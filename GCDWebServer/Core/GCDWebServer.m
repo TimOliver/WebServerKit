@@ -611,6 +611,7 @@ static inline NSString* _EncodeBase64(NSString* string) {
           if (!setTXTDataResult) {
             GWS_LOG_ERROR(@"Failed setting TXTData");
           }
+          CFRelease(txtData);
         }
       }
       
