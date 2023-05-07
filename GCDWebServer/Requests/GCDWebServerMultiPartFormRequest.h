@@ -1,28 +1,28 @@
 /*
- Copyright (c) 2012-2019, Pierre-Olivier Latour
- All rights reserved.
- 
- Redistribution and use in source and binary forms, with or without
- modification, are permitted provided that the following conditions are met:
+   Copyright (c) 2012-2019, Pierre-Olivier Latour
+   All rights reserved.
+
+   Redistribution and use in source and binary forms, with or without
+   modification, are permitted provided that the following conditions are met:
  * Redistributions of source code must retain the above copyright
- notice, this list of conditions and the following disclaimer.
+   notice, this list of conditions and the following disclaimer.
  * Redistributions in binary form must reproduce the above copyright
- notice, this list of conditions and the following disclaimer in the
- documentation and/or other materials provided with the distribution.
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
  * The name of Pierre-Olivier Latour may not be used to endorse
- or promote products derived from this software without specific
- prior written permission.
- 
- THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- DISCLAIMED. IN NO EVENT SHALL PIERRE-OLIVIER LATOUR BE LIABLE FOR ANY
- DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+   or promote products derived from this software without specific
+   prior written permission.
+
+   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+   ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+   WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+   DISCLAIMED. IN NO EVENT SHALL PIERRE-OLIVIER LATOUR BE LIABLE FOR ANY
+   DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+   (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+   LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+   ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 #import "GCDWebServerRequest.h"
@@ -38,18 +38,18 @@ NS_ASSUME_NONNULL_BEGIN
 /**
  *  Returns the control name retrieved from the part headers.
  */
-@property(nonatomic, readonly) NSString* controlName;
+@property (nonatomic, readonly) NSString *controlName;
 
 /**
  *  Returns the content type retrieved from the part headers or "text/plain"
  *  if not available (per HTTP specifications).
  */
-@property(nonatomic, readonly) NSString* contentType;
+@property (nonatomic, readonly) NSString *contentType;
 
 /**
  *  Returns the MIME type component of the content type for the part.
  */
-@property(nonatomic, readonly) NSString* mimeType;
+@property (nonatomic, readonly) NSString *mimeType;
 
 @end
 
@@ -62,7 +62,7 @@ NS_ASSUME_NONNULL_BEGIN
 /**
  *  Returns the data for the part.
  */
-@property(nonatomic, readonly) NSData* data;
+@property (nonatomic, readonly) NSData *data;
 
 /**
  *  Returns the data for the part interpreted as text. If the content
@@ -71,7 +71,7 @@ NS_ASSUME_NONNULL_BEGIN
  *  The text encoding used to interpret the data is extracted from the
  *  "Content-Type" header or defaults to UTF-8.
  */
-@property(nonatomic, readonly, nullable) NSString* string;
+@property (nonatomic, readonly, nullable) NSString *string;
 
 @end
 
@@ -84,7 +84,7 @@ NS_ASSUME_NONNULL_BEGIN
 /**
  *  Returns the file name retrieved from the part headers.
  */
-@property(nonatomic, readonly) NSString* fileName;
+@property (nonatomic, readonly) NSString *fileName;
 
 /**
  *  Returns the path to the temporary file containing the part data.
@@ -93,7 +93,7 @@ NS_ASSUME_NONNULL_BEGIN
  *  GCDWebServerMultiPartFile is deallocated. If you want to preserve this file,
  *  you must move it to a different location beforehand.
  */
-@property(nonatomic, readonly) NSString* temporaryPath;
+@property (nonatomic, readonly) NSString *temporaryPath;
 
 @end
 
@@ -107,29 +107,29 @@ NS_ASSUME_NONNULL_BEGIN
  *  Returns the argument parts from the multipart encoded form as
  *  name / GCDWebServerMultiPartArgument pairs.
  */
-@property(nonatomic, readonly) NSArray<GCDWebServerMultiPartArgument*>* arguments;
+@property (nonatomic, readonly) NSArray<GCDWebServerMultiPartArgument *> *arguments;
 
 /**
  *  Returns the files parts from the multipart encoded form as
  *  name / GCDWebServerMultiPartFile pairs.
  */
-@property(nonatomic, readonly) NSArray<GCDWebServerMultiPartFile*>* files;
+@property (nonatomic, readonly) NSArray<GCDWebServerMultiPartFile *> *files;
 
 /**
  *  Returns the MIME type for multipart encoded forms
  *  i.e. "multipart/form-data".
  */
-+ (NSString*)mimeType;
++ (NSString *)mimeType;
 
 /**
  *  Returns the first argument for a given control name or nil if not found.
  */
-- (nullable GCDWebServerMultiPartArgument*)firstArgumentForControlName:(NSString*)name;
+- (nullable GCDWebServerMultiPartArgument *)firstArgumentForControlName:(NSString *)name;
 
 /**
  *  Returns the first file for a given control name or nil if not found.
  */
-- (nullable GCDWebServerMultiPartFile*)firstFileForControlName:(NSString*)name;
+- (nullable GCDWebServerMultiPartFile *)firstFileForControlName:(NSString *)name;
 
 @end
 

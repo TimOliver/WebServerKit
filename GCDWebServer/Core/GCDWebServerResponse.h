@@ -1,28 +1,28 @@
 /*
- Copyright (c) 2012-2019, Pierre-Olivier Latour
- All rights reserved.
- 
- Redistribution and use in source and binary forms, with or without
- modification, are permitted provided that the following conditions are met:
+   Copyright (c) 2012-2019, Pierre-Olivier Latour
+   All rights reserved.
+
+   Redistribution and use in source and binary forms, with or without
+   modification, are permitted provided that the following conditions are met:
  * Redistributions of source code must retain the above copyright
- notice, this list of conditions and the following disclaimer.
+   notice, this list of conditions and the following disclaimer.
  * Redistributions in binary form must reproduce the above copyright
- notice, this list of conditions and the following disclaimer in the
- documentation and/or other materials provided with the distribution.
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
  * The name of Pierre-Olivier Latour may not be used to endorse
- or promote products derived from this software without specific
- prior written permission.
- 
- THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- DISCLAIMED. IN NO EVENT SHALL PIERRE-OLIVIER LATOUR BE LIABLE FOR ANY
- DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+   or promote products derived from this software without specific
+   prior written permission.
+
+   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+   ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+   WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+   DISCLAIMED. IN NO EVENT SHALL PIERRE-OLIVIER LATOUR BE LIABLE FOR ANY
+   DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+   (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+   LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+   ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 #import <Foundation/Foundation.h>
@@ -33,7 +33,7 @@ NS_ASSUME_NONNULL_BEGIN
  *  The GCDWebServerBodyReaderCompletionBlock is passed by GCDWebServer to the
  *  GCDWebServerBodyReader object when reading data from it asynchronously.
  */
-typedef void (^GCDWebServerBodyReaderCompletionBlock)(NSData* _Nullable data, NSError* _Nullable error);
+typedef void (^GCDWebServerBodyReaderCompletionBlock)(NSData * _Nullable data, NSError * _Nullable error);
 
 /**
  *  This protocol is used by the GCDWebServerConnection to communicate with
@@ -55,7 +55,7 @@ typedef void (^GCDWebServerBodyReaderCompletionBlock)(NSData* _Nullable data, NS
  *  It should return YES on success or NO on failure and set the "error" argument
  *  which is guaranteed to be non-NULL.
  */
-- (BOOL)open:(NSError**)error;
+- (BOOL)open:(NSError **)error;
 
 /**
  *  This method is called whenever body data is sent.
@@ -64,7 +64,7 @@ typedef void (^GCDWebServerBodyReaderCompletionBlock)(NSData* _Nullable data, NS
  *  or an empty NSData there is no more body data, or nil on error and set
  *  the "error" argument which is guaranteed to be non-NULL.
  */
-- (nullable NSData*)readData:(NSError**)error;
+- (nullable NSData *)readData:(NSError **)error;
 
 /**
  *  This method is called after all body data has been sent.
@@ -104,7 +104,7 @@ typedef void (^GCDWebServerBodyReaderCompletionBlock)(NSData* _Nullable data, NS
  *
  *  @warning This property must be set if a body is present.
  */
-@property(nonatomic, copy, nullable) NSString* contentType;
+@property (nonatomic, copy, nullable) NSString *contentType;
 
 /**
  *  Sets the content length for the body of the response. If a body is present
@@ -116,14 +116,14 @@ typedef void (^GCDWebServerBodyReaderCompletionBlock)(NSData* _Nullable data, NS
  *  The default value is "NSUIntegerMax" i.e. the response has no body or its length
  *  is undefined.
  */
-@property(nonatomic) NSUInteger contentLength;
+@property (nonatomic) NSUInteger contentLength;
 
 /**
  *  Sets the HTTP status code for the response.
  *
  *  The default value is 200 i.e. "OK".
  */
-@property(nonatomic) NSInteger statusCode;
+@property (nonatomic) NSInteger statusCode;
 
 /**
  *  Sets the caching hint for the response using the "Cache-Control" header.
@@ -131,21 +131,21 @@ typedef void (^GCDWebServerBodyReaderCompletionBlock)(NSData* _Nullable data, NS
  *
  *  The default value is 0 i.e. "no-cache".
  */
-@property(nonatomic) NSUInteger cacheControlMaxAge;
+@property (nonatomic) NSUInteger cacheControlMaxAge;
 
 /**
  *  Sets the last modified date for the response using the "Last-Modified" header.
  *
  *  The default value is nil.
  */
-@property(nonatomic, nullable) NSDate* lastModifiedDate;
+@property (nonatomic, nullable) NSDate *lastModifiedDate;
 
 /**
  *  Sets the ETag for the response using the "ETag" header.
  *
  *  The default value is nil.
  */
-@property(nonatomic, copy, nullable) NSString* eTag;
+@property (nonatomic, copy, nullable) NSString *eTag;
 
 /**
  *  Enables gzip encoding for the response body.
@@ -157,7 +157,7 @@ typedef void (^GCDWebServerBodyReaderCompletionBlock)(NSData* _Nullable data, NS
  *  be able to determine the body length when connection is closed per
  *  HTTP/1.1 specifications.
  */
-@property(nonatomic, getter=isGZipContentEncodingEnabled) BOOL gzipContentEncodingEnabled;
+@property (nonatomic, getter = isGZipContentEncodingEnabled) BOOL gzipContentEncodingEnabled;
 
 /**
  *  Creates an empty response.
@@ -176,7 +176,7 @@ typedef void (^GCDWebServerBodyReaderCompletionBlock)(NSData* _Nullable data, NS
  *  @warning Do not attempt to override the primary headers used
  *  by GCDWebServerResponse like "Content-Type", "ETag", etc...
  */
-- (void)setValue:(nullable NSString*)value forAdditionalHeader:(NSString*)header;
+- (void)setValue:(nullable NSString *)value forAdditionalHeader:(NSString *)header;
 
 /**
  *  Convenience method that checks if the contentType property is defined.
@@ -195,7 +195,7 @@ typedef void (^GCDWebServerBodyReaderCompletionBlock)(NSData* _Nullable data, NS
 /**
  *  Creates an HTTP redirect response to a new URL.
  */
-+ (instancetype)responseWithRedirect:(NSURL*)location permanent:(BOOL)permanent;
++ (instancetype)responseWithRedirect:(NSURL *)location permanent:(BOOL)permanent;
 
 /**
  *  Initializes an empty response with a specific HTTP status code.
@@ -205,7 +205,7 @@ typedef void (^GCDWebServerBodyReaderCompletionBlock)(NSData* _Nullable data, NS
 /**
  *  Initializes an HTTP redirect response to a new URL.
  */
-- (instancetype)initWithRedirect:(NSURL*)location permanent:(BOOL)permanent;
+- (instancetype)initWithRedirect:(NSURL *)location permanent:(BOOL)permanent;
 
 @end
 
