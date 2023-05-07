@@ -124,7 +124,7 @@ static void _SignalHandler(int signal) {
 // https://developer.apple.com/library/mac/documentation/General/Conceptual/ConcurrencyProgrammingGuide/OperationQueues/OperationQueues.html
 // The main queue works with the application’s run loop to interleave the execution of queued tasks with the execution of other event sources attached to the run loop
 // TODO: Ensure all scheduled blocks on the main queue are also executed
-static void _ExecuteMainThreadRunLoopSources() {
+static void _ExecuteMainThreadRunLoopSources(void) {
   SInt32 result;
   do {
     result = CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.0, true);
