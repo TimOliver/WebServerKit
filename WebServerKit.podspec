@@ -1,7 +1,7 @@
 Pod::Spec.new do |s|
   s.name     = 'WebServerKit'
   s.version  = '3.5.5'
-  s.author   =  { 'Pierre-Olivier Latour', 'Tim Oliver' }
+  s.author   =  [ 'Pierre-Olivier Latour', 'Tim Oliver' ]
   s.license  = { :type => 'BSD', :file => 'LICENSE' }
   s.homepage = 'https://github.com/TimOliver/WebServerKit'
   s.summary  = 'Lightweight GCD based HTTP server for OS X & iOS. A fork of GCDWebServer.'
