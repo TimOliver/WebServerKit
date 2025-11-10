@@ -1,14 +1,13 @@
 Pod::Spec.new do |s|
   s.name     = 'WebServerKit'
   s.version  = '3.5.5'
-  s.author   =  [ 'Pierre-Olivier Latour', 'Tim Oliver' ]
+  s.author   = [ 'Pierre-Olivier Latour', 'Tim Oliver' ]
   s.license  = { :type => 'BSD', :file => 'LICENSE' }
   s.homepage = 'https://github.com/TimOliver/WebServerKit'
   s.summary  = 'Lightweight GCD based HTTP server for OS X & iOS. A fork of GCDWebServer.'
   
   s.source   = { :git => 'https://github.com/TimOliver/WebServerKit.git', :tag => s.version.to_s }
   s.ios.deployment_target = '12.0'
-  s.tvos.deployment_target = '12.0'
   s.osx.deployment_target = '10.15'
   s.requires_arc = true
   
@@ -20,8 +19,6 @@ Pod::Spec.new do |s|
     cs.requires_arc = true
     cs.ios.library = 'z'
     cs.ios.frameworks = 'CoreServices', 'CFNetwork'
-    cs.tvos.library = 'z'
-    cs.tvos.frameworks = 'CoreServices', 'CFNetwork'
     cs.osx.library = 'z'
     cs.osx.framework = 'SystemConfiguration'
   end
@@ -31,7 +28,6 @@ Pod::Spec.new do |s|
     cs.source_files = 'GCDWebDAVServer/*.{h,m}'
     cs.requires_arc = true
     cs.ios.library = 'xml2'
-    cs.tvos.library = 'xml2'
     cs.osx.library = 'xml2'
     cs.compiler_flags = '-I$(SDKROOT)/usr/include/libxml2'
   end
@@ -40,6 +36,6 @@ Pod::Spec.new do |s|
     cs.dependency 'WebServerKit/Core'
     cs.source_files = 'GCDWebUploader/*.{h,m}'
     cs.requires_arc = true
-    cs.resource = "GCDWebUploader/GCDWebUploader.bundle"
+    cs.resources = 'GCDWebUploader/GCDWebUploader.bundle'
   end 
 end
