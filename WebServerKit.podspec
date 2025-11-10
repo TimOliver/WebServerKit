@@ -1,15 +1,15 @@
 Pod::Spec.new do |s|
   s.name     = 'WebServerKit'
-  s.version  = '3.5.4'
-  s.author   =  { 'Pierre-Olivier Latour' => 'info@pol-online.net' }
+  s.version  = '3.5.5'
+  s.author   =  { 'Pierre-Olivier Latour', 'Tim Oliver' }
   s.license  = { :type => 'BSD', :file => 'LICENSE' }
   s.homepage = 'https://github.com/TimOliver/WebServerKit'
   s.summary  = 'Lightweight GCD based HTTP server for OS X & iOS. A fork of GCDWebServer.'
   
   s.source   = { :git => 'https://github.com/TimOliver/WebServerKit.git', :tag => s.version.to_s }
-  s.ios.deployment_target = '11.0'
-  s.tvos.deployment_target = '11.0'
-  s.osx.deployment_target = '10.13'
+  s.ios.deployment_target = '12.0'
+  s.tvos.deployment_target = '12.0'
+  s.osx.deployment_target = '10.15'
   s.requires_arc = true
   
   s.default_subspec = 'Core'
