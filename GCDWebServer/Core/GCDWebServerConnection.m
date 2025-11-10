@@ -858,8 +858,12 @@ static inline BOOL _CompareResources(NSString *responseETag, NSString *requestET
 }
 
 - (GCDWebServerResponse *)overrideResponse:(GCDWebServerResponse *)response forRequest:(GCDWebServerRequest *)request {
-    if ((response.statusCode >= 200) && (response.statusCode < 300) && _CompareResources(response.eTag, request.ifNoneMatch, response.lastModifiedDate, request.ifModifiedSince)) {
-        NSInteger code = [request.method isEqualToString:@"HEAD"] || [request.method isEqualToString:@"GET"] ? kGCDWebServerHTTPStatusCode_NotModified : kGCDWebServerHTTPStatusCode_PreconditionFailed;
+    if ((response.statusCode >= 200) && (response.statusCode < 300) &&
+        _CompareResources(response.eTag, request.ifNoneMatch, response.lastModifiedDate, request.ifModifiedSince)) {
+        NSInteger code = kGCDWebServerHTTPStatusCode_PreconditionFailed;
+        if ([request.method isEqualToString:@"HEAD"] || [request.method isEqualToString:@"GET"]) {
+          code = kGCDWebServerHTTPStatusCode_NotModified;
+        }
         GCDWebServerResponse *newResponse = [GCDWebServerResponse responseWithStatusCode:code];
         newResponse.cacheControlMaxAge = response.cacheControlMaxAge;
         newResponse.lastModifiedDate = response.lastModifiedDate;
