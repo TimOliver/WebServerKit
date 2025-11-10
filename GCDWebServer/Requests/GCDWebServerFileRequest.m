@@ -88,7 +88,7 @@
     if (creationDateHeader) {
         NSDate *date = GCDWebServerParseISO8601(creationDateHeader);
 
-        if (!date || ![[NSFileManager defaultManager] setAttributes:@{ NSFileCreationDate: date } ofItemAtPath:_temporaryPath error:error]) {
+        if (!date || ![[NSFileManager defaultManager] setAttributes:@{NSFileCreationDate: date} ofItemAtPath:_temporaryPath error:error]) {
             return NO;
         }
     }
@@ -98,7 +98,7 @@
     if (modifiedDateHeader) {
         NSDate *date = GCDWebServerParseRFC822(modifiedDateHeader);
 
-        if (!date || ![[NSFileManager defaultManager] setAttributes:@{ NSFileModificationDate: date } ofItemAtPath:_temporaryPath error:error]) {
+        if (!date || ![[NSFileManager defaultManager] setAttributes:@{NSFileModificationDate: date} ofItemAtPath:_temporaryPath error:error]) {
             return NO;
         }
     }

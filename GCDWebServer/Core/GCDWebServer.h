@@ -42,7 +42,7 @@ NS_ASSUME_NONNULL_BEGIN
  *  GCDWebServerRequest instance created with the same basic info.
  *  Otherwise, it simply returns nil.
  */
-typedef GCDWebServerRequest * _Nullable (^GCDWebServerMatchBlock)(NSString *requestMethod, NSURL *requestURL, NSDictionary<NSString *, NSString *> *requestHeaders, NSString *urlPath, NSDictionary<NSString *, NSString *> *urlQuery);
+typedef GCDWebServerRequest *_Nullable (^GCDWebServerMatchBlock)(NSString *requestMethod, NSURL *requestURL, NSDictionary<NSString *, NSString *> *requestHeaders, NSString *urlPath, NSDictionary<NSString *, NSString *> *urlQuery);
 
 /**
  *  The GCDWebServerProcessBlock is called after the HTTP request has been fully
@@ -54,7 +54,7 @@ typedef GCDWebServerRequest * _Nullable (^GCDWebServerMatchBlock)(NSString *requ
  *  recommended to return a GCDWebServerErrorResponse on error so more useful
  *  information can be returned to the client.
  */
-typedef GCDWebServerResponse * _Nullable (^GCDWebServerProcessBlock)(__kindof GCDWebServerRequest *request);
+typedef GCDWebServerResponse *_Nullable (^GCDWebServerProcessBlock)(__kindof GCDWebServerRequest *request);
 
 /**
  *  The GCDWebServerAsynchronousProcessBlock works like the GCDWebServerProcessBlock
@@ -66,7 +66,7 @@ typedef GCDWebServerResponse * _Nullable (^GCDWebServerProcessBlock)(__kindof GC
  *  It's however recommended to return a GCDWebServerErrorResponse on error so more
  *  useful information can be returned to the client.
  */
-typedef void (^GCDWebServerCompletionBlock)(GCDWebServerResponse * _Nullable response);
+typedef void (^GCDWebServerCompletionBlock)(GCDWebServerResponse *_Nullable response);
 typedef void (^GCDWebServerAsyncProcessBlock)(__kindof GCDWebServerRequest *request, GCDWebServerCompletionBlock completionBlock);
 
 /**
@@ -74,14 +74,14 @@ typedef void (^GCDWebServerAsyncProcessBlock)(__kindof GCDWebServerRequest *requ
  *  The block will be passed the log level and the log message, see setLogLevel for
  *  documentation of the log levels for the built-in logger.
  */
-typedef void (^GCDWebServerBuiltInLoggerBlock)(int level, NSString * _Nonnull message);
+typedef void (^GCDWebServerBuiltInLoggerBlock)(int level, NSString *_Nonnull message);
 
 /**
  *  The port used by the GCDWebServer (NSNumber / NSUInteger).
  *
  *  The default value is 0 i.e. let the OS pick a random port.
  */
-extern NSString * const GCDWebServerOption_Port;
+extern NSString *const GCDWebServerOption_Port;
 
 /**
  *  The Bonjour name used by the GCDWebServer (NSString). If set to an empty string,
@@ -90,21 +90,21 @@ extern NSString * const GCDWebServerOption_Port;
  *
  *  The default value is nil.
  */
-extern NSString * const GCDWebServerOption_BonjourName;
+extern NSString *const GCDWebServerOption_BonjourName;
 
 /**
  *  The Bonjour TXT Data used by the GCDWebServer (NSDictionary<NSString, NSString>).
  *
  *  The default value is nil.
  */
-extern NSString * const GCDWebServerOption_BonjourTXTData;
+extern NSString *const GCDWebServerOption_BonjourTXTData;
 
 /**
  *  The Bonjour service type used by the GCDWebServer (NSString).
  *
  *  The default value is "_http._tcp", the service type for HTTP web servers.
  */
-extern NSString * const GCDWebServerOption_BonjourType;
+extern NSString *const GCDWebServerOption_BonjourType;
 
 /**
  *  Request a port mapping in the NAT gateway (NSNumber / BOOL).
@@ -116,7 +116,7 @@ extern NSString * const GCDWebServerOption_BonjourType;
  *  @warning The external port set up by the NAT gateway may be different than
  *  the one used by the GCDWebServer.
  */
-extern NSString * const GCDWebServerOption_RequestNATPortMapping;
+extern NSString *const GCDWebServerOption_RequestNATPortMapping;
 
 /**
  *  Only accept HTTP requests coming from localhost i.e. not from the outside
@@ -127,7 +127,7 @@ extern NSString * const GCDWebServerOption_RequestNATPortMapping;
  *  @warning Bonjour and NAT port mapping should be disabled if using this option
  *  since the server will not be reachable from the outside network anyway.
  */
-extern NSString * const GCDWebServerOption_BindToLocalhost;
+extern NSString *const GCDWebServerOption_BindToLocalhost;
 
 /**
  *  The maximum number of incoming HTTP requests that can be queued waiting to
@@ -135,14 +135,14 @@ extern NSString * const GCDWebServerOption_BindToLocalhost;
  *
  *  The default value is 16.
  */
-extern NSString * const GCDWebServerOption_MaxPendingConnections;
+extern NSString *const GCDWebServerOption_MaxPendingConnections;
 
 /**
  *  The value for "Server" HTTP header used by the GCDWebServer (NSString).
  *
  *  The default value is the GCDWebServer class name.
  */
-extern NSString * const GCDWebServerOption_ServerName;
+extern NSString *const GCDWebServerOption_ServerName;
 
 /**
  *  The authentication method used by the GCDWebServer
@@ -150,14 +150,14 @@ extern NSString * const GCDWebServerOption_ServerName;
  *
  *  The default value is nil i.e. authentication is disabled.
  */
-extern NSString * const GCDWebServerOption_AuthenticationMethod;
+extern NSString *const GCDWebServerOption_AuthenticationMethod;
 
 /**
  *  The authentication realm used by the GCDWebServer (NSString).
  *
  *  The default value is the same as the GCDWebServerOption_ServerName option.
  */
-extern NSString * const GCDWebServerOption_AuthenticationRealm;
+extern NSString *const GCDWebServerOption_AuthenticationRealm;
 
 /**
  *  The authentication accounts used by the GCDWebServer
@@ -165,7 +165,7 @@ extern NSString * const GCDWebServerOption_AuthenticationRealm;
  *
  *  The default value is nil i.e. no accounts.
  */
-extern NSString * const GCDWebServerOption_AuthenticationAccounts;
+extern NSString *const GCDWebServerOption_AuthenticationAccounts;
 
 /**
  *  The class used by the GCDWebServer when instantiating GCDWebServerConnection
@@ -173,7 +173,7 @@ extern NSString * const GCDWebServerOption_AuthenticationAccounts;
  *
  *  The default value is the GCDWebServerConnection class.
  */
-extern NSString * const GCDWebServerOption_ConnectionClass;
+extern NSString *const GCDWebServerOption_ConnectionClass;
 
 /**
  *  Allow the GCDWebServer to pretend "HEAD" requests are actually "GET" ones
@@ -181,7 +181,7 @@ extern NSString * const GCDWebServerOption_ConnectionClass;
  *
  *  The default value is YES.
  */
-extern NSString * const GCDWebServerOption_AutomaticallyMapHEADToGET;
+extern NSString *const GCDWebServerOption_AutomaticallyMapHEADToGET;
 
 /**
  *  The interval expressed in seconds used by the GCDWebServer to decide how to
@@ -190,7 +190,7 @@ extern NSString * const GCDWebServerOption_AutomaticallyMapHEADToGET;
  *
  *  The default value is 1.0 second.
  */
-extern NSString * const GCDWebServerOption_ConnectedStateCoalescingInterval;
+extern NSString *const GCDWebServerOption_ConnectedStateCoalescingInterval;
 
 /**
  *  Set the dispatch queue priority on which server connection will be
@@ -199,7 +199,7 @@ extern NSString * const GCDWebServerOption_ConnectedStateCoalescingInterval;
  *
  *  The default value is DISPATCH_QUEUE_PRIORITY_DEFAULT.
  */
-extern NSString * const GCDWebServerOption_DispatchQueuePriority;
+extern NSString *const GCDWebServerOption_DispatchQueuePriority;
 
 #if TARGET_OS_IPHONE
 
@@ -215,7 +215,7 @@ extern NSString * const GCDWebServerOption_DispatchQueuePriority;
  *
  *  @warning The running property will be NO while the GCDWebServer is suspended.
  */
-extern NSString * const GCDWebServerOption_AutomaticallySuspendInBackground;
+extern NSString *const GCDWebServerOption_AutomaticallySuspendInBackground;
 
 #endif
 
@@ -225,12 +225,12 @@ extern NSString * const GCDWebServerOption_AutomaticallySuspendInBackground;
  *  @warning Use of this authentication scheme is not recommended as the
  *  passwords are sent in clear.
  */
-extern NSString * const GCDWebServerAuthenticationMethod_Basic;
+extern NSString *const GCDWebServerAuthenticationMethod_Basic;
 
 /**
  *  HTTP Digest Access Authentication scheme (see https://tools.ietf.org/html/rfc2617).
  */
-extern NSString * const GCDWebServerAuthenticationMethod_DigestAccess;
+extern NSString *const GCDWebServerAuthenticationMethod_DigestAccess;
 
 @class GCDWebServer;
 
@@ -316,7 +316,7 @@ extern NSString * const GCDWebServerAuthenticationMethod_DigestAccess;
 /**
  *  Returns YES if the server is currently running.
  */
-@property (nonatomic, readonly, getter = isRunning) BOOL running;
+@property (nonatomic, readonly, getter=isRunning) BOOL running;
 
 /**
  *  Returns the port used by the server.
@@ -379,7 +379,7 @@ extern NSString * const GCDWebServerAuthenticationMethod_DigestAccess;
  *
  *  Returns NO if the server failed to start and sets "error" argument if not NULL.
  */
-- (BOOL)startWithOptions:(nullable NSDictionary<NSString *, id> *)options error:(NSError ** _Nullable)error;
+- (BOOL)startWithOptions:(nullable NSDictionary<NSString *, id> *)options error:(NSError **_Nullable)error;
 
 /**
  *  Stops the server and prevents it to accepts new HTTP requests.
@@ -458,7 +458,7 @@ extern NSString * const GCDWebServerAuthenticationMethod_DigestAccess;
  *
  *  @warning This method must be used from the main thread only.
  */
-- (BOOL)runWithOptions:(nullable NSDictionary<NSString *, id> *)options error:(NSError ** _Nullable)error;
+- (BOOL)runWithOptions:(nullable NSDictionary<NSString *, id> *)options error:(NSError **_Nullable)error;
 
 #endif
 
@@ -627,7 +627,7 @@ extern NSString * const GCDWebServerAuthenticationMethod_DigestAccess;
  *
  *  @warning The current directory must not contain any prior recording files.
  */
-@property (nonatomic, getter = isRecordingEnabled) BOOL recordingEnabled;
+@property (nonatomic, getter=isRecordingEnabled) BOOL recordingEnabled;
 
 /**
  *  Runs tests by playing back pre-recorded HTTP requests in the given directory

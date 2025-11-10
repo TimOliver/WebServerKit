@@ -36,7 +36,7 @@ NS_ASSUME_NONNULL_BEGIN
  *  @warning This attribute will only be set on the request if adding a handler using
  *  -addHandlerForMethod:pathRegex:requestClass:processBlock:.
  */
-extern NSString * const GCDWebServerRequestAttribute_RegexCaptures;
+extern NSString *const GCDWebServerRequestAttribute_RegexCaptures;
 
 /**
  *  This protocol is used by the GCDWebServerConnection to communicate with

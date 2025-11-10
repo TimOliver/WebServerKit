@@ -4,9 +4,6 @@
 
 BasedOnStyle: LLVM
 
-# Language specific settings
-Language: ObjC
-
 # Indentation
 IndentWidth: 4
 TabWidth: 4

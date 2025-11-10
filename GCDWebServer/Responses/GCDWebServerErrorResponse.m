@@ -69,7 +69,7 @@
     return response;
 }
 
-static inline NSString * _EscapeHTMLString(NSString *string) {
+static inline NSString *_EscapeHTMLString(NSString *string) {
     return [string stringByReplacingOccurrencesOfString:@"\"" withString:@"&quot;"];
 }
 
@@ -78,7 +78,10 @@ static inline NSString * _EscapeHTMLString(NSString *string) {
     NSString *title = [NSString stringWithFormat:@"HTTP Error %i", (int)statusCode];
     NSString *error = underlyingError ? [NSString stringWithFormat:@"[%@] %@ (%li)", underlyingError.domain, _EscapeHTMLString(underlyingError.localizedDescription), (long)underlyingError.code] : @"";
     NSString *html = [NSString stringWithFormat:@"<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>%@</title></head><body><h1>%@: %@</h1><h3>%@</h3></body></html>",
-                      title, title, _EscapeHTMLString(message), error];
+                                                title,
+                                                title,
+                                                _EscapeHTMLString(message),
+                                                error];
 
     if ((self = [self initWithHTML:html])) {
         self.statusCode = statusCode;

@@ -33,7 +33,7 @@
 
 #import "GCDWebServerPrivate.h"
 
-#define kZlibErrorDomain       @"ZlibErrorDomain"
+#define kZlibErrorDomain @"ZlibErrorDomain"
 #define kGZipInitialBufferSize (256 * 1024)
 
 @interface GCDWebServerBodyEncoder : NSObject <GCDWebServerBodyReader>
@@ -43,11 +43,11 @@
 @end
 
 @implementation GCDWebServerBodyEncoder {
-    GCDWebServerResponse * __unsafe_unretained _response;
+    GCDWebServerResponse *__unsafe_unretained _response;
     id<GCDWebServerBodyReader> __unsafe_unretained _reader;
 }
 
-- (instancetype)initWithResponse:(GCDWebServerResponse * _Nonnull)response reader:(id<GCDWebServerBodyReader> _Nonnull)reader {
+- (instancetype)initWithResponse:(GCDWebServerResponse *_Nonnull)response reader:(id<GCDWebServerBodyReader> _Nonnull)reader {
     if ((self = [super init])) {
         _response = response;
         _reader = reader;
@@ -75,9 +75,9 @@
     BOOL _finished;
 }
 
-- (instancetype)initWithResponse:(GCDWebServerResponse * _Nonnull)response reader:(id<GCDWebServerBodyReader> _Nonnull)reader {
+- (instancetype)initWithResponse:(GCDWebServerResponse *_Nonnull)response reader:(id<GCDWebServerBodyReader> _Nonnull)reader {
     if ((self = [super initWithResponse:response reader:reader])) {
-        response.contentLength = NSUIntegerMax; // Make sure "Content-Length" header is not set since we don't know it
+        response.contentLength = NSUIntegerMax;  // Make sure "Content-Length" header is not set since we don't know it
         [response setValue:@"gzip" forAdditionalHeader:@"Content-Encoding"];
     }
 
@@ -149,10 +149,10 @@
                     break;
                 }
 
-                encodedData.length = 2 * encodedData.length; // zlib has used all the output buffer so resize it and try again in case more data is available
+                encodedData.length = 2 * encodedData.length;  // zlib has used all the output buffer so resize it and try again in case more data is available
             }
             GWS_DCHECK(_stream.avail_in == 0);
-        } while (length == 0); // Make sure we don't return an empty NSData if not in finished state
+        } while (length == 0);  // Make sure we don't return an empty NSData if not in finished state
         encodedData.length = length;
     }
 

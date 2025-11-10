@@ -36,7 +36,6 @@
 #import <SystemConfiguration/SystemConfiguration.h>
 #endif
 #import <CommonCrypto/CommonDigest.h>
-
 #import <ifaddrs.h>
 #import <net/if.h>
 #import <netdb.h>
@@ -49,7 +48,7 @@ static dispatch_queue_t _dateFormatterQueue = NULL;
 
 // TODO: Handle RFC 850 and ANSI C's asctime() format
 void GCDWebServerInitializeFunctions(void) {
-    GWS_DCHECK([NSThread isMainThread]); // NSDateFormatter should be initialized on main thread
+    GWS_DCHECK([NSThread isMainThread]);  // NSDateFormatter should be initialized on main thread
 
     if (_dateFormatterRFC822 == nil) {
         _dateFormatterRFC822 = [[NSDateFormatter alloc] init];
@@ -73,9 +72,9 @@ void GCDWebServerInitializeFunctions(void) {
     }
 }
 
-NSString * GCDWebServerNormalizeHeaderValue(NSString *value) {
+NSString *GCDWebServerNormalizeHeaderValue(NSString *value) {
     if (value) {
-        NSRange range = [value rangeOfString:@";"]; // Assume part before ";" separator is case-insensitive
+        NSRange range = [value rangeOfString:@";"];  // Assume part before ";" separator is case-insensitive
 
         if (range.location != NSNotFound) {
             value = [[[value substringToIndex:range.location] lowercaseString] stringByAppendingString:[value substringFromIndex:range.location]];
@@ -87,7 +86,7 @@ NSString * GCDWebServerNormalizeHeaderValue(NSString *value) {
     return value;
 }
 
-NSString * GCDWebServerTruncateHeaderValue(NSString *value) {
+NSString *GCDWebServerTruncateHeaderValue(NSString *value) {
     if (value) {
         NSRange range = [value rangeOfString:@";"];
 
@@ -99,12 +98,12 @@ NSString * GCDWebServerTruncateHeaderValue(NSString *value) {
     return value;
 }
 
-NSString * GCDWebServerExtractHeaderValueParameter(NSString *value, NSString *name) {
+NSString *GCDWebServerExtractHeaderValueParameter(NSString *value, NSString *name) {
     NSString *parameter = nil;
 
     if (value) {
         NSScanner *scanner = [[NSScanner alloc] initWithString:value];
-        [scanner setCaseSensitive:NO]; // Assume parameter names are case-insensitive
+        [scanner setCaseSensitive:NO];  // Assume parameter names are case-insensitive
         NSString *string = [NSString stringWithFormat:@"%@=", name];
 
         if ([scanner scanUpToString:string intoString:NULL]) {
@@ -132,7 +131,7 @@ NSStringEncoding GCDWebServerStringEncodingFromCharset(NSString *charset) {
     return (encoding != kCFStringEncodingInvalidId ? encoding : NSUTF8StringEncoding);
 }
 
-NSString * GCDWebServerFormatRFC822(NSDate *date) {
+NSString *GCDWebServerFormatRFC822(NSDate *date) {
     __block NSString *string;
 
     dispatch_sync(_dateFormatterQueue, ^{
@@ -141,7 +140,7 @@ NSString * GCDWebServerFormatRFC822(NSDate *date) {
     return string;
 }
 
-NSDate * GCDWebServerParseRFC822(NSString *string) {
+NSDate *GCDWebServerParseRFC822(NSString *string) {
     __block NSDate *date;
 
     dispatch_sync(_dateFormatterQueue, ^{
@@ -150,7 +149,7 @@ NSDate * GCDWebServerParseRFC822(NSString *string) {
     return date;
 }
 
-NSString * GCDWebServerFormatISO8601(NSDate *date) {
+NSString *GCDWebServerFormatISO8601(NSDate *date) {
     __block NSString *string;
 
     dispatch_sync(_dateFormatterQueue, ^{
@@ -159,7 +158,7 @@ NSString * GCDWebServerFormatISO8601(NSDate *date) {
     return string;
 }
 
-NSDate * GCDWebServerParseISO8601(NSString *string) {
+NSDate *GCDWebServerParseISO8601(NSString *string) {
     __block NSDate *date;
 
     dispatch_sync(_dateFormatterQueue, ^{
@@ -172,7 +171,7 @@ BOOL GCDWebServerIsTextContentType(NSString *type) {
     return ([type hasPrefix:@"text/"] || [type hasPrefix:@"application/json"] || [type hasPrefix:@"application/xml"]);
 }
 
-NSString * GCDWebServerDescribeData(NSData *data, NSString *type) {
+NSString *GCDWebServerDescribeData(NSData *data, NSString *type) {
     if (GCDWebServerIsTextContentType(type)) {
         NSString *charset = GCDWebServerExtractHeaderValueParameter(type, @"charset");
         NSString *string = [[NSString alloc] initWithData:data encoding:GCDWebServerStringEncodingFromCharset(charset)];
@@ -185,7 +184,7 @@ NSString * GCDWebServerDescribeData(NSData *data, NSString *type) {
     return [NSString stringWithFormat:@"<%lu bytes>", (unsigned long)data.length];
 }
 
-NSString * GCDWebServerGetMimeTypeForExtension(NSString *extension, NSDictionary<NSString *, NSString *> *overrides) {
+NSString *GCDWebServerGetMimeTypeForExtension(NSString *extension, NSDictionary<NSString *, NSString *> *overrides) {
     NSDictionary *builtInOverrides = @{
         @"css": @"text/css"
     };
@@ -213,7 +212,7 @@ NSString * GCDWebServerGetMimeTypeForExtension(NSString *extension, NSDictionary
     return mimeType ? mimeType : kGCDWebServerDefaultMimeType;
 }
 
-NSString * GCDWebServerEscapeURLString(NSString *string) {
+NSString *GCDWebServerEscapeURLString(NSString *string) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
     return CFBridgingRelease(CFURLCreateStringByAddingPercentEscapes(kCFAllocatorDefault, (CFStringRef)string, NULL, CFSTR(":@/?&=+"), kCFStringEncodingUTF8));
@@ -221,7 +220,7 @@ NSString * GCDWebServerEscapeURLString(NSString *string) {
 #pragma clang diagnostic pop
 }
 
-NSString * GCDWebServerUnescapeURLString(NSString *string) {
+NSString *GCDWebServerUnescapeURLString(NSString *string) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
     return CFBridgingRelease(CFURLCreateStringByReplacingPercentEscapesUsingEncoding(kCFAllocatorDefault, (CFStringRef)string, CFSTR(""), kCFStringEncodingUTF8));
@@ -229,7 +228,7 @@ NSString * GCDWebServerUnescapeURLString(NSString *string) {
 #pragma clang diagnostic pop
 }
 
-NSDictionary<NSString *, NSString *> * GCDWebServerParseURLEncodedForm(NSString *form) {
+NSDictionary<NSString *, NSString *> *GCDWebServerParseURLEncodedForm(NSString *form) {
     NSMutableDictionary *parameters = [NSMutableDictionary dictionary];
     NSScanner *scanner = [[NSScanner alloc] initWithString:form];
 
@@ -272,7 +271,7 @@ NSDictionary<NSString *, NSString *> * GCDWebServerParseURLEncodedForm(NSString 
     return parameters;
 }
 
-NSString * GCDWebServerStringFromSockAddr(const struct sockaddr *addr, BOOL includeService) {
+NSString *GCDWebServerStringFromSockAddr(const struct sockaddr *addr, BOOL includeService) {
     char hostBuffer[NI_MAXHOST];
     char serviceBuffer[NI_MAXSERV];
 
@@ -288,25 +287,25 @@ NSString * GCDWebServerStringFromSockAddr(const struct sockaddr *addr, BOOL incl
     return includeService ? [NSString stringWithFormat:@"%s:%s", hostBuffer, serviceBuffer] : (NSString *)[NSString stringWithUTF8String:hostBuffer];
 }
 
-NSString * GCDWebServerGetPrimaryIPAddress(BOOL useIPv6) {
+NSString *GCDWebServerGetPrimaryIPAddress(BOOL useIPv6) {
     NSString *address = nil;
 
 #if TARGET_OS_IPHONE
 #if !TARGET_IPHONE_SIMULATOR && !TARGET_OS_TV
-    const char *primaryInterface = "en0"; // WiFi interface on iOS
+    const char *primaryInterface = "en0";  // WiFi interface on iOS
 #endif
 #else
     const char *primaryInterface = NULL;
     SCDynamicStoreRef store = SCDynamicStoreCreate(kCFAllocatorDefault, CFSTR("GCDWebServer"), NULL, NULL);
 
     if (store) {
-        CFPropertyListRef info = SCDynamicStoreCopyValue(store, CFSTR("State:/Network/Global/IPv4")); // There is no equivalent for IPv6 but the primary interface should be the same
+        CFPropertyListRef info = SCDynamicStoreCopyValue(store, CFSTR("State:/Network/Global/IPv4"));  // There is no equivalent for IPv6 but the primary interface should be the same
 
         if (info) {
             NSString *interface = [(__bridge NSDictionary *)info objectForKey:@"PrimaryInterface"];
 
             if (interface) {
-                primaryInterface = [[NSString stringWithString:interface] UTF8String]; // Copy string to auto-release pool
+                primaryInterface = [[NSString stringWithString:interface] UTF8String];  // Copy string to auto-release pool
             }
 
             CFRelease(info);
@@ -349,7 +348,7 @@ NSString * GCDWebServerGetPrimaryIPAddress(BOOL useIPv6) {
     return address;
 }
 
-NSString * GCDWebServerComputeMD5Digest(NSString *format, ...) {
+NSString *GCDWebServerComputeMD5Digest(NSString *format, ...) {
     va_list arguments;
 
     va_start(arguments, format);
@@ -374,7 +373,7 @@ NSString * GCDWebServerComputeMD5Digest(NSString *format, ...) {
     return (NSString *)[NSString stringWithUTF8String:buffer];
 }
 
-NSString * GCDWebServerNormalizePath(NSString *path) {
+NSString *GCDWebServerNormalizePath(NSString *path) {
     NSMutableArray *components = [[NSMutableArray alloc] init];
 
     for (NSString *component in [path componentsSeparatedByString:@"/"]) {
@@ -386,7 +385,7 @@ NSString * GCDWebServerNormalizePath(NSString *path) {
     }
 
     if (path.length && ([path characterAtIndex:0] == '/')) {
-        return [@"/" stringByAppendingString:[components componentsJoinedByString:@"/"]]; // Preserve initial slash
+        return [@"/" stringByAppendingString:[components componentsJoinedByString:@"/"]];  // Preserve initial slash
     }
 
     return [components componentsJoinedByString:@"/"];

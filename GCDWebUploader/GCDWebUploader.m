@@ -36,16 +36,14 @@
 #import <SystemConfiguration/SystemConfiguration.h>
 #endif
 
-#import "GCDWebUploader.h"
-#import "GCDWebServerFunctions.h"
-
 #import "GCDWebServerDataRequest.h"
-#import "GCDWebServerMultiPartFormRequest.h"
-#import "GCDWebServerURLEncodedFormRequest.h"
-
 #import "GCDWebServerDataResponse.h"
 #import "GCDWebServerErrorResponse.h"
 #import "GCDWebServerFileResponse.h"
+#import "GCDWebServerFunctions.h"
+#import "GCDWebServerMultiPartFormRequest.h"
+#import "GCDWebServerURLEncodedFormRequest.h"
+#import "GCDWebUploader.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -79,7 +77,7 @@ NS_ASSUME_NONNULL_END
         }
 
         _uploadDirectory = [path copy];
-        GCDWebUploader * __unsafe_unretained server = self;
+        GCDWebUploader *__unsafe_unretained server = self;
 
         // Resource files
         [self addGETHandlerForBasePath:@"/" directoryPath:(NSString *)[siteBundle resourcePath] indexFilename:nil cacheAge:3600 allowRangeRequests:NO];
@@ -89,11 +87,11 @@ NS_ASSUME_NONNULL_END
                              path:@"/"
                      requestClass:[GCDWebServerRequest class]
                      processBlock:^GCDWebServerResponse *(GCDWebServerRequest *request) {
-                         #if TARGET_OS_IPHONE
+#if TARGET_OS_IPHONE
                          NSString *device = [[UIDevice currentDevice] name];
-                         #else
-                         NSString *device = CFBridgingRelease(SCDynamicStoreCopyComputerName(NULL, NULL));
-                         #endif
+#else
+                NSString *device = CFBridgingRelease(SCDynamicStoreCopyComputerName(NULL, NULL));
+#endif
                          NSString *title = server.title;
 
                          if (title == nil) {
@@ -103,13 +101,13 @@ NS_ASSUME_NONNULL_END
                                  title = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleName"];
                              }
 
-                         #if !TARGET_OS_IPHONE
+#if !TARGET_OS_IPHONE
 
                              if (title == nil) {
                                  title = [[NSProcessInfo processInfo] processName];
                              }
 
-                         #endif
+#endif
                          }
 
                          NSString *header = server.header;
@@ -140,26 +138,26 @@ NS_ASSUME_NONNULL_END
                              }
 
                              NSString *version = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
-                         #if !TARGET_OS_IPHONE
+#if !TARGET_OS_IPHONE
 
                              if (!name && !version) {
                                  name = @"OS X";
                                  version = [[NSProcessInfo processInfo] operatingSystemVersionString];
                              }
 
-                         #endif
+#endif
                              footer = [NSString stringWithFormat:[siteBundle localizedStringForKey:@"FOOTER_FORMAT" value:@"" table:nil], name, version];
                          }
 
                          return [GCDWebServerDataResponse responseWithHTMLTemplate:(NSString *)[siteBundle pathForResource:@"index" ofType:@"html"]
                                                                          variables:@{
-                                     @"device": device,
-                                     @"title": title,
-                                     @"header": header,
-                                     @"prologue": prologue,
-                                     @"epilogue": epilogue,
-                                     @"footer": footer
-                                 }];
+                                                                             @"device": device,
+                                                                             @"title": title,
+                                                                             @"header": header,
+                                                                             @"prologue": prologue,
+                                                                             @"epilogue": epilogue,
+                                                                             @"footer": footer
+                                                                         }];
                      }];
 
         // File listing
@@ -280,15 +278,15 @@ NS_ASSUME_NONNULL_END
 
             if ([type isEqualToString:NSFileTypeRegular] && [self _checkFileExtension:item]) {
                 [array addObject:@{
-                     @"path": [relativePath stringByAppendingPathComponent:item],
-                     @"name": item,
-                     @"size": (NSNumber *)[attributes objectForKey:NSFileSize]
-                 }];
+                    @"path": [relativePath stringByAppendingPathComponent:item],
+                    @"name": item,
+                    @"size": (NSNumber *)[attributes objectForKey:NSFileSize]
+                }];
             } else if ([type isEqualToString:NSFileTypeDirectory]) {
                 [array addObject:@{
-                     @"path": [[relativePath stringByAppendingPathComponent:item] stringByAppendingString:@"/"],
-                     @"name": item
-                 }];
+                    @"path": [[relativePath stringByAppendingPathComponent:item] stringByAppendingString:@"/"],
+                    @"name": item
+                }];
             }
         }
     }
@@ -326,7 +324,7 @@ NS_ASSUME_NONNULL_END
 
 - (GCDWebServerResponse *)uploadFile:(GCDWebServerMultiPartFormRequest *)request {
     NSRange range = [[request.headers objectForKey:@"Accept"] rangeOfString:@"application/json" options:NSCaseInsensitiveSearch];
-    NSString *contentType = (range.location != NSNotFound ? @"application/json" : @"text/plain; charset=utf-8"); // Required when using iFrame transport (see https://github.com/blueimp/jQuery-File-Upload/wiki/Setup)
+    NSString *contentType = (range.location != NSNotFound ? @"application/json" : @"text/plain; charset=utf-8");  // Required when using iFrame transport (see https://github.com/blueimp/jQuery-File-Upload/wiki/Setup)
 
     GCDWebServerMultiPartFile *file = [request firstFileForControlName:@"files[]"];
 

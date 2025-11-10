@@ -33,9 +33,9 @@
 
 #import "GCDWebServerPrivate.h"
 
-NSString * const GCDWebServerRequestAttribute_RegexCaptures = @"GCDWebServerRequestAttribute_RegexCaptures";
+NSString *const GCDWebServerRequestAttribute_RegexCaptures = @"GCDWebServerRequestAttribute_RegexCaptures";
 
-#define kZlibErrorDomain       @"ZlibErrorDomain"
+#define kZlibErrorDomain @"ZlibErrorDomain"
 #define kGZipInitialBufferSize (256 * 1024)
 
 @interface GCDWebServerBodyDecoder : NSObject <GCDWebServerBodyWriter>
@@ -45,11 +45,11 @@ NSString * const GCDWebServerRequestAttribute_RegexCaptures = @"GCDWebServerRequ
 @end
 
 @implementation GCDWebServerBodyDecoder {
-    GCDWebServerRequest * __unsafe_unretained _request;
+    GCDWebServerRequest *__unsafe_unretained _request;
     id<GCDWebServerBodyWriter> __unsafe_unretained _writer;
 }
 
-- (instancetype)initWithRequest:(GCDWebServerRequest * _Nonnull)request writer:(id<GCDWebServerBodyWriter> _Nonnull)writer {
+- (instancetype)initWithRequest:(GCDWebServerRequest *_Nonnull)request writer:(id<GCDWebServerBodyWriter> _Nonnull)writer {
     if ((self = [super init])) {
         _request = request;
         _writer = writer;
@@ -133,10 +133,10 @@ NSString * const GCDWebServerRequestAttribute_RegexCaptures = @"GCDWebServerRequ
             break;
         }
 
-        decodedData.length = 2 * decodedData.length; // zlib has used all the output buffer so resize it and try again in case more data is available
+        decodedData.length = 2 * decodedData.length;  // zlib has used all the output buffer so resize it and try again in case more data is available
     }
     decodedData.length = length;
-    BOOL success = length ? [super writeData:decodedData error:error] : YES; // No need to call writer if we have no data yet
+    BOOL success = length ? [super writeData:decodedData error:error] : YES;  // No need to call writer if we have no data yet
     return success;
 }
 
@@ -190,7 +190,7 @@ NSString * const GCDWebServerRequestAttribute_RegexCaptures = @"GCDWebServerRequ
         } else {
             if (_contentType) {
                 GWS_LOG_WARNING(@"Ignoring 'Content-Type' header for '%@' request on \"%@\"", _method, _URL);
-                _contentType = nil; // Content-Type without Content-Length or chunked-encoding doesn't make sense
+                _contentType = nil;  // Content-Type without Content-Length or chunked-encoding doesn't make sense
             }
 
             _contentLength = NSUIntegerMax;
@@ -220,13 +220,13 @@ NSString * const GCDWebServerRequestAttribute_RegexCaptures = @"GCDWebServerRequ
                         NSString *endString = [components objectAtIndex:1];
                         NSInteger endValue = [endString integerValue];
 
-                        if (startString.length && (startValue >= 0) && endString.length && (endValue >= startValue)) { // The second 500 bytes: "500-999"
+                        if (startString.length && (startValue >= 0) && endString.length && (endValue >= startValue)) {  // The second 500 bytes: "500-999"
                             _byteRange.location = startValue;
                             _byteRange.length = endValue - startValue + 1;
-                        } else if (startString.length && (startValue >= 0)) { // The bytes after 9500 bytes: "9500-"
+                        } else if (startString.length && (startValue >= 0)) {  // The bytes after 9500 bytes: "9500-"
                             _byteRange.location = startValue;
                             _byteRange.length = NSUIntegerMax;
-                        } else if (endString.length && (endValue > 0)) { // The final 500 bytes: "-500"
+                        } else if (endString.length && (endValue > 0)) {  // The final 500 bytes: "-500"
                             _byteRange.location = NSUIntegerMax;
                             _byteRange.length = endValue;
                         }
@@ -234,7 +234,7 @@ NSString * const GCDWebServerRequestAttribute_RegexCaptures = @"GCDWebServerRequ
                 }
             }
 
-            if ((_byteRange.location == NSUIntegerMax) && (_byteRange.length == 0)) { // Ignore "Range" header if syntactically invalid
+            if ((_byteRange.location == NSUIntegerMax) && (_byteRange.length == 0)) {  // Ignore "Range" header if syntactically invalid
                 GWS_LOG_WARNING(@"Failed to parse 'Range' header \"%@\" for url: %@", rangeHeader, url);
             }
         }

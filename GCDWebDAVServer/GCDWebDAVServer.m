@@ -32,27 +32,25 @@
 // WebDAV specifications: http://webdav.org/specs/rfc4918.html
 
 // Requires "HEADER_SEARCH_PATHS = $(SDKROOT)/usr/include/libxml2" in Xcode build settings
-#import <libxml/parser.h>
-
 #import "GCDWebDAVServer.h"
 
-#import "GCDWebServerFunctions.h"
+#import <libxml/parser.h>
 
 #import "GCDWebServerDataRequest.h"
-#import "GCDWebServerFileRequest.h"
-
 #import "GCDWebServerDataResponse.h"
 #import "GCDWebServerErrorResponse.h"
+#import "GCDWebServerFileRequest.h"
 #import "GCDWebServerFileResponse.h"
+#import "GCDWebServerFunctions.h"
 
 #define kXMLParseOptions (XML_PARSE_NONET | XML_PARSE_RECOVER | XML_PARSE_NOBLANKS | XML_PARSE_COMPACT | XML_PARSE_NOWARNING | XML_PARSE_NOERROR)
 
 typedef NS_ENUM(NSInteger, DAVProperties) {
-    kDAVProperty_ResourceType  = (1 << 0),
-    kDAVProperty_CreationDate  = (1 << 1),
-    kDAVProperty_LastModified  = (1 << 2),
+    kDAVProperty_ResourceType = (1 << 0),
+    kDAVProperty_CreationDate = (1 << 1),
+    kDAVProperty_LastModified = (1 << 2),
     kDAVProperty_ContentLength = (1 << 3),
-    kDAVAllProperties          = kDAVProperty_ResourceType | kDAVProperty_CreationDate | kDAVProperty_LastModified | kDAVProperty_ContentLength
+    kDAVAllProperties = kDAVProperty_ResourceType | kDAVProperty_CreationDate | kDAVProperty_LastModified | kDAVProperty_ContentLength
 };
 
 NS_ASSUME_NONNULL_BEGIN
@@ -78,7 +76,7 @@ NS_ASSUME_NONNULL_END
 - (instancetype)initWithUploadDirectory:(NSString *)path {
     if ((self = [super init])) {
         _uploadDirectory = [path copy];
-        GCDWebDAVServer * __unsafe_unretained server = self;
+        GCDWebDAVServer *__unsafe_unretained server = self;
 
         // 9.1 PROPFIND method
         [self addDefaultHandlerForMethod:@"PROPFIND"
@@ -169,16 +167,16 @@ NS_ASSUME_NONNULL_END
 static inline BOOL _IsMacFinder(GCDWebServerRequest *request) {
     NSString *userAgentHeader = [request.headers objectForKey:@"User-Agent"];
 
-    return ([userAgentHeader hasPrefix:@"WebDAVFS/"] || [userAgentHeader hasPrefix:@"WebDAVLib/"]); // OS X WebDAV client
+    return ([userAgentHeader hasPrefix:@"WebDAVFS/"] || [userAgentHeader hasPrefix:@"WebDAVLib/"]);  // OS X WebDAV client
 }
 
 - (GCDWebServerResponse *)performOPTIONS:(GCDWebServerRequest *)request {
     GCDWebServerResponse *response = [GCDWebServerResponse response];
 
     if (_IsMacFinder(request)) {
-        [response setValue:@"1, 2" forAdditionalHeader:@"DAV"]; // Classes 1 and 2
+        [response setValue:@"1, 2" forAdditionalHeader:@"DAV"];  // Classes 1 and 2
     } else {
-        [response setValue:@"1" forAdditionalHeader:@"DAV"]; // Class 1
+        [response setValue:@"1" forAdditionalHeader:@"DAV"];  // Class 1
     }
 
     return response;
@@ -337,7 +335,7 @@ static inline BOOL _IsMacFinder(GCDWebServerRequest *request) {
     if (creationDateHeader) {
         NSDate *date = GCDWebServerParseISO8601(creationDateHeader);
 
-        if (!date || ![[NSFileManager defaultManager] setAttributes:@{ NSFileCreationDate: date } ofItemAtPath:absolutePath error:&error]) {
+        if (!date || ![[NSFileManager defaultManager] setAttributes:@{NSFileCreationDate: date} ofItemAtPath:absolutePath error:&error]) {
             return [GCDWebServerErrorResponse responseWithServerError:kGCDWebServerHTTPStatusCode_InternalServerError underlyingError:error message:@"Failed setting creation date for directory \"%@\"", relativePath];
         }
     }
@@ -355,7 +353,7 @@ static inline BOOL _IsMacFinder(GCDWebServerRequest *request) {
 
 - (GCDWebServerResponse *)performCOPY:(GCDWebServerRequest *)request isMove:(BOOL)isMove {
     if (!isMove) {
-        NSString *depthHeader = [request.headers objectForKey:@"Depth"]; // TODO: Support "Depth: 0"
+        NSString *depthHeader = [request.headers objectForKey:@"Depth"];  // TODO: Support "Depth: 0"
 
         if (depthHeader && ![depthHeader isEqualToString:@"infinity"]) {
             return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_BadRequest message:@"Unsupported 'Depth' header: %@", depthHeader];
@@ -489,7 +487,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
                 [xmlString appendFormat:@"<D:creationdate>%@</D:creationdate>", GCDWebServerFormatISO8601((NSDate *)[attributes fileCreationDate])];
             }
 
-            if ((properties & kDAVProperty_LastModified) && isFile && [attributes objectForKey:NSFileModificationDate]) { // Last modification date is not useful for directories as it changes implicitely and 'Last-Modified' header is not provided for directories anyway
+            if ((properties & kDAVProperty_LastModified) && isFile && [attributes objectForKey:NSFileModificationDate]) {  // Last modification date is not useful for directories as it changes implicitely and 'Last-Modified' header is not provided for directories anyway
                 [xmlString appendFormat:@"<D:getlastmodified>%@</D:getlastmodified>", GCDWebServerFormatRFC822((NSDate *)[attributes fileModificationDate])];
             }
 
@@ -518,7 +516,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
     } else if ([depthHeader isEqualToString:@"1"]) {
         depth = 1;
     } else {
-        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_BadRequest message:@"Unsupported 'Depth' header: %@", depthHeader]; // TODO: Return 403 / propfind-finite-depth for "infinity" depth
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_BadRequest message:@"Unsupported 'Depth' header: %@", depthHeader];  // TODO: Return 403 / propfind-finite-depth for "infinity" depth
     }
 
     DAVProperties properties = 0;

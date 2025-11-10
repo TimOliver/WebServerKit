@@ -33,7 +33,7 @@ NS_ASSUME_NONNULL_BEGIN
  *  The GCDWebServerBodyReaderCompletionBlock is passed by GCDWebServer to the
  *  GCDWebServerBodyReader object when reading data from it asynchronously.
  */
-typedef void (^GCDWebServerBodyReaderCompletionBlock)(NSData * _Nullable data, NSError * _Nullable error);
+typedef void (^GCDWebServerBodyReaderCompletionBlock)(NSData *_Nullable data, NSError *_Nullable error);
 
 /**
  *  This protocol is used by the GCDWebServerConnection to communicate with
@@ -157,7 +157,7 @@ typedef void (^GCDWebServerBodyReaderCompletionBlock)(NSData * _Nullable data, N
  *  be able to determine the body length when connection is closed per
  *  HTTP/1.1 specifications.
  */
-@property (nonatomic, getter = isGZipContentEncodingEnabled) BOOL gzipContentEncodingEnabled;
+@property (nonatomic, getter=isGZipContentEncodingEnabled) BOOL gzipContentEncodingEnabled;
 
 /**
  *  Creates an empty response.

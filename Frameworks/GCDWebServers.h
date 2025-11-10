@@ -30,8 +30,8 @@
 #import "GCDWebServerConnection.h"
 #import "GCDWebServerFunctions.h"
 #import "GCDWebServerHTTPStatusCodes.h"
-#import "GCDWebServerResponse.h"
 #import "GCDWebServerRequest.h"
+#import "GCDWebServerResponse.h"
 
 // GCDWebServer Requests
 #import "GCDWebServerDataRequest.h"

@@ -44,13 +44,13 @@ typedef enum {
 @interface GCDWebServerMIMEStreamParser : NSObject
 @end
 
-static NSData * _newlineData = nil;
+static NSData *_newlineData = nil;
 static NSData *_newlinesData = nil;
 static NSData *_dashNewlineData = nil;
 
 @implementation GCDWebServerMultiPart
 
-- (instancetype)initWithControlName:(NSString * _Nonnull)name contentType:(NSString * _Nonnull)type {
+- (instancetype)initWithControlName:(NSString *_Nonnull)name contentType:(NSString *_Nonnull)type {
     if ((self = [super init])) {
         _controlName = [name copy];
         _contentType = [type copy];
@@ -64,7 +64,7 @@ static NSData *_dashNewlineData = nil;
 
 @implementation GCDWebServerMultiPartArgument
 
-- (instancetype)initWithControlName:(NSString * _Nonnull)name contentType:(NSString * _Nonnull)type data:(NSData * _Nonnull)data {
+- (instancetype)initWithControlName:(NSString *_Nonnull)name contentType:(NSString *_Nonnull)type data:(NSData *_Nonnull)data {
     if ((self = [super initWithControlName:name contentType:type])) {
         _data = data;
 
@@ -85,7 +85,7 @@ static NSData *_dashNewlineData = nil;
 
 @implementation GCDWebServerMultiPartFile
 
-- (instancetype)initWithControlName:(NSString * _Nonnull)name contentType:(NSString * _Nonnull)type fileName:(NSString * _Nonnull)fileName temporaryPath:(NSString * _Nonnull)temporaryPath {
+- (instancetype)initWithControlName:(NSString *_Nonnull)name contentType:(NSString *_Nonnull)type fileName:(NSString *_Nonnull)fileName temporaryPath:(NSString *_Nonnull)temporaryPath {
     if ((self = [super initWithControlName:name contentType:type])) {
         _fileName = [fileName copy];
         _temporaryPath = [temporaryPath copy];
@@ -137,7 +137,7 @@ static NSData *_dashNewlineData = nil;
     }
 }
 
-- (instancetype)initWithBoundary:(NSString * _Nonnull)boundary defaultControlName:(NSString * _Nullable)name arguments:(NSMutableArray<GCDWebServerMultiPartArgument *> * _Nonnull)arguments files:(NSMutableArray<GCDWebServerMultiPartFile *> * _Nonnull)files {
+- (instancetype)initWithBoundary:(NSString *_Nonnull)boundary defaultControlName:(NSString *_Nullable)name arguments:(NSMutableArray<GCDWebServerMultiPartArgument *> *_Nonnull)arguments files:(NSMutableArray<GCDWebServerMultiPartFile *> *_Nonnull)files {
     NSData *data = boundary.length ? [[NSString stringWithFormat:@"--%@", boundary] dataUsingEncoding:NSASCIIStringEncoding] : nil;
 
     if (data == nil) {
@@ -366,7 +366,7 @@ static NSData *_dashNewlineData = nil;
 
     if (_parser == nil) {
         if (error) {
-            *error = [NSError errorWithDomain:kGCDWebServerErrorDomain code:-1 userInfo:@{ NSLocalizedDescriptionKey: @"Failed starting to parse multipart form data" }];
+            *error = [NSError errorWithDomain:kGCDWebServerErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: @"Failed starting to parse multipart form data"}];
         }
 
         return NO;
@@ -378,7 +378,7 @@ static NSData *_dashNewlineData = nil;
 - (BOOL)writeData:(NSData *)data error:(NSError **)error {
     if (![_parser appendBytes:data.bytes length:data.length]) {
         if (error) {
-            *error = [NSError errorWithDomain:kGCDWebServerErrorDomain code:-1 userInfo:@{ NSLocalizedDescriptionKey: @"Failed continuing to parse multipart form data" }];
+            *error = [NSError errorWithDomain:kGCDWebServerErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: @"Failed continuing to parse multipart form data"}];
         }
 
         return NO;
@@ -394,7 +394,7 @@ static NSData *_dashNewlineData = nil;
 
     if (!atEnd) {
         if (error) {
-            *error = [NSError errorWithDomain:kGCDWebServerErrorDomain code:-1 userInfo:@{ NSLocalizedDescriptionKey: @"Failed finishing to parse multipart form data" }];
+            *error = [NSError errorWithDomain:kGCDWebServerErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: @"Failed finishing to parse multipart form data"}];
         }
 
         return NO;

@@ -34,7 +34,7 @@ NS_ASSUME_NONNULL_BEGIN
  *  The block must return either a chunk of data, an empty NSData when done, or
  *  nil on error and set the "error" argument which is guaranteed to be non-NULL.
  */
-typedef NSData * _Nullable (^GCDWebServerStreamBlock)(NSError **error);
+typedef NSData *_Nullable (^GCDWebServerStreamBlock)(NSError **error);
 
 /**
  *  The GCDWebServerAsyncStreamBlock works like the GCDWebServerStreamBlock

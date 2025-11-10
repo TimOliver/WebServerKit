@@ -72,7 +72,7 @@
     return [self initWithFile:path byteRange:range isAttachment:NO mimeTypeOverrides:nil];
 }
 
-static inline NSDate * _NSDateFromTimeSpec(const struct timespec *t) {
+static inline NSDate *_NSDateFromTimeSpec(const struct timespec *t) {
     return [NSDate dateWithTimeIntervalSince1970:((NSTimeInterval)t->tv_sec + (NSTimeInterval)t->tv_nsec / 1000000000.0)];
 }
 
@@ -86,7 +86,7 @@ static inline NSDate * _NSDateFromTimeSpec(const struct timespec *t) {
 
 #ifndef __LP64__
 
-    if (info.st_size >= (off_t)4294967295) { // In 32 bit mode, we can't handle files greater than 4 GiBs (don't use "NSUIntegerMax" here to avoid potential unsigned to signed conversion issues)
+    if (info.st_size >= (off_t)4294967295) {  // In 32 bit mode, we can't handle files greater than 4 GiBs (don't use "NSUIntegerMax" here to avoid potential unsigned to signed conversion issues)
         GWS_DNOT_REACHED();
         return nil;
     }
@@ -106,7 +106,7 @@ static inline NSDate * _NSDateFromTimeSpec(const struct timespec *t) {
         }
 
         if (range.length == 0) {
-            return nil; // TODO: Return 416 status code and "Content-Range: bytes */{file length}" header
+            return nil;  // TODO: Return 416 status code and "Content-Range: bytes */{file length}" header
         }
     } else {
         range.location = 0;
