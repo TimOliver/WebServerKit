@@ -32,6 +32,20 @@
  *  All GCDWebServer headers.
  */
 
+#if __has_include(<GCDWebServers/GCDWebServer.h>)
+#import <GCDWebServers/GCDWebServer.h>
+#import <GCDWebServers/GCDWebServerConnection.h>
+#import <GCDWebServers/GCDWebServerDataRequest.h>
+#import <GCDWebServers/GCDWebServerDataResponse.h>
+#import <GCDWebServers/GCDWebServerErrorResponse.h>
+#import <GCDWebServers/GCDWebServerFileRequest.h>
+#import <GCDWebServers/GCDWebServerFileResponse.h>
+#import <GCDWebServers/GCDWebServerFunctions.h>
+#import <GCDWebServers/GCDWebServerHTTPStatusCodes.h>
+#import <GCDWebServers/GCDWebServerMultiPartFormRequest.h>
+#import <GCDWebServers/GCDWebServerStreamedResponse.h>
+#import <GCDWebServers/GCDWebServerURLEncodedFormRequest.h>
+#else
 #import "GCDWebServer.h"
 #import "GCDWebServerConnection.h"
 #import "GCDWebServerDataRequest.h"
@@ -44,6 +58,7 @@
 #import "GCDWebServerMultiPartFormRequest.h"
 #import "GCDWebServerStreamedResponse.h"
 #import "GCDWebServerURLEncodedFormRequest.h"
+#endif
 
 /**
  *  Check if a custom logging facility should be used instead.

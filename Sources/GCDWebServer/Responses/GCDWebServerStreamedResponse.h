@@ -25,7 +25,11 @@
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#if __has_include(<GCDWebServers/GCDWebServerResponse.h>)
+#import <GCDWebServers/GCDWebServerResponse.h>
+#else
 #import "GCDWebServerResponse.h"
+#endif
 
 NS_ASSUME_NONNULL_BEGIN
 
