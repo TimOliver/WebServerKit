@@ -27,8 +27,13 @@
 
 #import <TargetConditionals.h>
 
+#if __has_include(<GCDWebServers/GCDWebServerRequest.h>)
+#import <GCDWebServers/GCDWebServerRequest.h>
+#import <GCDWebServers/GCDWebServerResponse.h>
+#else
 #import "GCDWebServerRequest.h"
 #import "GCDWebServerResponse.h"
+#endif
 
 NS_ASSUME_NONNULL_BEGIN
 

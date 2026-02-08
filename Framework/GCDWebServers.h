@@ -25,6 +25,36 @@
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#if __has_include(<GCDWebServers/GCDWebServer.h>)
+
+// GCDWebServer Core
+#import <GCDWebServers/GCDWebServer.h>
+#import <GCDWebServers/GCDWebServerConnection.h>
+#import <GCDWebServers/GCDWebServerFunctions.h>
+#import <GCDWebServers/GCDWebServerHTTPStatusCodes.h>
+#import <GCDWebServers/GCDWebServerRequest.h>
+#import <GCDWebServers/GCDWebServerResponse.h>
+
+// GCDWebServer Requests
+#import <GCDWebServers/GCDWebServerDataRequest.h>
+#import <GCDWebServers/GCDWebServerFileRequest.h>
+#import <GCDWebServers/GCDWebServerMultiPartFormRequest.h>
+#import <GCDWebServers/GCDWebServerURLEncodedFormRequest.h>
+
+// GCDWebServer Responses
+#import <GCDWebServers/GCDWebServerDataResponse.h>
+#import <GCDWebServers/GCDWebServerErrorResponse.h>
+#import <GCDWebServers/GCDWebServerFileResponse.h>
+#import <GCDWebServers/GCDWebServerStreamedResponse.h>
+
+// GCDWebUploader
+#import <GCDWebServers/GCDWebUploader.h>
+
+// GCDWebDAVServer
+#import <GCDWebServers/GCDWebDAVServer.h>
+
+#else
+
 // GCDWebServer Core
 #import "GCDWebServer.h"
 #import "GCDWebServerConnection.h"
@@ -50,3 +80,5 @@
 
 // GCDWebDAVServer
 #import "GCDWebDAVServer.h"
+
+#endif

@@ -25,7 +25,11 @@
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+#if __has_include(<GCDWebServers/GCDWebServer.h>)
+#import <GCDWebServers/GCDWebServer.h>
+#else
 #import "GCDWebServer.h"
+#endif
 
 NS_ASSUME_NONNULL_BEGIN
 
