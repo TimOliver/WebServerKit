@@ -1243,6 +1243,8 @@
 					"-Wno-objc-missing-property-synthesis",
 					"-Wno-cstring-format-directive",
 					"-Wno-reserved-id-macro",
+					"-Wno-reserved-identifier",
+					"-Wno-pre-c11-compat",
 					"-Wno-cast-qual",
 				);
 			};
@@ -1340,6 +1342,8 @@
 					"-Wno-objc-missing-property-synthesis",
 					"-Wno-cstring-format-directive",
 					"-Wno-reserved-id-macro",
+					"-Wno-reserved-identifier",
+					"-Wno-pre-c11-compat",
 					"-Wno-cast-qual",
 					"-Wno-declaration-after-statement",
 				);
@@ -1414,6 +1418,8 @@
 					"-Wno-objc-missing-property-synthesis",
 					"-Wno-cstring-format-directive",
 					"-Wno-reserved-id-macro",
+					"-Wno-reserved-identifier",
+					"-Wno-pre-c11-compat",
 					"-Wno-cast-qual",
 					"-Wno-declaration-after-statement",
 				);
@@ -1556,6 +1562,8 @@
 					"-Wno-objc-missing-property-synthesis",
 					"-Wno-cstring-format-directive",
 					"-Wno-reserved-id-macro",
+					"-Wno-reserved-identifier",
+					"-Wno-pre-c11-compat",
 					"-Wno-cast-qual",
 					"-Wno-declaration-after-statement",
 				);
