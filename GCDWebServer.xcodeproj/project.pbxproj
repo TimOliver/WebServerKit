@@ -3,7 +3,7 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 53;
+	objectVersion = 54;
 	objects = {
 
 /* Begin PBXAggregateTarget section */
@@ -439,10 +439,8 @@
 				E28BAE1418F99C810095C089 /* GCDWebServer */,
 				E2A0E80718F3432600C580B1 /* GCDWebDAVServer */,
 				E2BE850618E77ECA0061360B /* GCDWebUploader */,
+				228C21112F38582100AC49DD /* Examples */,
 				CEE28D081AE0053E00F4023C /* Frameworks */,
-				E221128D1690B6470048D2B2 /* Mac */,
-				E2DDD1F71BE69EE5002CE867 /* iOS */,
-				E2DDD1C81BE698A8002CE867 /* tvOS */,
 				E282F1A7150FF0630004D7C0 /* Mac Frameworks and Libraries */,
 				E221129E1690B7CB0048D2B2 /* iOS Frameworks and Libraries */,
 				E2DDD1B81BE6952F002CE867 /* tvOS Frameworks and Libraries */,
@@ -465,6 +463,16 @@
 				E2DDD1F61BE69EE4002CE867 /* GCDWebServer.app */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		228C21112F38582100AC49DD /* Examples */ = {
+			isa = PBXGroup;
+			children = (
+				E221128D1690B6470048D2B2 /* Mac */,
+				E2DDD1F71BE69EE5002CE867 /* iOS */,
+				E2DDD1C81BE698A8002CE867 /* tvOS */,
+			);
+			path = Examples;
 			sourceTree = "<group>";
 		};
 		CEE28D081AE0053E00F4023C /* Frameworks */ = {
@@ -1597,7 +1605,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
 				DEVELOPMENT_TEAM = 6LF3GMKZAB;
-				INFOPLIST_FILE = tvOS/Info.plist;
+				INFOPLIST_FILE = Examples/tvOS/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -1618,7 +1626,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
 				DEVELOPMENT_TEAM = 6LF3GMKZAB;
-				INFOPLIST_FILE = tvOS/Info.plist;
+				INFOPLIST_FILE = Examples/tvOS/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -1638,7 +1646,7 @@
 				COPY_PHASE_STRIP = NO;
 				DEVELOPMENT_TEAM = 6LF3GMKZAB;
 				ENABLE_BITCODE = YES;
-				INFOPLIST_FILE = iOS/Info.plist;
+				INFOPLIST_FILE = Examples/iOS/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 12.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -1658,7 +1666,7 @@
 				COPY_PHASE_STRIP = NO;
 				DEVELOPMENT_TEAM = 6LF3GMKZAB;
 				ENABLE_BITCODE = YES;
-				INFOPLIST_FILE = iOS/Info.plist;
+				INFOPLIST_FILE = Examples/iOS/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 12.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
