@@ -35,6 +35,9 @@
 #else
 #import <SystemConfiguration/SystemConfiguration.h>
 #endif
+#if __has_include(<UniformTypeIdentifiers/UniformTypeIdentifiers.h>)
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+#endif
 #import <CommonCrypto/CommonDigest.h>
 #import <ifaddrs.h>
 #import <net/if.h>
@@ -200,11 +203,22 @@ NSString *GCDWebServerGetMimeTypeForExtension(NSString *extension, NSDictionary<
         }
 
         if (mimeType == nil) {
-            CFStringRef uti = UTTypeCreatePreferredIdentifierForTag(kUTTagClassFilenameExtension, (__bridge CFStringRef)extension, NULL);
+#if __has_include(<UniformTypeIdentifiers/UniformTypeIdentifiers.h>)
+            if (@available(iOS 14.0, macOS 11.0, *)) {
+                UTType *type = [UTType typeWithFilenameExtension:extension];
+                mimeType = type.preferredMIMEType;
+            } else
+#endif
+            {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+                CFStringRef uti = UTTypeCreatePreferredIdentifierForTag(kUTTagClassFilenameExtension, (__bridge CFStringRef)extension, NULL);
 
-            if (uti) {
-                mimeType = CFBridgingRelease(UTTypeCopyPreferredTagWithClass(uti, kUTTagClassMIMEType));
-                CFRelease(uti);
+                if (uti) {
+                    mimeType = CFBridgingRelease(UTTypeCopyPreferredTagWithClass(uti, kUTTagClassMIMEType));
+                    CFRelease(uti);
+                }
+#pragma clang diagnostic pop
             }
         }
     }
@@ -213,19 +227,13 @@ NSString *GCDWebServerGetMimeTypeForExtension(NSString *extension, NSDictionary<
 }
 
 NSString *GCDWebServerEscapeURLString(NSString *string) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    return CFBridgingRelease(CFURLCreateStringByAddingPercentEscapes(kCFAllocatorDefault, (CFStringRef)string, NULL, CFSTR(":@/?&=+"), kCFStringEncodingUTF8));
-
-#pragma clang diagnostic pop
+    NSMutableCharacterSet *allowed = [[NSCharacterSet URLQueryAllowedCharacterSet] mutableCopy];
+    [allowed removeCharactersInString:@":@/?&=+"];
+    return [string stringByAddingPercentEncodingWithAllowedCharacters:allowed];
 }
 
 NSString *GCDWebServerUnescapeURLString(NSString *string) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    return CFBridgingRelease(CFURLCreateStringByReplacingPercentEscapesUsingEncoding(kCFAllocatorDefault, (CFStringRef)string, CFSTR(""), kCFStringEncodingUTF8));
-
-#pragma clang diagnostic pop
+    return [string stringByRemovingPercentEncoding];
 }
 
 NSDictionary<NSString *, NSString *> *GCDWebServerParseURLEncodedForm(NSString *form) {
@@ -355,6 +363,7 @@ NSString *GCDWebServerComputeMD5Digest(NSString *format, ...) {
     const char *string = [[[NSString alloc] initWithFormat:format arguments:arguments] UTF8String];
     va_end(arguments);
     unsigned char md5[CC_MD5_DIGEST_LENGTH];
+    // MD5 is mandated by HTTP Digest Auth (RFC 2617). No non-deprecated replacement exists.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
     CC_MD5(string, (CC_LONG)strlen(string), md5);

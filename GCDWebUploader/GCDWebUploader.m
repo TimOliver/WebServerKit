@@ -32,8 +32,6 @@
 #import <TargetConditionals.h>
 #if TARGET_OS_IPHONE
 #import <UIKit/UIKit.h>
-#else
-#import <SystemConfiguration/SystemConfiguration.h>
 #endif
 
 #import "GCDWebServerDataRequest.h"
@@ -90,7 +88,7 @@ NS_ASSUME_NONNULL_END
 #if TARGET_OS_IPHONE
                          NSString *device = [[UIDevice currentDevice] name];
 #else
-                NSString *device = CFBridgingRelease(SCDynamicStoreCopyComputerName(NULL, NULL));
+                NSString *device = [[NSHost currentHost] localizedName];
 #endif
                          NSString *title = server.title;
 

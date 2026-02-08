@@ -21,6 +21,8 @@ Pod::Spec.new do |s|
     cs.ios.frameworks = 'CoreServices', 'CFNetwork'
     cs.osx.library = 'z'
     cs.osx.framework = 'SystemConfiguration'
+    cs.ios.weak_framework = 'UniformTypeIdentifiers'
+    cs.osx.weak_framework = 'UniformTypeIdentifiers'
   end
   
   s.subspec 'WebDAV' do |cs|

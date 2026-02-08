@@ -32,7 +32,7 @@
 #import <netdb.h>
 #import <TargetConditionals.h>
 #ifdef __GCDWEBSERVER_ENABLE_TESTING__
-#import <libkern/OSAtomic.h>
+#import <stdatomic.h>
 #endif
 
 #import "GCDWebServerPrivate.h"
@@ -54,7 +54,7 @@ static NSData *_continueData = nil;
 static NSData *_lastChunkData = nil;
 static NSString *_digestAuthenticationNonce = nil;
 #ifdef __GCDWEBSERVER_ENABLE_TESTING__
-static int32_t _connectionCounter = 0;
+static _Atomic(int32_t) _connectionCounter = 0;
 #endif
 
 NS_ASSUME_NONNULL_BEGIN
@@ -712,10 +712,7 @@ static inline NSUInteger _ScanHexNumber(const void *bytes, NSUInteger size) {
 #ifdef __GCDWEBSERVER_ENABLE_TESTING__
 
     if (_server.recordingEnabled) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        _connectionIndex = OSAtomicIncrement32(&_connectionCounter);
-#pragma clang diagnostic pop
+        _connectionIndex = atomic_fetch_add(&_connectionCounter, 1) + 1;
 
         _requestPath = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSProcessInfo processInfo] globallyUniqueString]];
         _requestFD = open([_requestPath fileSystemRepresentation], O_CREAT | O_TRUNC | O_WRONLY, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
