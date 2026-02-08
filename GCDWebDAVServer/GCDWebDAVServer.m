@@ -370,10 +370,7 @@ static inline BOOL _IsMacFinder(GCDWebServerRequest *request) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_BadRequest message:@"Malformed 'Destination' header: %@", dstRelativePath];
     }
 
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    dstRelativePath = [[dstRelativePath substringFromIndex:(range.location + range.length)] stringByReplacingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
-#pragma clang diagnostic pop
+    dstRelativePath = [[dstRelativePath substringFromIndex:(range.location + range.length)] stringByRemovingPercentEncoding];
     NSString *dstAbsolutePath = [_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(dstRelativePath)];
 
     if (!dstAbsolutePath) {
@@ -458,10 +455,9 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
 }
 
 - (void)_addPropertyResponseForItem:(NSString *)itemPath resource:(NSString *)resourcePath properties:(DAVProperties)properties xmlString:(NSMutableString *)xmlString {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    CFStringRef escapedPath = CFURLCreateStringByAddingPercentEscapes(kCFAllocatorDefault, (__bridge CFStringRef)resourcePath, NULL, CFSTR("<&>?+"), kCFStringEncodingUTF8);
-#pragma clang diagnostic pop
+    NSMutableCharacterSet *allowed = [[NSCharacterSet URLPathAllowedCharacterSet] mutableCopy];
+    [allowed removeCharactersInString:@"<&>?+"];
+    NSString *escapedPath = [resourcePath stringByAddingPercentEncodingWithAllowedCharacters:allowed];
 
     if (escapedPath) {
         NSDictionary *attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:itemPath error:NULL];
@@ -501,7 +497,6 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
             [xmlString appendString:@"</D:response>\n"];
         }
 
-        CFRelease(escapedPath);
     } else {
         [self logError:@"Failed escaping path: %@", itemPath];
     }
