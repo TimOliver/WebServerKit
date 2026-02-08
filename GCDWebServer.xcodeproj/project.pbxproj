@@ -1250,6 +1250,7 @@
 					"-Wno-reserved-identifier",
 					"-Wno-pre-c11-compat",
 					"-Wno-cast-qual",
+					"-Wno-missing-include-dirs",
 				);
 			};
 			name = Debug;
@@ -1353,6 +1354,7 @@
 					"-Wno-pre-c11-compat",
 					"-Wno-cast-qual",
 					"-Wno-declaration-after-statement",
+					"-Wno-missing-include-dirs",
 				);
 			};
 			name = Debug;
@@ -1431,6 +1433,7 @@
 					"-Wno-pre-c11-compat",
 					"-Wno-cast-qual",
 					"-Wno-declaration-after-statement",
+					"-Wno-missing-include-dirs",
 				);
 			};
 			name = Debug;
@@ -1577,6 +1580,7 @@
 					"-Wno-pre-c11-compat",
 					"-Wno-cast-qual",
 					"-Wno-declaration-after-statement",
+					"-Wno-missing-include-dirs",
 				);
 			};
 			name = Debug;
