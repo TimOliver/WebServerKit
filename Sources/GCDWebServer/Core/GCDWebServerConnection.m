@@ -76,6 +76,7 @@ NS_ASSUME_NONNULL_END
 
 @implementation GCDWebServerConnection {
     CFSocketNativeHandle _socket;
+    dispatch_queue_t _connectionQueue;
     BOOL _virtualHEAD;
 
     CFHTTPMessageRef _requestMessage;
@@ -398,6 +399,7 @@ NS_ASSUME_NONNULL_END
         _localAddressData = localAddress;
         _remoteAddressData = remoteAddress;
         _socket = socket;
+        _connectionQueue = dispatch_queue_create("gcdwebserver.connection", DISPATCH_QUEUE_SERIAL);
         GWS_LOG_DEBUG(@"Did open connection on socket %i", _socket);
 
         [_server willStartConnection:self];
@@ -452,7 +454,7 @@ NS_ASSUME_NONNULL_END
 @implementation GCDWebServerConnection (Read)
 
 - (void)readData:(NSMutableData *)data withLength:(NSUInteger)length completionBlock:(ReadDataCompletionBlock)block {
-    dispatch_read(_socket, length, dispatch_get_global_queue(_server.dispatchQueuePriority, 0), ^(dispatch_data_t buffer, int error) {
+    dispatch_read(_socket, length, _connectionQueue, ^(dispatch_data_t buffer, int error) {
         @autoreleasepool {
             if (error == 0) {
                 size_t size = dispatch_data_get_size(buffer);
@@ -623,11 +625,11 @@ static inline NSUInteger _ScanHexNumber(const void *bytes, NSUInteger size) {
 @implementation GCDWebServerConnection (Write)
 
 - (void)writeData:(NSData *)data withCompletionBlock:(WriteDataCompletionBlock)block {
-    dispatch_data_t buffer = dispatch_data_create(data.bytes, data.length, dispatch_get_global_queue(_server.dispatchQueuePriority, 0), ^{
+    dispatch_data_t buffer = dispatch_data_create(data.bytes, data.length, _connectionQueue, ^{
         [data self];  // Keeps ARC from releasing data too early
     });
 
-    dispatch_write(_socket, buffer, dispatch_get_global_queue(_server.dispatchQueuePriority, 0), ^(dispatch_data_t remainingData, int error) {
+    dispatch_write(_socket, buffer, _connectionQueue, ^(dispatch_data_t remainingData, int error) {
         @autoreleasepool {
             if (error == 0) {
                 GWS_DCHECK(remainingData == NULL);
