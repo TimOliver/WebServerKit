@@ -85,7 +85,7 @@
 - (NSString *)text {
     if (_text == nil) {
         if ([self.contentType hasPrefix:@"text/"]) {
-            NSString *charset = GCDWebServerExtractHeaderValueParameter(self.contentType, @"charset");
+            NSString *const charset = GCDWebServerExtractHeaderValueParameter(self.contentType, @"charset");
             _text = [[NSString alloc] initWithData:self.data encoding:GCDWebServerStringEncodingFromCharset(charset)];
         } else {
             GWS_DNOT_REACHED();
@@ -97,7 +97,7 @@
 
 - (id)jsonObject {
     if (_jsonObject == nil) {
-        NSString *mimeType = GCDWebServerTruncateHeaderValue(self.contentType);
+        NSString *const mimeType = GCDWebServerTruncateHeaderValue(self.contentType);
 
         if ([mimeType isEqualToString:@"application/json"] || [mimeType isEqualToString:@"text/json"] || [mimeType isEqualToString:@"text/javascript"]) {
             _jsonObject = [NSJSONSerialization JSONObjectWithData:_data options:0 error:NULL];

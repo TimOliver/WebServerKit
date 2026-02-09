@@ -69,7 +69,7 @@ static NSData *_dashNewlineData = nil;
         _data = data;
 
         if ([self.contentType hasPrefix:@"text/"]) {
-            NSString *charset = GCDWebServerExtractHeaderValueParameter(self.contentType, @"charset");
+            NSString *const charset = GCDWebServerExtractHeaderValueParameter(self.contentType, @"charset");
             _string = [[NSString alloc] initWithData:_data encoding:GCDWebServerStringEncodingFromCharset(charset)];
         }
     }
@@ -177,20 +177,20 @@ static NSData *_dashNewlineData = nil;
             _contentType = nil;
             _tmpPath = nil;
             _subParser = nil;
-            NSString *headers = [[NSString alloc] initWithData:[_data subdataWithRange:NSMakeRange(0, range.location)] encoding:NSUTF8StringEncoding];
+            NSString *const headers = [[NSString alloc] initWithData:[_data subdataWithRange:NSMakeRange(0, range.location)] encoding:NSUTF8StringEncoding];
 
             if (headers) {
                 for (NSString *header in [headers componentsSeparatedByString:@"\r\n"]) {
                     NSRange subRange = [header rangeOfString:@":"];
 
                     if (subRange.location != NSNotFound) {
-                        NSString *name = [header substringToIndex:subRange.location];
-                        NSString *value = [[header substringFromIndex:(subRange.location + subRange.length)] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                        NSString *const name = [header substringToIndex:subRange.location];
+                        NSString *const value = [[header substringFromIndex:(subRange.location + subRange.length)] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
 
                         if ([name caseInsensitiveCompare:@"Content-Type"] == NSOrderedSame) {
                             _contentType = GCDWebServerNormalizeHeaderValue(value);
                         } else if ([name caseInsensitiveCompare:@"Content-Disposition"] == NSOrderedSame) {
-                            NSString *contentDisposition = GCDWebServerNormalizeHeaderValue(value);
+                            NSString *const contentDisposition = GCDWebServerNormalizeHeaderValue(value);
 
                             if ([GCDWebServerTruncateHeaderValue(contentDisposition) isEqualToString:@"form-data"]) {
                                 _controlName = GCDWebServerExtractHeaderValueParameter(contentDisposition, @"name");
@@ -215,7 +215,7 @@ static NSData *_dashNewlineData = nil;
 
             if (_controlName) {
                 if ([GCDWebServerTruncateHeaderValue(_contentType) isEqualToString:@"multipart/mixed"]) {
-                    NSString *boundary = GCDWebServerExtractHeaderValueParameter(_contentType, @"boundary");
+                    NSString *const boundary = GCDWebServerExtractHeaderValueParameter(_contentType, @"boundary");
                     _subParser = [[GCDWebServerMIMEStreamParser alloc] initWithBoundary:boundary defaultControlName:_controlName arguments:_arguments files:_files];
 
                     if (_subParser == nil) {
@@ -223,7 +223,7 @@ static NSData *_dashNewlineData = nil;
                         success = NO;
                     }
                 } else if (_fileName) {
-                    NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSProcessInfo processInfo] globallyUniqueString]];
+                    NSString *const path = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSProcessInfo processInfo] globallyUniqueString]];
                     _tmpFile = open([path fileSystemRepresentation], O_CREAT | O_TRUNC | O_WRONLY, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 
                     if (_tmpFile > 0) {
@@ -269,7 +269,7 @@ static NSData *_dashNewlineData = nil;
                         if (result == (ssize_t)dataLength) {
                             if (close(_tmpFile) == 0) {
                                 _tmpFile = 0;
-                                GCDWebServerMultiPartFile *file = [[GCDWebServerMultiPartFile alloc] initWithControlName:_controlName contentType:_contentType fileName:_fileName temporaryPath:_tmpPath];
+                                GCDWebServerMultiPartFile *const file = [[GCDWebServerMultiPartFile alloc] initWithControlName:_controlName contentType:_contentType fileName:_fileName temporaryPath:_tmpPath];
                                 [_files addObject:file];
                             } else {
                                 GWS_DNOT_REACHED();
@@ -282,8 +282,8 @@ static NSData *_dashNewlineData = nil;
 
                         _tmpPath = nil;
                     } else {
-                        NSData *data = [[NSData alloc] initWithBytes:(void *)dataBytes length:dataLength];
-                        GCDWebServerMultiPartArgument *argument = [[GCDWebServerMultiPartArgument alloc] initWithControlName:_controlName contentType:_contentType data:data];
+                        NSData *const data = [[NSData alloc] initWithBytes:(void *)dataBytes length:dataLength];
+                        GCDWebServerMultiPartArgument *const argument = [[GCDWebServerMultiPartArgument alloc] initWithControlName:_controlName contentType:_contentType data:data];
                         [_arguments addObject:argument];
                     }
                 }
@@ -360,7 +360,7 @@ static NSData *_dashNewlineData = nil;
 }
 
 - (BOOL)open:(NSError **)error {
-    NSString *boundary = GCDWebServerExtractHeaderValueParameter(self.contentType, @"boundary");
+    NSString *const boundary = GCDWebServerExtractHeaderValueParameter(self.contentType, @"boundary");
 
     _parser = [[GCDWebServerMIMEStreamParser alloc] initWithBoundary:boundary defaultControlName:nil arguments:_arguments files:_files];
 

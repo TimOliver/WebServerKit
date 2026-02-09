@@ -42,8 +42,8 @@
         return NO;
     }
 
-    NSString *charset = GCDWebServerExtractHeaderValueParameter(self.contentType, @"charset");
-    NSString *string = [[NSString alloc] initWithData:self.data encoding:GCDWebServerStringEncodingFromCharset(charset)];
+    NSString *const charset = GCDWebServerExtractHeaderValueParameter(self.contentType, @"charset");
+    NSString *const string = [[NSString alloc] initWithData:self.data encoding:GCDWebServerStringEncodingFromCharset(charset)];
     _arguments = GCDWebServerParseURLEncodedForm(string);
     return YES;
 }
@@ -54,7 +54,7 @@
     [description appendString:@"\n"];
 
     for (NSString *argument in [[_arguments allKeys] sortedArrayUsingSelector:@selector(compare:)]) {
-        [description appendFormat:@"\n%@ = %@", argument, [_arguments objectForKey:argument]];
+        [description appendFormat:@"\n%@ = %@", argument, _arguments[argument]];
     }
 
     return description;

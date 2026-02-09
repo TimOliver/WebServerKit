@@ -83,20 +83,20 @@
     }
 
 #ifdef __GCDWEBSERVER_ENABLE_TESTING__
-    NSString *creationDateHeader = [self.headers objectForKey:@"X-GCDWebServer-CreationDate"];
+    NSString *const creationDateHeader = self.headers[@"X-GCDWebServer-CreationDate"];
 
     if (creationDateHeader) {
-        NSDate *date = GCDWebServerParseISO8601(creationDateHeader);
+        NSDate *const date = GCDWebServerParseISO8601(creationDateHeader);
 
         if (!date || ![[NSFileManager defaultManager] setAttributes:@{NSFileCreationDate: date} ofItemAtPath:_temporaryPath error:error]) {
             return NO;
         }
     }
 
-    NSString *modifiedDateHeader = [self.headers objectForKey:@"X-GCDWebServer-ModifiedDate"];
+    NSString *const modifiedDateHeader = self.headers[@"X-GCDWebServer-ModifiedDate"];
 
     if (modifiedDateHeader) {
-        NSDate *date = GCDWebServerParseRFC822(modifiedDateHeader);
+        NSDate *const date = GCDWebServerParseRFC822(modifiedDateHeader);
 
         if (!date || ![[NSFileManager defaultManager] setAttributes:@{NSFileModificationDate: date} ofItemAtPath:_temporaryPath error:error]) {
             return NO;

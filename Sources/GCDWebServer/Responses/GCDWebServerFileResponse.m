@@ -125,9 +125,9 @@ static inline NSDate *_NSDateFromTimeSpec(const struct timespec *t) {
         }
 
         if (attachment) {
-            NSString *fileName = [path lastPathComponent];
-            NSData *data = [[fileName stringByReplacingOccurrencesOfString:@"\"" withString:@""] dataUsingEncoding:NSISOLatin1StringEncoding allowLossyConversion:YES];
-            NSString *lossyFileName = data ? [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding] : nil;
+            NSString *const fileName = [path lastPathComponent];
+            NSData *const data = [[fileName stringByReplacingOccurrencesOfString:@"\"" withString:@""] dataUsingEncoding:NSISOLatin1StringEncoding allowLossyConversion:YES];
+            NSString *const lossyFileName = data ? [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding] : nil;
 
             if (lossyFileName) {
                 NSString *value = [NSString stringWithFormat:@"attachment; filename=\"%@\"; filename*=UTF-8''%@", lossyFileName, GCDWebServerEscapeURLString(fileName)];

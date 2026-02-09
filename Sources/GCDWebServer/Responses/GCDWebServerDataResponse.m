@@ -99,7 +99,7 @@
 }
 
 - (instancetype)initWithText:(NSString *)text {
-    NSData *data = [text dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *const data = [text dataUsingEncoding:NSUTF8StringEncoding];
 
     if (data == nil) {
         GWS_DNOT_REACHED();
@@ -110,7 +110,7 @@
 }
 
 - (instancetype)initWithHTML:(NSString *)html {
-    NSData *data = [html dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *const data = [html dataUsingEncoding:NSUTF8StringEncoding];
 
     if (data == nil) {
         GWS_DNOT_REACHED();
@@ -121,7 +121,7 @@
 }
 
 - (instancetype)initWithHTMLTemplate:(NSString *)path variables:(NSDictionary<NSString *, NSString *> *)variables {
-    NSMutableString *html = [[NSMutableString alloc] initWithContentsOfFile:path encoding:NSUTF8StringEncoding error:NULL];
+    NSMutableString *const html = [[NSMutableString alloc] initWithContentsOfFile:path encoding:NSUTF8StringEncoding error:NULL];
 
     [variables enumerateKeysAndObjectsUsingBlock:^(NSString *key, NSString *value, BOOL *stop) {
         [html replaceOccurrencesOfString:[NSString stringWithFormat:@"%%%@%%", key] withString:value options:0 range:NSMakeRange(0, html.length)];
@@ -134,7 +134,7 @@
 }
 
 - (instancetype)initWithJSONObject:(id)object contentType:(NSString *)type {
-    NSData *data = [NSJSONSerialization dataWithJSONObject:object options:0 error:NULL];
+    NSData *const data = [NSJSONSerialization dataWithJSONObject:object options:0 error:NULL];
 
     if (data == nil) {
         GWS_DNOT_REACHED();

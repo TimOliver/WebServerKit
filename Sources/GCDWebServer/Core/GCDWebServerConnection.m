@@ -283,7 +283,7 @@ NS_ASSUME_NONNULL_END
         return;
     }
 
-    NSMutableData *chunkData = [[NSMutableData alloc] initWithData:initialData];
+    NSMutableData *const chunkData = [[NSMutableData alloc] initWithData:initialData];
     [self readNextBodyChunk:chunkData
             completionBlock:^(BOOL success) {
                 NSError *localError = nil;
@@ -299,7 +299,7 @@ NS_ASSUME_NONNULL_END
 
 - (void)_readRequestHeaders {
     _requestMessage = CFHTTPMessageCreateEmpty(kCFAllocatorDefault, true);
-    NSMutableData *headersData = [[NSMutableData alloc] initWithCapacity:kHeadersReadCapacity];
+    NSMutableData *const headersData = [[NSMutableData alloc] initWithCapacity:kHeadersReadCapacity];
     [self readHeaders:headersData
         withCompletionBlock:^(NSData *extraData) {
             if (extraData) {
@@ -310,7 +310,7 @@ NS_ASSUME_NONNULL_END
                     self->_virtualHEAD = YES;
                 }
 
-                NSDictionary *requestHeaders = CFBridgingRelease(CFHTTPMessageCopyAllHeaderFields(self->_requestMessage));  // Header names are case-insensitive but CFHTTPMessageCopyAllHeaderFields() will standardize the common ones
+                NSDictionary *const requestHeaders = CFBridgingRelease(CFHTTPMessageCopyAllHeaderFields(self->_requestMessage));  // Header names are case-insensitive but CFHTTPMessageCopyAllHeaderFields() will standardize the common ones
                 NSURL *requestURL = CFBridgingRelease(CFHTTPMessageCopyRequestURL(self->_requestMessage));
 
                 if (requestURL) {
@@ -324,9 +324,9 @@ NS_ASSUME_NONNULL_END
                     urlPath = @"/";  // CFURLCopyPath() returns NULL for a relative URL with path "//" contrary to -[NSURL path] which returns "/"
                 }
 
-                NSString *requestPath = urlPath ? GCDWebServerUnescapeURLString(urlPath) : nil;
-                NSString *queryString = requestURL ? CFBridgingRelease(CFURLCopyQueryString((CFURLRef)requestURL, NULL)) : nil;  // Don't use -[NSURL query] to make sure query is not unescaped;
-                NSDictionary *requestQuery = queryString ? GCDWebServerParseURLEncodedForm(queryString) : @{};
+                NSString *const requestPath = urlPath ? GCDWebServerUnescapeURLString(urlPath) : nil;
+                NSString *const queryString = requestURL ? CFBridgingRelease(CFURLCopyQueryString((CFURLRef)requestURL, NULL)) : nil;  // Don't use -[NSURL query] to make sure query is not unescaped;
+                NSDictionary *const requestQuery = queryString ? GCDWebServerParseURLEncodedForm(queryString) : @{};
 
                 if (requestMethod && requestURL && requestHeaders && requestPath && requestQuery) {
                     for (self->_handler in self->_server.handlers) {
@@ -345,7 +345,7 @@ NS_ASSUME_NONNULL_END
                             [self->_request prepareForWriting];
 
                             if (self->_request.usesChunkedTransferEncoding || (extraData.length <= self->_request.contentLength)) {
-                                NSString *expectHeader = [requestHeaders objectForKey:@"Expect"];
+                                NSString *const expectHeader = requestHeaders[@"Expect"];
 
                                 if (expectHeader) {
                                     if ([expectHeader caseInsensitiveCompare:@"100-continue"] == NSOrderedSame) {  // TODO: Actually validate request before continuing
@@ -515,7 +515,7 @@ NS_ASSUME_NONNULL_END
 
 - (void)readBodyWithRemainingLength:(NSUInteger)length completionBlock:(ReadBodyCompletionBlock)block {
     GWS_DCHECK([_request hasBody] && ![_request usesChunkedTransferEncoding]);
-    NSMutableData *bodyData = [[NSMutableData alloc] initWithCapacity:kBodyReadCapacity];
+    NSMutableData *const bodyData = [[NSMutableData alloc] initWithCapacity:kBodyReadCapacity];
     [self readData:bodyData
              withLength:length
         completionBlock:^(BOOL success) {
@@ -769,10 +769,10 @@ static inline NSUInteger _ScanHexNumber(const void *bytes, NSUInteger size) {
 
     if (_server.authenticationBasicAccounts) {
         __block BOOL authenticated = NO;
-        NSString *authorizationHeader = [request.headers objectForKey:@"Authorization"];
+        NSString *const authorizationHeader = request.headers[@"Authorization"];
 
         if ([authorizationHeader hasPrefix:@"Basic "]) {
-            NSString *basicAccount = [authorizationHeader substringFromIndex:6];
+            NSString *const basicAccount = [authorizationHeader substringFromIndex:6];
             [_server.authenticationBasicAccounts enumerateKeysAndObjectsUsingBlock:^(NSString *username, NSString *digest, BOOL *stop) {
                 if ([basicAccount isEqualToString:digest]) {
                     authenticated = YES;
@@ -788,21 +788,21 @@ static inline NSUInteger _ScanHexNumber(const void *bytes, NSUInteger size) {
     } else if (_server.authenticationDigestAccounts) {
         BOOL authenticated = NO;
         BOOL isStaled = NO;
-        NSString *authorizationHeader = [request.headers objectForKey:@"Authorization"];
+        NSString *const authorizationHeader = request.headers[@"Authorization"];
 
         if ([authorizationHeader hasPrefix:@"Digest "]) {
-            NSString *realm = GCDWebServerExtractHeaderValueParameter(authorizationHeader, @"realm");
+            NSString *const realm = GCDWebServerExtractHeaderValueParameter(authorizationHeader, @"realm");
 
             if (realm && [_server.authenticationRealm isEqualToString:realm]) {
-                NSString *nonce = GCDWebServerExtractHeaderValueParameter(authorizationHeader, @"nonce");
+                NSString *const nonce = GCDWebServerExtractHeaderValueParameter(authorizationHeader, @"nonce");
 
                 if ([nonce isEqualToString:_digestAuthenticationNonce]) {
-                    NSString *username = GCDWebServerExtractHeaderValueParameter(authorizationHeader, @"username");
-                    NSString *uri = GCDWebServerExtractHeaderValueParameter(authorizationHeader, @"uri");
-                    NSString *actualResponse = GCDWebServerExtractHeaderValueParameter(authorizationHeader, @"response");
-                    NSString *ha1 = [_server.authenticationDigestAccounts objectForKey:username];
-                    NSString *ha2 = GCDWebServerComputeMD5Digest(@"%@:%@", request.method, uri);  // We cannot use "request.path" as the query string is required
-                    NSString *expectedResponse = GCDWebServerComputeMD5Digest(@"%@:%@:%@", ha1, _digestAuthenticationNonce, ha2);
+                    NSString *const username = GCDWebServerExtractHeaderValueParameter(authorizationHeader, @"username");
+                    NSString *const uri = GCDWebServerExtractHeaderValueParameter(authorizationHeader, @"uri");
+                    NSString *const actualResponse = GCDWebServerExtractHeaderValueParameter(authorizationHeader, @"response");
+                    NSString *const ha1 = _server.authenticationDigestAccounts[username];
+                    NSString *const ha2 = GCDWebServerComputeMD5Digest(@"%@:%@", request.method, uri);  // We cannot use "request.path" as the query string is required
+                    NSString *const expectedResponse = GCDWebServerComputeMD5Digest(@"%@:%@:%@", ha1, _digestAuthenticationNonce, ha2);
 
                     if ([actualResponse isEqualToString:expectedResponse]) {
                         authenticated = YES;
@@ -891,7 +891,7 @@ static inline BOOL _CompareResources(NSString *responseETag, NSString *requestET
 
         if (_requestFD > 0) {
             close(_requestFD);
-            NSString *name = [NSString stringWithFormat:@"%03lu-%@.request", (unsigned long)_connectionIndex, _virtualHEAD ? @"HEAD" : _request.method];
+            NSString *const name = [NSString stringWithFormat:@"%03lu-%@.request", (unsigned long)_connectionIndex, _virtualHEAD ? @"HEAD" : _request.method];
             success = [[NSFileManager defaultManager] moveItemAtPath:_requestPath toPath:[[[NSFileManager defaultManager] currentDirectoryPath] stringByAppendingPathComponent:name] error:&error];
         }
 
@@ -909,7 +909,7 @@ static inline BOOL _CompareResources(NSString *responseETag, NSString *requestET
 
         if (_responseFD > 0) {
             close(_responseFD);
-            NSString *name = [NSString stringWithFormat:@"%03lu-%i.response", (unsigned long)_connectionIndex, (int)_statusCode];
+            NSString *const name = [NSString stringWithFormat:@"%03lu-%i.response", (unsigned long)_connectionIndex, (int)_statusCode];
             success = [[NSFileManager defaultManager] moveItemAtPath:_responsePath toPath:[[[NSFileManager defaultManager] currentDirectoryPath] stringByAppendingPathComponent:name] error:&error];
         }
 
