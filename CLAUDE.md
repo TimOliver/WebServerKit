@@ -39,7 +39,10 @@ Added live browser updates when files change on the device.
 - `/events` endpoint streaming SSE with content-type `text/event-stream`
 - Heartbeat comments every 15 seconds to keep connections alive
 - Broadcasts change events for: upload, delete, move, create operations
-- Directory watcher using `dispatch_source` (DISPATCH_SOURCE_TYPE_VNODE) for external filesystem changes
+- File system observation using `NSFilePresenter` for external changes (Files app, etc.)
+  - Monitors subdirectories recursively via `presentedSubitemDidChangeAtURL:`
+  - Coalesces rapid changes with 100ms timer to avoid flooding
+  - Sends specific directory paths so browser only reloads when current folder is affected
 - JavaScript EventSource with auto-reconnect on connection errors
 
 **Event format:**
@@ -57,10 +60,10 @@ event: change
 data: {"type":"create","path":"/NewFolder/"}
 
 event: change
-data: {"type":"external","path":"/"}
+data: {"type":"external","path":"/Documents/"}
 ```
 
-**Limitation:** Directory watcher only monitors the root upload directory. Subdirectory changes require the file operation to happen in the currently viewed directory to trigger updates.
+**Smart reloading:** The browser only reloads when the changed directory matches the currently viewed path.
 
 ### Framework Linking
 
@@ -73,3 +76,9 @@ System frameworks are linked via `OTHER_LDFLAGS` in project build settings:
 `Examples/iOS/Info.plist` includes:
 - `UIFileSharingEnabled` - Makes Documents visible in iTunes/Finder
 - `LSSupportsOpeningDocumentsInPlace` - Makes app appear in Files app
+
+### Background Mode
+
+`Examples/iOS/ViewController.swift` starts the server with:
+- `GCDWebServerOption_AutomaticallySuspendInBackground: false`
+- This gives ~30 seconds of background execution time before iOS suspends the app

@@ -57,12 +57,16 @@ NS_ASSUME_NONNULL_BEGIN
 
 NS_ASSUME_NONNULL_END
 
+@interface GCDWebUploader () <NSFilePresenter>
+@end
+
 @implementation GCDWebUploader {
     NSMutableArray<GCDWebServerBodyReaderCompletionBlock> *_sseClients;
     dispatch_queue_t _sseQueue;
     dispatch_source_t _heartbeatTimer;
-    dispatch_source_t _directoryWatcher;
-    int _directoryFileDescriptor;
+    NSOperationQueue *_filePresenterQueue;
+    NSMutableSet<NSString *> *_pendingChangedPaths;
+    NSTimer *_changeCoalescingTimer;
 }
 
 @dynamic delegate;
@@ -85,8 +89,11 @@ NS_ASSUME_NONNULL_END
         _serverSentEventsEnabled = YES;
         _sseClients = [NSMutableArray array];
         _sseQueue = dispatch_queue_create("com.gcdwebuploader.sse", DISPATCH_QUEUE_SERIAL);
+        _pendingChangedPaths = [NSMutableSet set];
+        _filePresenterQueue = [[NSOperationQueue alloc] init];
+        _filePresenterQueue.maxConcurrentOperationCount = 1;
         [self _startHeartbeatTimer];
-        [self _startDirectoryWatcher];
+        [NSFileCoordinator addFilePresenter:self];
         GCDWebUploader *const __unsafe_unretained server = self;
 
         // Resource files
@@ -257,23 +264,65 @@ NS_ASSUME_NONNULL_END
     dispatch_resume(_heartbeatTimer);
 }
 
-- (void)_startDirectoryWatcher {
-    _directoryFileDescriptor = open([_uploadDirectory fileSystemRepresentation], O_EVTONLY);
-    if (_directoryFileDescriptor < 0) {
+#pragma mark - NSFilePresenter
+
+- (NSURL *)presentedItemURL {
+    return [NSURL fileURLWithPath:_uploadDirectory];
+}
+
+- (NSOperationQueue *)presentedItemOperationQueue {
+    return _filePresenterQueue;
+}
+
+- (void)presentedSubitemDidChangeAtURL:(NSURL *)url {
+    if (!_serverSentEventsEnabled) {
         return;
     }
-    _directoryWatcher = dispatch_source_create(DISPATCH_SOURCE_TYPE_VNODE,
-                                               _directoryFileDescriptor,
-                                               DISPATCH_VNODE_WRITE | DISPATCH_VNODE_DELETE | DISPATCH_VNODE_RENAME,
-                                               _sseQueue);
-    __weak GCDWebUploader *weakSelf = self;
-    dispatch_source_set_event_handler(_directoryWatcher, ^{
-        [weakSelf _broadcastSSEEvent:@"change" data:@{@"type": @"external", @"path": @"/"}];
+
+    // Convert to relative path
+    NSString *absolutePath = url.path;
+    NSString *relativePath = @"/";
+    if ([absolutePath hasPrefix:_uploadDirectory]) {
+        relativePath = [absolutePath substringFromIndex:_uploadDirectory.length];
+        if (relativePath.length == 0) {
+            relativePath = @"/";
+        }
+    }
+
+    // Get the directory containing the changed item
+    NSString *changedDirectory = [relativePath stringByDeletingLastPathComponent];
+    if (changedDirectory.length == 0 || ![changedDirectory hasPrefix:@"/"]) {
+        changedDirectory = @"/";
+    }
+    if (![changedDirectory hasSuffix:@"/"]) {
+        changedDirectory = [changedDirectory stringByAppendingString:@"/"];
+    }
+
+    @synchronized(_pendingChangedPaths) {
+        [_pendingChangedPaths addObject:changedDirectory];
+    }
+
+    // Coalesce rapid changes with a short timer
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self->_changeCoalescingTimer invalidate];
+        self->_changeCoalescingTimer = [NSTimer scheduledTimerWithTimeInterval:0.1
+                                                                        target:self
+                                                                      selector:@selector(_flushPendingChanges)
+                                                                      userInfo:nil
+                                                                       repeats:NO];
     });
-    dispatch_source_set_cancel_handler(_directoryWatcher, ^{
-        close(self->_directoryFileDescriptor);
-    });
-    dispatch_resume(_directoryWatcher);
+}
+
+- (void)_flushPendingChanges {
+    NSSet *paths;
+    @synchronized(_pendingChangedPaths) {
+        paths = [_pendingChangedPaths copy];
+        [_pendingChangedPaths removeAllObjects];
+    }
+
+    for (NSString *path in paths) {
+        [self _broadcastSSEEvent:@"change" data:@{@"type": @"external", @"path": path}];
+    }
 }
 
 - (void)_sendHeartbeat {
@@ -310,9 +359,8 @@ NS_ASSUME_NONNULL_END
     if (_heartbeatTimer) {
         dispatch_source_cancel(_heartbeatTimer);
     }
-    if (_directoryWatcher) {
-        dispatch_source_cancel(_directoryWatcher);
-    }
+    [NSFileCoordinator removeFilePresenter:self];
+    [_changeCoalescingTimer invalidate];
 }
 
 @end
