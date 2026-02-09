@@ -310,7 +310,26 @@ $(document).ready(function() {
   $("#reload").click(function(event) {
     _reload(_path);
   });
-  
+
   _reload("/");
-  
+
+  // Server-Sent Events for live updates
+  if (typeof(EventSource) !== "undefined") {
+    var eventSource = new EventSource('/events');
+
+    eventSource.addEventListener('change', function(event) {
+      var data = JSON.parse(event.data);
+      // Reload if event affects current directory
+      var eventPath = data.path || data.oldPath || '';
+      var eventDir = eventPath.substring(0, eventPath.lastIndexOf('/') + 1) || '/';
+      if (eventDir === _path || (data.newPath && data.newPath.indexOf(_path) === 0)) {
+        _reload(_path);
+      }
+    });
+
+    eventSource.onerror = function() {
+      console.log('SSE connection error, will auto-reconnect');
+    };
+  }
+
 });

@@ -108,6 +108,14 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic) BOOL allowHiddenItems;
 
 /**
+ *  Sets if Server-Sent Events (SSE) are enabled for live browser updates
+ *  when files change on the device.
+ *
+ *  The default value is YES.
+ */
+@property (nonatomic) BOOL serverSentEventsEnabled;
+
+/**
  *  Sets the title for the uploader web interface.
  *
  *  The default value is the application name.

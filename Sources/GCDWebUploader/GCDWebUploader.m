@@ -40,6 +40,7 @@
 #import "GCDWebServerFileResponse.h"
 #import "GCDWebServerFunctions.h"
 #import "GCDWebServerMultiPartFormRequest.h"
+#import "GCDWebServerStreamedResponse.h"
 #import "GCDWebServerURLEncodedFormRequest.h"
 #import "GCDWebUploader.h"
 
@@ -56,7 +57,11 @@ NS_ASSUME_NONNULL_BEGIN
 
 NS_ASSUME_NONNULL_END
 
-@implementation GCDWebUploader
+@implementation GCDWebUploader {
+    NSMutableArray<GCDWebServerBodyReaderCompletionBlock> *_sseClients;
+    dispatch_queue_t _sseQueue;
+    dispatch_source_t _heartbeatTimer;
+}
 
 @dynamic delegate;
 
@@ -75,6 +80,10 @@ NS_ASSUME_NONNULL_END
         }
 
         _uploadDirectory = [path copy];
+        _serverSentEventsEnabled = YES;
+        _sseClients = [NSMutableArray array];
+        _sseQueue = dispatch_queue_create("com.gcdwebuploader.sse", DISPATCH_QUEUE_SERIAL);
+        [self _startHeartbeatTimer];
         GCDWebUploader *const __unsafe_unretained server = self;
 
         // Resource files
@@ -205,9 +214,80 @@ NS_ASSUME_NONNULL_END
                      processBlock:^GCDWebServerResponse *(GCDWebServerRequest *request) {
                          return [server createDirectory:(GCDWebServerURLEncodedFormRequest *)request];
                      }];
+
+        // Server-Sent Events endpoint
+        [self addHandlerForMethod:@"GET"
+                             path:@"/events"
+                     requestClass:[GCDWebServerRequest class]
+             asyncProcessBlock:^(GCDWebServerRequest *request, GCDWebServerCompletionBlock completionBlock) {
+                         if (!server.serverSentEventsEnabled) {
+                             completionBlock([GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_NotFound message:@"SSE not enabled"]);
+                             return;
+                         }
+                         GCDWebServerStreamedResponse *response =
+                             [GCDWebServerStreamedResponse responseWithContentType:@"text/event-stream"
+                                                                  asyncStreamBlock:^(GCDWebServerBodyReaderCompletionBlock dataBlock) {
+                                 dispatch_async(server->_sseQueue, ^{
+                                     [server->_sseClients addObject:[dataBlock copy]];
+                                 });
+                             }];
+                         response.cacheControlMaxAge = 0;
+                         [response setValue:@"no-cache" forAdditionalHeader:@"Cache-Control"];
+                         [response setValue:@"keep-alive" forAdditionalHeader:@"Connection"];
+                         completionBlock(response);
+                     }];
     }
 
     return self;
+}
+
+- (void)_startHeartbeatTimer {
+    _heartbeatTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _sseQueue);
+    dispatch_source_set_timer(_heartbeatTimer,
+                              dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC),
+                              15 * NSEC_PER_SEC,
+                              1 * NSEC_PER_SEC);
+    __weak GCDWebUploader *weakSelf = self;
+    dispatch_source_set_event_handler(_heartbeatTimer, ^{
+        [weakSelf _sendHeartbeat];
+    });
+    dispatch_resume(_heartbeatTimer);
+}
+
+- (void)_sendHeartbeat {
+    if (!_serverSentEventsEnabled) {
+        return;
+    }
+    NSData *heartbeat = [@":heartbeat\n\n" dataUsingEncoding:NSUTF8StringEncoding];
+    NSArray *clients = [_sseClients copy];
+    [_sseClients removeAllObjects];
+    for (GCDWebServerBodyReaderCompletionBlock client in clients) {
+        client(heartbeat, nil);
+    }
+}
+
+- (void)_broadcastSSEEvent:(NSString *)eventType data:(NSDictionary *)data {
+    if (!_serverSentEventsEnabled) {
+        return;
+    }
+    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:data options:0 error:nil];
+    NSString *json = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
+    NSString *sseMessage = [NSString stringWithFormat:@"event: %@\ndata: %@\n\n", eventType, json];
+    NSData *messageData = [sseMessage dataUsingEncoding:NSUTF8StringEncoding];
+
+    dispatch_async(_sseQueue, ^{
+        NSArray *clients = [self->_sseClients copy];
+        [self->_sseClients removeAllObjects];
+        for (GCDWebServerBodyReaderCompletionBlock client in clients) {
+            client(messageData, nil);
+        }
+    });
+}
+
+- (void)dealloc {
+    if (_heartbeatTimer) {
+        dispatch_source_cancel(_heartbeatTimer);
+    }
 }
 
 @end
@@ -349,6 +429,9 @@ NS_ASSUME_NONNULL_END
         });
     }
 
+    NSString *const uploadedRelativePath = [absolutePath substringFromIndex:_uploadDirectory.length];
+    [self _broadcastSSEEvent:@"change" data:@{@"type": @"upload", @"path": uploadedRelativePath}];
+
     return [GCDWebServerDataResponse responseWithJSONObject:@{} contentType:contentType];
 }
 
@@ -392,6 +475,10 @@ NS_ASSUME_NONNULL_END
         });
     }
 
+    NSString *const movedOldRelativePath = [oldAbsolutePath substringFromIndex:_uploadDirectory.length];
+    NSString *const movedNewRelativePath = [newAbsolutePath substringFromIndex:_uploadDirectory.length];
+    [self _broadcastSSEEvent:@"change" data:@{@"type": @"move", @"oldPath": movedOldRelativePath, @"newPath": movedNewRelativePath}];
+
     return [GCDWebServerDataResponse responseWithJSONObject:@{}];
 }
 
@@ -426,6 +513,8 @@ NS_ASSUME_NONNULL_END
         });
     }
 
+    [self _broadcastSSEEvent:@"change" data:@{@"type": @"delete", @"path": relativePath}];
+
     return [GCDWebServerDataResponse responseWithJSONObject:@{}];
 }
 
@@ -454,6 +543,9 @@ NS_ASSUME_NONNULL_END
             [self.delegate webUploader:self didCreateDirectoryAtPath:absolutePath];
         });
     }
+
+    NSString *const createdRelativePath = [[absolutePath substringFromIndex:_uploadDirectory.length] stringByAppendingString:@"/"];
+    [self _broadcastSSEEvent:@"change" data:@{@"type": @"create", @"path": createdRelativePath}];
 
     return [GCDWebServerDataResponse responseWithJSONObject:@{}];
 }
