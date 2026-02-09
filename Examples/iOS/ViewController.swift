@@ -27,32 +27,13 @@
 
 import GCDWebServers
 import UIKit
-import UserNotifications
 
 class ViewController: UIViewController {
   @IBOutlet var label: UILabel?
   var webServer: GCDWebUploader!
-  var backgroundTimer: Timer?
 
   override func viewWillAppear(_ animated: Bool) {
     super.viewWillAppear(animated)
-
-    // Request notification permission
-    UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
-
-    // Observe background/foreground transitions
-    NotificationCenter.default.addObserver(
-      self,
-      selector: #selector(appDidEnterBackground),
-      name: UIApplication.didEnterBackgroundNotification,
-      object: nil
-    )
-    NotificationCenter.default.addObserver(
-      self,
-      selector: #selector(appWillEnterForeground),
-      name: UIApplication.willEnterForegroundNotification,
-      object: nil
-    )
 
     let documentsPath = NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true).first!
     webServer = GCDWebUploader(uploadDirectory: documentsPath)
@@ -75,32 +56,8 @@ class ViewController: UIViewController {
   override func viewDidDisappear(_ animated: Bool) {
     super.viewDidDisappear(animated)
 
-    NotificationCenter.default.removeObserver(self)
-    backgroundTimer?.invalidate()
-    backgroundTimer = nil
     webServer.stop()
     webServer = nil
-  }
-
-  @objc private func appDidEnterBackground() {
-    // Cancel any pending notifications
-    UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ["serverSuspending"])
-
-    // Schedule notification for ~25 seconds (before the ~30 second background limit)
-    let content = UNMutableNotificationContent()
-    content.title = "Server Suspending"
-    content.body = "Return to the app to keep the file server running."
-    content.sound = .default
-
-    let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 25, repeats: false)
-    let request = UNNotificationRequest(identifier: "serverSuspending", content: content, trigger: trigger)
-
-    UNUserNotificationCenter.current().add(request)
-  }
-
-  @objc private func appWillEnterForeground() {
-    // Cancel the notification if user returns in time
-    UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ["serverSuspending"])
   }
 }
 
