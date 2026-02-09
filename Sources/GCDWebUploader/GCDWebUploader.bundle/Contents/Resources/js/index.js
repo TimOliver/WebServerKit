@@ -319,6 +319,11 @@ $(document).ready(function() {
 
     eventSource.addEventListener('change', function(event) {
       var data = JSON.parse(event.data);
+      // External changes (from Files app, etc.) - always reload
+      if (data.type === 'external') {
+        _reload(_path);
+        return;
+      }
       // Reload if event affects current directory
       var eventPath = data.path || data.oldPath || '';
       var eventDir = eventPath.substring(0, eventPath.lastIndexOf('/') + 1) || '/';

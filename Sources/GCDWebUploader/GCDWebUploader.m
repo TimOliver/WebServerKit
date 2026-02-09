@@ -61,6 +61,8 @@ NS_ASSUME_NONNULL_END
     NSMutableArray<GCDWebServerBodyReaderCompletionBlock> *_sseClients;
     dispatch_queue_t _sseQueue;
     dispatch_source_t _heartbeatTimer;
+    dispatch_source_t _directoryWatcher;
+    int _directoryFileDescriptor;
 }
 
 @dynamic delegate;
@@ -84,6 +86,7 @@ NS_ASSUME_NONNULL_END
         _sseClients = [NSMutableArray array];
         _sseQueue = dispatch_queue_create("com.gcdwebuploader.sse", DISPATCH_QUEUE_SERIAL);
         [self _startHeartbeatTimer];
+        [self _startDirectoryWatcher];
         GCDWebUploader *const __unsafe_unretained server = self;
 
         // Resource files
@@ -254,6 +257,25 @@ NS_ASSUME_NONNULL_END
     dispatch_resume(_heartbeatTimer);
 }
 
+- (void)_startDirectoryWatcher {
+    _directoryFileDescriptor = open([_uploadDirectory fileSystemRepresentation], O_EVTONLY);
+    if (_directoryFileDescriptor < 0) {
+        return;
+    }
+    _directoryWatcher = dispatch_source_create(DISPATCH_SOURCE_TYPE_VNODE,
+                                               _directoryFileDescriptor,
+                                               DISPATCH_VNODE_WRITE | DISPATCH_VNODE_DELETE | DISPATCH_VNODE_RENAME,
+                                               _sseQueue);
+    __weak GCDWebUploader *weakSelf = self;
+    dispatch_source_set_event_handler(_directoryWatcher, ^{
+        [weakSelf _broadcastSSEEvent:@"change" data:@{@"type": @"external", @"path": @"/"}];
+    });
+    dispatch_source_set_cancel_handler(_directoryWatcher, ^{
+        close(self->_directoryFileDescriptor);
+    });
+    dispatch_resume(_directoryWatcher);
+}
+
 - (void)_sendHeartbeat {
     if (!_serverSentEventsEnabled) {
         return;
@@ -287,6 +309,9 @@ NS_ASSUME_NONNULL_END
 - (void)dealloc {
     if (_heartbeatTimer) {
         dispatch_source_cancel(_heartbeatTimer);
+    }
+    if (_directoryWatcher) {
+        dispatch_source_cancel(_directoryWatcher);
     }
 }
 
