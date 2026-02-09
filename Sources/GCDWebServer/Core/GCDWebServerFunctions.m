@@ -105,9 +105,9 @@ NSString *GCDWebServerExtractHeaderValueParameter(NSString *value, NSString *nam
     NSString *parameter = nil;
 
     if (value) {
-        NSScanner *scanner = [[NSScanner alloc] initWithString:value];
+        NSScanner *const scanner = [[NSScanner alloc] initWithString:value];
         [scanner setCaseSensitive:NO];  // Assume parameter names are case-insensitive
-        NSString *string = [NSString stringWithFormat:@"%@=", name];
+        NSString *const string = [NSString stringWithFormat:@"%@=", name];
 
         if ([scanner scanUpToString:string intoString:NULL]) {
             [scanner scanString:string intoString:NULL];
@@ -176,8 +176,8 @@ BOOL GCDWebServerIsTextContentType(NSString *type) {
 
 NSString *GCDWebServerDescribeData(NSData *data, NSString *type) {
     if (GCDWebServerIsTextContentType(type)) {
-        NSString *charset = GCDWebServerExtractHeaderValueParameter(type, @"charset");
-        NSString *string = [[NSString alloc] initWithData:data encoding:GCDWebServerStringEncodingFromCharset(charset)];
+        NSString *const charset = GCDWebServerExtractHeaderValueParameter(type, @"charset");
+        NSString *const string = [[NSString alloc] initWithData:data encoding:GCDWebServerStringEncodingFromCharset(charset)];
 
         if (string) {
             return string;
@@ -188,7 +188,7 @@ NSString *GCDWebServerDescribeData(NSData *data, NSString *type) {
 }
 
 NSString *GCDWebServerGetMimeTypeForExtension(NSString *extension, NSDictionary<NSString *, NSString *> *overrides) {
-    NSDictionary *builtInOverrides = @{
+    NSDictionary *const builtInOverrides = @{
         @"css": @"text/css"
     };
     NSString *mimeType = nil;
@@ -196,10 +196,10 @@ NSString *GCDWebServerGetMimeTypeForExtension(NSString *extension, NSDictionary<
     extension = [extension lowercaseString];
 
     if (extension.length) {
-        mimeType = [overrides objectForKey:extension];
+        mimeType = overrides[extension];
 
         if (mimeType == nil) {
-            mimeType = [builtInOverrides objectForKey:extension];
+            mimeType = builtInOverrides[extension];
         }
 
         if (mimeType == nil) {
@@ -227,7 +227,7 @@ NSString *GCDWebServerGetMimeTypeForExtension(NSString *extension, NSDictionary<
 }
 
 NSString *GCDWebServerEscapeURLString(NSString *string) {
-    NSMutableCharacterSet *allowed = [[NSCharacterSet URLQueryAllowedCharacterSet] mutableCopy];
+    NSMutableCharacterSet *const allowed = [[NSCharacterSet URLQueryAllowedCharacterSet] mutableCopy];
     [allowed removeCharactersInString:@":@/?&=+"];
     return [string stringByAddingPercentEncodingWithAllowedCharacters:allowed];
 }
@@ -237,8 +237,8 @@ NSString *GCDWebServerUnescapeURLString(NSString *string) {
 }
 
 NSDictionary<NSString *, NSString *> *GCDWebServerParseURLEncodedForm(NSString *form) {
-    NSMutableDictionary *parameters = [NSMutableDictionary dictionary];
-    NSScanner *scanner = [[NSScanner alloc] initWithString:form];
+    NSMutableDictionary *const parameters = [NSMutableDictionary dictionary];
+    NSScanner *const scanner = [[NSScanner alloc] initWithString:form];
 
     [scanner setCharactersToBeSkipped:nil];
 
@@ -310,7 +310,7 @@ NSString *GCDWebServerGetPrimaryIPAddress(BOOL useIPv6) {
         CFPropertyListRef info = SCDynamicStoreCopyValue(store, CFSTR("State:/Network/Global/IPv4"));  // There is no equivalent for IPv6 but the primary interface should be the same
 
         if (info) {
-            NSString *interface = [(__bridge NSDictionary *)info objectForKey:@"PrimaryInterface"];
+            NSString *const interface = ((__bridge NSDictionary *)info)[@"PrimaryInterface"];
 
             if (interface) {
                 primaryInterface = [[NSString stringWithString:interface] UTF8String];  // Copy string to auto-release pool
@@ -383,7 +383,7 @@ NSString *GCDWebServerComputeMD5Digest(NSString *format, ...) {
 }
 
 NSString *GCDWebServerNormalizePath(NSString *path) {
-    NSMutableArray *components = [[NSMutableArray alloc] init];
+    NSMutableArray *const components = [[NSMutableArray alloc] init];
 
     for (NSString *component in [path componentsSeparatedByString:@"/"]) {
         if ([component isEqualToString:@".."]) {

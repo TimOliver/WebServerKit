@@ -163,9 +163,9 @@ NSString *const GCDWebServerRequestAttribute_RegexCaptures = @"GCDWebServerReque
         _path = [path copy];
         _query = query;
 
-        _contentType = GCDWebServerNormalizeHeaderValue([_headers objectForKey:@"Content-Type"]);
-        _usesChunkedTransferEncoding = [GCDWebServerNormalizeHeaderValue([_headers objectForKey:@"Transfer-Encoding"]) isEqualToString:@"chunked"];
-        NSString *lengthHeader = [_headers objectForKey:@"Content-Length"];
+        _contentType = GCDWebServerNormalizeHeaderValue(_headers[@"Content-Type"]);
+        _usesChunkedTransferEncoding = [GCDWebServerNormalizeHeaderValue(_headers[@"Transfer-Encoding"]) isEqualToString:@"chunked"];
+        NSString *const lengthHeader = _headers[@"Content-Length"];
 
         if (lengthHeader) {
             NSInteger length = [lengthHeader integerValue];
@@ -196,16 +196,16 @@ NSString *const GCDWebServerRequestAttribute_RegexCaptures = @"GCDWebServerReque
             _contentLength = NSUIntegerMax;
         }
 
-        NSString *modifiedHeader = [_headers objectForKey:@"If-Modified-Since"];
+        NSString *const modifiedHeader = _headers[@"If-Modified-Since"];
 
         if (modifiedHeader) {
             _ifModifiedSince = [GCDWebServerParseRFC822(modifiedHeader) copy];
         }
 
-        _ifNoneMatch = [_headers objectForKey:@"If-None-Match"];
+        _ifNoneMatch = _headers[@"If-None-Match"];
 
         _byteRange = NSMakeRange(NSUIntegerMax, 0);
-        NSString *rangeHeader = GCDWebServerNormalizeHeaderValue([_headers objectForKey:@"Range"]);
+        NSString *const rangeHeader = GCDWebServerNormalizeHeaderValue(_headers[@"Range"]);
 
         if (rangeHeader) {
             if ([rangeHeader hasPrefix:@"bytes="]) {
@@ -215,9 +215,9 @@ NSString *const GCDWebServerRequestAttribute_RegexCaptures = @"GCDWebServerReque
                     components = [(NSString *)[components firstObject] componentsSeparatedByString:@"-"];
 
                     if (components.count == 2) {
-                        NSString *startString = [components objectAtIndex:0];
+                        NSString *const startString = components[0];
                         NSInteger startValue = [startString integerValue];
-                        NSString *endString = [components objectAtIndex:1];
+                        NSString *const endString = components[1];
                         NSInteger endValue = [endString integerValue];
 
                         if (startString.length && (startValue >= 0) && endString.length && (endValue >= startValue)) {  // The second 500 bytes: "500-999"
@@ -239,7 +239,7 @@ NSString *const GCDWebServerRequestAttribute_RegexCaptures = @"GCDWebServerReque
             }
         }
 
-        if ([[_headers objectForKey:@"Accept-Encoding"] rangeOfString:@"gzip"].location != NSNotFound) {
+        if ([_headers[@"Accept-Encoding"] rangeOfString:@"gzip"].location != NSNotFound) {
             _acceptsGzipContentEncoding = YES;
         }
 
@@ -259,7 +259,7 @@ NSString *const GCDWebServerRequestAttribute_RegexCaptures = @"GCDWebServerReque
 }
 
 - (id)attributeForKey:(NSString *)key {
-    return [_attributes objectForKey:key];
+    return _attributes[key];
 }
 
 - (BOOL)open:(NSError **)error {
@@ -277,8 +277,8 @@ NSString *const GCDWebServerRequestAttribute_RegexCaptures = @"GCDWebServerReque
 - (void)prepareForWriting {
     _writer = self;
 
-    if ([GCDWebServerNormalizeHeaderValue([self.headers objectForKey:@"Content-Encoding"]) isEqualToString:@"gzip"]) {
-        GCDWebServerGZipDecoder *decoder = [[GCDWebServerGZipDecoder alloc] initWithRequest:self writer:_writer];
+    if ([GCDWebServerNormalizeHeaderValue(self.headers[@"Content-Encoding"]) isEqualToString:@"gzip"]) {
+        GCDWebServerGZipDecoder *const decoder = [[GCDWebServerGZipDecoder alloc] initWithRequest:self writer:_writer];
         [_decoders addObject:decoder];
         _writer = decoder;
     }
@@ -323,13 +323,13 @@ NSString *const GCDWebServerRequestAttribute_RegexCaptures = @"GCDWebServerReque
     NSMutableString *description = [NSMutableString stringWithFormat:@"%@ %@", _method, _path];
 
     for (NSString *argument in [[_query allKeys] sortedArrayUsingSelector:@selector(compare:)]) {
-        [description appendFormat:@"\n  %@ = %@", argument, [_query objectForKey:argument]];
+        [description appendFormat:@"\n  %@ = %@", argument, _query[argument]];
     }
 
     [description appendString:@"\n"];
 
     for (NSString *header in [[_headers allKeys] sortedArrayUsingSelector:@selector(compare:)]) {
-        [description appendFormat:@"\n%@: %@", header, [_headers objectForKey:header]];
+        [description appendFormat:@"\n%@: %@", header, _headers[header]];
     }
 
     return description;

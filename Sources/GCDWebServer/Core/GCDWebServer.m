@@ -100,7 +100,7 @@ void GCDWebServerLogMessage(GCDWebServerLoggingLevel level, NSString *format, ..
     if (_builtInLoggerBlock || enableLogging) {
         va_list arguments;
         va_start(arguments, format);
-        NSString *message = [[NSString alloc] initWithFormat:format arguments:arguments];
+        NSString *const message = [[NSString alloc] initWithFormat:format arguments:arguments];
         va_end(arguments);
 
         if (_builtInLoggerBlock) {
@@ -358,7 +358,7 @@ static void _ExecuteMainThreadRunLoopSources(void) {
 
 - (void)addHandlerWithMatchBlock:(GCDWebServerMatchBlock)matchBlock asyncProcessBlock:(GCDWebServerAsyncProcessBlock)processBlock {
     GWS_DCHECK(_options == nil);
-    GCDWebServerHandler *handler = [[GCDWebServerHandler alloc] initWithMatchBlock:matchBlock asyncProcessBlock:processBlock];
+    GCDWebServerHandler *const handler = [[GCDWebServerHandler alloc] initWithMatchBlock:matchBlock asyncProcessBlock:processBlock];
     [_handlers insertObject:handler atIndex:0];
 }
 
@@ -441,13 +441,13 @@ static void _SocketCallBack(CFSocketRef s, CFSocketCallBackType type, CFDataRef 
 }
 
 static inline id _GetOption(NSDictionary<NSString *, id> *options, NSString *key, id defaultValue) {
-    id value = [options objectForKey:key];
+    id value = options[key];
 
     return value ? value : defaultValue;
 }
 
 static inline NSString *_EncodeBase64(NSString *string) {
-    NSData *data = [string dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *const data = [string dataUsingEncoding:NSUTF8StringEncoding];
 
 #if TARGET_OS_IPHONE || (__MAC_OS_X_VERSION_MIN_REQUIRED >= __MAC_10_9)
     return [[NSString alloc] initWithData:[data base64EncodedDataWithOptions:0] encoding:NSASCIIStringEncoding];
@@ -597,7 +597,7 @@ static inline NSString *_EncodeBase64(NSString *string) {
     }
 
     _serverName = [(NSString *)_GetOption(_options, GCDWebServerOption_ServerName, NSStringFromClass([self class])) copy];
-    NSString *authenticationMethod = _GetOption(_options, GCDWebServerOption_AuthenticationMethod, nil);
+    NSString *const authenticationMethod = _GetOption(_options, GCDWebServerOption_AuthenticationMethod, nil);
 
     if ([authenticationMethod isEqualToString:GCDWebServerAuthenticationMethod_Basic]) {
         _authenticationRealm = [(NSString *)_GetOption(_options, GCDWebServerOption_AuthenticationRealm, _serverName) copy];
@@ -625,8 +625,8 @@ static inline NSString *_EncodeBase64(NSString *string) {
     _port = port;
     _bindToLocalhost = bindToLocalhost;
 
-    NSString *bonjourName = _GetOption(_options, GCDWebServerOption_BonjourName, nil);
-    NSString *bonjourType = _GetOption(_options, GCDWebServerOption_BonjourType, @"_http._tcp");
+    NSString *const bonjourName = _GetOption(_options, GCDWebServerOption_BonjourName, nil);
+    NSString *const bonjourType = _GetOption(_options, GCDWebServerOption_BonjourType, @"_http._tcp");
 
     if (bonjourName) {
         _registrationService = CFNetServiceCreate(kCFAllocatorDefault, CFSTR("local."), (__bridge CFStringRef)bonjourType, (__bridge CFStringRef)(bonjourName.length ? bonjourName : _serverName), (SInt32)_port);
@@ -935,7 +935,7 @@ static inline NSString *_EncodeBase64(NSString *string) {
 - (BOOL)startWithPort:(NSUInteger)port bonjourName:(NSString *)name {
     NSMutableDictionary *options = [NSMutableDictionary dictionary];
 
-    [options setObject:[NSNumber numberWithInteger:port] forKey:GCDWebServerOption_Port];
+    [options setObject:@(port) forKey:GCDWebServerOption_Port];
     [options setValue:name forKey:GCDWebServerOption_BonjourName];
     return [self startWithOptions:options error:NULL];
 }
@@ -945,7 +945,7 @@ static inline NSString *_EncodeBase64(NSString *string) {
 - (BOOL)runWithPort:(NSUInteger)port bonjourName:(NSString *)name {
     NSMutableDictionary *options = [NSMutableDictionary dictionary];
 
-    [options setObject:[NSNumber numberWithInteger:port] forKey:GCDWebServerOption_Port];
+    [options setObject:@(port) forKey:GCDWebServerOption_Port];
     [options setValue:name forKey:GCDWebServerOption_BonjourName];
     return [self runWithOptions:options error:NULL];
 }
@@ -1113,22 +1113,22 @@ static inline NSString *_EncodeBase64(NSString *string) {
 }
 
 - (GCDWebServerResponse *)_responseWithContentsOfDirectory:(NSString *)path {
-    NSArray *contents = [[[NSFileManager defaultManager] contentsOfDirectoryAtPath:path error:NULL] sortedArrayUsingSelector:@selector(localizedStandardCompare:)];
+    NSArray *const contents = [[[NSFileManager defaultManager] contentsOfDirectoryAtPath:path error:NULL] sortedArrayUsingSelector:@selector(localizedStandardCompare:)];
 
     if (contents == nil) {
         return nil;
     }
 
-    NSMutableString *html = [NSMutableString string];
+    NSMutableString *const html = [NSMutableString string];
     [html appendString:@"<!DOCTYPE html>\n"];
     [html appendString:@"<html><head><meta charset=\"utf-8\"></head><body>\n"];
     [html appendString:@"<ul>\n"];
 
     for (NSString *entry in contents) {
         if (![entry hasPrefix:@"."]) {
-            NSString *type = [[[NSFileManager defaultManager] attributesOfItemAtPath:[path stringByAppendingPathComponent:entry] error:NULL] objectForKey:NSFileType];
+            NSString *const type = [[NSFileManager defaultManager] attributesOfItemAtPath:[path stringByAppendingPathComponent:entry] error:NULL][NSFileType];
             GWS_DCHECK(type);
-            NSString *escapedFile = [entry stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLPathAllowedCharacterSet]];
+            NSString *const escapedFile = [entry stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLPathAllowedCharacterSet]];
             GWS_DCHECK(escapedFile);
 
             if ([type isEqualToString:NSFileTypeRegular]) {
@@ -1329,21 +1329,21 @@ static void _LogResult(NSString *format, ...) {
     va_list arguments;
 
     va_start(arguments, format);
-    NSString *message = [[NSString alloc] initWithFormat:format arguments:arguments];
+    NSString *const message = [[NSString alloc] initWithFormat:format arguments:arguments];
     va_end(arguments);
     fprintf(stdout, "%s\n", [message UTF8String]);
 }
 
 - (NSInteger)runTestsWithOptions:(NSDictionary<NSString *, id> *)options inDirectory:(NSString *)path {
     GWS_DCHECK([NSThread isMainThread]);
-    NSArray *ignoredHeaders = @[@"Date", @"Etag"];  // Dates are always different by definition and ETags depend on file system node IDs
+    NSArray *const ignoredHeaders = @[@"Date", @"Etag"];  // Dates are always different by definition and ETags depend on file system node IDs
     NSInteger result = -1;
 
     if ([self startWithOptions:options error:NULL]) {
         _ExecuteMainThreadRunLoopSources();
 
         result = 0;
-        NSArray *files = [[[NSFileManager defaultManager] contentsOfDirectoryAtPath:path error:NULL] sortedArrayUsingSelector:@selector(localizedStandardCompare:)];
+        NSArray *const files = [[[NSFileManager defaultManager] contentsOfDirectoryAtPath:path error:NULL] sortedArrayUsingSelector:@selector(localizedStandardCompare:)];
 
         for (NSString *requestFile in files) {
             if (![requestFile hasSuffix:@".request"]) {
@@ -1351,22 +1351,22 @@ static void _LogResult(NSString *format, ...) {
             }
 
             @autoreleasepool {
-                NSString *index = [[requestFile componentsSeparatedByString:@"-"] firstObject];
+                NSString *const index = [[requestFile componentsSeparatedByString:@"-"] firstObject];
                 BOOL success = NO;
-                NSData *requestData = [NSData dataWithContentsOfFile:[path stringByAppendingPathComponent:requestFile]];
+                NSData *const requestData = [NSData dataWithContentsOfFile:[path stringByAppendingPathComponent:requestFile]];
 
                 if (requestData) {
                     CFHTTPMessageRef request = _CreateHTTPMessageFromData(requestData, YES);
 
                     if (request) {
-                        NSString *requestMethod = CFBridgingRelease(CFHTTPMessageCopyRequestMethod(request));
-                        NSURL *requestURL = CFBridgingRelease(CFHTTPMessageCopyRequestURL(request));
+                        NSString *const requestMethod = CFBridgingRelease(CFHTTPMessageCopyRequestMethod(request));
+                        NSURL *const requestURL = CFBridgingRelease(CFHTTPMessageCopyRequestURL(request));
                         _LogResult(@"[%i] %@ %@", (int)[index integerValue], requestMethod, requestURL.path);
-                        NSString *prefix = [index stringByAppendingString:@"-"];
+                        NSString *const prefix = [index stringByAppendingString:@"-"];
 
                         for (NSString *responseFile in files) {
                             if ([responseFile hasPrefix:prefix] && [responseFile hasSuffix:@".response"]) {
-                                NSData *responseData = [NSData dataWithContentsOfFile:[path stringByAppendingPathComponent:responseFile]];
+                                NSData *const responseData = [NSData dataWithContentsOfFile:[path stringByAppendingPathComponent:responseFile]];
 
                                 if (responseData) {
                                     CFHTTPMessageRef expectedResponse = _CreateHTTPMessageFromData(responseData, NO);
@@ -1385,16 +1385,16 @@ static void _LogResult(NSString *format, ...) {
                                                 success = NO;
                                             }
 
-                                            NSDictionary *expectedHeaders = CFBridgingRelease(CFHTTPMessageCopyAllHeaderFields(expectedResponse));
-                                            NSDictionary *actualHeaders = CFBridgingRelease(CFHTTPMessageCopyAllHeaderFields(actualResponse));
+                                            NSDictionary *const expectedHeaders = CFBridgingRelease(CFHTTPMessageCopyAllHeaderFields(expectedResponse));
+                                            NSDictionary *const actualHeaders = CFBridgingRelease(CFHTTPMessageCopyAllHeaderFields(actualResponse));
 
                                             for (NSString *expectedHeader in expectedHeaders) {
                                                 if ([ignoredHeaders containsObject:expectedHeader]) {
                                                     continue;
                                                 }
 
-                                                NSString *expectedValue = [expectedHeaders objectForKey:expectedHeader];
-                                                NSString *actualValue = [actualHeaders objectForKey:expectedHeader];
+                                                NSString *const expectedValue = expectedHeaders[expectedHeader];
+                                                NSString *const actualValue = actualHeaders[expectedHeader];
 
                                                 if (![actualValue isEqualToString:expectedValue]) {
                                                     _LogResult(@"  Header '%@' not matching:\n    Expected: \"%@\"\n      Actual: \"%@\"", expectedHeader, expectedValue, actualValue);
@@ -1403,15 +1403,15 @@ static void _LogResult(NSString *format, ...) {
                                             }
 
                                             for (NSString *actualHeader in actualHeaders) {
-                                                if (![expectedHeaders objectForKey:actualHeader]) {
-                                                    _LogResult(@"  Header '%@' not matching:\n    Expected: \"%@\"\n      Actual: \"%@\"", actualHeader, nil, [actualHeaders objectForKey:actualHeader]);
+                                                if (!expectedHeaders[actualHeader]) {
+                                                    _LogResult(@"  Header '%@' not matching:\n    Expected: \"%@\"\n      Actual: \"%@\"", actualHeader, nil, actualHeaders[actualHeader]);
                                                     success = NO;
                                                 }
                                             }
 
-                                            NSString *expectedContentLength = CFBridgingRelease(CFHTTPMessageCopyHeaderFieldValue(expectedResponse, CFSTR("Content-Length")));
-                                            NSData *expectedBody = CFBridgingRelease(CFHTTPMessageCopyBody(expectedResponse));
-                                            NSString *actualContentLength = CFBridgingRelease(CFHTTPMessageCopyHeaderFieldValue(actualResponse, CFSTR("Content-Length")));
+                                            NSString *const expectedContentLength = CFBridgingRelease(CFHTTPMessageCopyHeaderFieldValue(expectedResponse, CFSTR("Content-Length")));
+                                            NSData *const expectedBody = CFBridgingRelease(CFHTTPMessageCopyBody(expectedResponse));
+                                            NSString *const actualContentLength = CFBridgingRelease(CFHTTPMessageCopyHeaderFieldValue(actualResponse, CFSTR("Content-Length")));
                                             NSData *actualBody = CFBridgingRelease(CFHTTPMessageCopyBody(actualResponse));
 
                                             if ([actualContentLength isEqualToString:expectedContentLength] && (actualBody.length > expectedBody.length)) {  // Handle web browser closing connection before retrieving entire body (e.g. when playing a video file)
@@ -1424,12 +1424,12 @@ static void _LogResult(NSString *format, ...) {
 #if !TARGET_OS_IPHONE
 #if DEBUG
 
-                                                if (GCDWebServerIsTextContentType((NSString *)[expectedHeaders objectForKey:@"Content-Type"])) {
-                                                    NSString *expectedPath = [NSTemporaryDirectory() stringByAppendingPathComponent:(NSString *)[[[NSProcessInfo processInfo] globallyUniqueString] stringByAppendingPathExtension:@"txt"]];
-                                                    NSString *actualPath = [NSTemporaryDirectory() stringByAppendingPathComponent:(NSString *)[[[NSProcessInfo processInfo] globallyUniqueString] stringByAppendingPathExtension:@"txt"]];
+                                                if (GCDWebServerIsTextContentType((NSString *)expectedHeaders[@"Content-Type"])) {
+                                                    NSString *const expectedPath = [NSTemporaryDirectory() stringByAppendingPathComponent:(NSString *)[[[NSProcessInfo processInfo] globallyUniqueString] stringByAppendingPathExtension:@"txt"]];
+                                                    NSString *const actualPath = [NSTemporaryDirectory() stringByAppendingPathComponent:(NSString *)[[[NSProcessInfo processInfo] globallyUniqueString] stringByAppendingPathExtension:@"txt"]];
 
                                                     if ([expectedBody writeToFile:expectedPath atomically:YES] && [actualBody writeToFile:actualPath atomically:YES]) {
-                                                        NSTask *task = [[NSTask alloc] init];
+                                                        NSTask *const task = [[NSTask alloc] init];
                                                         [task setLaunchPath:@"/usr/bin/opendiff"];
                                                         [task setArguments:@[expectedPath, actualPath]];
                                                         [task launch];

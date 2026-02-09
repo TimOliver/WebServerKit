@@ -216,7 +216,7 @@
     _reader = self;
 
     if (_gzipContentEncodingEnabled) {
-        GCDWebServerGZipEncoder *encoder = [[GCDWebServerGZipEncoder alloc] initWithResponse:self reader:_reader];
+        GCDWebServerGZipEncoder *const encoder = [[GCDWebServerGZipEncoder alloc] initWithResponse:self reader:_reader];
         [_encoders addObject:encoder];
         _reader = encoder;
     }
@@ -242,7 +242,7 @@
         [_reader asyncReadDataWithCompletion:[block copy]];
     } else {
         NSError *error = nil;
-        NSData *data = [_reader readData:&error];
+        NSData *const data = [_reader readData:&error];
         block(data, error);
     }
 }
@@ -277,7 +277,7 @@
         [description appendString:@"\n"];
 
         for (NSString *header in [[_additionalHeaders allKeys] sortedArrayUsingSelector:@selector(compare:)]) {
-            [description appendFormat:@"\n%@: %@", header, [_additionalHeaders objectForKey:header]];
+            [description appendFormat:@"\n%@: %@", header, _additionalHeaders[header]];
         }
     }
 
