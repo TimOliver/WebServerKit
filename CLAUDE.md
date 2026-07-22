@@ -33,7 +33,27 @@ Added live browser updates when files change on the device.
 **Files modified:**
 - `Sources/GCDWebUploader/GCDWebUploader.h` - Added `serverSentEventsEnabled` property
 - `Sources/GCDWebUploader/GCDWebUploader.m` - SSE infrastructure implementation
+- `Sources/GCDWebUploader/GCDWebUploaderSSEChannel.h` - Per-connection SSE buffer (state machine)
 - `Sources/GCDWebUploader/GCDWebUploader.bundle/Contents/Resources/js/index.js` - EventSource client
+
+**Reliability model (per-connection buffering):**
+GCDWebServer's async streaming API is a strict ping-pong — it hands the response
+one completion block ("reader"), waits for it to be called once with a chunk,
+writes it, then asks for the next. Between those calls the connection has no
+reader waiting. The original shared-array-of-blocks approach dropped any event
+broadcast in that window (bursts collapsed to a single delivered event). Each
+connection now owns a `GCDWebUploaderSSEChannel` that buffers events in FIFO
+order (bounded, oldest dropped) until a reader parks, so no event is lost.
+Dead connections are reaped on the heartbeat tick (no parked reader + buffered
+data ⇒ gone). Covered by unit tests in `Framework/Tests.m` (`testSSEChannel*`).
+
+**`serverSentEventsEnabled`:** defaults to `YES`. The `NSFilePresenter`
+registration (which participates in system-wide file coordination) is only
+installed while enabled; toggling the property adds/removes it.
+
+**External-change paths** are compared after resolving symlinks on both sides
+(`URLByResolvingSymlinksInPath`) so `/private/var` vs `/var` mismatches don't
+cause every change to be reported as the root directory.
 
 **Features:**
 - `/events` endpoint streaming SSE with content-type `text/event-stream`
