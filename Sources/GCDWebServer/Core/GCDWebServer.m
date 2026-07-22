@@ -873,7 +873,14 @@ static inline NSString *_EncodeBase64(NSString *string) {
 }
 
 - (BOOL)isRunning {
-    return (_options ? YES : NO);
+    // Reflect whether the server is actually listening, not merely configured.
+    // This is NO while the server is suspended in the background (its listening
+    // sockets are torn down until the app returns to the foreground), which is
+    // the behavior the header documents for
+    // GCDWebServerOption_AutomaticallySuspendInBackground. Previously this
+    // returned YES whenever the server had been started, so it stayed YES while
+    // suspended and lied about the server's state. See swisspol/GCDWebServer#437.
+    return (_source4 != NULL);
 }
 
 - (void)stop {

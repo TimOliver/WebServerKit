@@ -319,7 +319,10 @@ extern NSString *const GCDWebServerAuthenticationMethod_DigestAccess;
 @property (nonatomic, weak, nullable) id<GCDWebServerDelegate> delegate;
 
 /**
- *  Returns YES if the server is currently running.
+ *  Returns YES if the server is currently running, i.e. actively listening for
+ *  connections. This is NO while the server is suspended in the background (see
+ *  GCDWebServerOption_AutomaticallySuspendInBackground), even though it will
+ *  resume automatically when the app returns to the foreground.
  */
 @property (nonatomic, readonly, getter=isRunning) BOOL running;
 
