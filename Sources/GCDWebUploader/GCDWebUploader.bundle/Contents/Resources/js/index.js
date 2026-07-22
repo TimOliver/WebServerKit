@@ -98,6 +98,13 @@ function _reload(path) {
         $("#path").append('<li class="active">' + components[components.length - 1] + '</li>');
       }
       _path = path;
+
+      // Update URL hash to preserve path on refresh
+      if (path == "/") {
+        history.replaceState(null, '', window.location.pathname);
+      } else {
+        history.replaceState(null, '', '#' + encodeURIComponent(path));
+      }
     }
     
     $("#listing").empty();
@@ -310,7 +317,54 @@ $(document).ready(function() {
   $("#reload").click(function(event) {
     _reload(_path);
   });
-  
-  _reload("/");
-  
+
+  // Restore path from URL hash on page load, or start at root
+  var initialPath = "/";
+  if (window.location.hash) {
+    var hashPath = decodeURIComponent(window.location.hash.substring(1));
+    if (hashPath && hashPath.charAt(0) === '/') {
+      initialPath = hashPath;
+    }
+  }
+  _reload(initialPath);
+
+  // Handle browser back/forward navigation
+  $(window).on('hashchange', function() {
+    var hashPath = "/";
+    if (window.location.hash) {
+      hashPath = decodeURIComponent(window.location.hash.substring(1));
+    }
+    if (hashPath !== _path) {
+      _reload(hashPath);
+    }
+  });
+
+  // Server-Sent Events for live updates
+  if (typeof(EventSource) !== "undefined") {
+    var eventSource = new EventSource('/events');
+
+    eventSource.addEventListener('change', function(event) {
+      var data = JSON.parse(event.data);
+      var eventPath = data.path || data.oldPath || '';
+
+      // For external changes, path is the changed directory
+      // For internal changes, path is the file path - get its directory
+      var eventDir;
+      if (data.type === 'external') {
+        eventDir = eventPath;
+      } else {
+        eventDir = eventPath.substring(0, eventPath.lastIndexOf('/') + 1) || '/';
+      }
+
+      // Reload if the changed directory matches current path
+      if (eventDir === _path || (data.newPath && data.newPath.indexOf(_path) === 0)) {
+        _reload(_path);
+      }
+    });
+
+    eventSource.onerror = function() {
+      console.log('SSE connection error, will auto-reconnect');
+    };
+  }
+
 });

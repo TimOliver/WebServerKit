@@ -39,10 +39,17 @@ class ViewController: UIViewController {
     webServer = GCDWebUploader(uploadDirectory: documentsPath)
     webServer.delegate = self
     webServer.allowHiddenItems = true
-    if webServer.start() {
+
+    // Start with background suspension disabled for extended background task time
+    let options: [String: Any] = [
+      GCDWebServerOption_AutomaticallySuspendInBackground: false
+    ]
+
+    do {
+      try webServer.start(options: options)
       label?.text = "GCDWebServer running locally on port \(webServer.port)"
-    } else {
-      label?.text = "GCDWebServer not running!"
+    } catch {
+      label?.text = "GCDWebServer not running: \(error.localizedDescription)"
     }
   }
 

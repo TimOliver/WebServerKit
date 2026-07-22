@@ -40,8 +40,65 @@
 #import "GCDWebServerFileResponse.h"
 #import "GCDWebServerFunctions.h"
 #import "GCDWebServerMultiPartFormRequest.h"
+#import "GCDWebServerStreamedResponse.h"
 #import "GCDWebServerURLEncodedFormRequest.h"
 #import "GCDWebUploader.h"
+#import "GCDWebUploaderSSEChannel.h"
+
+@implementation GCDWebUploaderSSEChannel {
+    NSUInteger _capacity;
+    NSMutableArray<NSData*>* _buffer;
+    void (^_parkedReader)(NSData* data);
+}
+
+- (instancetype)init {
+    return [self initWithCapacity:100];
+}
+
+- (instancetype)initWithCapacity:(NSUInteger)capacity {
+    if ((self = [super init])) {
+        _capacity = capacity > 0 ? capacity : 1;
+        _buffer = [[NSMutableArray alloc] init];
+    }
+    return self;
+}
+
+- (NSUInteger)capacity {
+    return _capacity;
+}
+
+- (BOOL)hasParkedReader {
+    return _parkedReader != nil;
+}
+
+- (NSUInteger)bufferedCount {
+    return _buffer.count;
+}
+
+- (void)enqueueData:(NSData*)data {
+    if (_parkedReader) {
+        void (^reader)(NSData*) = _parkedReader;
+        _parkedReader = nil;
+        reader(data);
+        return;
+    }
+    [_buffer addObject:data];
+    if (_buffer.count > _capacity) {
+        [_buffer removeObjectAtIndex:0];  // Drop oldest to stay bounded.
+    }
+}
+
+- (void)parkReader:(void (^)(NSData* data))reader {
+    if (_buffer.count > 0) {
+        NSData* data = _buffer.firstObject;
+        [_buffer removeObjectAtIndex:0];
+        reader(data);
+        return;
+    }
+    _parkedReader = [reader copy];
+}
+
+@end
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -56,9 +113,22 @@ NS_ASSUME_NONNULL_BEGIN
 
 NS_ASSUME_NONNULL_END
 
-@implementation GCDWebUploader
+@interface GCDWebUploader () <NSFilePresenter>
+@end
+
+@implementation GCDWebUploader {
+    NSMutableArray<GCDWebUploaderSSEChannel *> *_sseChannels;  // One per connected /events client. Accessed only on _sseQueue.
+    dispatch_queue_t _sseQueue;
+    dispatch_source_t _heartbeatTimer;
+    NSOperationQueue *_filePresenterQueue;
+    NSMutableSet<NSString *> *_pendingChangedPaths;
+    NSTimer *_changeCoalescingTimer;
+    BOOL _filePresenterRegistered;
+}
 
 @dynamic delegate;
+
+@synthesize serverSentEventsEnabled = _serverSentEventsEnabled;
 
 - (instancetype)initWithUploadDirectory:(NSString *)path {
     if ((self = [super init])) {
@@ -75,6 +145,16 @@ NS_ASSUME_NONNULL_END
         }
 
         _uploadDirectory = [path copy];
+        _serverSentEventsEnabled = YES;
+        _sseChannels = [NSMutableArray array];
+        _sseQueue = dispatch_queue_create("com.gcdwebuploader.sse", DISPATCH_QUEUE_SERIAL);
+        _pendingChangedPaths = [NSMutableSet set];
+        _filePresenterQueue = [[NSOperationQueue alloc] init];
+        _filePresenterQueue.maxConcurrentOperationCount = 1;
+        [self _startHeartbeatTimer];
+        if (_serverSentEventsEnabled) {
+            [self _registerFilePresenter];
+        }
         GCDWebUploader *const __unsafe_unretained server = self;
 
         // Resource files
@@ -205,9 +285,199 @@ NS_ASSUME_NONNULL_END
                      processBlock:^GCDWebServerResponse *(GCDWebServerRequest *request) {
                          return [server createDirectory:(GCDWebServerURLEncodedFormRequest *)request];
                      }];
+
+        // Server-Sent Events endpoint
+        [self addHandlerForMethod:@"GET"
+                             path:@"/events"
+                     requestClass:[GCDWebServerRequest class]
+             asyncProcessBlock:^(GCDWebServerRequest *request, GCDWebServerCompletionBlock completionBlock) {
+                         if (!server.serverSentEventsEnabled) {
+                             completionBlock([GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_NotFound message:@"SSE not enabled"]);
+                             return;
+                         }
+                         // Each connection gets its own channel, which buffers events so that
+                         // nothing is dropped in the window between GCDWebServer consuming one
+                         // reader and asking for the next (its streaming API is a ping-pong).
+                         GCDWebUploaderSSEChannel *channel = [[GCDWebUploaderSSEChannel alloc] init];
+                         dispatch_async(server->_sseQueue, ^{
+                             [server->_sseChannels addObject:channel];
+                         });
+                         GCDWebServerStreamedResponse *response =
+                             [GCDWebServerStreamedResponse responseWithContentType:@"text/event-stream"
+                                                                  asyncStreamBlock:^(GCDWebServerBodyReaderCompletionBlock dataBlock) {
+                                 dispatch_async(server->_sseQueue, ^{
+                                     [channel parkReader:^(NSData *data) {
+                                         dataBlock(data, nil);
+                                     }];
+                                 });
+                             }];
+                         response.cacheControlMaxAge = 0;
+                         [response setValue:@"no-cache" forAdditionalHeader:@"Cache-Control"];
+                         [response setValue:@"keep-alive" forAdditionalHeader:@"Connection"];
+                         completionBlock(response);
+                     }];
     }
 
     return self;
+}
+
+- (void)_startHeartbeatTimer {
+    _heartbeatTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _sseQueue);
+    dispatch_source_set_timer(_heartbeatTimer,
+                              dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC),
+                              15 * NSEC_PER_SEC,
+                              1 * NSEC_PER_SEC);
+    __weak GCDWebUploader *weakSelf = self;
+    dispatch_source_set_event_handler(_heartbeatTimer, ^{
+        [weakSelf _sendHeartbeat];
+    });
+    dispatch_resume(_heartbeatTimer);
+}
+
+// The NSFilePresenter registration participates in system-wide file coordination,
+// so it is only installed while SSE is enabled. Guarded so add/remove stay balanced.
+- (void)_registerFilePresenter {
+    @synchronized(self) {
+        if (!_filePresenterRegistered) {
+            [NSFileCoordinator addFilePresenter:self];
+            _filePresenterRegistered = YES;
+        }
+    }
+}
+
+- (void)_unregisterFilePresenter {
+    @synchronized(self) {
+        if (_filePresenterRegistered) {
+            [NSFileCoordinator removeFilePresenter:self];
+            _filePresenterRegistered = NO;
+        }
+    }
+}
+
+- (void)setServerSentEventsEnabled:(BOOL)enabled {
+    if (_serverSentEventsEnabled == enabled) {
+        return;
+    }
+    _serverSentEventsEnabled = enabled;
+    if (enabled) {
+        [self _registerFilePresenter];
+    } else {
+        [self _unregisterFilePresenter];
+        dispatch_async(_sseQueue, ^{
+            [self->_sseChannels removeAllObjects];
+        });
+    }
+}
+
+#pragma mark - NSFilePresenter
+
+- (NSURL *)presentedItemURL {
+    return [NSURL fileURLWithPath:_uploadDirectory];
+}
+
+- (NSOperationQueue *)presentedItemOperationQueue {
+    return _filePresenterQueue;
+}
+
+- (void)presentedSubitemDidChangeAtURL:(NSURL *)url {
+    if (!_serverSentEventsEnabled) {
+        return;
+    }
+
+    // Convert to a relative path. Resolve symlinks on both sides first: the URL
+    // handed to us can be rooted at /private/var while _uploadDirectory is /var
+    // (or vice-versa), and a raw hasPrefix: would then miss and report every
+    // change as the root directory.
+    NSString *base = [[[NSURL fileURLWithPath:_uploadDirectory] URLByResolvingSymlinksInPath] path];
+    NSString *absolutePath = [[url URLByResolvingSymlinksInPath] path];
+    NSString *relativePath = @"/";
+    if ([absolutePath isEqualToString:base]) {
+        relativePath = @"/";
+    } else if ([absolutePath hasPrefix:[base stringByAppendingString:@"/"]]) {
+        relativePath = [absolutePath substringFromIndex:base.length];
+    }
+
+    // Get the directory containing the changed item
+    NSString *changedDirectory = [relativePath stringByDeletingLastPathComponent];
+    if (changedDirectory.length == 0 || ![changedDirectory hasPrefix:@"/"]) {
+        changedDirectory = @"/";
+    }
+    if (![changedDirectory hasSuffix:@"/"]) {
+        changedDirectory = [changedDirectory stringByAppendingString:@"/"];
+    }
+
+    @synchronized(_pendingChangedPaths) {
+        [_pendingChangedPaths addObject:changedDirectory];
+    }
+
+    // Coalesce rapid changes with a short timer
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self->_changeCoalescingTimer invalidate];
+        self->_changeCoalescingTimer = [NSTimer scheduledTimerWithTimeInterval:0.1
+                                                                        target:self
+                                                                      selector:@selector(_flushPendingChanges)
+                                                                      userInfo:nil
+                                                                       repeats:NO];
+    });
+}
+
+- (void)_flushPendingChanges {
+    NSSet *paths;
+    @synchronized(_pendingChangedPaths) {
+        paths = [_pendingChangedPaths copy];
+        [_pendingChangedPaths removeAllObjects];
+    }
+
+    for (NSString *path in paths) {
+        [self _broadcastSSEEvent:@"change" data:@{@"type": @"external", @"path": path}];
+    }
+}
+
+// Runs on _sseQueue (the heartbeat timer targets it). Reaps dead connections and
+// pushes a keep-alive comment to the survivors. A live client always re-parks a
+// reader shortly after each delivery, so a channel that has no parked reader AND
+// still holds buffered data we handed it earlier is treated as gone.
+- (void)_sendHeartbeat {
+    if (!_serverSentEventsEnabled) {
+        return;
+    }
+    NSMutableArray<GCDWebUploaderSSEChannel *> *live = [NSMutableArray arrayWithCapacity:_sseChannels.count];
+    for (GCDWebUploaderSSEChannel *channel in _sseChannels) {
+        if (!channel.hasParkedReader && channel.bufferedCount > 0) {
+            continue;  // Never came back to read what we last sent it: reap.
+        }
+        [live addObject:channel];
+    }
+    _sseChannels = live;
+
+    NSData *heartbeat = [@":heartbeat\n\n" dataUsingEncoding:NSUTF8StringEncoding];
+    for (GCDWebUploaderSSEChannel *channel in _sseChannels) {
+        [channel enqueueData:heartbeat];
+    }
+}
+
+- (void)_broadcastSSEEvent:(NSString *)eventType data:(NSDictionary *)data {
+    if (!_serverSentEventsEnabled) {
+        return;
+    }
+    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:data options:0 error:nil];
+    NSString *json = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
+    NSString *sseMessage = [NSString stringWithFormat:@"event: %@\ndata: %@\n\n", eventType, json];
+    NSData *messageData = [sseMessage dataUsingEncoding:NSUTF8StringEncoding];
+
+    dispatch_async(_sseQueue, ^{
+        for (GCDWebUploaderSSEChannel *channel in self->_sseChannels) {
+            [channel enqueueData:messageData];
+        }
+    });
+}
+
+- (void)dealloc {
+    if (_heartbeatTimer) {
+        dispatch_source_cancel(_heartbeatTimer);
+    }
+    [self _unregisterFilePresenter];
+    [_changeCoalescingTimer invalidate];
 }
 
 @end
@@ -349,6 +619,9 @@ NS_ASSUME_NONNULL_END
         });
     }
 
+    NSString *const uploadedRelativePath = [absolutePath substringFromIndex:_uploadDirectory.length];
+    [self _broadcastSSEEvent:@"change" data:@{@"type": @"upload", @"path": uploadedRelativePath}];
+
     return [GCDWebServerDataResponse responseWithJSONObject:@{} contentType:contentType];
 }
 
@@ -392,6 +665,10 @@ NS_ASSUME_NONNULL_END
         });
     }
 
+    NSString *const movedOldRelativePath = [oldAbsolutePath substringFromIndex:_uploadDirectory.length];
+    NSString *const movedNewRelativePath = [newAbsolutePath substringFromIndex:_uploadDirectory.length];
+    [self _broadcastSSEEvent:@"change" data:@{@"type": @"move", @"oldPath": movedOldRelativePath, @"newPath": movedNewRelativePath}];
+
     return [GCDWebServerDataResponse responseWithJSONObject:@{}];
 }
 
@@ -426,6 +703,8 @@ NS_ASSUME_NONNULL_END
         });
     }
 
+    [self _broadcastSSEEvent:@"change" data:@{@"type": @"delete", @"path": relativePath}];
+
     return [GCDWebServerDataResponse responseWithJSONObject:@{}];
 }
 
@@ -454,6 +733,9 @@ NS_ASSUME_NONNULL_END
             [self.delegate webUploader:self didCreateDirectoryAtPath:absolutePath];
         });
     }
+
+    NSString *const createdRelativePath = [[absolutePath substringFromIndex:_uploadDirectory.length] stringByAppendingString:@"/"];
+    [self _broadcastSSEEvent:@"change" data:@{@"type": @"create", @"path": createdRelativePath}];
 
     return [GCDWebServerDataResponse responseWithJSONObject:@{}];
 }
