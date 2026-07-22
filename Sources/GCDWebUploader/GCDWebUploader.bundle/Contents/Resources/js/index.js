@@ -356,8 +356,15 @@ $(document).ready(function() {
         eventDir = eventPath.substring(0, eventPath.lastIndexOf('/') + 1) || '/';
       }
 
-      // Reload if the changed directory matches current path
-      if (eventDir === _path || (data.newPath && data.newPath.indexOf(_path) === 0)) {
+      // Reload only if the changed directory IS the currently-viewed directory.
+      // For a move, the destination's directory may be the current path too.
+      // (Compare directories, not a path prefix, so moving into a subdirectory
+      // of the current folder doesn't trigger a spurious reload.)
+      var newDir = null;
+      if (data.newPath) {
+        newDir = data.newPath.substring(0, data.newPath.lastIndexOf('/') + 1) || '/';
+      }
+      if (eventDir === _path || newDir === _path) {
         _reload(_path);
       }
     });
