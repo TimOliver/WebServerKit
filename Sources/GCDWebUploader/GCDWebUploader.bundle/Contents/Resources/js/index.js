@@ -31,6 +31,14 @@ var _path = null;
 var _pendingReloads = [];
 var _reloadingDisabled = 0;
 
+// Escape server-provided strings (file/folder names, device name) before they are
+// concatenated into HTML, to prevent stored XSS via crafted names.
+function _escapeHTML(s) {
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 function formatFileSize(bytes) {
   if (bytes >= 1000000000) {
     return (bytes / 1000000000).toFixed(2) + ' GB';
@@ -83,19 +91,19 @@ function _reload(path) {
     if (path != _path) {
       $("#path").empty();
       if (path == "/") {
-        $("#path").append('<li class="active">' + _device + '</li>');
+        $("#path").append('<li class="active">' + _escapeHTML(_device) + '</li>');
       } else {
-        $("#path").append('<li data-path="/"><a>' + _device + '</a></li>');
+        $("#path").append('<li data-path="/"><a>' + _escapeHTML(_device) + '</a></li>');
         var components = path.split("/").slice(1, -1);
         for (var i = 0; i < components.length - 1; ++i) {
           var subpath = "/" + components.slice(0, i + 1).join("/") + "/";
-          $("#path").append('<li data-path="' + subpath + '"><a>' + components[i] + '</a></li>');
+          $("#path").append('<li data-path="' + _escapeHTML(subpath) + '"><a>' + _escapeHTML(components[i]) + '</a></li>');
         }
         $("#path > li").click(function(event) {
           _reload($(this).data("path"));
           event.preventDefault();
         });
-        $("#path").append('<li class="active">' + components[components.length - 1] + '</li>');
+        $("#path").append('<li class="active">' + _escapeHTML(components[components.length - 1]) + '</li>');
       }
       _path = path;
 
@@ -353,7 +361,11 @@ $(document).ready(function() {
       if (data.type === 'external') {
         eventDir = eventPath;
       } else {
-        eventDir = eventPath.substring(0, eventPath.lastIndexOf('/') + 1) || '/';
+        // Strip a trailing slash first: folder create/delete events carry the
+        // folder's own path (e.g. "/Docs/New/"), and we want its PARENT dir so
+        // clients viewing "/Docs/" reload.
+        var p = eventPath.replace(/\/+$/, '');
+        eventDir = p.substring(0, p.lastIndexOf('/') + 1) || '/';
       }
 
       // Reload only if the changed directory IS the currently-viewed directory.
@@ -362,12 +374,19 @@ $(document).ready(function() {
       // of the current folder doesn't trigger a spurious reload.)
       var newDir = null;
       if (data.newPath) {
-        newDir = data.newPath.substring(0, data.newPath.lastIndexOf('/') + 1) || '/';
+        var np = data.newPath.replace(/\/+$/, '');
+        newDir = np.substring(0, np.lastIndexOf('/') + 1) || '/';
       }
       if (eventDir === _path || newDir === _path) {
         _reload(_path);
       }
     });
+
+    eventSource.onopen = function() {
+      // Re-sync on every (re)connect so any change missed while disconnected
+      // is picked up instead of leaving a stale listing.
+      _reload(_path);
+    };
 
     eventSource.onerror = function() {
       console.log('SSE connection error, will auto-reconnect');

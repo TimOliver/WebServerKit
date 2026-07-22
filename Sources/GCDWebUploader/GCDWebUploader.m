@@ -89,6 +89,7 @@
 }
 
 - (void)parkReader:(void (^)(NSData* data))reader {
+    _idleHeartbeats = 0;  // The client came back to read: it is alive.
     if (_buffer.count > 0) {
         NSData* data = _buffer.firstObject;
         [_buffer removeObjectAtIndex:0];
@@ -154,9 +155,9 @@ NS_ASSUME_NONNULL_END
         _filePresenterQueue = [[NSOperationQueue alloc] init];
         _filePresenterQueue.maxConcurrentOperationCount = 1;
         [self _startHeartbeatTimer];
-        if (_serverSentEventsEnabled) {
-            [self _registerFilePresenter];
-        }
+        // The NSFilePresenter is registered on -start and removed on -stop (see
+        // -_updateFilePresenterRegistration) so we only participate in system file
+        // coordination while actually serving, not for the object's whole lifetime.
         GCDWebUploader *const __unsafe_unretained server = self;
 
         // Resource files. cacheAge:0 sends "Cache-Control: no-cache" so browsers
@@ -306,7 +307,12 @@ NS_ASSUME_NONNULL_END
                          // reader and asking for the next (its streaming API is a ping-pong).
                          GCDWebUploaderSSEChannel *channel = [[GCDWebUploaderSSEChannel alloc] init];
                          dispatch_async(server->_sseQueue, ^{
-                             [server->_sseChannels addObject:channel];
+                             // Re-check on the SSE queue: SSE may have been disabled between the
+                             // check above and now, in which case don't register a channel that
+                             // would never be serviced or reaped.
+                             if (server->_serverSentEventsEnabled) {
+                                 [server->_sseChannels addObject:channel];
+                             }
                          });
                          GCDWebServerStreamedResponse *response =
                              [GCDWebServerStreamedResponse responseWithContentType:@"text/event-stream"
@@ -360,19 +366,47 @@ NS_ASSUME_NONNULL_END
     }
 }
 
+// The file presenter should be registered only while the server is actually
+// running AND SSE is enabled. Centralised here and driven from -start/-stop and
+// the SSE toggle. Idempotent (the register/unregister helpers are guarded).
+- (void)_updateFilePresenterRegistration {
+    if (self.isRunning && _serverSentEventsEnabled) {
+        [self _registerFilePresenter];
+    } else {
+        [self _unregisterFilePresenter];
+    }
+}
+
 - (void)setServerSentEventsEnabled:(BOOL)enabled {
     if (_serverSentEventsEnabled == enabled) {
         return;
     }
     _serverSentEventsEnabled = enabled;
-    if (enabled) {
-        [self _registerFilePresenter];
-    } else {
-        [self _unregisterFilePresenter];
+    [self _updateFilePresenterRegistration];
+    if (!enabled) {
         dispatch_async(_sseQueue, ^{
             [self->_sseChannels removeAllObjects];
         });
     }
+}
+
+- (BOOL)startWithOptions:(NSDictionary<NSString *, id> *)options error:(NSError **)error {
+    BOOL started = [super startWithOptions:options error:error];
+    if (started) {
+        [self _updateFilePresenterRegistration];
+    }
+    return started;
+}
+
+- (void)stop {
+    [super stop];
+    // No longer serving: stop observing the file system and drop any lingering SSE
+    // connections instead of leaving the presenter registered and the machinery
+    // running for the rest of the object's lifetime.
+    [self _updateFilePresenterRegistration];
+    dispatch_async(_sseQueue, ^{
+        [self->_sseChannels removeAllObjects];
+    });
 }
 
 #pragma mark - NSFilePresenter
@@ -416,14 +450,22 @@ NS_ASSUME_NONNULL_END
         [_pendingChangedPaths addObject:changedDirectory];
     }
 
-    // Coalesce rapid changes with a short timer
+    // Coalesce rapid changes with a short timer. Use the block-based API capturing
+    // a weak reference so the scheduled timer never retains self — a target:self
+    // timer would keep self alive (and, under continuous file activity, perpetually
+    // renew that retain), preventing deterministic teardown.
+    __weak GCDWebUploader *weakSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^{
-        [self->_changeCoalescingTimer invalidate];
-        self->_changeCoalescingTimer = [NSTimer scheduledTimerWithTimeInterval:0.1
-                                                                        target:self
-                                                                      selector:@selector(_flushPendingChanges)
-                                                                      userInfo:nil
-                                                                       repeats:NO];
+        GCDWebUploader *strongSelf = weakSelf;
+        if (strongSelf == nil) {
+            return;
+        }
+        [strongSelf->_changeCoalescingTimer invalidate];
+        strongSelf->_changeCoalescingTimer = [NSTimer scheduledTimerWithTimeInterval:0.1
+                                                                              repeats:NO
+                                                                                block:^(NSTimer *timer) {
+            [weakSelf _flushPendingChanges];
+        }];
     });
 }
 
@@ -449,8 +491,17 @@ NS_ASSUME_NONNULL_END
     }
     NSMutableArray<GCDWebUploaderSSEChannel *> *live = [NSMutableArray arrayWithCapacity:_sseChannels.count];
     for (GCDWebUploaderSSEChannel *channel in _sseChannels) {
-        if (!channel.hasParkedReader && channel.bufferedCount > 0) {
-            continue;  // Never came back to read what we last sent it: reap.
+        if (channel.hasParkedReader) {
+            channel.idleHeartbeats = 0;  // A reader is waiting: alive.
+        } else {
+            // No reader waiting since we last serviced it. A live client re-parks
+            // within milliseconds of each delivery, so tolerate a single transient
+            // miss (e.g. a socket write completing across a heartbeat boundary) and
+            // only reap after two consecutive idle heartbeats.
+            channel.idleHeartbeats += 1;
+            if (channel.idleHeartbeats >= 2) {
+                continue;  // Stopped reading: reap.
+            }
         }
         [live addObject:channel];
     }
@@ -602,12 +653,19 @@ NS_ASSUME_NONNULL_END
 
     GCDWebServerMultiPartFile *const file = [request firstFileForControlName:@"files[]"];
 
-    if ((!_allowHiddenItems && [file.fileName hasPrefix:@"."]) || ![self _checkFileExtension:file.fileName]) {
+    // The multipart "filename" is fully attacker-controlled and may contain path
+    // separators or "..", which -stringByAppendingPathComponent: does NOT resolve,
+    // so an unsanitized name lets a move escape the upload directory. Reduce it to
+    // a single leaf component and reject the traversal specials.
+    NSString *const fileName = [file.fileName lastPathComponent];
+
+    if ((fileName.length == 0) || [fileName isEqualToString:@"."] || [fileName isEqualToString:@".."] ||
+        (!_allowHiddenItems && [fileName hasPrefix:@"."]) || ![self _checkFileExtension:fileName]) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Uploaded file name \"%@\" is not allowed", file.fileName];
     }
 
     NSString *const relativePath = [[request firstArgumentForControlName:@"path"] string];
-    NSString *const desiredPath = [[_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(relativePath)] stringByAppendingPathComponent:file.fileName];
+    NSString *const desiredPath = [[_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(relativePath)] stringByAppendingPathComponent:fileName];
 
     // Resolving a unique name and moving the uploaded file into place must be
     // atomic against concurrent requests, otherwise two uploads of the same
