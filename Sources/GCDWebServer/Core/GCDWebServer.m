@@ -174,6 +174,7 @@ static void _ExecuteMainThreadRunLoopSources(void) {
     NSString *_dnsAddress;
     NSUInteger _dnsPort;
     BOOL _bindToLocalhost;
+    NSUInteger _lastBoundPort;  // OS-assigned port to reuse across background/resume when Port option is 0
 
 #if TARGET_OS_IPHONE
     BOOL _suspendInBackground;
@@ -556,7 +557,14 @@ static inline NSString *_EncodeBase64(NSString *string) {
 - (BOOL)_start:(NSError **)error {
     GWS_DCHECK(_source4 == NULL);
 
-    NSUInteger port = [(NSNumber *)_GetOption(_options, GCDWebServerOption_Port, @0) unsignedIntegerValue];
+    NSUInteger const configuredPort = [(NSNumber *)_GetOption(_options, GCDWebServerOption_Port, @0) unsignedIntegerValue];
+    NSUInteger port = configuredPort;
+    // When the caller asked for an OS-assigned port (0), reuse the port we were
+    // given last time so client URLs stay valid across a background/resume cycle
+    // (which tears the sockets down and starts them again). See swisspol/GCDWebServer#563.
+    if (configuredPort == 0 && _lastBoundPort != 0) {
+        port = _lastBoundPort;
+    }
     BOOL bindToLocalhost = [(NSNumber *)_GetOption(_options, GCDWebServerOption_BindToLocalhost, @NO) boolValue];
     NSUInteger maxPendingConnections = [(NSNumber *)_GetOption(_options, GCDWebServerOption_MaxPendingConnections, @16) unsignedIntegerValue];
 
@@ -566,7 +574,16 @@ static inline NSString *_EncodeBase64(NSString *string) {
     addr4.sin_family = AF_INET;
     addr4.sin_port = htons(port);
     addr4.sin_addr.s_addr = bindToLocalhost ? htonl(INADDR_LOOPBACK) : htonl(INADDR_ANY);
-    int listeningSocket4 = [self _createListeningSocket:NO localAddress:&addr4 length:sizeof(addr4) maxPendingConnections:maxPendingConnections error:error];
+    // Only surface the error on the attempt we won't retry from.
+    int listeningSocket4 = [self _createListeningSocket:NO localAddress:&addr4 length:sizeof(addr4) maxPendingConnections:maxPendingConnections error:(port == configuredPort ? error : NULL)];
+
+    // If reusing the remembered port failed (e.g. another process took it while we
+    // were suspended), fall back to letting the OS assign a fresh one.
+    if ((listeningSocket4 <= 0) && (port != 0) && (configuredPort == 0)) {
+        port = 0;
+        addr4.sin_port = htons(port);
+        listeningSocket4 = [self _createListeningSocket:NO localAddress:&addr4 length:sizeof(addr4) maxPendingConnections:maxPendingConnections error:error];
+    }
 
     if (listeningSocket4 <= 0) {
         return NO;
@@ -623,6 +640,7 @@ static inline NSString *_EncodeBase64(NSString *string) {
     _source4 = [self _createDispatchSourceWithListeningSocket:listeningSocket4 isIPv6:NO];
     _source6 = [self _createDispatchSourceWithListeningSocket:listeningSocket6 isIPv6:YES];
     _port = port;
+    _lastBoundPort = port;  // Remember it so a background/resume cycle keeps the same port.
     _bindToLocalhost = bindToLocalhost;
 
     NSString *const bonjourName = _GetOption(_options, GCDWebServerOption_BonjourName, nil);
@@ -824,6 +842,7 @@ static inline NSString *_EncodeBase64(NSString *string) {
 - (BOOL)startWithOptions:(NSDictionary<NSString *, id> *)options error:(NSError **)error {
     if (_options == nil) {
         _options = options ? [options copy] : @{};
+        _lastBoundPort = 0;  // Fresh session: don't inherit a port remembered from a previous run.
 #if TARGET_OS_IPHONE
         _suspendInBackground = [(NSNumber *)_GetOption(_options, GCDWebServerOption_AutomaticallySuspendInBackground, @YES) boolValue];
 
