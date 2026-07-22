@@ -837,6 +837,23 @@ static inline NSString *_EncodeBase64(NSString *string) {
     }
 }
 
+- (void)_reconnectInForeground:(NSNotification *)notification {
+    GWS_DCHECK([NSThread isMainThread]);
+    GWS_LOG_DEBUG(@"Will enter foreground (not suspending in background)");
+
+    // When not suspending in the background we keep serving, but iOS may still
+    // tear down our listening sockets once the process is actually suspended.
+    // If we were running, rebuild them from scratch when returning to the
+    // foreground so the server keeps accepting connections. -_start: reuses the
+    // previously assigned port, so client URLs stay valid. See
+    // swisspol/GCDWebServer#292. Existing (already-accepted) connections are
+    // unaffected — only the listening sockets are rebuilt.
+    if (_source4) {
+        [self _stop];
+        [self _start:NULL];  // TODO: There's probably nothing we can do on failure
+    }
+}
+
 #endif
 
 - (BOOL)startWithOptions:(NSDictionary<NSString *, id> *)options error:(NSError **)error {
@@ -861,6 +878,8 @@ static inline NSString *_EncodeBase64(NSString *string) {
         if (_suspendInBackground) {
             [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(_didEnterBackground:) name:UIApplicationDidEnterBackgroundNotification object:nil];
             [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(_willEnterForeground:) name:UIApplicationWillEnterForegroundNotification object:nil];
+        } else {
+            [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(_reconnectInForeground:) name:UIApplicationWillEnterForegroundNotification object:nil];
         }
 
 #endif
@@ -889,6 +908,8 @@ static inline NSString *_EncodeBase64(NSString *string) {
 
         if (_suspendInBackground) {
             [[NSNotificationCenter defaultCenter] removeObserver:self name:UIApplicationDidEnterBackgroundNotification object:nil];
+            [[NSNotificationCenter defaultCenter] removeObserver:self name:UIApplicationWillEnterForegroundNotification object:nil];
+        } else {
             [[NSNotificationCenter defaultCenter] removeObserver:self name:UIApplicationWillEnterForegroundNotification object:nil];
         }
 
