@@ -124,6 +124,7 @@ NS_ASSUME_NONNULL_END
     NSMutableSet<NSString *> *_pendingChangedPaths;
     NSTimer *_changeCoalescingTimer;
     BOOL _filePresenterRegistered;
+    NSObject *_fileOperationLock;  // Serializes "pick a unique path, then create it" against concurrent requests.
 }
 
 @dynamic delegate;
@@ -149,6 +150,7 @@ NS_ASSUME_NONNULL_END
         _sseChannels = [NSMutableArray array];
         _sseQueue = dispatch_queue_create("com.gcdwebuploader.sse", DISPATCH_QUEUE_SERIAL);
         _pendingChangedPaths = [NSMutableSet set];
+        _fileOperationLock = [[NSObject alloc] init];
         _filePresenterQueue = [[NSOperationQueue alloc] init];
         _filePresenterQueue.maxConcurrentOperationCount = 1;
         [self _startHeartbeatTimer];
@@ -710,21 +712,31 @@ NS_ASSUME_NONNULL_END
 
 - (GCDWebServerResponse *)createDirectory:(GCDWebServerURLEncodedFormRequest *)request {
     NSString *const relativePath = request.arguments[@"path"];
-    NSString *const absolutePath = [self _uniquePathForPath:[_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(relativePath)]];
+    NSString *const desiredPath = [_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(relativePath)];
 
-    NSString *const directoryName = [absolutePath lastPathComponent];
-
-    if (!_allowHiddenItems && [directoryName hasPrefix:@"."]) {
-        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Creating directory name \"%@\" is not allowed", directoryName];
-    }
-
-    if (![self shouldCreateDirectoryAtPath:absolutePath]) {
-        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Creating directory \"%@\" is not permitted", relativePath];
-    }
-
+    // Resolving a unique name and creating the directory must be atomic: request
+    // handlers run concurrently, so without this two requests for the same name
+    // would both resolve the same "unique" path and the second mkdir would fail.
+    NSString *absolutePath;
     NSError *error = nil;
+    BOOL created;
+    @synchronized(_fileOperationLock) {
+        absolutePath = [self _uniquePathForPath:desiredPath];
 
-    if (![[NSFileManager defaultManager] createDirectoryAtPath:absolutePath withIntermediateDirectories:NO attributes:nil error:&error]) {
+        NSString *const directoryName = [absolutePath lastPathComponent];
+
+        if (!_allowHiddenItems && [directoryName hasPrefix:@"."]) {
+            return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Creating directory name \"%@\" is not allowed", directoryName];
+        }
+
+        if (![self shouldCreateDirectoryAtPath:absolutePath]) {
+            return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Creating directory \"%@\" is not permitted", relativePath];
+        }
+
+        created = [[NSFileManager defaultManager] createDirectoryAtPath:absolutePath withIntermediateDirectories:NO attributes:nil error:&error];
+    }
+
+    if (!created) {
         return [GCDWebServerErrorResponse responseWithServerError:kGCDWebServerHTTPStatusCode_InternalServerError underlyingError:error message:@"Failed creating directory \"%@\"", relativePath];
     }
 
