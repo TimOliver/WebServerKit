@@ -111,6 +111,15 @@ static NSData* SSEData(NSString* string) {
     XCTAssertEqualObjects(received, (@[ @"1", @"2", @"3", @"4" ]));
 }
 
+// Parking a reader signals the client is alive, so it resets the idle-heartbeat
+// counter the owner uses to reap connections that have stopped reading.
+- (void)testSSEChannelParkingResetsIdleHeartbeats {
+    GCDWebUploaderSSEChannel* channel = [[GCDWebUploaderSSEChannel alloc] initWithCapacity:100];
+    channel.idleHeartbeats = 5;
+    [channel parkReader:^(NSData* data) {}];
+    XCTAssertEqual(channel.idleHeartbeats, (NSUInteger)0);
+}
+
 // When the buffer overflows (e.g. a dead connection), the oldest messages are
 // dropped so memory stays bounded.
 - (void)testSSEChannelDropsOldestBeyondCapacity {

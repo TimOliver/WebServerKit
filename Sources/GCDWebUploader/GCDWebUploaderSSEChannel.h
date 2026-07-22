@@ -66,6 +66,13 @@ NS_ASSUME_NONNULL_BEGIN
  */
 @property (nonatomic, readonly) NSUInteger bufferedCount;
 
+/**
+ *  Consecutive heartbeats observed by the owner during which no reader parked.
+ *  Used to reap connections that have stopped reading without misjudging a live
+ *  client that is momentarily mid-write. Reset to 0 whenever a reader parks.
+ */
+@property (nonatomic) NSUInteger idleHeartbeats;
+
 - (instancetype)init;  // Uses a sensible default capacity.
 - (instancetype)initWithCapacity:(NSUInteger)capacity NS_DESIGNATED_INITIALIZER;
 
