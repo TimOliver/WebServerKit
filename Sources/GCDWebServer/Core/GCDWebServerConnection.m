@@ -769,6 +769,15 @@ static inline NSUInteger _ScanHexNumber(const void *bytes, NSUInteger size) {
     GWS_LOG_DEBUG(@"Connection on socket %i preflighting request \"%@ %@\" with %lu bytes body", _socket, _virtualHEAD ? @"HEAD" : _request.method, _request.path, (unsigned long)_totalBytesRead);
     GCDWebServerResponse *response = nil;
 
+    // A CORS preflight (an OPTIONS request carrying "Access-Control-Request-Method")
+    // must not require credentials: browsers never send "Authorization" on preflight
+    // per the CORS spec, so enforcing auth here rejects it with 401 and breaks every
+    // subsequent cross-origin request. Let it through to the handler so the app can
+    // answer the preflight. See swisspol/GCDWebServer#479.
+    if ([request.method isEqualToString:@"OPTIONS"] && request.headers[@"Access-Control-Request-Method"]) {
+        return nil;
+    }
+
     if (_server.authenticationBasicAccounts) {
         __block BOOL authenticated = NO;
         NSString *const authorizationHeader = request.headers[@"Authorization"];
