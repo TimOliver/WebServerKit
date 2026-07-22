@@ -159,8 +159,12 @@ NS_ASSUME_NONNULL_END
         }
         GCDWebUploader *const __unsafe_unretained server = self;
 
-        // Resource files
-        [self addGETHandlerForBasePath:@"/" directoryPath:(NSString *)[siteBundle resourcePath] indexFilename:nil cacheAge:3600 allowRangeRequests:NO];
+        // Resource files. cacheAge:0 sends "Cache-Control: no-cache" so browsers
+        // revalidate (via ETag/Last-Modified) on every load instead of caching for
+        // an hour. Unchanged files still return a cheap 304, but after an app
+        // update the rebuilt bundle changes each file's ETag, so the new assets
+        // (e.g. index.js) are picked up immediately rather than served stale.
+        [self addGETHandlerForBasePath:@"/" directoryPath:(NSString *)[siteBundle resourcePath] indexFilename:nil cacheAge:0 allowRangeRequests:NO];
 
         // Web page
         [self addHandlerForMethod:@"GET"
