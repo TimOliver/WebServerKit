@@ -387,7 +387,9 @@ NSString *GCDWebServerNormalizePath(NSString *path) {
 
     for (NSString *component in [path componentsSeparatedByString:@"/"]) {
         if ([component isEqualToString:@".."]) {
-            [components removeLastObject];
+            if (components.count) {  // Guard: -removeLastObject on an empty array is documented to raise; surplus ".." are simply dropped.
+                [components removeLastObject];
+            }
         } else if (component.length && ![component isEqualToString:@"."]) {
             [components addObject:component];
         }
@@ -398,4 +400,15 @@ NSString *GCDWebServerNormalizePath(NSString *path) {
     }
 
     return [components componentsJoinedByString:@"/"];
+}
+
+BOOL GCDWebServerPathIsInsideDirectory(NSString *path, NSString *directory) {
+    if ((path.length == 0) || (directory.length == 0)) {
+        return NO;
+    }
+    if ([path isEqualToString:directory]) {
+        return NO;  // The directory itself is not "inside" it.
+    }
+    NSString *const prefix = [directory hasSuffix:@"/"] ? directory : [directory stringByAppendingString:@"/"];
+    return [path hasPrefix:prefix];
 }

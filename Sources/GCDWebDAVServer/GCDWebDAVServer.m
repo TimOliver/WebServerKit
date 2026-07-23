@@ -224,6 +224,10 @@ static inline BOOL _IsMacFinder(GCDWebServerRequest *request) {
     NSString *const absolutePath = [_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(relativePath)];
     BOOL isDirectory;
 
+    if (!GCDWebServerPathIsInsideDirectory(absolutePath, _uploadDirectory)) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Operating on the root directory is not allowed"];
+    }
+
     if (![[NSFileManager defaultManager] fileExistsAtPath:[absolutePath stringByDeletingLastPathComponent] isDirectory:&isDirectory] || !isDirectory) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Conflict message:@"Missing intermediate collection(s) for \"%@\"", relativePath];
     }
@@ -271,6 +275,12 @@ static inline BOOL _IsMacFinder(GCDWebServerRequest *request) {
     NSString *const absolutePath = [_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(relativePath)];
     BOOL isDirectory = NO;
 
+    // Refuse to operate on the upload directory itself: "DELETE /" collapses to it
+    // and would remove the entire share.
+    if (!GCDWebServerPathIsInsideDirectory(absolutePath, _uploadDirectory)) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Operating on the root directory is not allowed"];
+    }
+
     if (![[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory]) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
     }
@@ -308,6 +318,10 @@ static inline BOOL _IsMacFinder(GCDWebServerRequest *request) {
     NSString *const relativePath = request.path;
     NSString *const absolutePath = [_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(relativePath)];
     BOOL isDirectory;
+
+    if (!GCDWebServerPathIsInsideDirectory(absolutePath, _uploadDirectory)) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Operating on the root directory is not allowed"];
+    }
 
     if (![[NSFileManager defaultManager] fileExistsAtPath:[absolutePath stringByDeletingLastPathComponent] isDirectory:&isDirectory] || !isDirectory) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Conflict message:@"Missing intermediate collection(s) for \"%@\"", relativePath];
@@ -373,8 +387,13 @@ static inline BOOL _IsMacFinder(GCDWebServerRequest *request) {
     dstRelativePath = [[dstRelativePath substringFromIndex:(range.location + range.length)] stringByRemovingPercentEncoding];
     NSString *const dstAbsolutePath = [_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(dstRelativePath)];
 
-    if (!dstAbsolutePath) {
-        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_NotFound message:@"\"%@\" does not exist", srcRelativePath];
+    // Neither source nor destination may be the upload directory itself. A malformed
+    // Destination (e.g. an invalid %-escape makes stringByRemovingPercentEncoding
+    // return nil) collapses to the root, and a MOVE with Overwrite:T would then
+    // remove the whole share before failing. (The old `!dstAbsolutePath` check was
+    // dead: normalize(nil) yields "" -> the root, never nil.)
+    if (!GCDWebServerPathIsInsideDirectory(srcAbsolutePath, _uploadDirectory) || !GCDWebServerPathIsInsideDirectory(dstAbsolutePath, _uploadDirectory)) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Operating on the root directory is not allowed"];
     }
 
     BOOL isDirectory;
@@ -383,15 +402,25 @@ static inline BOOL _IsMacFinder(GCDWebServerRequest *request) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Conflict message:@"Invalid destination \"%@\"", dstRelativePath];
     }
 
+    // The extension allow-list applies to files, not directories, so derive that from
+    // the SOURCE item. The previous code reused the destination-parent's isDirectory
+    // (always a directory), so `!isDirectory` was always false and the extension check
+    // never ran on COPY/MOVE — letting an allowed file be renamed to any extension.
+    BOOL srcIsDirectory = NO;
+
+    if (![[NSFileManager defaultManager] fileExistsAtPath:srcAbsolutePath isDirectory:&srcIsDirectory]) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_NotFound message:@"\"%@\" does not exist", srcRelativePath];
+    }
+
     NSString *const srcName = [srcAbsolutePath lastPathComponent];
 
-    if ((!_allowHiddenItems && [srcName hasPrefix:@"."]) || (!isDirectory && ![self _checkFileExtension:srcName])) {
+    if ((!_allowHiddenItems && [srcName hasPrefix:@"."]) || (!srcIsDirectory && ![self _checkFileExtension:srcName])) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"%@ from item name \"%@\" is not allowed", isMove ? @"Moving" : @"Copying", srcName];
     }
 
     NSString *const dstName = [dstAbsolutePath lastPathComponent];
 
-    if ((!_allowHiddenItems && [dstName hasPrefix:@"."]) || (!isDirectory && ![self _checkFileExtension:dstName])) {
+    if ((!_allowHiddenItems && [dstName hasPrefix:@"."]) || (!srcIsDirectory && ![self _checkFileExtension:dstName])) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"%@ to item name \"%@\" is not allowed", isMove ? @"Moving" : @"Copying", dstName];
     }
 

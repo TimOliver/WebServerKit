@@ -704,6 +704,14 @@ NS_ASSUME_NONNULL_END
     NSString *const oldAbsolutePath = [_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(oldRelativePath)];
     BOOL isDirectory = NO;
 
+    // Neither endpoint may be the upload directory itself (a missing/empty path
+    // collapses to it), which would let a move destroy or displace the root.
+    NSString *const newRelativePath = request.arguments[@"newPath"];
+    NSString *const desiredNewPath = [_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(newRelativePath)];
+    if (!GCDWebServerPathIsInsideDirectory(oldAbsolutePath, _uploadDirectory) || !GCDWebServerPathIsInsideDirectory(desiredNewPath, _uploadDirectory)) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Operating on the root directory is not allowed"];
+    }
+
     if (![[NSFileManager defaultManager] fileExistsAtPath:oldAbsolutePath isDirectory:&isDirectory]) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_NotFound message:@"\"%@\" does not exist", oldRelativePath];
     }
@@ -713,9 +721,6 @@ NS_ASSUME_NONNULL_END
     if ((!_allowHiddenItems && [oldItemName hasPrefix:@"."]) || (!isDirectory && ![self _checkFileExtension:oldItemName])) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Moving from item name \"%@\" is not allowed", oldItemName];
     }
-
-    NSString *const newRelativePath = request.arguments[@"newPath"];
-    NSString *const desiredNewPath = [_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(newRelativePath)];
 
     // Resolving a unique destination name and performing the move must be atomic
     // against concurrent requests, otherwise two moves targeting the same name
@@ -761,6 +766,12 @@ NS_ASSUME_NONNULL_END
     NSString *const absolutePath = [_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(relativePath)];
     BOOL isDirectory = NO;
 
+    // A missing/empty path collapses to the upload directory itself; refuse to
+    // operate on the root (deleting it would wipe the entire share).
+    if (!GCDWebServerPathIsInsideDirectory(absolutePath, _uploadDirectory)) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Operating on the root directory is not allowed"];
+    }
+
     if (![[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory]) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
     }
@@ -795,6 +806,12 @@ NS_ASSUME_NONNULL_END
 - (GCDWebServerResponse *)createDirectory:(GCDWebServerURLEncodedFormRequest *)request {
     NSString *const relativePath = request.arguments[@"path"];
     NSString *const desiredPath = [_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(relativePath)];
+
+    // An empty path collapses to the upload directory itself; refuse it (uniquing
+    // the root would otherwise create a sibling directory outside the share).
+    if (!GCDWebServerPathIsInsideDirectory(desiredPath, _uploadDirectory)) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Operating on the root directory is not allowed"];
+    }
 
     // Resolving a unique name and creating the directory must be atomic: request
     // handlers run concurrently, so without this two requests for the same name
