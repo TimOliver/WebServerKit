@@ -149,8 +149,17 @@ NS_ASSUME_NONNULL_END
     if (preflightResponse) {
         [self _finishProcessingRequest:preflightResponse];
     } else {
+        // Guard against an async handler that invokes its completion block more than
+        // once: a second call would overwrite _responseMessage (leaking the first
+        // CFHTTPMessageRef) and race a second write chain on the same socket.
+        __block BOOL processed = NO;
         [self processRequest:_request
                   completion:^(GCDWebServerResponse *processResponse) {
+                      if (processed) {
+                          GWS_LOG_ERROR(@"Ignoring extra completion block invocation for request on socket %i", self->_socket);
+                          return;
+                      }
+                      processed = YES;
                       [self _finishProcessingRequest:processResponse];
                   }];
     }

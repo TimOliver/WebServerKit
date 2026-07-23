@@ -168,6 +168,10 @@ static NSData *_dashNewlineData = nil;
 - (BOOL)_parseData {
     BOOL success = YES;
 
+    // Iterate over the parts rather than recursing once per part: a body made of
+    // many tiny parts delivered in a single read would otherwise recurse thousands
+    // of frames deep and overflow the worker-thread stack.
+    while (1) {
     if (_state == kParserState_Headers) {
         NSRange range = [_data rangeOfData:_newlinesData options:0 range:NSMakeRange(0, _data.length)];
 
@@ -271,19 +275,16 @@ static NSData *_dashNewlineData = nil;
                         _subParser = nil;
                     } else if (_tmpPath) {
                         ssize_t result = write(_tmpFile, dataBytes, dataLength);
+                        int closeResult = close(_tmpFile);  // Always close (no short-circuit) so the fd never leaks on a write failure.
+                        _tmpFile = 0;
 
-                        if (result == (ssize_t)dataLength) {
-                            if (close(_tmpFile) == 0) {
-                                _tmpFile = 0;
-                                GCDWebServerMultiPartFile *const file = [[GCDWebServerMultiPartFile alloc] initWithControlName:_controlName contentType:_contentType fileName:_fileName temporaryPath:_tmpPath];
-                                [_files addObject:file];
-                            } else {
-                                GWS_DNOT_REACHED();
-                                success = NO;
-                            }
+                        if ((result == (ssize_t)dataLength) && (closeResult == 0)) {
+                            GCDWebServerMultiPartFile *const file = [[GCDWebServerMultiPartFile alloc] initWithControlName:_controlName contentType:_contentType fileName:_fileName temporaryPath:_tmpPath];
+                            [_files addObject:file];
                         } else {
                             GWS_DNOT_REACHED();
                             success = NO;
+                            unlink([_tmpPath fileSystemRepresentation]);  // Remove the orphaned temp file; -dealloc can't (we clear _tmpPath below).
                         }
 
                         _tmpPath = nil;
@@ -297,7 +298,7 @@ static NSData *_dashNewlineData = nil;
                 if (subRange1.location != NSNotFound) {
                     [_data replaceBytesInRange:NSMakeRange(0, subRange1.location + subRange1.length) withBytes:NULL length:0];
                     _state = kParserState_Headers;
-                    success = [self _parseData];
+                    continue;  // Parse the next part on the next loop iteration (was a recursive -_parseData call).
                 } else {
                     _state = kParserState_End;
                 }
@@ -327,6 +328,8 @@ static NSData *_dashNewlineData = nil;
                 }
             }
         }
+    }
+    break;  // No further complete part was found in this pass: wait for more data.
     }
 
     return success;
