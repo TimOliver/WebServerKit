@@ -39,6 +39,7 @@
 
 #define kHeadersReadCapacity (1 * 1024)
 #define kBodyReadCapacity (256 * 1024)
+#define kHeadersMaxLength (64 * 1024)  // Upper bound on total request header bytes, to cap memory for a client that never sends the terminating blank line.
 
 typedef void (^ReadDataCompletionBlock)(BOOL success);
 typedef void (^ReadHeadersCompletionBlock)(NSData *extraData);
@@ -493,7 +494,12 @@ NS_ASSUME_NONNULL_END
                 NSRange range = [headersData rangeOfData:_CRLFCRLFData options:0 range:NSMakeRange(0, headersData.length)];
 
                 if (range.location == NSNotFound) {
-                    [self readHeaders:headersData withCompletionBlock:block];
+                    if (headersData.length > kHeadersMaxLength) {
+                        GWS_LOG_ERROR(@"Request headers exceeded %i bytes on socket %i", (int)kHeadersMaxLength, self->_socket);
+                        block(nil);
+                    } else {
+                        [self readHeaders:headersData withCompletionBlock:block];
+                    }
                 } else {
                     NSUInteger length = range.location + range.length;
 
@@ -549,13 +555,20 @@ NS_ASSUME_NONNULL_END
 }
 
 static inline NSUInteger _ScanHexNumber(const void *bytes, NSUInteger size) {
-    char buffer[size + 1];
-
+    // A chunk-size line is a short hex number. Reject absurd lengths up front rather
+    // than allocating an attacker-sized stack VLA (`char buffer[size + 1]`), which a
+    // long chunk-size line would blow the worker-thread stack with. A fixed buffer also
+    // lets us bound the copy.
+    if ((size == 0) || (size > 32)) {
+        return NSNotFound;
+    }
+    char buffer[33];
     bcopy(bytes, buffer, size);
     buffer[size] = 0;
     char *end = NULL;
+    errno = 0;
     long result = strtol(buffer, &end, 16);
-    return ((end != NULL) && (*end == 0) && (result >= 0) ? result : NSNotFound);
+    return (((end != NULL) && (*end == 0) && (result >= 0) && (errno != ERANGE)) ? (NSUInteger)result : NSNotFound);
 }
 
 - (void)readNextBodyChunk:(NSMutableData *)chunkData completionBlock:(ReadBodyCompletionBlock)block {
@@ -601,6 +614,9 @@ static inline NSUInteger _ScanHexNumber(const void *bytes, NSUInteger size) {
                     block(YES);
                     return;
                 }
+                break;  // Last-chunk marker seen but the terminating CRLFCRLF has not arrived
+                        // yet: break to read more data. Without this, the loop re-runs with
+                        // identical state forever (100% CPU), never fetching the missing bytes.
             }
         } else {
             GWS_LOG_ERROR(@"Invalid chunk length reading request body on socket %i", _socket);
@@ -764,6 +780,27 @@ static inline NSUInteger _ScanHexNumber(const void *bytes, NSUInteger size) {
     return url;
 }
 
+// Compare two credential strings without an early-out on the first differing
+// byte, to avoid leaking how much of a credential/digest was correct via response
+// timing. Length differences still leak length, which is not sensitive here.
+static BOOL _ConstantTimeEqualStrings(NSString *a, NSString *b) {
+    if ((a == nil) || (b == nil)) {
+        return NO;
+    }
+    const char *ca = a.UTF8String;
+    const char *cb = b.UTF8String;
+    size_t la = strlen(ca);
+    size_t lb = strlen(cb);
+    size_t n = (la > lb) ? la : lb;
+    unsigned char diff = (unsigned char)(la ^ lb);
+    for (size_t i = 0; i < n; i++) {
+        unsigned char x = (i < la) ? (unsigned char)ca[i] : 0;
+        unsigned char y = (i < lb) ? (unsigned char)cb[i] : 0;
+        diff |= (unsigned char)(x ^ y);
+    }
+    return (diff == 0);
+}
+
 // https://tools.ietf.org/html/rfc2617
 - (GCDWebServerResponse *)preflightRequest:(GCDWebServerRequest *)request {
     GWS_LOG_DEBUG(@"Connection on socket %i preflighting request \"%@ %@\" with %lu bytes body", _socket, _virtualHEAD ? @"HEAD" : _request.method, _request.path, (unsigned long)_totalBytesRead);
@@ -785,9 +822,8 @@ static inline NSUInteger _ScanHexNumber(const void *bytes, NSUInteger size) {
         if ([authorizationHeader hasPrefix:@"Basic "]) {
             NSString *const basicAccount = [authorizationHeader substringFromIndex:6];
             [_server.authenticationBasicAccounts enumerateKeysAndObjectsUsingBlock:^(NSString *username, NSString *digest, BOOL *stop) {
-                if ([basicAccount isEqualToString:digest]) {
+                if (_ConstantTimeEqualStrings(basicAccount, digest)) {  // Do not *stop early: keep the match position from leaking via timing.
                     authenticated = YES;
-                    *stop = YES;
                 }
             }];
         }
@@ -812,11 +848,18 @@ static inline NSUInteger _ScanHexNumber(const void *bytes, NSUInteger size) {
                     NSString *const uri = GCDWebServerExtractHeaderValueParameter(authorizationHeader, @"uri");
                     NSString *const actualResponse = GCDWebServerExtractHeaderValueParameter(authorizationHeader, @"response");
                     NSString *const ha1 = _server.authenticationDigestAccounts[username];
-                    NSString *const ha2 = GCDWebServerComputeMD5Digest(@"%@:%@", request.method, uri);  // We cannot use "request.path" as the query string is required
-                    NSString *const expectedResponse = GCDWebServerComputeMD5Digest(@"%@:%@:%@", ha1, _digestAuthenticationNonce, ha2);
+                    // An unknown username MUST be rejected here. Otherwise ha1 is nil and
+                    // gets formatted into the digest below as the literal string "(null)",
+                    // whose every input is attacker-known (nonce and realm are disclosed in
+                    // the 401; method and uri are attacker-chosen), letting an attacker forge
+                    // a valid response with no password at all.
+                    if (ha1 != nil) {
+                        NSString *const ha2 = GCDWebServerComputeMD5Digest(@"%@:%@", request.method, uri);  // We cannot use "request.path" as the query string is required
+                        NSString *const expectedResponse = GCDWebServerComputeMD5Digest(@"%@:%@:%@", ha1, _digestAuthenticationNonce, ha2);
 
-                    if ([actualResponse isEqualToString:expectedResponse]) {
-                        authenticated = YES;
+                        if (_ConstantTimeEqualStrings(actualResponse, expectedResponse)) {
+                            authenticated = YES;
+                        }
                     }
                 } else if (nonce.length) {
                     isStaled = YES;

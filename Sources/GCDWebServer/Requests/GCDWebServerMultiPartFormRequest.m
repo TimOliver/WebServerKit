@@ -254,10 +254,16 @@ static NSData *_dashNewlineData = nil;
             if ((subRange1.location != NSNotFound) || (subRange2.location != NSNotFound)) {
                 if (_state == kParserState_Content) {
                     const void *dataBytes = _data.bytes;
-                    NSUInteger dataLength = range.location - 2;
+                    // range.location is the offset of the boundary delimiter; the part's
+                    // content (including its trailing CRLF) is everything before it. Guard
+                    // the "- 2" that strips that CRLF, so a delimiter at offset 0/1 (a part
+                    // with no content, e.g. a closing "--boundary--" placed with no leading
+                    // CRLF) cannot underflow NSUInteger into a ~18-exabyte length and crash.
+                    NSUInteger contentLength = range.location;
+                    NSUInteger dataLength = (contentLength >= 2) ? (contentLength - 2) : 0;
 
                     if (_subParser) {
-                        if (![_subParser appendBytes:dataBytes length:(dataLength + 2)] || ![_subParser isAtEnd]) {
+                        if (![_subParser appendBytes:dataBytes length:contentLength] || ![_subParser isAtEnd]) {
                             GWS_DNOT_REACHED();
                             success = NO;
                         }
