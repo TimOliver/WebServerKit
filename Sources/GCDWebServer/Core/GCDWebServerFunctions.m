@@ -344,7 +344,7 @@ NSString *GCDWebServerGetPrimaryIPAddress(BOOL useIPv6) {
                 continue;
             }
 
-            if ((ifap->ifa_flags & IFF_UP) && ((!useIPv6 && (ifap->ifa_addr->sa_family == AF_INET)) || (useIPv6 && (ifap->ifa_addr->sa_family == AF_INET6)))) {
+            if ((ifap->ifa_flags & IFF_UP) && ifap->ifa_addr && ((!useIPv6 && (ifap->ifa_addr->sa_family == AF_INET)) || (useIPv6 && (ifap->ifa_addr->sa_family == AF_INET6)))) {  // getifaddrs can return entries with a NULL ifa_addr
                 address = GCDWebServerStringFromSockAddr(ifap->ifa_addr, NO);
                 break;
             }

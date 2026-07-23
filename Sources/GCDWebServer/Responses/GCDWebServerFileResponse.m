@@ -185,6 +185,13 @@ static inline NSDate *_NSDateFromTimeSpec(const struct timespec *t) {
     if (result > 0) {
         [data setLength:result];
         _size -= result;
+    } else {
+        // result == 0 is a premature EOF (e.g. the file was truncated or replaced
+        // mid-download). Return empty data to end the response rather than a buffer
+        // of zeros with _size never decremented, which would stream 32 KB zero
+        // chunks forever and exceed the declared Content-Length.
+        [data setLength:0];
+        _size = 0;
     }
 
     return data;

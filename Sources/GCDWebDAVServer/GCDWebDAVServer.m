@@ -164,6 +164,16 @@ NS_ASSUME_NONNULL_END
     return YES;
 }
 
+static NSString *_XMLEscape(NSString *string) {
+    NSMutableString *const escaped = [string mutableCopy];
+    [escaped replaceOccurrencesOfString:@"&" withString:@"&amp;" options:0 range:NSMakeRange(0, escaped.length)];  // Must run first.
+    [escaped replaceOccurrencesOfString:@"<" withString:@"&lt;" options:0 range:NSMakeRange(0, escaped.length)];
+    [escaped replaceOccurrencesOfString:@">" withString:@"&gt;" options:0 range:NSMakeRange(0, escaped.length)];
+    [escaped replaceOccurrencesOfString:@"\"" withString:@"&quot;" options:0 range:NSMakeRange(0, escaped.length)];
+    [escaped replaceOccurrencesOfString:@"'" withString:@"&apos;" options:0 range:NSMakeRange(0, escaped.length)];
+    return escaped;
+}
+
 static inline BOOL _IsMacFinder(GCDWebServerRequest *request) {
     NSString *const userAgentHeader = request.headers[@"User-Agent"];
 
@@ -741,16 +751,16 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
     [xmlString appendFormat:@"<D:depth>%@</D:depth>\n", depthHeader];
 
     if (owner) {
-        [xmlString appendFormat:@"<D:owner><D:href>%@</D:href></D:owner>\n", owner];
+        [xmlString appendFormat:@"<D:owner><D:href>%@</D:href></D:owner>\n", _XMLEscape(owner)];
     }
 
     if (timeoutHeader) {
-        [xmlString appendFormat:@"<D:timeout>%@</D:timeout>\n", timeoutHeader];
+        [xmlString appendFormat:@"<D:timeout>%@</D:timeout>\n", _XMLEscape(timeoutHeader)];
     }
 
     [xmlString appendFormat:@"<D:locktoken><D:href>%@</D:href></D:locktoken>\n", token];
     NSString *const lockroot = [@"http://" stringByAppendingString:[(NSString *)request.headers[@"Host"] stringByAppendingString:[@"/" stringByAppendingString:relativePath]]];
-    [xmlString appendFormat:@"<D:lockroot><D:href>%@</D:href></D:lockroot>\n", lockroot];
+    [xmlString appendFormat:@"<D:lockroot><D:href>%@</D:href></D:lockroot>\n", _XMLEscape(lockroot)];
     [xmlString appendString:@"</D:activelock>\n</D:lockdiscovery>\n"];
     [xmlString appendString:@"</D:prop>"];
 
