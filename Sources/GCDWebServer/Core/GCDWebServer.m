@@ -49,6 +49,7 @@
 #endif
 
 #define kBonjourResolutionTimeout 5.0
+#define kGCDWebServerMaxConnections 128  // Upper bound on simultaneous connections, to cap file-descriptor use.
 
 NSString *const GCDWebServerOption_Port = @"Port";
 NSString *const GCDWebServerOption_BonjourName = @"BonjourName";
@@ -544,6 +545,19 @@ static inline NSString *_EncodeBase64(NSString *string) {
                 int noSigPipe = 1;
                 setsockopt(socket, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, sizeof(noSigPipe));  // Make sure this socket cannot generate SIG_PIPE
 
+                // Cap the number of simultaneous connections so a flood of (e.g. idle)
+                // connections cannot exhaust file descriptors — especially important on
+                // iOS where the per-process fd limit is small.
+                __block NSInteger activeConnections = 0;
+                dispatch_sync(self->_syncQueue, ^{
+                    activeConnections = self->_activeConnections;
+                });
+                if (activeConnections >= kGCDWebServerMaxConnections) {
+                    GWS_LOG_ERROR(@"Refusing %s connection: already at the %i connection limit", isIPv6 ? "IPv6" : "IPv4", (int)kGCDWebServerMaxConnections);
+                    close(socket);
+                    return;
+                }
+
                 GCDWebServerConnection *connection = [(GCDWebServerConnection *)[self->_connectionClass alloc] initWithServer:self localAddress:localAddress remoteAddress:remoteAddress socket:socket];  // Connection will automatically retain itself while opened
                 [connection self];                                                                                                                                                                        // Prevent compiler from complaining about unused variable / useless statement
             } else {
@@ -677,13 +691,15 @@ static inline NSString *_EncodeBase64(NSString *string) {
 
                 if (txtDictionary != NULL) {
                     CFDataRef txtData = CFNetServiceCreateTXTDataWithDictionary(nil, txtDictionary);
-                    Boolean setTXTDataResult = CFNetServiceSetTXTData(_registrationService, txtData);
 
-                    if (!setTXTDataResult) {
-                        GWS_LOG_ERROR(@"Failed setting TXTData");
+                    if (txtData != NULL) {  // Guard: CFRelease(NULL) is a hard crash, and the dictionary may be un-encodable.
+                        if (!CFNetServiceSetTXTData(_registrationService, txtData)) {
+                            GWS_LOG_ERROR(@"Failed setting TXTData");
+                        }
+                        CFRelease(txtData);
                     }
 
-                    CFRelease(txtData);
+                    CFRelease(txtDictionary);  // Was leaked on every start when BonjourTXTData was set.
                 }
             }
 
@@ -1159,6 +1175,16 @@ static inline NSString *_EncodeBase64(NSString *string) {
                  }];
 }
 
+static NSString *_EscapeHTMLString(NSString *string) {
+    NSMutableString *const escaped = [string mutableCopy];
+    [escaped replaceOccurrencesOfString:@"&" withString:@"&amp;" options:0 range:NSMakeRange(0, escaped.length)];  // Must run first.
+    [escaped replaceOccurrencesOfString:@"<" withString:@"&lt;" options:0 range:NSMakeRange(0, escaped.length)];
+    [escaped replaceOccurrencesOfString:@">" withString:@"&gt;" options:0 range:NSMakeRange(0, escaped.length)];
+    [escaped replaceOccurrencesOfString:@"\"" withString:@"&quot;" options:0 range:NSMakeRange(0, escaped.length)];
+    [escaped replaceOccurrencesOfString:@"'" withString:@"&#39;" options:0 range:NSMakeRange(0, escaped.length)];
+    return escaped;
+}
+
 - (GCDWebServerResponse *)_responseWithContentsOfDirectory:(NSString *)path {
     NSArray *const contents = [[[NSFileManager defaultManager] contentsOfDirectoryAtPath:path error:NULL] sortedArrayUsingSelector:@selector(localizedStandardCompare:)];
 
@@ -1178,10 +1204,12 @@ static inline NSString *_EncodeBase64(NSString *string) {
             NSString *const escapedFile = [entry stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLPathAllowedCharacterSet]];
             GWS_DCHECK(escapedFile);
 
+            NSString *const escapedEntry = _EscapeHTMLString(entry);  // The filename is reflected into HTML text; escape it to prevent stored XSS via crafted names.
+
             if ([type isEqualToString:NSFileTypeRegular]) {
-                [html appendFormat:@"<li><a href=\"%@\">%@</a></li>\n", escapedFile, entry];
+                [html appendFormat:@"<li><a href=\"%@\">%@</a></li>\n", escapedFile, escapedEntry];
             } else if ([type isEqualToString:NSFileTypeDirectory]) {
-                [html appendFormat:@"<li><a href=\"%@/\">%@/</a></li>\n", escapedFile, entry];
+                [html appendFormat:@"<li><a href=\"%@/\">%@/</a></li>\n", escapedFile, escapedEntry];
             }
         }
     }

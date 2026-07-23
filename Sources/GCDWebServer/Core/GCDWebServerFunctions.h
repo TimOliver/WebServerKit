@@ -107,6 +107,14 @@ NSDate *_Nullable GCDWebServerParseISO8601(NSString *string);
  */
 NSString *GCDWebServerNormalizePath(NSString *path);
 
+/**
+ *  Returns YES only if `path` resolves to a location strictly inside `directory`
+ *  (i.e. neither the directory itself nor outside it). Used to keep destructive
+ *  file operations from ever targeting the served root directory, e.g. when a
+ *  client-supplied relative path collapses to the empty string.
+ */
+BOOL GCDWebServerPathIsInsideDirectory(NSString *path, NSString *directory);
+
 #ifdef __cplusplus
 }
 #endif
