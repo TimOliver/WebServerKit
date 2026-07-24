@@ -26,6 +26,26 @@ xcodebuild -project GCDWebServer.xcodeproj -scheme "GCDWebServers (tvOS)" -confi
 
 ## Recent Changes
 
+### Per-connection config snapshot (auth/serverName race fix)
+
+Each `GCDWebServerConnection` now **snapshots** the server's mutable configuration —
+`serverName`, the authentication realm and account dictionaries, and the
+HEAD→GET mapping flag — into its own ivars in `initWithServer:`, and reads those
+copies for its whole life instead of `_server.*`.
+
+Previously connections read those `nonatomic` ivars directly off the shared server
+while `-_stop` niled them (and `-_start` rebuilt them) on the main thread — which
+happens on *every* foreground transition in non-suspend mode via
+`-_reconnectInForeground:`. A request in flight during that window raced a
+nonatomic object-pointer write (use-after-free) and could briefly observe nil auth
+accounts, bypassing authentication. The snapshot is race-free because the accept
+handler only runs while the listening socket is live — i.e. after `-_start`
+populates the config and before `-_stop`'s socket-cancel/`dispatch_group_wait`
+barrier tears it down — so the capture always sees a stable, valid config. It also
+matches the intended semantics (an already-accepted connection keeps serving with
+the config it started with). Regression-tested by `testBasicAuthEnforcedOverConnection`;
+the race itself is timing-dependent and verified by construction + build.
+
 ### Request hardening: in-memory body caps
 
 Bounds a malicious/broken client's ability to exhaust memory on a transient

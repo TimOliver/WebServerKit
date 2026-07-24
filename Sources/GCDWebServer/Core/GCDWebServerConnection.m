@@ -81,6 +81,18 @@ NS_ASSUME_NONNULL_END
     dispatch_queue_t _connectionQueue;
     BOOL _virtualHEAD;
 
+    // Server configuration captured once at accept time. The server re-creates these
+    // ivars (e.g. when it rebuilds its listening sockets on a background/foreground
+    // cycle) while this connection may still be live on its own queue; reading the
+    // server's mutable ivars directly would be a data race (and could momentarily
+    // observe nil auth, bypassing authentication). Each connection instead reads its
+    // own stable snapshot for its whole life.
+    NSString *_serverName;
+    NSString *_authenticationRealm;
+    NSDictionary<NSString *, NSString *> *_authenticationBasicAccounts;
+    NSDictionary<NSString *, NSString *> *_authenticationDigestAccounts;
+    BOOL _shouldAutomaticallyMapHEADToGET;
+
     CFHTTPMessageRef _requestMessage;
     GCDWebServerRequest *_request;
     GCDWebServerHandler *_handler;
@@ -143,7 +155,7 @@ NS_ASSUME_NONNULL_END
     _statusCode = statusCode;
     _responseMessage = CFHTTPMessageCreateResponse(kCFAllocatorDefault, statusCode, NULL, kCFHTTPVersion1_1);
     CFHTTPMessageSetHeaderFieldValue(_responseMessage, CFSTR("Connection"), CFSTR("Close"));
-    CFHTTPMessageSetHeaderFieldValue(_responseMessage, CFSTR("Server"), (__bridge CFStringRef)_server.serverName);
+    CFHTTPMessageSetHeaderFieldValue(_responseMessage, CFSTR("Server"), (__bridge CFStringRef)_serverName);
     CFHTTPMessageSetHeaderFieldValue(_responseMessage, CFSTR("Date"), (__bridge CFStringRef)GCDWebServerFormatRFC822([NSDate date]));
 }
 
@@ -365,7 +377,7 @@ NS_ASSUME_NONNULL_END
             if (extraData) {
                 NSString *requestMethod = CFBridgingRelease(CFHTTPMessageCopyRequestMethod(self->_requestMessage));  // Method verbs are case-sensitive and uppercase
 
-                if (self->_server.shouldAutomaticallyMapHEADToGET && [requestMethod isEqualToString:@"HEAD"]) {
+                if (self->_shouldAutomaticallyMapHEADToGET && [requestMethod isEqualToString:@"HEAD"]) {
                     requestMethod = @"GET";
                     self->_virtualHEAD = YES;
                 }
@@ -455,6 +467,14 @@ NS_ASSUME_NONNULL_END
 - (instancetype)initWithServer:(GCDWebServer *)server localAddress:(NSData *)localAddress remoteAddress:(NSData *)remoteAddress socket:(CFSocketNativeHandle)socket {
     if ((self = [super init])) {
         _server = server;
+        // Snapshot the server's config now (see the ivar declarations): the accept
+        // handler runs only while the listening socket is live, i.e. after -_start has
+        // populated this config and before -_stop tears it down, so this read is safe.
+        _serverName = server.serverName;
+        _authenticationRealm = server.authenticationRealm;
+        _authenticationBasicAccounts = server.authenticationBasicAccounts;
+        _authenticationDigestAccounts = server.authenticationDigestAccounts;
+        _shouldAutomaticallyMapHEADToGET = server.shouldAutomaticallyMapHEADToGET;
         _localAddressData = localAddress;
         _remoteAddressData = remoteAddress;
         _socket = socket;
@@ -919,13 +939,13 @@ static BOOL _ConstantTimeEqualStrings(NSString *a, NSString *b) {
         return nil;
     }
 
-    if (_server.authenticationBasicAccounts) {
+    if (_authenticationBasicAccounts) {
         __block BOOL authenticated = NO;
         NSString *const authorizationHeader = request.headers[@"Authorization"];
 
         if ([authorizationHeader hasPrefix:@"Basic "]) {
             NSString *const basicAccount = [authorizationHeader substringFromIndex:6];
-            [_server.authenticationBasicAccounts enumerateKeysAndObjectsUsingBlock:^(NSString *username, NSString *digest, BOOL *stop) {
+            [_authenticationBasicAccounts enumerateKeysAndObjectsUsingBlock:^(NSString *username, NSString *digest, BOOL *stop) {
                 if (_ConstantTimeEqualStrings(basicAccount, digest)) {  // Do not *stop early: keep the match position from leaking via timing.
                     authenticated = YES;
                 }
@@ -934,9 +954,9 @@ static BOOL _ConstantTimeEqualStrings(NSString *a, NSString *b) {
 
         if (!authenticated) {
             response = [GCDWebServerResponse responseWithStatusCode:kGCDWebServerHTTPStatusCode_Unauthorized];
-            [response setValue:[NSString stringWithFormat:@"Basic realm=\"%@\"", _server.authenticationRealm] forAdditionalHeader:@"WWW-Authenticate"];
+            [response setValue:[NSString stringWithFormat:@"Basic realm=\"%@\"", _authenticationRealm] forAdditionalHeader:@"WWW-Authenticate"];
         }
-    } else if (_server.authenticationDigestAccounts) {
+    } else if (_authenticationDigestAccounts) {
         BOOL authenticated = NO;
         BOOL isStaled = NO;
         NSString *const authorizationHeader = request.headers[@"Authorization"];
@@ -944,14 +964,14 @@ static BOOL _ConstantTimeEqualStrings(NSString *a, NSString *b) {
         if ([authorizationHeader hasPrefix:@"Digest "]) {
             NSString *const realm = GCDWebServerExtractHeaderValueParameter(authorizationHeader, @"realm");
 
-            if (realm && [_server.authenticationRealm isEqualToString:realm]) {
+            if (realm && [_authenticationRealm isEqualToString:realm]) {
                 NSString *const nonce = GCDWebServerExtractHeaderValueParameter(authorizationHeader, @"nonce");
 
                 if ([nonce isEqualToString:_digestAuthenticationNonce]) {
                     NSString *const username = GCDWebServerExtractHeaderValueParameter(authorizationHeader, @"username");
                     NSString *const uri = GCDWebServerExtractHeaderValueParameter(authorizationHeader, @"uri");
                     NSString *const actualResponse = GCDWebServerExtractHeaderValueParameter(authorizationHeader, @"response");
-                    NSString *const ha1 = _server.authenticationDigestAccounts[username];
+                    NSString *const ha1 = _authenticationDigestAccounts[username];
                     // An unknown username MUST be rejected here. Otherwise ha1 is nil and
                     // gets formatted into the digest below as the literal string "(null)",
                     // whose every input is attacker-known (nonce and realm are disclosed in
@@ -973,7 +993,7 @@ static BOOL _ConstantTimeEqualStrings(NSString *a, NSString *b) {
 
         if (!authenticated) {
             response = [GCDWebServerResponse responseWithStatusCode:kGCDWebServerHTTPStatusCode_Unauthorized];
-            [response setValue:[NSString stringWithFormat:@"Digest realm=\"%@\", nonce=\"%@\"%@", _server.authenticationRealm, _digestAuthenticationNonce, isStaled ? @", stale=TRUE" : @""] forAdditionalHeader:@"WWW-Authenticate"];  // TODO: Support Quality of Protection ("qop")
+            [response setValue:[NSString stringWithFormat:@"Digest realm=\"%@\", nonce=\"%@\"%@", _authenticationRealm, _digestAuthenticationNonce, isStaled ? @", stale=TRUE" : @""] forAdditionalHeader:@"WWW-Authenticate"];  // TODO: Support Quality of Protection ("qop")
         }
     }
 

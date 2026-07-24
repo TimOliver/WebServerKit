@@ -441,6 +441,55 @@ static __kindof GCDWebServerRequest* OpenBodyRequest(Class requestClass, NSDicti
     [server stop];
 }
 
+#pragma mark - Authentication
+
+// Basic auth must be enforced over a real connection: a request without
+// credentials gets 401 (and no body leaks), and correct credentials get through.
+// This exercises the per-connection path that reads the server's auth
+// configuration, guarding it against regressions.
+- (void)testBasicAuthEnforcedOverConnection {
+    GCDWebServer* server = [[GCDWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[GCDWebServerRequest class]
+                          processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
+                              return [GCDWebServerDataResponse responseWithText:@"secret-body"];
+                          }];
+    NSDictionary* options = @{
+        GCDWebServerOption_Port : @0,
+        GCDWebServerOption_BindToLocalhost : @YES,
+        GCDWebServerOption_AuthenticationMethod : GCDWebServerAuthenticationMethod_Basic,
+        GCDWebServerOption_AuthenticationAccounts : @{@"user" : @"pass"}
+    };
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    // No credentials: expect 401 with a challenge, and the body must not leak.
+    int fd = ConnectToLocalhostPort(server.port);
+    XCTAssertGreaterThan(fd, 0);
+    const char* anonRequest = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    XCTAssertEqual(send(fd, anonRequest, strlen(anonRequest), 0), (ssize_t)strlen(anonRequest));
+    BOOL sawEOF = NO;
+    NSString* anonReply = [[NSString alloc] initWithData:ReadToEOF(fd, &sawEOF) encoding:NSUTF8StringEncoding];
+    XCTAssertTrue([anonReply containsString:@"401"], @"expected 401 without credentials, got: %@", anonReply);
+    XCTAssertNotEqual([anonReply rangeOfString:@"WWW-Authenticate" options:NSCaseInsensitiveSearch].location, (NSUInteger)NSNotFound, @"expected a challenge, got: %@", anonReply);  // CFNetwork normalizes the header case
+    XCTAssertFalse([anonReply containsString:@"secret-body"], @"body leaked without authentication");
+    close(fd);
+
+    // Correct credentials: expect 200 with the body.
+    int authFd = ConnectToLocalhostPort(server.port);
+    XCTAssertGreaterThan(authFd, 0);
+    NSString* credentials = [[@"user:pass" dataUsingEncoding:NSUTF8StringEncoding] base64EncodedStringWithOptions:0];
+    NSString* authRequest = [NSString stringWithFormat:@"GET / HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic %@\r\n\r\n", credentials];
+    const char* authRequestBytes = [authRequest UTF8String];
+    XCTAssertEqual(send(authFd, authRequestBytes, strlen(authRequestBytes), 0), (ssize_t)strlen(authRequestBytes));
+    BOOL authSawEOF = NO;
+    NSString* authReply = [[NSString alloc] initWithData:ReadToEOF(authFd, &authSawEOF) encoding:NSUTF8StringEncoding];
+    XCTAssertTrue([authReply containsString:@"200"], @"expected 200 with valid credentials, got: %@", authReply);
+    XCTAssertTrue([authReply containsString:@"secret-body"], @"expected the body with valid credentials, got: %@", authReply);
+    close(authFd);
+
+    [server stop];
+}
+
 #pragma mark - Request body-size caps
 
 // A body buffered entirely in memory (e.g. a DAV PROPFIND/LOCK body or a data
