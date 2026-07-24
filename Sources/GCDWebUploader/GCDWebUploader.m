@@ -685,7 +685,60 @@ NS_ASSUME_NONNULL_END
     return [GCDWebServerFileResponse responseWithFile:absolutePath isAttachment:YES];
 }
 
+// Extract the host[:port] authority from an Origin ("scheme://host:port") or a
+// Referer ("scheme://host:port/path…") header value; nil for an opaque/"null" origin.
+static NSString *_OriginAuthority(NSString *value) {
+    if (value.length == 0) {
+        return nil;
+    }
+
+    NSRange scheme = [value rangeOfString:@"://"];
+    if (scheme.location == NSNotFound) {
+        return nil;
+    }
+
+    NSString *authority = [value substringFromIndex:(scheme.location + 3)];
+    NSRange slash = [authority rangeOfString:@"/"];
+    if (slash.location != NSNotFound) {
+        authority = [authority substringToIndex:slash.location];
+    }
+
+    return authority;
+}
+
+// Defends the state-changing endpoints (/upload, /move, /delete, /create) against
+// browser-driven CSRF: a malicious LAN web page can auto-POST a "simple" form to them
+// and the browser attaches any credentials cached for this origin. A cross-origin
+// browser request always carries an Origin whose authority differs from ours (POST
+// always sends Origin), so reject those. Requests with no Origin/Referer at all — a
+// non-browser client such as curl or a native app — are allowed: they cannot be a
+// confused deputy. Returns a 403 response to reject, or nil to allow.
+- (GCDWebServerResponse *)_rejectIfCrossOrigin:(GCDWebServerRequest *)request {
+    NSString *const originHeader = request.headers[@"Origin"];
+    NSString *const host = request.headers[@"Host"];
+    NSString *authority = _OriginAuthority(originHeader);
+
+    if (authority == nil) {
+        if (originHeader.length) {
+            return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Cross-origin request rejected"];  // Explicit but opaque Origin ("null")
+        }
+
+        authority = _OriginAuthority(request.headers[@"Referer"]);  // Fall back to Referer when Origin is absent
+    }
+
+    if (authority && ((host.length == 0) || ![authority isEqualToString:host])) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Cross-origin request rejected"];
+    }
+
+    return nil;
+}
+
 - (GCDWebServerResponse *)uploadFile:(GCDWebServerMultiPartFormRequest *)request {
+    GCDWebServerResponse *const crossOrigin = [self _rejectIfCrossOrigin:request];
+    if (crossOrigin) {
+        return crossOrigin;
+    }
+
     NSRange range = [request.headers[@"Accept"] rangeOfString:@"application/json" options:NSCaseInsensitiveSearch];
     NSString *const contentType = (range.location != NSNotFound ? @"application/json" : @"text/plain; charset=utf-8");  // Required when using iFrame transport (see https://github.com/blueimp/jQuery-File-Upload/wiki/Setup)
 
@@ -738,6 +791,11 @@ NS_ASSUME_NONNULL_END
 }
 
 - (GCDWebServerResponse *)moveItem:(GCDWebServerURLEncodedFormRequest *)request {
+    GCDWebServerResponse *const crossOrigin = [self _rejectIfCrossOrigin:request];
+    if (crossOrigin) {
+        return crossOrigin;
+    }
+
     NSString *const oldRelativePath = request.arguments[@"oldPath"];
     NSString *const oldAbsolutePath = [_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(oldRelativePath)];
     BOOL isDirectory = NO;
@@ -800,6 +858,11 @@ NS_ASSUME_NONNULL_END
 }
 
 - (GCDWebServerResponse *)deleteItem:(GCDWebServerURLEncodedFormRequest *)request {
+    GCDWebServerResponse *const crossOrigin = [self _rejectIfCrossOrigin:request];
+    if (crossOrigin) {
+        return crossOrigin;
+    }
+
     NSString *const relativePath = request.arguments[@"path"];
     NSString *const absolutePath = [_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(relativePath)];
     BOOL isDirectory = NO;
@@ -842,6 +905,11 @@ NS_ASSUME_NONNULL_END
 }
 
 - (GCDWebServerResponse *)createDirectory:(GCDWebServerURLEncodedFormRequest *)request {
+    GCDWebServerResponse *const crossOrigin = [self _rejectIfCrossOrigin:request];
+    if (crossOrigin) {
+        return crossOrigin;
+    }
+
     NSString *const relativePath = request.arguments[@"path"];
     NSString *const desiredPath = [_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(relativePath)];
 

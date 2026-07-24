@@ -148,7 +148,15 @@ NSString *const GCDWebServerRequestAttribute_RegexCaptures = @"GCDWebServerReque
             break;
         }
 
-        decodedData.length = 2 * decodedData.length;  // zlib has used all the output buffer so resize it and try again in case more data is available
+        // zlib has used all the output buffer, so grow it and try again in case more
+        // data is available — but never beyond the decompressed-size budget still
+        // remaining for this stream (plus one byte, so the next inflate can cross the
+        // cap and be rejected by the check above). Without this clamp a body that
+        // inflates to just over the cap first doubles the buffer to twice the cap
+        // (128 MB for the 64 MB cap) and commits it before the next check rejects it.
+        NSUInteger maxBufferLength = (NSUInteger)kGCDWebServerMaxDecompressedBodyLength - _totalDecoded + 1;
+        NSUInteger newBufferLength = 2 * decodedData.length;
+        decodedData.length = (newBufferLength < maxBufferLength) ? newBufferLength : maxBufferLength;
     }
     _totalDecoded += length;
     decodedData.length = length;
@@ -236,9 +244,9 @@ NSString *const GCDWebServerRequestAttribute_RegexCaptures = @"GCDWebServerReque
                         NSString *const endString = components[1];
                         NSInteger endValue = [endString integerValue];
 
-                        if (startString.length && (startValue >= 0) && endString.length && (endValue >= startValue)) {  // The second 500 bytes: "500-999"
+                        if (startString.length && (startValue >= 0) && endString.length && (endValue >= startValue) && (endValue != NSIntegerMax)) {  // The second 500 bytes: "500-999"
                             _byteRange.location = startValue;
-                            _byteRange.length = endValue - startValue + 1;
+                            _byteRange.length = (NSUInteger)endValue - (NSUInteger)startValue + 1;  // Computed unsigned, and endValue != NSIntegerMax, so "+ 1" cannot signed-overflow (a huge end value from -integerValue clamps to NSIntegerMax and is treated as an invalid range)
                         } else if (startString.length && (startValue >= 0)) {  // The bytes after 9500 bytes: "9500-"
                             _byteRange.location = startValue;
                             _byteRange.length = NSUIntegerMax;

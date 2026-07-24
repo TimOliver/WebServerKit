@@ -42,7 +42,11 @@
 
 - (BOOL)open:(NSError **)error {
     if (self.contentLength != NSUIntegerMax) {
-        _data = [[NSMutableData alloc] initWithCapacity:self.contentLength];
+        // Only a capacity hint — -writeData: enforces the real in-memory cap — so clamp
+        // it to that cap rather than trusting the attacker-declared Content-Length,
+        // which could otherwise request a huge (or failed) up-front allocation.
+        NSUInteger capacity = MIN(self.contentLength, (NSUInteger)kGCDWebServerMaxInMemoryBodyLength);
+        _data = [[NSMutableData alloc] initWithCapacity:capacity];
     } else {
         _data = [[NSMutableData alloc] init];
     }

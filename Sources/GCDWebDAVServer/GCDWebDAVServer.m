@@ -406,9 +406,20 @@ static inline BOOL _IsMacFinder(GCDWebServerRequest *request) {
     NSString *const srcAbsolutePath = [_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(srcRelativePath)];
 
     NSString *dstRelativePath = request.headers[@"Destination"];
-    NSRange range = [dstRelativePath rangeOfString:(NSString *)request.headers[@"Host"]];
+    NSString *const hostHeader = request.headers[@"Host"];
 
-    if ((dstRelativePath == nil) || (range.location == NSNotFound)) {
+    // Both the Destination and Host headers are required. The Host non-nil check
+    // MUST come before -rangeOfString:: passing a nil argument to -rangeOfString:
+    // throws NSInvalidArgumentException, and as nothing catches it that terminates
+    // the whole server process — a one-request remote denial of service. (A missing
+    // Destination is already safe via the explicit nil check, but Host was not.)
+    if ((dstRelativePath == nil) || (hostHeader.length == 0)) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_BadRequest message:@"Malformed 'Destination' header: %@", dstRelativePath];
+    }
+
+    NSRange range = [dstRelativePath rangeOfString:hostHeader];
+
+    if (range.location == NSNotFound) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_BadRequest message:@"Malformed 'Destination' header: %@", dstRelativePath];
     }
 

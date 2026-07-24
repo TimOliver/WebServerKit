@@ -41,6 +41,7 @@
 #define kHeadersReadCapacity (1 * 1024)
 #define kBodyReadCapacity (256 * 1024)
 #define kHeadersMaxLength (64 * 1024)  // Upper bound on total request header bytes, to cap memory for a client that never sends the terminating blank line.
+#define kMaxHeaderPhaseTicks 2  // Idle-timer ticks a connection may spend receiving its request line + headers before being closed (defeats a slowloris dribbling bytes just under the zero-progress check).
 
 typedef void (^ReadDataCompletionBlock)(BOOL success);
 typedef void (^ReadHeadersCompletionBlock)(NSData *extraData);
@@ -54,7 +55,7 @@ static NSData *_CRLFData = nil;
 static NSData *_CRLFCRLFData = nil;
 static NSData *_continueData = nil;
 static NSData *_lastChunkData = nil;
-static NSString *_digestAuthenticationNonce = nil;
+static NSString *_digestAuthenticationSecret = nil;  // Per-process key for minting/validating Digest nonces
 #ifdef __GCDWEBSERVER_ENABLE_TESTING__
 static _Atomic(int32_t) _connectionCounter = 0;
 #endif
@@ -106,6 +107,7 @@ NS_ASSUME_NONNULL_END
     NSUInteger _pendingIOCount;    // Accessed on _connectionQueue only
     NSUInteger _idleCheckedBytes;  // Accessed on _connectionQueue only
     BOOL _idleCheckWasBusy;        // Accessed on _connectionQueue only
+    NSUInteger _headerPhaseTicks;  // Idle ticks elapsed before a request was matched; on _connectionQueue only
 
 #ifdef __GCDWEBSERVER_ENABLE_TESTING__
     NSUInteger _connectionIndex;
@@ -138,9 +140,9 @@ NS_ASSUME_NONNULL_END
         _lastChunkData = [[NSData alloc] initWithBytes:"0\r\n\r\n" length:5];
     }
 
-    if (_digestAuthenticationNonce == nil) {
+    if (_digestAuthenticationSecret == nil) {
         CFUUIDRef uuid = CFUUIDCreate(kCFAllocatorDefault);
-        _digestAuthenticationNonce = GCDWebServerComputeMD5Digest(@"%@", CFBridgingRelease(CFUUIDCreateString(kCFAllocatorDefault, uuid)));
+        _digestAuthenticationSecret = GCDWebServerComputeMD5Digest(@"%@", CFBridgingRelease(CFUUIDCreateString(kCFAllocatorDefault, uuid)));
         CFRelease(uuid);
     }
 }
@@ -354,6 +356,24 @@ NS_ASSUME_NONNULL_END
 - (void)_checkIdleTimeout {
     NSUInteger transferredBytes = _totalBytesRead + _totalBytesWritten;
     BOOL waitingOnSocket = (_pendingIOCount > 0);
+
+    // Absolute deadline for the request-line + headers phase (before any handler is
+    // matched, i.e. while _request is still nil — assigned on this same queue). The
+    // zero-progress check below spares slow handlers and slow bodies, but it is
+    // defeated by a client that dribbles one byte per tick to keep "progress" moving;
+    // such a client could otherwise hold a connection slot forever (128 of them = a
+    // full-server denial of service). A well-behaved client sends its small header
+    // block in far under one interval, so this never trips on legitimate traffic.
+    if (_request == nil) {
+        _headerPhaseTicks += 1;
+
+        if (_headerPhaseTicks > kMaxHeaderPhaseTicks) {
+            GWS_LOG_WARNING(@"Closing connection on socket %i: request headers not fully received within the header-phase deadline", _socket);
+            dispatch_source_cancel(_idleTimer);
+            shutdown(_socket, SHUT_RDWR);
+            return;
+        }
+    }
 
     if (waitingOnSocket && _idleCheckWasBusy && (transferredBytes == _idleCheckedBytes)) {
         GWS_LOG_WARNING(@"Closing connection on socket %i: no bytes transferred while waiting on socket I/O across the idle timeout", _socket);
@@ -739,6 +759,19 @@ static inline NSUInteger _ScanHexNumber(const void *bytes, NSUInteger size) {
         }
     }
 
+    // Every loop break above falls through to here to read more bytes into the same
+    // `chunkData`. The per-chunk cap (line above) only fires once a chunk-size line's
+    // CRLF has been parsed; before that — a client that streams bytes never forming a
+    // chunk-size-line CRLF, or that never terminates the last chunk's trailer — nothing
+    // bounds the buffer, so it would grow until the app is jetsam/OOM-killed (the idle
+    // timeout never fires while bytes keep arriving). Bound it at one max-size chunk
+    // plus framing slack: a legitimate in-flight chunk needs at most that much buffered.
+    if (chunkData.length > (NSUInteger)kGCDWebServerMaxInMemoryBodyLength + kHeadersMaxLength) {
+        GWS_LOG_ERROR(@"Chunked transfer framing exceeds the buffer limit reading request body on socket %i", _socket);
+        block(NO);
+        return;
+    }
+
     [self readData:chunkData
              withLength:NSUIntegerMax
         completionBlock:^(BOOL success) {
@@ -925,6 +958,76 @@ static BOOL _ConstantTimeEqualStrings(NSString *a, NSString *b) {
     return (diff == 0);
 }
 
+// Digest nonces are issued time-stamped and integrity-protected with a per-process
+// secret, so the server can validate and expire them statelessly. A static,
+// never-expiring nonce (the previous behaviour) lets an on-network eavesdropper replay
+// a captured Authorization header for the entire process lifetime; expiry bounds that
+// to a short window. Format: "<hexSeconds>.<MD5(hexSeconds ":" secret)>". The alphabet
+// (hex + ".") is safe inside the quoted nonce of WWW-Authenticate / Authorization.
+#define kDigestNonceLifetime 300.0  // seconds a nonce stays valid after issue
+
+static NSString *_GenerateDigestNonce(NSString *secret) {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    unsigned long long seconds = (unsigned long long)now;
+    NSString *const stamp = [NSString stringWithFormat:@"%llX", seconds];
+    return [NSString stringWithFormat:@"%@.%@", stamp, GCDWebServerComputeMD5Digest(@"%@:%@", stamp, secret)];
+}
+
+// Returns YES if `nonce` is one this process issued (its MAC verifies). On success,
+// *expired reports whether it has aged past its lifetime — a genuine but stale nonce,
+// answered with stale=TRUE so a compliant client retries transparently.
+static BOOL _ValidateDigestNonce(NSString *nonce, NSString *secret, BOOL *expired) {
+    *expired = NO;
+    if (nonce.length == 0) {
+        return NO;
+    }
+
+    NSRange dot = [nonce rangeOfString:@"." options:NSBackwardsSearch];
+    if (dot.location == NSNotFound) {
+        return NO;
+    }
+
+    NSString *const stamp = [nonce substringToIndex:dot.location];
+    NSString *const mac = [nonce substringFromIndex:(dot.location + 1)];
+
+    if (!_ConstantTimeEqualStrings(mac, GCDWebServerComputeMD5Digest(@"%@:%@", stamp, secret))) {
+        return NO;  // Not minted by us (forged, or from a previous process run).
+    }
+
+    unsigned long long seconds = 0;
+    if (![[NSScanner scannerWithString:stamp] scanHexLongLong:&seconds]) {
+        return NO;
+    }
+
+    CFAbsoluteTime elapsed = CFAbsoluteTimeGetCurrent() - (CFAbsoluteTime)seconds;
+    if ((elapsed < 0.0) || (elapsed > kDigestNonceLifetime)) {
+        *expired = YES;
+    }
+
+    return YES;
+}
+
+// Reduce a Digest "uri" parameter to its decoded path so it can be compared to the
+// request's actual path. Handles origin-form ("/a?b") and absolute-form
+// ("http://h/a?b") request-targets, and strips any query/fragment.
+static NSString *_DigestURIPath(NSString *uri) {
+    if (uri == nil) {
+        return nil;
+    }
+
+    NSRange cut = [uri rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"?#"]];
+    NSString *target = (cut.location != NSNotFound) ? [uri substringToIndex:cut.location] : uri;
+
+    NSRange scheme = [target rangeOfString:@"://"];
+    if (scheme.location != NSNotFound) {
+        NSString *const rest = [target substringFromIndex:(scheme.location + 3)];
+        NSRange slash = [rest rangeOfString:@"/"];
+        target = (slash.location != NSNotFound) ? [rest substringFromIndex:slash.location] : @"/";
+    }
+
+    return GCDWebServerUnescapeURLString(target);
+}
+
 // https://tools.ietf.org/html/rfc2617
 - (GCDWebServerResponse *)preflightRequest:(GCDWebServerRequest *)request {
     GWS_LOG_DEBUG(@"Connection on socket %i preflighting request \"%@ %@\" with %lu bytes body", _socket, _virtualHEAD ? @"HEAD" : _request.method, _request.path, (unsigned long)_totalBytesRead);
@@ -966,34 +1069,42 @@ static BOOL _ConstantTimeEqualStrings(NSString *a, NSString *b) {
 
             if (realm && [_authenticationRealm isEqualToString:realm]) {
                 NSString *const nonce = GCDWebServerExtractHeaderValueParameter(authorizationHeader, @"nonce");
+                BOOL nonceExpired = NO;
 
-                if ([nonce isEqualToString:_digestAuthenticationNonce]) {
-                    NSString *const username = GCDWebServerExtractHeaderValueParameter(authorizationHeader, @"username");
-                    NSString *const uri = GCDWebServerExtractHeaderValueParameter(authorizationHeader, @"uri");
-                    NSString *const actualResponse = GCDWebServerExtractHeaderValueParameter(authorizationHeader, @"response");
-                    NSString *const ha1 = _authenticationDigestAccounts[username];
-                    // An unknown username MUST be rejected here. Otherwise ha1 is nil and
-                    // gets formatted into the digest below as the literal string "(null)",
-                    // whose every input is attacker-known (nonce and realm are disclosed in
-                    // the 401; method and uri are attacker-chosen), letting an attacker forge
-                    // a valid response with no password at all.
-                    if (ha1 != nil) {
-                        NSString *const ha2 = GCDWebServerComputeMD5Digest(@"%@:%@", request.method, uri);  // We cannot use "request.path" as the query string is required
-                        NSString *const expectedResponse = GCDWebServerComputeMD5Digest(@"%@:%@:%@", ha1, _digestAuthenticationNonce, ha2);
+                if (_ValidateDigestNonce(nonce, _digestAuthenticationSecret, &nonceExpired)) {
+                    if (nonceExpired) {
+                        isStaled = YES;  // Genuine nonce, just aged out: stale=TRUE lets the client retry silently.
+                    } else {
+                        NSString *const username = GCDWebServerExtractHeaderValueParameter(authorizationHeader, @"username");
+                        NSString *const uri = GCDWebServerExtractHeaderValueParameter(authorizationHeader, @"uri");
+                        NSString *const actualResponse = GCDWebServerExtractHeaderValueParameter(authorizationHeader, @"response");
+                        NSString *const ha1 = _authenticationDigestAccounts[username];
+                        // Bind the credential to the resource actually requested: HA2 is
+                        // computed over the client-supplied "uri", so without requiring it to
+                        // match the real request path a captured Authorization header would
+                        // authenticate any other same-method resource. An unknown username MUST
+                        // also be rejected here — otherwise ha1 is nil and formats into the
+                        // digest as the literal "(null)", whose every input is attacker-known
+                        // (nonce and realm are disclosed in the 401; method and uri are
+                        // attacker-chosen), forging a valid response with no password at all.
+                        if ((ha1 != nil) && [_DigestURIPath(uri) isEqualToString:request.path]) {
+                            NSString *const ha2 = GCDWebServerComputeMD5Digest(@"%@:%@", request.method, uri);  // Use "uri" not "request.path": the query string is part of the client's digest
+                            NSString *const expectedResponse = GCDWebServerComputeMD5Digest(@"%@:%@:%@", ha1, nonce, ha2);
 
-                        if (_ConstantTimeEqualStrings(actualResponse, expectedResponse)) {
-                            authenticated = YES;
+                            if (_ConstantTimeEqualStrings(actualResponse, expectedResponse)) {
+                                authenticated = YES;
+                            }
                         }
                     }
                 } else if (nonce.length) {
-                    isStaled = YES;
+                    isStaled = YES;  // A nonce we never issued (forged, or from a prior process run): re-challenge as stale so a well-behaved client retries with the fresh one rather than re-prompting.
                 }
             }
         }
 
         if (!authenticated) {
             response = [GCDWebServerResponse responseWithStatusCode:kGCDWebServerHTTPStatusCode_Unauthorized];
-            [response setValue:[NSString stringWithFormat:@"Digest realm=\"%@\", nonce=\"%@\"%@", _authenticationRealm, _digestAuthenticationNonce, isStaled ? @", stale=TRUE" : @""] forAdditionalHeader:@"WWW-Authenticate"];  // TODO: Support Quality of Protection ("qop")
+            [response setValue:[NSString stringWithFormat:@"Digest realm=\"%@\", nonce=\"%@\"%@", _authenticationRealm, _GenerateDigestNonce(_digestAuthenticationSecret), isStaled ? @", stale=TRUE" : @""] forAdditionalHeader:@"WWW-Authenticate"];  // TODO: Support Quality of Protection ("qop")
         }
     }
 

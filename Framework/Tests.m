@@ -679,4 +679,237 @@ static NSString* MakeTempDirectory(void) {
     XCTAssertFalse([request performWriteData:bomb error:&error], @"gzip decoder should reject a decompression bomb");
 }
 
+#pragma mark - Crash / DoS hardening
+
+// A COPY/MOVE carrying a Destination header but NO Host header must be rejected with
+// 400, not crash the process. The destination parsing did [dst rangeOfString:Host]
+// with a nil Host, which throws NSInvalidArgumentException; uncaught, that terminates
+// the whole server. The server must survive and keep serving afterwards.
+- (void)testDAVMoveWithoutHostHeaderDoesNotCrash {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    NSString* path = [dir stringByAppendingPathComponent:@"a.txt"];
+    XCTAssertTrue([@"data" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    GCDWebDAVServer* server = [[GCDWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    // Destination present, Host absent (HTTP/1.0 so CFHTTPMessage accepts no Host).
+    NSString* reply = SendRawRequest(server.port, @"MOVE /a.txt HTTP/1.0\r\nDestination: http://localhost/b.txt\r\nOverwrite: T\r\n\r\n");
+    XCTAssertNotNil(reply);
+    XCTAssertTrue([reply containsString:@"400"], @"missing Host must yield 400, got: %@", reply);
+    XCTAssertTrue([fm fileExistsAtPath:path], @"file must be untouched; reply: %@", reply);
+
+    // The process must still be alive: a fresh, well-formed request must get a reply.
+    NSString* reply2 = SendRawRequest(server.port, @"OPTIONS / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertNotNil(reply2, @"server appears to have crashed after the malformed request");
+    XCTAssertTrue([reply2 containsString:@"200"], @"server did not respond normally after the malformed request: %@", reply2);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// A chunked request whose chunk-size line never contains a CRLF must be rejected once
+// the framing buffer exceeds its bound, rather than accumulating without limit (OOM).
+// The per-chunk cap only applies after a size line is parsed; the framing scan itself
+// was previously unbounded.
+- (void)testChunkedTransferRejectsUnterminatedSizeLine {
+    GCDWebServer* server = [[GCDWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"POST"
+                          requestClass:[GCDWebServerDataRequest class]
+                          processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
+                              return [GCDWebServerDataResponse responseWithText:@"ok"];
+                          }];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES, GCDWebServerOption_ConnectionIdleTimeout : @5.0};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    int fd = ConnectToLocalhostPort(server.port);
+    XCTAssertGreaterThan(fd, 0);
+    const char* head = "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\n\r\n";
+    XCTAssertEqual(send(fd, head, strlen(head), 0), (ssize_t)strlen(head));
+
+    // Stream ~20 MB of 'a' (all valid hex, no CRLF) so the chunk-size line can never
+    // complete, exceeding the 16 MB + framing-slack bound. Send on a background queue
+    // so the main thread can read the server's rejection response promptly (a blocking
+    // send of the whole blob would otherwise deadlock against the server that has
+    // stopped reading). A rejecting server produces an HTTP error response; a server
+    // that buffered without bound would send nothing and the read would just time out.
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSMutableData* blob = [NSMutableData dataWithLength:(20 * 1024 * 1024)];
+        memset(blob.mutableBytes, 'a', blob.length);
+        send(fd, blob.bytes, blob.length, 0);  // partially sends then errors once the server rejects/closes; ignore
+    });
+
+    BOOL sawEOF = NO;
+    NSString* reply = [[NSString alloc] initWithData:ReadToEOF(fd, &sawEOF) encoding:NSUTF8StringEncoding];
+    XCTAssertTrue(([reply containsString:@"500"] || [reply containsString:@"400"]), @"server did not reject unbounded chunk framing (reply: %@)", reply);
+    close(fd);
+    [server stop];
+}
+
+// A slowloris that dribbles one byte per tick keeps "bytes moving", so the
+// zero-progress idle check never fires — but the request headers never complete.
+// The header-phase deadline must still close such a connection so it cannot hold a
+// slot forever. Dribbling faster than one tick guarantees the zero-progress check is
+// not what closes it, so a close proves the header deadline works.
+- (void)testConnectionClosesSlowlorisHeaderDribble {
+    GCDWebServer* server = [[GCDWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[GCDWebServerRequest class]
+                          processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
+                              return [GCDWebServerDataResponse responseWithText:@"hello"];
+                          }];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES, GCDWebServerOption_ConnectionIdleTimeout : @0.5};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    int fd = ConnectToLocalhostPort(server.port);
+    XCTAssertGreaterThan(fd, 0);
+    const char* partial = "GET / HTTP/1.1\r\nHost: localhost\r\n";  // deliberately never completes the header block
+    XCTAssertEqual(send(fd, partial, strlen(partial), 0), (ssize_t)strlen(partial));
+
+    // Dribble one header byte every 0.25 s (< the 0.5 s tick) on a background queue so
+    // socket I/O keeps "progressing" and only the header-phase deadline can close us.
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        for (int i = 0; i < 40; i++) {  // up to ~10 s of dribbling; stops early on EPIPE
+            usleep(250 * 1000);
+            const char space = ' ';
+            if (send(fd, &space, 1, 0) < 0) {
+                break;
+            }
+        }
+    });
+
+    BOOL sawEOF = NO;
+    ReadToEOF(fd, &sawEOF);  // returns when the server closes the connection (or the 5 s recv timeout)
+    XCTAssertTrue(sawEOF, @"header-phase deadline did not close a slowloris dribbling under one tick");
+    close(fd);
+    [server stop];
+}
+
+// Builds `levels` nested "multipart/mixed" wrappers around a single text leaf part.
+// Boundaries: `top` for the outermost part, then mix1..mix{levels} for the nested
+// parts; the leaf lives inside boundary mix{levels}.
+static NSData* NestedMultipartMixedBody(NSString* top, NSUInteger levels) {
+    NSString* leafBoundary = [NSString stringWithFormat:@"mix%lu", (unsigned long)levels];
+    NSString* body = [NSString stringWithFormat:@"--%@\r\nContent-Disposition: form-data; name=\"leaf\"\r\nContent-Type: text/plain\r\n\r\nhello\r\n--%@--\r\n", leafBoundary, leafBoundary];
+
+    for (NSInteger i = (NSInteger)levels; i >= 1; i--) {
+        NSString* boundary = (i == 1) ? top : [NSString stringWithFormat:@"mix%ld", (long)(i - 1)];
+        NSString* childBoundary = [NSString stringWithFormat:@"mix%ld", (long)i];
+        NSString* header = [NSString stringWithFormat:@"--%@\r\nContent-Disposition: form-data; name=\"n%ld\"\r\nContent-Type: multipart/mixed; boundary=%@\r\n\r\n", boundary, (long)i, childBoundary];
+        body = [NSString stringWithFormat:@"%@%@\r\n--%@--\r\n", header, body, boundary];
+    }
+
+    return [body dataUsingEncoding:NSUTF8StringEncoding];
+}
+
+// Nested multipart/mixed parts are fed to a synchronously-recursing sub-parser, so
+// unbounded nesting overflows the worker-thread stack. Nesting within the depth cap is
+// accepted; nesting beyond it is rejected (before it can recurse deeply and crash).
+- (void)testMultiPartRejectsDeeplyNestedMixed {
+    // Within the cap: parses successfully.
+    GCDWebServerMultiPartFormRequest* shallow = OpenBodyRequest([GCDWebServerMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=top"});
+    NSError* error = nil;
+    XCTAssertTrue([shallow performWriteData:NestedMultipartMixedBody(@"top", 2) error:&error], @"shallow nesting should parse: %@", error);
+    XCTAssertTrue([shallow performClose:&error], @"shallow nesting should finish cleanly: %@", error);
+
+    // Beyond the cap: rejected rather than recursing to the crash depth.
+    GCDWebServerMultiPartFormRequest* deep = OpenBodyRequest([GCDWebServerMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=top"});
+    XCTAssertFalse([deep performWriteData:NestedMultipartMixedBody(@"top", 20) error:&error], @"deeply nested multipart/mixed must be rejected");
+}
+
+#pragma mark - Digest authentication
+
+// Extracts a quoted directive value (e.g. nonce="…") from a header line.
+static NSString* QuotedParam(NSString* header, NSString* name) {
+    NSString* needle = [NSString stringWithFormat:@"%@=\"", name];
+    NSRange start = [header rangeOfString:needle];
+    if (start.location == NSNotFound) {
+        return nil;
+    }
+    NSUInteger valueStart = start.location + start.length;
+    NSRange end = [header rangeOfString:@"\"" options:0 range:NSMakeRange(valueStart, header.length - valueStart)];
+    if (end.location == NSNotFound) {
+        return nil;
+    }
+    return [header substringWithRange:NSMakeRange(valueStart, end.location - valueStart)];
+}
+
+// Digest auth must (a) work end-to-end and (b) bind the credential to the actual
+// request target: a response computed for one URI must not authenticate a request for
+// a different URI (the "uri" directive was previously never checked against the
+// request line, so a captured header authenticated any same-method resource).
+- (void)testDigestAuthRoundTripAndURIBinding {
+    GCDWebServer* server = [[GCDWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[GCDWebServerRequest class]
+                          processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
+                              return [GCDWebServerDataResponse responseWithText:@"secret-body"];
+                          }];
+    NSDictionary* options = @{
+        GCDWebServerOption_Port : @0,
+        GCDWebServerOption_BindToLocalhost : @YES,
+        GCDWebServerOption_AuthenticationMethod : GCDWebServerAuthenticationMethod_DigestAccess,
+        GCDWebServerOption_AuthenticationRealm : @"test",
+        GCDWebServerOption_AuthenticationAccounts : @{@"user" : @"pass"}
+    };
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    // Anonymous request -> 401 with a Digest challenge; capture the server-issued nonce.
+    NSString* challenge = SendRawRequest(server.port, @"GET /secret HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([challenge containsString:@"401"], @"expected 401 challenge, got: %@", challenge);
+    NSString* nonce = QuotedParam(challenge, @"nonce");
+    XCTAssertNotNil(nonce, @"no nonce in challenge: %@", challenge);
+
+    // Compute a valid Digest response for GET /secret and authenticate.
+    NSString* ha1 = GCDWebServerComputeMD5Digest(@"%@:%@:%@", @"user", @"test", @"pass");
+    NSString* ha2Secret = GCDWebServerComputeMD5Digest(@"%@:%@", @"GET", @"/secret");
+    NSString* response = GCDWebServerComputeMD5Digest(@"%@:%@:%@", ha1, nonce, ha2Secret);
+    NSString* authForSecret = [NSString stringWithFormat:@"Authorization: Digest username=\"user\", realm=\"test\", nonce=\"%@\", uri=\"/secret\", response=\"%@\"", nonce, response];
+
+    NSString* ok = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /secret HTTP/1.1\r\nHost: localhost\r\n%@\r\n\r\n", authForSecret]);
+    XCTAssertTrue([ok containsString:@"200"], @"valid digest credentials should authenticate, got: %@", ok);
+    XCTAssertTrue([ok containsString:@"secret-body"], @"expected body with valid credentials, got: %@", ok);
+
+    // Replay the exact same Authorization header (computed for /secret) against a
+    // different resource: must be rejected because the uri no longer matches.
+    NSString* replay = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /other HTTP/1.1\r\nHost: localhost\r\n%@\r\n\r\n", authForSecret]);
+    XCTAssertTrue([replay containsString:@"401"], @"a header computed for /secret must not authenticate /other, got: %@", replay);
+    XCTAssertFalse([replay containsString:@"secret-body"], @"cross-resource replay leaked the body: %@", replay);
+
+    [server stop];
+}
+
+#pragma mark - Uploader CSRF
+
+// The uploader's state-changing endpoints must reject a cross-origin browser request
+// (a CSRF attempt): a request whose Origin authority differs from the Host is refused,
+// while a request with no Origin at all (a non-browser client) is allowed through.
+- (void)testUploaderRejectsCrossOriginMutation {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+
+    GCDWebUploader* server = [[GCDWebUploader alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* host = [NSString stringWithFormat:@"localhost:%lu", (unsigned long)server.port];
+
+    // Cross-origin Origin -> rejected with 403; the directory must not be created.
+    NSString* body = @"path=/EvilFolder";
+    NSString* crossOrigin = SendRawRequest(server.port, [NSString stringWithFormat:@"POST /create HTTP/1.1\r\nHost: %@\r\nOrigin: http://evil.example\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %lu\r\n\r\n%@", host, (unsigned long)body.length, body]);
+    XCTAssertTrue([crossOrigin containsString:@"403"], @"cross-origin mutation must be rejected, got: %@", crossOrigin);
+    XCTAssertFalse([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"EvilFolder"]], @"cross-origin request created the folder");
+
+    // No Origin header (non-browser client) -> allowed.
+    NSString* body2 = @"path=/GoodFolder";
+    NSString* noOrigin = SendRawRequest(server.port, [NSString stringWithFormat:@"POST /create HTTP/1.1\r\nHost: %@\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %lu\r\n\r\n%@", host, (unsigned long)body2.length, body2]);
+    XCTAssertFalse([noOrigin containsString:@"403"], @"a request with no Origin should be allowed, got: %@", noOrigin);
+    XCTAssertTrue([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"GoodFolder"]], @"the legitimate request did not create the folder: %@", noOrigin);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 @end

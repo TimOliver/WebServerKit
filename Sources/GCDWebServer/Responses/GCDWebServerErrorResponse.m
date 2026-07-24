@@ -86,7 +86,7 @@ static inline NSString *_EscapeHTMLString(NSString *string) {
 - (instancetype)initWithStatusCode:(NSInteger)statusCode underlyingError:(NSError *)underlyingError messageFormat:(NSString *)format arguments:(va_list)arguments {
     NSString *const message = [[NSString alloc] initWithFormat:format arguments:arguments];
     NSString *const title = [NSString stringWithFormat:@"HTTP Error %i", (int)statusCode];
-    NSString *const error = underlyingError ? [NSString stringWithFormat:@"[%@] %@ (%li)", underlyingError.domain, _EscapeHTMLString(underlyingError.localizedDescription), (long)underlyingError.code] : @"";
+    NSString *const error = underlyingError ? [NSString stringWithFormat:@"[%@] %@ (%li)", _EscapeHTMLString(underlyingError.domain), _EscapeHTMLString(underlyingError.localizedDescription), (long)underlyingError.code] : @"";
     NSString *const html = [NSString stringWithFormat:@"<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>%@</title></head><body><h1>%@: %@</h1><h3>%@</h3></body></html>",
                                                 title,
                                                 title,

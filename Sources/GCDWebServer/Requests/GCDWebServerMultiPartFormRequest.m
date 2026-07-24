@@ -33,6 +33,14 @@
 
 #define kMultiPartBufferSize (256 * 1024)
 
+// A part whose Content-Type is "multipart/mixed" spawns a nested sub-parser that is
+// fed synchronously (appendBytes: -> _parseData -> sub-parser appendBytes: -> ...),
+// so the parse recursion depth equals the client-chosen nesting depth. Cap it: a
+// crafted body of thousands of nested multipart/mixed parts (each only tens of bytes,
+// so they fit well within the in-memory buffer cap) would otherwise overflow the
+// worker-thread stack and crash the process. Real forms never nest beyond one level.
+#define kMultiPartMaxDepth 8
+
 typedef enum {
     kParserState_Undefined = 0,
     kParserState_Start,
@@ -118,6 +126,7 @@ static NSData *_dashNewlineData = nil;
     NSString *_tmpPath;
     int _tmpFile;
     GCDWebServerMIMEStreamParser *_subParser;
+    NSUInteger _depth;  // Nesting level; 0 for the top-level parser, +1 per multipart/mixed
 }
 
 + (void)initialize {
@@ -137,11 +146,19 @@ static NSData *_dashNewlineData = nil;
     }
 }
 
-- (instancetype)initWithBoundary:(NSString *_Nonnull)boundary defaultControlName:(NSString *_Nullable)name arguments:(NSMutableArray<GCDWebServerMultiPartArgument *> *_Nonnull)arguments files:(NSMutableArray<GCDWebServerMultiPartFile *> *_Nonnull)files {
+- (instancetype)initWithBoundary:(NSString *_Nonnull)boundary defaultControlName:(NSString *_Nullable)name arguments:(NSMutableArray<GCDWebServerMultiPartArgument *> *_Nonnull)arguments files:(NSMutableArray<GCDWebServerMultiPartFile *> *_Nonnull)files depth:(NSUInteger)depth {
     NSData *data = boundary.length ? [[NSString stringWithFormat:@"--%@", boundary] dataUsingEncoding:NSASCIIStringEncoding] : nil;
 
     if (data == nil) {
         GWS_DNOT_REACHED();
+        return nil;
+    }
+
+    // Refuse to nest deeper than the cap: returning nil here surfaces as a parse
+    // failure at the sub-parser creation site, so a malicious deeply-nested
+    // multipart/mixed body is rejected before it can overflow the stack.
+    if (depth > kMultiPartMaxDepth) {
+        GWS_LOG_ERROR(@"Rejecting 'multipart/mixed' nested deeper than %i levels", (int)kMultiPartMaxDepth);
         return nil;
     }
 
@@ -152,6 +169,7 @@ static NSData *_dashNewlineData = nil;
         _files = files;
         _data = [[NSMutableData alloc] initWithCapacity:kMultiPartBufferSize];
         _state = kParserState_Start;
+        _depth = depth;
     }
 
     return self;
@@ -220,10 +238,13 @@ static NSData *_dashNewlineData = nil;
             if (_controlName) {
                 if ([GCDWebServerTruncateHeaderValue(_contentType) isEqualToString:@"multipart/mixed"]) {
                     NSString *const boundary = GCDWebServerExtractHeaderValueParameter(_contentType, @"boundary");
-                    _subParser = [[GCDWebServerMIMEStreamParser alloc] initWithBoundary:boundary defaultControlName:_controlName arguments:_arguments files:_files];
+                    _subParser = [[GCDWebServerMIMEStreamParser alloc] initWithBoundary:boundary defaultControlName:_controlName arguments:_arguments files:_files depth:(_depth + 1)];
 
                     if (_subParser == nil) {
-                        GWS_DNOT_REACHED();
+                        // A nil sub-parser is now an expected rejection (nesting past the
+                        // depth cap, or a missing/invalid child boundary), not an
+                        // unreachable state — so fail the parse rather than GWS_DNOT_REACHED
+                        // (which aborts in debug builds).
                         success = NO;
                     }
                 } else if (_fileName) {
@@ -268,7 +289,9 @@ static NSData *_dashNewlineData = nil;
 
                     if (_subParser) {
                         if (![_subParser appendBytes:dataBytes length:contentLength] || ![_subParser isAtEnd]) {
-                            GWS_DNOT_REACHED();
+                            // Reachable on malicious/malformed nested content — the sub-parser
+                            // rejected it (depth cap or in-memory buffer cap) or the nested
+                            // part never closed. Fail the parse rather than abort in debug.
                             success = NO;
                         }
 
@@ -313,7 +336,8 @@ static NSData *_dashNewlineData = nil;
                     if ([_subParser appendBytes:_data.bytes length:length]) {
                         [_data replaceBytesInRange:NSMakeRange(0, length) withBytes:NULL length:0];
                     } else {
-                        GWS_DNOT_REACHED();
+                        // The sub-parser rejected the streamed nested content (depth or
+                        // buffer cap) — expected on malicious input, so fail without abort.
                         success = NO;
                     }
                 } else if (_tmpPath) {
@@ -381,7 +405,7 @@ static NSData *_dashNewlineData = nil;
 - (BOOL)open:(NSError **)error {
     NSString *const boundary = GCDWebServerExtractHeaderValueParameter(self.contentType, @"boundary");
 
-    _parser = [[GCDWebServerMIMEStreamParser alloc] initWithBoundary:boundary defaultControlName:nil arguments:_arguments files:_files];
+    _parser = [[GCDWebServerMIMEStreamParser alloc] initWithBoundary:boundary defaultControlName:nil arguments:_arguments files:_files depth:0];
 
     if (_parser == nil) {
         if (error) {
