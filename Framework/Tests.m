@@ -490,6 +490,36 @@ static __kindof GCDWebServerRequest* OpenBodyRequest(Class requestClass, NSDicti
     [server stop];
 }
 
+#pragma mark - Error response escaping
+
+// Request-controlled text (paths, filenames, header values) is reflected into the
+// HTML error body served as text/html, so it must be fully HTML-escaped. Escaping
+// only quotes leaves '<'/'>'/'&' through, allowing reflected XSS in the server's
+// origin (which can list/move/delete files).
+- (void)testErrorResponseEscapesReflectedMarkup {
+    NSString* const payload = @"<script>alert(1)</script> a&b \"q\" 'z'";
+    GCDWebServerErrorResponse* response = [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_NotFound message:@"\"%@\" does not exist", payload];
+    XCTAssertNotNil(response);
+
+    [response prepareForReading];
+    NSError* error = nil;
+    XCTAssertTrue([response performOpen:&error]);
+    __block NSData* body = nil;
+    [response performReadDataWithCompletion:^(NSData* data, NSError* readError) {
+        body = data;
+    }];
+    [response performClose];
+
+    NSString* const html = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
+    XCTAssertNotNil(html);
+    // The payload's angle brackets must be escaped: no raw <script> tag (the template's
+    // own tags are fine; <script> only comes from the reflected message).
+    XCTAssertFalse([html containsString:@"<script>"], @"reflected markup was not escaped: %@", html);
+    XCTAssertFalse([html containsString:@"</script>"], @"reflected markup was not escaped: %@", html);
+    XCTAssertTrue([html containsString:@"&lt;script&gt;"], @"expected escaped payload in body: %@", html);
+    XCTAssertTrue([html containsString:@"a&amp;b"], @"'&' must be escaped: %@", html);
+}
+
 #pragma mark - Request body-size caps
 
 // A body buffered entirely in memory (e.g. a DAV PROPFIND/LOCK body or a data

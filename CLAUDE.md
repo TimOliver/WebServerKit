@@ -26,6 +26,15 @@ xcodebuild -project GCDWebServer.xcodeproj -scheme "GCDWebServers (tvOS)" -confi
 
 ## Recent Changes
 
+### Error-page HTML escaping (reflected XSS fix)
+
+`GCDWebServerErrorResponse`'s `_EscapeHTMLString` escaped only `"`, so
+request-controlled text reflected into the `text/html` error body (e.g.
+`"<path>" does not exist`) passed `<`/`>`/`&` through unescaped — a reflected XSS
+in the server's own origin, which via the uploader/DAV can list, move, and delete
+files. It now escapes `& < > " '` (with `&` first), matching the directory-listing
+escaper in `GCDWebServer.m`. Covered by `testErrorResponseEscapesReflectedMarkup`.
+
 ### Per-connection config snapshot (auth/serverName race fix)
 
 Each `GCDWebServerConnection` now **snapshots** the server's mutable configuration —

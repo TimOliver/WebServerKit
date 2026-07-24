@@ -70,7 +70,17 @@
 }
 
 static inline NSString *_EscapeHTMLString(NSString *string) {
-    return [string stringByReplacingOccurrencesOfString:@"\"" withString:@"&quot;"];
+    // The (attacker-influenced) message and underlying-error text are reflected into
+    // an HTML body served as text/html, so every HTML metacharacter must be escaped —
+    // not just quotes. Mirrors the directory-listing escaper in GCDWebServer.m; "&"
+    // must be replaced first so the entities we introduce are not re-escaped.
+    NSMutableString *const escaped = [string mutableCopy];
+    [escaped replaceOccurrencesOfString:@"&" withString:@"&amp;" options:0 range:NSMakeRange(0, escaped.length)];
+    [escaped replaceOccurrencesOfString:@"<" withString:@"&lt;" options:0 range:NSMakeRange(0, escaped.length)];
+    [escaped replaceOccurrencesOfString:@">" withString:@"&gt;" options:0 range:NSMakeRange(0, escaped.length)];
+    [escaped replaceOccurrencesOfString:@"\"" withString:@"&quot;" options:0 range:NSMakeRange(0, escaped.length)];
+    [escaped replaceOccurrencesOfString:@"'" withString:@"&#39;" options:0 range:NSMakeRange(0, escaped.length)];
+    return escaped;
 }
 
 - (instancetype)initWithStatusCode:(NSInteger)statusCode underlyingError:(NSError *)underlyingError messageFormat:(NSString *)format arguments:(va_list)arguments {
