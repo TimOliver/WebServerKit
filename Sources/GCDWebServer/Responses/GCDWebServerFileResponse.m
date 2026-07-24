@@ -126,7 +126,14 @@ static inline NSDate *_NSDateFromTimeSpec(const struct timespec *t) {
 
         if (attachment) {
             NSString *const fileName = [path lastPathComponent];
-            NSData *const data = [[fileName stringByReplacingOccurrencesOfString:@"\"" withString:@""] dataUsingEncoding:NSISOLatin1StringEncoding allowLossyConversion:YES];
+            // Strip control characters (notably CR/LF) from the quoted filename before
+            // building the header. A bare CR/LF in the value makes CFNetwork drop the
+            // entire Content-Disposition header, which would serve the file inline (e.g. an
+            // uploaded ".html" as text/html on our own origin) instead of as a download — a
+            // stored-XSS vector. The quote is removed too so it cannot close the field
+            // early. The RFC 5987 filename* below is percent-encoded, so it is unaffected.
+            NSString *const safeName = [[[fileName componentsSeparatedByCharactersInSet:[NSCharacterSet controlCharacterSet]] componentsJoinedByString:@""] stringByReplacingOccurrencesOfString:@"\"" withString:@""];
+            NSData *const data = [safeName dataUsingEncoding:NSISOLatin1StringEncoding allowLossyConversion:YES];
             NSString *const lossyFileName = data ? [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding] : nil;
 
             if (lossyFileName) {
@@ -135,6 +142,8 @@ static inline NSDate *_NSDateFromTimeSpec(const struct timespec *t) {
             } else {
                 GWS_DNOT_REACHED();
             }
+            // Defense in depth: never let a browser MIME-sniff a download into active content.
+            [self setValue:@"nosniff" forAdditionalHeader:@"X-Content-Type-Options"];
         }
 
         self.contentType = GCDWebServerGetMimeTypeForExtension([_path pathExtension], overrides);

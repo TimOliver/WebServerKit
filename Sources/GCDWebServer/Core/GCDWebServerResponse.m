@@ -193,6 +193,10 @@
     [_additionalHeaders setValue:value forKey:header];
 }
 
+- (NSString *)valueForAdditionalHeader:(NSString *)header {
+    return [_additionalHeaders objectForKey:header];
+}
+
 - (BOOL)hasBody {
     return _contentType ? YES : NO;
 }

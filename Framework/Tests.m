@@ -126,6 +126,30 @@ static NSData* ReadToEOF(int fd, BOOL* sawEOF) {
     }
 }
 
+// A filename containing a bare CR/LF must not reach the Content-Disposition value (a raw
+// control char makes CFNetwork drop the whole header, serving the file inline), and
+// downloads must carry X-Content-Type-Options: nosniff.
+- (void)testAttachmentFilenameStripsControlCharactersAndSetsNosniff {
+    unichar cr = 0x0D;
+    NSString *const crString = [NSString stringWithCharacters:&cr length:1];
+    NSString *const fileName = [[@"evil" stringByAppendingString:crString] stringByAppendingString:@".html"];
+    NSString *const path = [NSTemporaryDirectory() stringByAppendingPathComponent:fileName];
+    NSError *writeError = nil;
+    BOOL wrote = [@"<script>alert(1)</script>" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&writeError];
+    XCTAssertTrue(wrote, @"could not create test file: %@", writeError);
+
+    GCDWebServerFileResponse *const response = [GCDWebServerFileResponse responseWithFile:path isAttachment:YES];
+    XCTAssertNotNil(response);
+    NSString *const disposition = [response valueForAdditionalHeader:@"Content-Disposition"];
+    XCTAssertNotNil(disposition);
+    XCTAssertEqual([disposition rangeOfString:crString].location, (NSUInteger)NSNotFound);  // no raw CR
+    XCTAssertFalse([disposition containsString:@"\n"]);  // no raw LF
+    XCTAssertTrue([disposition hasPrefix:@"attachment;"]);
+    XCTAssertEqualObjects([response valueForAdditionalHeader:@"X-Content-Type-Options"], @"nosniff");
+
+    [[NSFileManager defaultManager] removeItemAtPath:path error:NULL];
+}
+
 #pragma mark - GCDWebUploaderSSEChannel
 
 // Messages produced while no reader is parked must be buffered and later

@@ -218,11 +218,15 @@ static inline BOOL _IsMacFinder(GCDWebServerRequest *request) {
         });
     }
 
+    // Serve as an attachment so a browser pointed at a PUT'd file (e.g. an ".html" or
+    // ".svg") downloads it instead of rendering it inline as active content on our own
+    // origin. WebDAV clients read the body regardless of the disposition, so this does
+    // not affect normal file access.
     if ([request hasByteRange]) {
-        return [GCDWebServerFileResponse responseWithFile:absolutePath byteRange:request.byteRange];
+        return [GCDWebServerFileResponse responseWithFile:absolutePath byteRange:request.byteRange isAttachment:YES];
     }
 
-    return [GCDWebServerFileResponse responseWithFile:absolutePath];
+    return [GCDWebServerFileResponse responseWithFile:absolutePath isAttachment:YES];
 }
 
 - (GCDWebServerResponse *)performPUT:(GCDWebServerFileRequest *)request {

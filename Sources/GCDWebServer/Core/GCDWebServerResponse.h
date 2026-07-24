@@ -179,6 +179,11 @@ typedef void (^GCDWebServerBodyReaderCompletionBlock)(NSData *_Nullable data, NS
 - (void)setValue:(nullable NSString *)value forAdditionalHeader:(NSString *)header;
 
 /**
+ *  Returns the value previously set for an additional HTTP header, or nil if none.
+ */
+- (nullable NSString *)valueForAdditionalHeader:(NSString *)header;
+
+/**
  *  Convenience method that checks if the contentType property is defined.
  */
 - (BOOL)hasBody;
