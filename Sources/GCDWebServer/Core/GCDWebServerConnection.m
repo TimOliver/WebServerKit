@@ -30,6 +30,7 @@
 #endif
 
 #import <netdb.h>
+#import <sys/socket.h>
 #import <TargetConditionals.h>
 #ifdef __GCDWEBSERVER_ENABLE_TESTING__
 #import <stdatomic.h>
@@ -88,6 +89,11 @@ NS_ASSUME_NONNULL_END
     NSInteger _statusCode;
 
     BOOL _opened;
+
+    dispatch_source_t _idleTimer;  // Nil when idle timeouts are disabled
+    NSUInteger _pendingIOCount;    // Accessed on _connectionQueue only
+    NSUInteger _idleCheckedBytes;  // Accessed on _connectionQueue only
+    BOOL _idleCheckWasBusy;        // Accessed on _connectionQueue only
 
 #ifdef __GCDWEBSERVER_ENABLE_TESTING__
     NSUInteger _connectionIndex;
@@ -308,6 +314,31 @@ NS_ASSUME_NONNULL_END
             }];
 }
 
+// Runs on _connectionQueue. The connection is considered hung when a socket read
+// or write has been pending across two consecutive timer ticks without a single
+// byte moving in either direction; requiring two ticks avoids killing an I/O
+// operation that merely started just before a tick. Time spent waiting on a
+// request handler to produce a response (no pending socket I/O) never counts, so
+// slow handlers are unaffected. Note this does not defeat a client deliberately
+// dribbling one byte per interval — any transfer at all counts as progress.
+- (void)_checkIdleTimeout {
+    NSUInteger transferredBytes = _totalBytesRead + _totalBytesWritten;
+    BOOL waitingOnSocket = (_pendingIOCount > 0);
+
+    if (waitingOnSocket && _idleCheckWasBusy && (transferredBytes == _idleCheckedBytes)) {
+        GWS_LOG_WARNING(@"Closing connection on socket %i: no bytes transferred while waiting on socket I/O across the idle timeout", _socket);
+        dispatch_source_cancel(_idleTimer);
+        // Shut down (rather than close) so the pending read completes with EOF or
+        // the pending write errors, and the connection tears down through its
+        // normal paths; the descriptor itself is still closed in -dealloc.
+        shutdown(_socket, SHUT_RDWR);
+        return;
+    }
+
+    _idleCheckWasBusy = waitingOnSocket;
+    _idleCheckedBytes = transferredBytes;
+}
+
 - (void)_readRequestHeaders {
     _requestMessage = CFHTTPMessageCreateEmpty(kCFAllocatorDefault, true);
     NSMutableData *const headersData = [[NSMutableData alloc] initWithCapacity:kHeadersReadCapacity];
@@ -412,6 +443,19 @@ NS_ASSUME_NONNULL_END
         _connectionQueue = dispatch_queue_create("gcdwebserver.connection", DISPATCH_QUEUE_SERIAL);
         GWS_LOG_DEBUG(@"Did open connection on socket %i", _socket);
 
+        NSTimeInterval idleTimeout = server.connectionIdleTimeout;
+
+        if (idleTimeout > 0.0) {
+            _idleTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _connectionQueue);
+            uint64_t interval = (uint64_t)(idleTimeout * (NSTimeInterval)NSEC_PER_SEC);
+            dispatch_source_set_timer(_idleTimer, dispatch_time(DISPATCH_TIME_NOW, (int64_t)interval), interval, interval / 10);
+            __weak GCDWebServerConnection *weakSelf = self;  // A strong capture would cycle through the source's handler and keep the connection alive forever
+            dispatch_source_set_event_handler(_idleTimer, ^{
+                [weakSelf _checkIdleTimeout];
+            });
+            dispatch_resume(_idleTimer);
+        }
+
         [_server willStartConnection:self];
 
         if (![self open]) {
@@ -436,6 +480,10 @@ NS_ASSUME_NONNULL_END
 }
 
 - (void)dealloc {
+    if (_idleTimer) {
+        dispatch_source_cancel(_idleTimer);
+    }
+
     int result = close(_socket);
 
     if (result != 0) {
@@ -464,8 +512,18 @@ NS_ASSUME_NONNULL_END
 @implementation GCDWebServerConnection (Read)
 
 - (void)readData:(NSMutableData *)data withLength:(NSUInteger)length completionBlock:(ReadDataCompletionBlock)block {
+    if (_idleTimer) {
+        dispatch_async(_connectionQueue, ^{  // Enqueued ahead of dispatch_read's handler on the same serial queue, so the increment always runs first
+            self->_pendingIOCount += 1;
+        });
+    }
+
     dispatch_read(_socket, length, _connectionQueue, ^(dispatch_data_t buffer, int error) {
         @autoreleasepool {
+            if (self->_idleTimer) {
+                self->_pendingIOCount -= 1;
+            }
+
             if (error == 0) {
                 size_t size = dispatch_data_get_size(buffer);
 
@@ -654,8 +712,18 @@ static inline NSUInteger _ScanHexNumber(const void *bytes, NSUInteger size) {
         [data self];  // Keeps ARC from releasing data too early
     });
 
+    if (_idleTimer) {
+        dispatch_async(_connectionQueue, ^{  // Enqueued ahead of dispatch_write's handler on the same serial queue, so the increment always runs first
+            self->_pendingIOCount += 1;
+        });
+    }
+
     dispatch_write(_socket, buffer, _connectionQueue, ^(dispatch_data_t remainingData, int error) {
         @autoreleasepool {
+            if (self->_idleTimer) {
+                self->_pendingIOCount -= 1;
+            }
+
             if (error == 0) {
                 GWS_DCHECK(remainingData == NULL);
                 [self didWriteBytes:data.bytes length:data.length];

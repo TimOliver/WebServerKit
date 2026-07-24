@@ -1,12 +1,54 @@
 #import <GCDWebServers/GCDWebServers.h>
 #import <XCTest/XCTest.h>
 
+#import <netinet/in.h>
+#import <sys/socket.h>
+
 #import "GCDWebUploaderSSEChannel.h"
 
 #pragma clang diagnostic ignored "-Weverything"  // Prevent "messaging to unqualified id" warnings
 
 static NSData* SSEData(NSString* string) {
     return [string dataUsingEncoding:NSUTF8StringEncoding];
+}
+
+// Opens a raw TCP connection to localhost:port with a 5 second receive timeout,
+// so tests can exercise server behavior below the HTTP-client abstraction.
+static int ConnectToLocalhostPort(NSUInteger port) {
+    int fd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (fd < 0) {
+        return -1;
+    }
+    struct sockaddr_in addr;
+    bzero(&addr, sizeof(addr));
+    addr.sin_len = sizeof(addr);
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((unsigned short)port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
+        close(fd);
+        return -1;
+    }
+    struct timeval tv = {5, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    return fd;
+}
+
+// Reads until the peer closes the connection (EOF) or the receive timeout fires.
+// Returns the accumulated bytes; *sawEOF reports whether EOF was actually seen.
+static NSData* ReadToEOF(int fd, BOOL* sawEOF) {
+    NSMutableData* data = [NSMutableData data];
+    char buffer[4096];
+    *sawEOF = NO;
+    while (1) {
+        ssize_t result = recv(fd, buffer, sizeof(buffer), 0);
+        if (result > 0) {
+            [data appendBytes:buffer length:(NSUInteger)result];
+        } else {
+            *sawEOF = (result == 0);
+            return data;
+        }
+    }
 }
 
 @interface Tests : XCTestCase
@@ -172,6 +214,147 @@ static NSData* SSEData(NSString* string) {
     [channel parkReader:reader];
     [channel parkReader:reader];
     XCTAssertEqualObjects(received, (@[ @"2", @"3" ]));
+}
+
+// Closing a channel must complete a parked reader with the empty-data sentinel
+// (GCDWebServer's end-of-stream marker) so the connection winds down cleanly
+// instead of waiting forever on a channel nothing will ever write to again.
+- (void)testSSEChannelCloseDeliversEndOfStreamToParkedReader {
+    GCDWebUploaderSSEChannel* channel = [[GCDWebUploaderSSEChannel alloc] initWithCapacity:100];
+
+    __block NSData* received = nil;
+    [channel parkReader:^(NSData* data) { received = data; }];
+    XCTAssertFalse(channel.isClosed);
+
+    [channel close];
+    XCTAssertTrue(channel.isClosed);
+    XCTAssertEqualObjects(received, [NSData data]);
+    XCTAssertFalse(channel.hasParkedReader);
+}
+
+// A reader parked after close (e.g. a connection whose channel was reaped or
+// orphaned by -stop) must complete immediately with end-of-stream, never park.
+- (void)testSSEChannelParkAfterCloseCompletesImmediately {
+    GCDWebUploaderSSEChannel* channel = [[GCDWebUploaderSSEChannel alloc] initWithCapacity:100];
+    [channel close];
+
+    __block NSData* received = nil;
+    [channel parkReader:^(NSData* data) { received = data; }];
+    XCTAssertEqualObjects(received, [NSData data]);
+    XCTAssertFalse(channel.hasParkedReader);
+}
+
+// After close, the buffer is dropped and further messages are discarded: the
+// next reader must see end-of-stream, not stale events.
+- (void)testSSEChannelDropsMessagesAfterClose {
+    GCDWebUploaderSSEChannel* channel = [[GCDWebUploaderSSEChannel alloc] initWithCapacity:100];
+
+    [channel enqueueData:SSEData(@"before")];
+    [channel close];
+    [channel enqueueData:SSEData(@"after")];
+    XCTAssertEqual(channel.bufferedCount, (NSUInteger)0);
+
+    __block NSData* received = nil;
+    [channel parkReader:^(NSData* data) { received = data; }];
+    XCTAssertEqualObjects(received, [NSData data]);
+}
+
+// Double-close must not fire the end-of-stream sentinel twice.
+- (void)testSSEChannelCloseIsIdempotent {
+    GCDWebUploaderSSEChannel* channel = [[GCDWebUploaderSSEChannel alloc] initWithCapacity:100];
+
+    __block NSUInteger callCount = 0;
+    [channel parkReader:^(NSData* data) { callCount += 1; }];
+    [channel close];
+    [channel close];
+    XCTAssertEqual(callCount, (NSUInteger)1);
+}
+
+#pragma mark - SSE connection teardown
+
+// Stopping the uploader while an SSE client is connected must actively end that
+// connection (via the channel close sentinel). Previously the channels were just
+// dropped from the registry, leaving the connection parked forever — leaking the
+// socket, the connection, and (through a retain cycle) the server itself.
+- (void)testStopClosesActiveSSEConnections {
+    NSString* directory = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSProcessInfo processInfo] globallyUniqueString]];
+    XCTAssertTrue([[NSFileManager defaultManager] createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:NULL]);
+    GCDWebUploader* uploader = [[GCDWebUploader alloc] initWithUploadDirectory:directory];
+    XCTAssertNotNil(uploader);
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([uploader startWithOptions:options error:NULL]);
+
+    int fd = ConnectToLocalhostPort(uploader.port);
+    XCTAssertGreaterThan(fd, 0);
+    const char* request = "GET /events HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    XCTAssertEqual(send(fd, request, strlen(request), 0), (ssize_t)strlen(request));
+
+    // Wait for the response headers so the stream is established before stopping.
+    char buffer[4096];
+    XCTAssertGreaterThan(recv(fd, buffer, sizeof(buffer), 0), (ssize_t)0);
+
+    [uploader stop];
+
+    BOOL sawEOF = NO;
+    ReadToEOF(fd, &sawEOF);
+    XCTAssertTrue(sawEOF, @"server did not close the SSE connection after -stop");
+    close(fd);
+    [[NSFileManager defaultManager] removeItemAtPath:directory error:NULL];
+}
+
+#pragma mark - Connection idle timeout
+
+// A client that connects and then goes silent while the server is waiting on
+// socket I/O must be disconnected once the idle timeout elapses, instead of
+// holding a connection slot (and file descriptor) forever.
+- (void)testConnectionIdleTimeoutClosesSilentConnection {
+    GCDWebServer* server = [[GCDWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[GCDWebServerRequest class]
+                          processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
+                              return [GCDWebServerDataResponse responseWithText:@"hello"];
+                          }];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES, GCDWebServerOption_ConnectionIdleTimeout : @0.5};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    int fd = ConnectToLocalhostPort(server.port);
+    XCTAssertGreaterThan(fd, 0);
+
+    // Send nothing: the server is parked in a header read that will never complete.
+    BOOL sawEOF = NO;
+    ReadToEOF(fd, &sawEOF);
+    XCTAssertTrue(sawEOF, @"server did not disconnect a silent client");
+    close(fd);
+    [server stop];
+}
+
+// The timeout must only fire while the connection is actually waiting on socket
+// I/O. A handler that takes longer than the timeout to produce a response (no
+// pending reads or writes during that window) must not have its connection cut.
+- (void)testConnectionIdleTimeoutSparesSlowHandler {
+    GCDWebServer* server = [[GCDWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[GCDWebServerRequest class]
+                     asyncProcessBlock:^(GCDWebServerRequest* request, GCDWebServerCompletionBlock completionBlock) {
+                         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * (double)NSEC_PER_SEC)), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                             completionBlock([GCDWebServerDataResponse responseWithText:@"slow-response-body"]);
+                         });
+                     }];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES, GCDWebServerOption_ConnectionIdleTimeout : @0.5};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    int fd = ConnectToLocalhostPort(server.port);
+    XCTAssertGreaterThan(fd, 0);
+    const char* request = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    XCTAssertEqual(send(fd, request, strlen(request), 0), (ssize_t)strlen(request));
+
+    BOOL sawEOF = NO;
+    NSData* data = ReadToEOF(fd, &sawEOF);
+    NSString* reply = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    XCTAssertTrue([reply containsString:@"200"], @"expected a 200 response, got: %@", reply);
+    XCTAssertTrue([reply containsString:@"slow-response-body"], @"slow handler's response was cut off: %@", reply);
+    close(fd);
+    [server stop];
 }
 
 @end

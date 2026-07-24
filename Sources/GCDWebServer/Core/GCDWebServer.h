@@ -206,6 +206,22 @@ extern NSString *const GCDWebServerOption_ConnectedStateCoalescingInterval;
  */
 extern NSString *const GCDWebServerOption_DispatchQueuePriority;
 
+/**
+ *  The timeout expressed in seconds after which a connection that is waiting on
+ *  socket I/O without any bytes moving in either direction is forcibly closed
+ *  (NSNumber / double). This protects against clients that connect and then go
+ *  silent (or stop reading a response), which would otherwise hold their
+ *  connection — and a file descriptor — forever. The timeout only applies while
+ *  a socket read or write is actually pending: time spent waiting for a handler
+ *  to produce a response does not count, and a connection is closed no sooner
+ *  than one timeout interval and no later than two after going idle.
+ *
+ *  Set to 0.0 to disable idle timeouts entirely.
+ *
+ *  The default value is 30.0 seconds.
+ */
+extern NSString *const GCDWebServerOption_ConnectionIdleTimeout;
+
 #if TARGET_OS_IPHONE
 
 /**

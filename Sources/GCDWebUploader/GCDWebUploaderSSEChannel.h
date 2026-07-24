@@ -87,8 +87,31 @@ NS_ASSUME_NONNULL_BEGIN
  *  Offer a reader for the next message. If a buffered message is available it is
  *  delivered synchronously through the reader and the reader is consumed;
  *  otherwise the reader is parked until the next enqueue.
+ *
+ *  On a closed channel the reader is invoked immediately with empty data (the
+ *  end-of-stream sentinel) and is never parked.
  */
 - (void)parkReader:(void (^)(NSData* data))reader;
+
+/**
+ *  YES once -close has been called.
+ */
+@property (nonatomic, readonly, getter=isClosed) BOOL closed;
+
+/**
+ *  Permanently closes the channel. A parked reader is completed immediately with
+ *  empty data — the sentinel GCDWebServer's streaming API treats as end-of-body —
+ *  so the owning connection finishes its response and tears down, instead of
+ *  waiting forever on a channel nothing will write to again. Buffered messages
+ *  are discarded, later enqueues are dropped, and later readers complete
+ *  immediately with the same sentinel. Idempotent.
+ *
+ *  The owner MUST close a channel whenever it stops servicing it (reaping it,
+ *  disabling SSE, or stopping the server); merely dropping the reference leaks
+ *  the connection: a parked reader forms a retain cycle connection → response →
+ *  stream block → channel → parked reader → connection.
+ */
+- (void)close;
 
 @end
 

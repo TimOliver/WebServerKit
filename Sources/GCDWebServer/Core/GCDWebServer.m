@@ -66,6 +66,7 @@ NSString *const GCDWebServerOption_ConnectionClass = @"ConnectionClass";
 NSString *const GCDWebServerOption_AutomaticallyMapHEADToGET = @"AutomaticallyMapHEADToGET";
 NSString *const GCDWebServerOption_ConnectedStateCoalescingInterval = @"ConnectedStateCoalescingInterval";
 NSString *const GCDWebServerOption_DispatchQueuePriority = @"DispatchQueuePriority";
+NSString *const GCDWebServerOption_ConnectionIdleTimeout = @"ConnectionIdleTimeout";
 #if TARGET_OS_IPHONE
 NSString *const GCDWebServerOption_AutomaticallySuspendInBackground = @"AutomaticallySuspendInBackground";
 #endif
@@ -663,6 +664,7 @@ static inline NSString *_EncodeBase64(NSString *string) {
     _shouldAutomaticallyMapHEADToGET = [(NSNumber *)_GetOption(_options, GCDWebServerOption_AutomaticallyMapHEADToGET, @YES) boolValue];
     _disconnectDelay = [(NSNumber *)_GetOption(_options, GCDWebServerOption_ConnectedStateCoalescingInterval, @1.0) doubleValue];
     _dispatchQueuePriority = [(NSNumber *)_GetOption(_options, GCDWebServerOption_DispatchQueuePriority, @(DISPATCH_QUEUE_PRIORITY_DEFAULT)) longValue];
+    _connectionIdleTimeout = [(NSNumber *)_GetOption(_options, GCDWebServerOption_ConnectionIdleTimeout, @30.0) doubleValue];
 
     _source4 = [self _createDispatchSourceWithListeningSocket:listeningSocket4 isIPv6:NO];
     _source6 = [self _createDispatchSourceWithListeningSocket:listeningSocket6 isIPv6:YES];
