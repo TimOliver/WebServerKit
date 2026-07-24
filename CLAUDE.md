@@ -47,6 +47,16 @@ order (bounded, oldest dropped) until a reader parks, so no event is lost.
 Dead connections are reaped on the heartbeat tick (no parked reader + buffered
 data ⇒ gone). Covered by unit tests in `Framework/Tests.m` (`testSSEChannel*`).
 
+**Channel close semantics:** whenever the uploader stops servicing a channel
+(heartbeat reap, `-stop`, disabling SSE, or losing the registration race) it
+must call `-[GCDWebUploaderSSEChannel close]`, which completes any parked
+reader with empty data — GCDWebServer's end-of-stream sentinel — and makes
+future `parkReader:` calls complete immediately the same way. Merely dropping
+the channel from `_sseChannels` strands the connection parked forever and leaks
+it (retain cycle: connection → response → stream block → channel → parked
+reader → connection), which also keeps `_activeConnections` from ever reaching
+zero. Covered by `testSSEChannelClose*` and `testStopClosesActiveSSEConnections`.
+
 **`serverSentEventsEnabled`:** defaults to `YES`. The `NSFilePresenter`
 registration (which participates in system-wide file coordination) is only
 installed while enabled; toggling the property adds/removes it.
@@ -84,6 +94,20 @@ data: {"type":"external","path":"/Documents/"}
 ```
 
 **Smart reloading:** The browser only reloads when the changed directory matches the currently viewed path.
+
+### Connection Idle Timeout
+
+`GCDWebServerOption_ConnectionIdleTimeout` (NSNumber / double, default 30.0
+seconds, 0 disables): a connection whose pending socket read/write moves no
+bytes in either direction across two consecutive timer ticks is shut down
+(`shutdown(2)`, so the pending I/O unwinds through the normal error paths and
+the fd is closed in dealloc). The timeout only counts while socket I/O is
+actually pending — time spent waiting on a request handler never counts, so
+slow handlers are unaffected, and idle SSE streams are kept alive by the 15s
+heartbeats. This prevents silent clients from holding connection slots forever
+(with the 128-connection cap, 128 idle sockets previously meant a permanent
+denial of service). Covered by `testConnectionIdleTimeout*` in
+`Framework/Tests.m`.
 
 ### Framework Linking
 

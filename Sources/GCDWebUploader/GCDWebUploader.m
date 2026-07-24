@@ -76,6 +76,9 @@
 }
 
 - (void)enqueueData:(NSData*)data {
+    if (_closed) {
+        return;
+    }
     if (_parkedReader) {
         void (^reader)(NSData*) = _parkedReader;
         _parkedReader = nil;
@@ -89,6 +92,10 @@
 }
 
 - (void)parkReader:(void (^)(NSData* data))reader {
+    if (_closed) {
+        reader([NSData data]);  // End-of-stream: complete immediately, never park.
+        return;
+    }
     _idleHeartbeats = 0;  // The client came back to read: it is alive.
     if (_buffer.count > 0) {
         NSData* data = _buffer.firstObject;
@@ -97,6 +104,19 @@
         return;
     }
     _parkedReader = [reader copy];
+}
+
+- (void)close {
+    if (_closed) {
+        return;
+    }
+    _closed = YES;
+    [_buffer removeAllObjects];
+    if (_parkedReader) {
+        void (^reader)(NSData*) = _parkedReader;
+        _parkedReader = nil;
+        reader([NSData data]);  // End-of-stream sentinel: lets the connection finish cleanly.
+    }
 }
 
 @end
@@ -309,9 +329,12 @@ NS_ASSUME_NONNULL_END
                          dispatch_async(server->_sseQueue, ^{
                              // Re-check on the SSE queue: SSE may have been disabled between the
                              // check above and now, in which case don't register a channel that
-                             // would never be serviced or reaped.
+                             // would never be serviced or reaped — close it instead so the
+                             // connection ends cleanly rather than parking a reader forever.
                              if (server->_serverSentEventsEnabled) {
                                  [server->_sseChannels addObject:channel];
+                             } else {
+                                 [channel close];
                              }
                          });
                          GCDWebServerStreamedResponse *response =
@@ -385,6 +408,11 @@ NS_ASSUME_NONNULL_END
     [self _updateFilePresenterRegistration];
     if (!enabled) {
         dispatch_async(_sseQueue, ^{
+            // Close before dropping: an unclosed channel with a parked reader
+            // strands its connection forever (and leaks it via a retain cycle).
+            for (GCDWebUploaderSSEChannel* channel in self->_sseChannels) {
+                [channel close];
+            }
             [self->_sseChannels removeAllObjects];
         });
     }
@@ -400,11 +428,17 @@ NS_ASSUME_NONNULL_END
 
 - (void)stop {
     [super stop];
-    // No longer serving: stop observing the file system and drop any lingering SSE
-    // connections instead of leaving the presenter registered and the machinery
-    // running for the rest of the object's lifetime.
+    // No longer serving: stop observing the file system and actively end any
+    // lingering SSE connections. Each channel must be closed (not just dropped):
+    // closing completes the parked reader with end-of-stream so the connection
+    // finishes its response and releases its socket, whereas merely emptying the
+    // array would strand the connection parked forever, leaking the socket, the
+    // connection, and the server through a retain cycle.
     [self _updateFilePresenterRegistration];
     dispatch_async(_sseQueue, ^{
+        for (GCDWebUploaderSSEChannel* channel in self->_sseChannels) {
+            [channel close];
+        }
         [self->_sseChannels removeAllObjects];
     });
 }
@@ -500,7 +534,11 @@ NS_ASSUME_NONNULL_END
             // only reap after two consecutive idle heartbeats.
             channel.idleHeartbeats += 1;
             if (channel.idleHeartbeats >= 2) {
-                continue;  // Stopped reading: reap.
+                // Stopped reading: reap. Close so that a connection that is
+                // merely slow (not dead) gets end-of-stream when it re-parks,
+                // instead of parking forever on a channel we no longer service.
+                [channel close];
+                continue;
             }
         }
         [live addObject:channel];

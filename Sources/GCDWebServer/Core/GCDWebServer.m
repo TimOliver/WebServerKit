@@ -66,6 +66,7 @@ NSString *const GCDWebServerOption_ConnectionClass = @"ConnectionClass";
 NSString *const GCDWebServerOption_AutomaticallyMapHEADToGET = @"AutomaticallyMapHEADToGET";
 NSString *const GCDWebServerOption_ConnectedStateCoalescingInterval = @"ConnectedStateCoalescingInterval";
 NSString *const GCDWebServerOption_DispatchQueuePriority = @"DispatchQueuePriority";
+NSString *const GCDWebServerOption_ConnectionIdleTimeout = @"ConnectionIdleTimeout";
 #if TARGET_OS_IPHONE
 NSString *const GCDWebServerOption_AutomaticallySuspendInBackground = @"AutomaticallySuspendInBackground";
 #endif
@@ -644,12 +645,26 @@ static inline NSString *_EncodeBase64(NSString *string) {
         [accounts enumerateKeysAndObjectsUsingBlock:^(NSString *username, NSString *password, BOOL *stop) {
             [self->_authenticationDigestAccounts setObject:GCDWebServerComputeMD5Digest(@"%@:%@:%@", username, self->_authenticationRealm, password) forKey:username];
         }];
+    } else if (authenticationMethod != nil) {
+        // An AuthenticationMethod was requested but doesn't match a method we implement
+        // (a typo such as @"Digest" instead of @"DigestAccess" is easy to make). Neither
+        // account dictionary would be populated, and enforcement gates purely on those
+        // being non-nil, so we would silently run with NO authentication. Fail closed:
+        // refuse to start rather than serve unauthenticated when the caller asked for auth.
+        GWS_LOG_ERROR(@"Refusing to start: unknown authentication method \"%@\"", authenticationMethod);
+        if (error) {
+            *error = [NSError errorWithDomain:kGCDWebServerErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Unknown authentication method \"%@\"", authenticationMethod]}];
+        }
+        close(listeningSocket4);
+        close(listeningSocket6);
+        return NO;
     }
 
     _connectionClass = _GetOption(_options, GCDWebServerOption_ConnectionClass, [GCDWebServerConnection class]);
     _shouldAutomaticallyMapHEADToGET = [(NSNumber *)_GetOption(_options, GCDWebServerOption_AutomaticallyMapHEADToGET, @YES) boolValue];
     _disconnectDelay = [(NSNumber *)_GetOption(_options, GCDWebServerOption_ConnectedStateCoalescingInterval, @1.0) doubleValue];
     _dispatchQueuePriority = [(NSNumber *)_GetOption(_options, GCDWebServerOption_DispatchQueuePriority, @(DISPATCH_QUEUE_PRIORITY_DEFAULT)) longValue];
+    _connectionIdleTimeout = [(NSNumber *)_GetOption(_options, GCDWebServerOption_ConnectionIdleTimeout, @30.0) doubleValue];
 
     _source4 = [self _createDispatchSourceWithListeningSocket:listeningSocket4 isIPv6:NO];
     _source6 = [self _createDispatchSourceWithListeningSocket:listeningSocket6 isIPv6:YES];

@@ -383,6 +383,15 @@ NSString *GCDWebServerComputeMD5Digest(NSString *format, ...) {
 }
 
 NSString *GCDWebServerNormalizePath(NSString *path) {
+    // Treat an embedded NUL as a path terminator, the way the filesystem's C-string APIs do.
+    // Otherwise -pathExtension reads past the NUL while -fileSystemRepresentation truncates at
+    // it, so "secret.dat\0.png" would pass an extension allow-list yet open "secret.dat".
+    unichar nul = 0;
+    NSRange nulRange = [path rangeOfString:[NSString stringWithCharacters:&nul length:1]];
+    if (nulRange.location != NSNotFound) {
+        path = [path substringToIndex:nulRange.location];
+    }
+
     NSMutableArray *const components = [[NSMutableArray alloc] init];
 
     for (NSString *component in [path componentsSeparatedByString:@"/"]) {
