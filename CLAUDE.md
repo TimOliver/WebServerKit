@@ -26,6 +26,20 @@ xcodebuild -project GCDWebServer.xcodeproj -scheme "GCDWebServers (tvOS)" -confi
 
 ## Recent Changes
 
+### WebDAV MOVE/COPY safety (self-move data loss)
+
+`performCOPY:isMove:` previously did an unconditional `removeItemAtPath:dst` before
+the move. A MOVE whose destination resolved to the source — an exact self-move, or a
+case-only rename on a case-insensitive volume (`File.txt`→`file.txt`, same inode) —
+with `Overwrite: T` therefore deleted the only copy of the file. COPY onto an existing
+destination also always failed (it never removed the existing item). Now it rejects a
+self-move/self-copy with 403 (same-file detection via `NSURLFileResourceIdentifierKey`,
+so case-variants are caught) before any destructive step, checks the remove error
+instead of ignoring it, and removes an overwrite-permitted destination before COPY.
+A case-only rename is now rejected (safe) rather than performed. Covered by
+`testDAVMoveOntoItselfPreservesFile`, `testDAVCopyOverExistingReplacesContent`,
+`testDAVMoveOverExistingReplacesContent`.
+
 ### Error-page HTML escaping (reflected XSS fix)
 
 `GCDWebServerErrorResponse`'s `_EscapeHTMLString` escaped only `"`, so

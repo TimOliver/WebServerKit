@@ -105,6 +105,30 @@ static __kindof GCDWebServerRequest* OpenBodyRequest(Class requestClass, NSDicti
     return request;
 }
 
+// Sends a raw request over a fresh connection and returns the full reply, read to
+// EOF (every response sets Connection: Close). Nil on connect/send failure.
+static NSString* SendRawRequest(NSUInteger port, NSString* request) {
+    int fd = ConnectToLocalhostPort(port);
+    if (fd < 0) {
+        return nil;
+    }
+    const char* bytes = [request UTF8String];
+    if (send(fd, bytes, strlen(bytes), 0) != (ssize_t)strlen(bytes)) {
+        close(fd);
+        return nil;
+    }
+    BOOL sawEOF = NO;
+    NSData* data = ReadToEOF(fd, &sawEOF);
+    close(fd);
+    return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+}
+
+static NSString* MakeTempDirectory(void) {
+    NSString* dir = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSProcessInfo processInfo] globallyUniqueString]];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:NULL];
+    return dir;
+}
+
 @interface Tests : XCTestCase
 @end
 
@@ -518,6 +542,77 @@ static __kindof GCDWebServerRequest* OpenBodyRequest(Class requestClass, NSDicti
     XCTAssertFalse([html containsString:@"</script>"], @"reflected markup was not escaped: %@", html);
     XCTAssertTrue([html containsString:@"&lt;script&gt;"], @"expected escaped payload in body: %@", html);
     XCTAssertTrue([html containsString:@"a&amp;b"], @"'&' must be escaped: %@", html);
+}
+
+#pragma mark - WebDAV MOVE/COPY
+
+// A MOVE whose destination resolves to the source file must never destroy it. The
+// old code removed the destination then moved the (now-deleted) source, losing the
+// only copy of the file.
+- (void)testDAVMoveOntoItselfPreservesFile {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    NSString* path = [dir stringByAppendingPathComponent:@"a.txt"];
+    XCTAssertTrue([@"important" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    GCDWebDAVServer* server = [[GCDWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* reply = SendRawRequest(server.port, @"MOVE /a.txt HTTP/1.1\r\nHost: localhost\r\nDestination: http://localhost/a.txt\r\nOverwrite: T\r\n\r\n");
+    XCTAssertNotNil(reply);
+    XCTAssertTrue([fm fileExistsAtPath:path], @"a self-MOVE must not destroy the only copy; reply: %@", reply);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// COPY onto an existing destination (with overwrite permitted) must replace it, not
+// fail. The old code never removed the existing destination, so copyItem always failed.
+- (void)testDAVCopyOverExistingReplacesContent {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    NSString* srcPath = [dir stringByAppendingPathComponent:@"a.txt"];
+    NSString* dstPath = [dir stringByAppendingPathComponent:@"b.txt"];
+    XCTAssertTrue([@"source" writeToFile:srcPath atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([@"destination" writeToFile:dstPath atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    GCDWebDAVServer* server = [[GCDWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* reply = SendRawRequest(server.port, @"COPY /a.txt HTTP/1.1\r\nHost: localhost\r\nDestination: http://localhost/b.txt\r\nOverwrite: T\r\n\r\n");
+    XCTAssertNotNil(reply);
+    XCTAssertTrue([fm fileExistsAtPath:srcPath], @"source should remain after a copy; reply: %@", reply);
+    NSString* dstContent = [NSString stringWithContentsOfFile:dstPath encoding:NSUTF8StringEncoding error:NULL];
+    XCTAssertEqualObjects(dstContent, @"source", @"copy-over-existing should replace the destination; reply: %@", reply);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// Regression guard: a MOVE onto a *different* existing destination (Overwrite: T)
+// must still replace it and remove the source.
+- (void)testDAVMoveOverExistingReplacesContent {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    NSString* srcPath = [dir stringByAppendingPathComponent:@"a.txt"];
+    NSString* dstPath = [dir stringByAppendingPathComponent:@"b.txt"];
+    XCTAssertTrue([@"source" writeToFile:srcPath atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([@"destination" writeToFile:dstPath atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    GCDWebDAVServer* server = [[GCDWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* reply = SendRawRequest(server.port, @"MOVE /a.txt HTTP/1.1\r\nHost: localhost\r\nDestination: http://localhost/b.txt\r\nOverwrite: T\r\n\r\n");
+    XCTAssertNotNil(reply);
+    XCTAssertFalse([fm fileExistsAtPath:srcPath], @"source should be gone after a move; reply: %@", reply);
+    NSString* dstContent = [NSString stringWithContentsOfFile:dstPath encoding:NSUTF8StringEncoding error:NULL];
+    XCTAssertEqualObjects(dstContent, @"source", @"move-over-existing should replace the destination; reply: %@", reply);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
 }
 
 #pragma mark - Request body-size caps

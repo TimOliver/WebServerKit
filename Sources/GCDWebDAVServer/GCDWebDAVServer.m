@@ -379,6 +379,20 @@ static inline BOOL _IsMacFinder(GCDWebServerRequest *request) {
     return [GCDWebServerResponse responseWithStatusCode:kGCDWebServerHTTPStatusCode_Created];
 }
 
+// Whether two paths refer to the same underlying file — either identical strings, or
+// (on a case-insensitive volume) different spellings that resolve to a single inode.
+- (BOOL)_fileAtPath:(NSString *)path1 isSameAsPath:(NSString *)path2 {
+    if ([path1 isEqualToString:path2]) {
+        return YES;
+    }
+
+    id identifier1 = nil;
+    id identifier2 = nil;
+    return [[NSURL fileURLWithPath:path1] getResourceValue:&identifier1 forKey:NSURLFileResourceIdentifierKey error:NULL] &&
+           [[NSURL fileURLWithPath:path2] getResourceValue:&identifier2 forKey:NSURLFileResourceIdentifierKey error:NULL] &&
+           identifier1 && [identifier1 isEqual:identifier2];
+}
+
 - (GCDWebServerResponse *)performCOPY:(GCDWebServerRequest *)request isMove:(BOOL)isMove {
     if (!isMove) {
         NSString *const depthHeader = request.headers[@"Depth"];  // TODO: Support "Depth: 0"
@@ -456,15 +470,30 @@ static inline BOOL _IsMacFinder(GCDWebServerRequest *request) {
     }
 
     NSError *error = nil;
+    NSFileManager *const fileManager = [NSFileManager defaultManager];
+
+    // Reject a MOVE/COPY whose destination resolves to the source file itself — an exact
+    // self-move, or a case-only rename on a case-insensitive volume (different path
+    // strings, one underlying inode). Removing the "destination" below would otherwise
+    // delete the source, i.e. the only copy of the file. RFC 4918 forbids this.
+    if ([self _fileAtPath:srcAbsolutePath isSameAsPath:dstAbsolutePath]) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"%@ \"%@\" onto itself is not allowed", isMove ? @"Moving" : @"Copying", srcRelativePath];
+    }
+
+    // Overwriting is only reachable when the precondition check above permitted it (MOVE
+    // needs Overwrite:T, COPY needs Overwrite!=F). The destination is a distinct file, so
+    // remove it first — surfacing a failure instead of ignoring it — because moveItem and
+    // copyItem both refuse to overwrite an existing item.
+    if (existing && ![fileManager removeItemAtPath:dstAbsolutePath error:&error]) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden underlyingError:error message:@"Failed replacing \"%@\"", dstRelativePath];
+    }
 
     if (isMove) {
-        [[NSFileManager defaultManager] removeItemAtPath:dstAbsolutePath error:NULL];
-
-        if (![[NSFileManager defaultManager] moveItemAtPath:srcAbsolutePath toPath:dstAbsolutePath error:&error]) {
-            return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden underlyingError:error message:@"Failed copying \"%@\" to \"%@\"", srcRelativePath, dstRelativePath];
+        if (![fileManager moveItemAtPath:srcAbsolutePath toPath:dstAbsolutePath error:&error]) {
+            return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden underlyingError:error message:@"Failed moving \"%@\" to \"%@\"", srcRelativePath, dstRelativePath];
         }
     } else {
-        if (![[NSFileManager defaultManager] copyItemAtPath:srcAbsolutePath toPath:dstAbsolutePath error:&error]) {
+        if (![fileManager copyItemAtPath:srcAbsolutePath toPath:dstAbsolutePath error:&error]) {
             return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden underlyingError:error message:@"Failed copying \"%@\" to \"%@\"", srcRelativePath, dstRelativePath];
         }
     }
