@@ -49,6 +49,41 @@ static NSData* SSEData(NSString* string) {
     XCTAssertEqualObjects(GCDWebServerNormalizePath(@"../.."), @"");
 }
 
+// A misspelled AuthenticationMethod must fail closed (refuse to start) rather than
+// silently run the server with no authentication at all.
+- (void)testUnknownAuthenticationMethodFailsClosed {
+    GCDWebServer *server = [[GCDWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET" requestClass:[GCDWebServerRequest class] processBlock:^GCDWebServerResponse *(GCDWebServerRequest *request) {
+        return [GCDWebServerDataResponse responseWithText:@"ok"];
+    }];
+
+    NSError *error = nil;
+    BOOL started = [server startWithOptions:@{
+        GCDWebServerOption_Port : @(0),
+        GCDWebServerOption_BindToLocalhost : @(YES),
+        GCDWebServerOption_AuthenticationMethod : @"Digest",  // typo for "DigestAccess"
+        GCDWebServerOption_AuthenticationAccounts : @{@"user" : @"password"}
+    } error:&error];
+    XCTAssertFalse(started);
+    XCTAssertNotNil(error);
+    if (started) {
+        [server stop];
+    }
+
+    // The correctly-spelled method still starts.
+    NSError *validError = nil;
+    BOOL validStarted = [server startWithOptions:@{
+        GCDWebServerOption_Port : @(0),
+        GCDWebServerOption_BindToLocalhost : @(YES),
+        GCDWebServerOption_AuthenticationMethod : GCDWebServerAuthenticationMethod_DigestAccess,
+        GCDWebServerOption_AuthenticationAccounts : @{@"user" : @"password"}
+    } error:&validError];
+    XCTAssertTrue(validStarted);
+    if (validStarted) {
+        [server stop];
+    }
+}
+
 #pragma mark - GCDWebUploaderSSEChannel
 
 // Messages produced while no reader is parked must be buffered and later

@@ -644,6 +644,19 @@ static inline NSString *_EncodeBase64(NSString *string) {
         [accounts enumerateKeysAndObjectsUsingBlock:^(NSString *username, NSString *password, BOOL *stop) {
             [self->_authenticationDigestAccounts setObject:GCDWebServerComputeMD5Digest(@"%@:%@:%@", username, self->_authenticationRealm, password) forKey:username];
         }];
+    } else if (authenticationMethod != nil) {
+        // An AuthenticationMethod was requested but doesn't match a method we implement
+        // (a typo such as @"Digest" instead of @"DigestAccess" is easy to make). Neither
+        // account dictionary would be populated, and enforcement gates purely on those
+        // being non-nil, so we would silently run with NO authentication. Fail closed:
+        // refuse to start rather than serve unauthenticated when the caller asked for auth.
+        GWS_LOG_ERROR(@"Refusing to start: unknown authentication method \"%@\"", authenticationMethod);
+        if (error) {
+            *error = [NSError errorWithDomain:kGCDWebServerErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"Unknown authentication method \"%@\"", authenticationMethod]}];
+        }
+        close(listeningSocket4);
+        close(listeningSocket6);
+        return NO;
     }
 
     _connectionClass = _GetOption(_options, GCDWebServerOption_ConnectionClass, [GCDWebServerConnection class]);
