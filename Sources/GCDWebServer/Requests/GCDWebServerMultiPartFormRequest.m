@@ -336,6 +336,16 @@ static NSData *_dashNewlineData = nil;
 }
 
 - (BOOL)appendBytes:(const void *)bytes length:(NSUInteger)length {
+    // Bound the parser's working buffer. File-part content is drained to disk as it
+    // arrives, so this only limits data genuinely held in memory: an oversized
+    // argument part, or a malformed stream whose content contains the boundary token
+    // without the trailing CRLF (which otherwise wedges the parser and grows the
+    // buffer without bound).
+    if (_data.length + length > kGCDWebServerMaxInMemoryBodyLength) {
+        GWS_LOG_ERROR(@"Multipart form data buffered in memory exceeds the %i byte limit", (int)kGCDWebServerMaxInMemoryBodyLength);
+        return NO;
+    }
+
     [_data appendBytes:bytes length:length];
     return [self _parseData];
 }

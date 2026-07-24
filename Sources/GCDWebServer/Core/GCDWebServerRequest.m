@@ -75,6 +75,7 @@ NSString *const GCDWebServerRequestAttribute_RegexCaptures = @"GCDWebServerReque
 @implementation GCDWebServerGZipDecoder {
     z_stream _stream;
     BOOL _finished;
+    NSUInteger _totalDecoded;
 }
 
 - (BOOL)open:(NSError **)error {
@@ -125,6 +126,20 @@ NSString *const GCDWebServerRequestAttribute_RegexCaptures = @"GCDWebServerReque
 
         length += maxLength - _stream.avail_out;
 
+        // Bound total inflated output so a small highly-compressible body (a "zip
+        // bomb") cannot balloon the output buffer and exhaust memory. Checked inside
+        // the loop, before the next doubling, so we stop growing as soon as the cap
+        // is crossed rather than after allocating past it.
+        if (_totalDecoded + length > kGCDWebServerMaxDecompressedBodyLength) {
+            GWS_LOG_ERROR(@"Decompressed request body exceeds the %i byte limit", (int)kGCDWebServerMaxDecompressedBodyLength);
+
+            if (error) {
+                *error = [NSError errorWithDomain:kGCDWebServerErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: @"Decompressed request body exceeds maximum size"}];
+            }
+
+            return NO;
+        }
+
         if (_stream.avail_out > 0) {
             if (result == Z_STREAM_END) {
                 _finished = YES;
@@ -135,6 +150,7 @@ NSString *const GCDWebServerRequestAttribute_RegexCaptures = @"GCDWebServerReque
 
         decodedData.length = 2 * decodedData.length;  // zlib has used all the output buffer so resize it and try again in case more data is available
     }
+    _totalDecoded += length;
     decodedData.length = length;
     BOOL success = length ? [super writeData:decodedData error:error] : YES;  // No need to call writer if we have no data yet
     return success;

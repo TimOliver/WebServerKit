@@ -61,6 +61,21 @@
 #endif
 
 /**
+ *  Upper bounds on how much request data may be held in memory at once, to keep
+ *  a malicious or broken client from exhausting memory on a constrained device.
+ *  These cap in-memory buffering only; bodies streamed to disk (uploaded files,
+ *  WebDAV PUT) are not limited by these. Like kHeadersMaxLength and
+ *  kGCDWebServerMaxConnections, they are fixed safety limits, not options.
+ *
+ *  kGCDWebServerMaxInMemoryBodyLength bounds any single in-memory body buffer
+ *  (a data request body, a multipart argument part or the parser's working
+ *  buffer, a single chunked-transfer chunk). kGCDWebServerMaxDecompressedBodyLength
+ *  bounds the total output a gzip-encoded request body may inflate to.
+ */
+#define kGCDWebServerMaxInMemoryBodyLength (16 * 1024 * 1024)
+#define kGCDWebServerMaxDecompressedBodyLength (64 * 1024 * 1024)
+
+/**
  *  Check if a custom logging facility should be used instead.
  */
 

@@ -59,6 +59,16 @@
 }
 
 - (BOOL)writeData:(NSData *)data error:(NSError **)error {
+    if (_data.length + data.length > kGCDWebServerMaxInMemoryBodyLength) {
+        GWS_LOG_ERROR(@"Request body exceeds the %i byte in-memory limit", (int)kGCDWebServerMaxInMemoryBodyLength);
+
+        if (error) {
+            *error = [NSError errorWithDomain:kGCDWebServerErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: @"Request body exceeds maximum in-memory size"}];
+        }
+
+        return NO;
+    }
+
     [_data appendData:data];
     return YES;
 }

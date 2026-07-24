@@ -26,6 +26,30 @@ xcodebuild -project GCDWebServer.xcodeproj -scheme "GCDWebServers (tvOS)" -confi
 
 ## Recent Changes
 
+### Request hardening: in-memory body caps
+
+Bounds a malicious/broken client's ability to exhaust memory on a transient
+device. (Connection slot exhaustion by silent clients is handled separately —
+see "Connection Idle Timeout" below.)
+
+**In-memory body caps** (`kGCDWebServerMaxInMemoryBodyLength` = 16 MB,
+`kGCDWebServerMaxDecompressedBodyLength` = 64 MB, in `GCDWebServerPrivate.h`).
+Fixed safety constants like `kHeadersMaxLength`, not options. They cap only data
+held **in memory**; bodies streamed to disk (uploaded files, WebDAV `PUT`) are not
+limited, so large uploads keep working. Enforced at four points:
+- `GCDWebServerDataRequest` body (DAV PROPFIND/LOCK/MKCOL, forms, data requests)
+- `GCDWebServerGZipDecoder` total inflated output — bails inside the inflate loop, so a zip bomb can't balloon the buffer first
+- multipart parser working buffer (`appendBytes:`) — also resolves a stall where content containing the boundary token without a trailing CRLF wedged the parser and grew the buffer without bound
+- a single chunked-transfer chunk (`readNextBodyChunk:`)
+
+A body read that fails (client disconnect mid-body, malformed framing, or a cap
+rejection) now aborts the request instead of processing a partial body as if
+complete (`_readBodyWithLength:` / `_readChunkedBodyWithInitialData:`).
+
+Covered by unit tests in `Framework/Tests.m` (`testDataRequest*`, `testGZip*`,
+`testMultiPart*`); the chunk/partial-body paths are verified by build and review
+(they need socket-level integration to unit-test).
+
 ### Server-Sent Events (SSE) for GCDWebUploader
 
 Added live browser updates when files change on the device.

@@ -3,7 +3,9 @@
 
 #import <netinet/in.h>
 #import <sys/socket.h>
+#import <zlib.h>
 
+#import "GCDWebServerPrivate.h"
 #import "GCDWebUploaderSSEChannel.h"
 
 #pragma clang diagnostic ignored "-Weverything"  // Prevent "messaging to unqualified id" warnings
@@ -49,6 +51,58 @@ static NSData* ReadToEOF(int fd, BOOL* sawEOF) {
             return data;
         }
     }
+}
+
+// Produce a gzip stream (RFC 1952) from the given data, matching the format the
+// server's GCDWebServerGZipDecoder expects (inflateInit2 window bits 15 + 16).
+static NSData* GZipCompress(NSData* input) {
+    z_stream stream;
+    bzero(&stream, sizeof(stream));
+
+    if (deflateInit2(&stream, Z_BEST_COMPRESSION, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+        return nil;
+    }
+
+    stream.next_in = (Bytef*)input.bytes;
+    stream.avail_in = (uInt)input.length;
+    NSMutableData* output = [NSMutableData dataWithLength:(64 * 1024)];
+    NSUInteger total = 0;
+    int result;
+
+    do {
+        if (total == output.length) {
+            output.length = 2 * output.length;
+        }
+
+        stream.next_out = (Bytef*)output.mutableBytes + total;
+        stream.avail_out = (uInt)(output.length - total);
+        result = deflate(&stream, Z_FINISH);
+        total = output.length - stream.avail_out;
+    } while (result == Z_OK);
+
+    deflateEnd(&stream);
+
+    if (result != Z_STREAM_END) {
+        return nil;
+    }
+
+    output.length = total;
+    return output;
+}
+
+// Build a request of the given class with a body, ready to receive performWriteData:.
+static __kindof GCDWebServerRequest* OpenBodyRequest(Class requestClass, NSDictionary* extraHeaders) {
+    NSURL* url = [NSURL URLWithString:@"http://localhost/"];
+    // A Content-Length is required for the request to keep its Content-Type (and
+    // thus hasBody); its value is only a capacity hint here — writing past it via
+    // performWriteData: directly is fine (only the connection enforces the length).
+    NSMutableDictionary* headers = [NSMutableDictionary dictionaryWithDictionary:@{@"Content-Type": @"application/octet-stream", @"Content-Length": @"1024"}];
+    [headers addEntriesFromDictionary:extraHeaders];
+    GCDWebServerRequest* request = [[requestClass alloc] initWithMethod:@"POST" url:url headers:headers path:@"/" query:@{}];
+    [request prepareForWriting];
+    NSError* error = nil;
+    [request performOpen:&error];
+    return request;
 }
 
 @interface Tests : XCTestCase
@@ -385,6 +439,70 @@ static NSData* ReadToEOF(int fd, BOOL* sawEOF) {
     XCTAssertTrue([reply containsString:@"slow-response-body"], @"slow handler's response was cut off: %@", reply);
     close(fd);
     [server stop];
+}
+
+#pragma mark - Request body-size caps
+
+// A body buffered entirely in memory (e.g. a DAV PROPFIND/LOCK body or a data
+// request) must be rejected once it exceeds the in-memory cap, rather than
+// growing unbounded and exhausting memory on the device.
+- (void)testDataRequestRejectsBodyExceedingInMemoryCap {
+    GCDWebServerDataRequest* request = OpenBodyRequest([GCDWebServerDataRequest class], @{});
+    XCTAssertTrue([request hasBody]);
+
+    NSData* chunk = [NSMutableData dataWithLength:(1024 * 1024)];  // 1 MB
+    NSError* error = nil;
+    BOOL rejected = NO;
+
+    for (int i = 0; i < 256; i++) {  // up to 256 MB if never rejected
+        if (![request performWriteData:chunk error:&error]) {
+            rejected = YES;
+            break;
+        }
+    }
+
+    XCTAssertTrue(rejected, @"Data request should reject a body exceeding the in-memory cap");
+}
+
+// The multipart parser can be wedged by a part whose content contains the
+// boundary token not followed by CRLF: it can never advance, so the buffer
+// would grow without bound. It must reject once the buffer exceeds the cap.
+- (void)testMultiPartParserRejectsUnboundedBufferingFromFakeBoundary {
+    GCDWebServerMultiPartFormRequest* request = OpenBodyRequest([GCDWebServerMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
+    XCTAssertTrue([request hasBody]);
+
+    // A file part header, then content that begins with the boundary token "--X"
+    // followed by 'y' (not CRLF) — the parser stalls on this forever.
+    NSMutableData* head = [NSMutableData data];
+    [head appendData:SSEData(@"--X\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.bin\"\r\n\r\n")];
+    [head appendData:SSEData(@"--Xy")];
+    NSError* error = nil;
+    XCTAssertTrue([request performWriteData:head error:&error]);
+
+    NSData* filler = [NSMutableData dataWithLength:(1024 * 1024)];  // zeros: no boundary token
+    BOOL rejected = NO;
+
+    for (int i = 0; i < 256; i++) {
+        if (![request performWriteData:filler error:&error]) {
+            rejected = YES;
+            break;
+        }
+    }
+
+    XCTAssertTrue(rejected, @"Multipart parser should reject unbounded buffering from a fake boundary");
+}
+
+// A gzip-encoded body must not be allowed to inflate without bound: a small
+// highly-compressible payload that decompresses past the cap must be rejected.
+- (void)testGZipDecoderRejectsDecompressionBomb {
+    NSData* bomb = GZipCompress([NSMutableData dataWithLength:(80 * 1024 * 1024)]);  // inflates to 80 MB
+    XCTAssertNotNil(bomb);
+    XCTAssertLessThan(bomb.length, (NSUInteger)(1024 * 1024));  // sanity: compressed form is tiny
+
+    GCDWebServerDataRequest* request = OpenBodyRequest([GCDWebServerDataRequest class], @{@"Content-Encoding": @"gzip"});
+    NSError* error = nil;
+
+    XCTAssertFalse([request performWriteData:bomb error:&error], @"gzip decoder should reject a decompression bomb");
 }
 
 @end

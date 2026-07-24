@@ -274,10 +274,19 @@ NS_ASSUME_NONNULL_END
                           completionBlock:^(BOOL success) {
                               NSError *localError = nil;
 
+                              if (!success) {
+                                  // The body read failed: the client disconnected mid-body, the
+                                  // chunk framing was malformed, or a size cap rejected it. Don't
+                                  // hand the handler a partial body as if it were complete.
+                                  [self->_request performClose:NULL];
+                                  [self abortRequest:self->_request withStatusCode:kGCDWebServerHTTPStatusCode_InternalServerError];
+                                  return;
+                              }
+
                               if ([self->_request performClose:&localError]) {
                                   [self _startProcessingRequest];
                               } else {
-                                  GWS_LOG_ERROR(@"Failed closing request body for socket %i: %@", self->_socket, error);
+                                  GWS_LOG_ERROR(@"Failed closing request body for socket %i: %@", self->_socket, localError);
                                   [self abortRequest:self->_request withStatusCode:kGCDWebServerHTTPStatusCode_InternalServerError];
                               }
                           }];
@@ -305,10 +314,19 @@ NS_ASSUME_NONNULL_END
             completionBlock:^(BOOL success) {
                 NSError *localError = nil;
 
+                if (!success) {
+                    // The body read failed: the client disconnected mid-body, the chunk
+                    // framing was malformed, or a size cap rejected it. Don't hand the
+                    // handler a partial body as if it were complete.
+                    [self->_request performClose:NULL];
+                    [self abortRequest:self->_request withStatusCode:kGCDWebServerHTTPStatusCode_InternalServerError];
+                    return;
+                }
+
                 if ([self->_request performClose:&localError]) {
                     [self _startProcessingRequest];
                 } else {
-                    GWS_LOG_ERROR(@"Failed closing request body for socket %i: %@", self->_socket, error);
+                    GWS_LOG_ERROR(@"Failed closing request body for socket %i: %@", self->_socket, localError);
                     [self abortRequest:self->_request withStatusCode:kGCDWebServerHTTPStatusCode_InternalServerError];
                 }
             }];
@@ -653,6 +671,15 @@ static inline NSUInteger _ScanHexNumber(const void *bytes, NSUInteger size) {
 
         if (length != NSNotFound) {
             if (length) {
+                if (length > kGCDWebServerMaxInMemoryBodyLength) {
+                    // A single chunk is buffered whole in memory before being written, so
+                    // cap its declared size. Legitimate chunked uploads use many smaller
+                    // chunks; this only rejects a pathologically large single chunk.
+                    GWS_LOG_ERROR(@"Chunk size %lu exceeds the %i byte limit reading request body on socket %i", (unsigned long)length, (int)kGCDWebServerMaxInMemoryBodyLength, _socket);
+                    block(NO);
+                    return;
+                }
+
                 if (chunkData.length < range.location + range.length + length + 2) {
                     break;
                 }
