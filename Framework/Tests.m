@@ -89,6 +89,12 @@ static NSData* ReadToEOF(int fd, BOOL* sawEOF) {
     XCTAssertEqualObjects(GCDWebServerNormalizePath(@"."), @"");
     XCTAssertEqualObjects(GCDWebServerNormalizePath(@".."), @"");
     XCTAssertEqualObjects(GCDWebServerNormalizePath(@"../.."), @"");
+
+    // An embedded NUL is treated as a terminator, so the extension check and the actual
+    // file access can no longer disagree (which would bypass an extension allow-list).
+    unichar nul = 0;
+    NSString *const nulStr = [NSString stringWithCharacters:&nul length:1];
+    XCTAssertEqualObjects(GCDWebServerNormalizePath([[@"secret.dat" stringByAppendingString:nulStr] stringByAppendingString:@".png"]), @"secret.dat");
 }
 
 // A misspelled AuthenticationMethod must fail closed (refuse to start) rather than
