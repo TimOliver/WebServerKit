@@ -49,6 +49,91 @@ Concretely, when a judgment call comes up:
 
 ## Recent Changes
 
+### Fifth audit pass: response-side amplification, refusal ordering, and a regression from the budget branch
+
+Run with eight deliberately disjoint lenses and every finding put through two independent
+refuters — one reading the call chain, one required to reproduce it — because the fourth
+pass showed that reading alone manufactures confident nonsense. Each fix below was checked
+in both directions: the regression test was run against the *unfixed* source and confirmed
+to fail. Two findings were defects in code added by the host-validation and
+aggregate-budget branches.
+
+**A truncated gzip request body was accepted as a complete one.**
+`-[GCDWebServerGZipDecoder close:]` asserted `Z_STREAM_END` and then reported success
+regardless; `GWS_DCHECK` is a no-op in Release. A `PUT` of a 20-byte gzip prefix over an
+existing file answered `204 No Content` and left the file **zero bytes** — stage-and-swap
+does not help, because the handler runs. The same request aborted a Debug build. Trailing
+bytes *after* `Z_STREAM_END` were a second DCHECK, silently discarding a concatenated
+member in Release. Both refuse now, and `close:` still closes the downstream writer so the
+refused transaction leaves no descriptor or staging file behind.
+
+**Every refusal was evaluated after the whole body had been spooled to disk.** The
+connection matched a handler and read the body immediately; `-_startProcessingRequest` —
+which runs the Host allow-list and `-preflightRequest:` — was only reached from that
+read's completion. Measured: **288 MB** written to `NSTemporaryDirectory()` before a 401,
+the same before a 421, 199 MB before the uploader's 403. The last is reachable from a
+plain auto-submitting HTML form, so it needs no DNS rebinding and is not covered by the
+rebinding item still deferred below. Both checks now run through a single
+`-_responseForRejectedRequest` as soon as the headers are available. **`-preflightRequest:`
+is therefore now called before the body exists** and its documentation says so; an
+override must decide on headers alone.
+
+**⚠️ The aggregate budget's own gzip accounting was inverted.** The decoder charged
+`_totalDecoded` — everything it had ever inflated — rather than the buffer it held, and
+the decoded bytes go straight to the downstream writer, which does its own accounting. So
+64 KB of traffic parked 63 of the 64 MB budget indefinitely and every other connection
+then failed every in-memory path. It charges the live buffer now, *before* growing it.
+
+**Error pages were a 6x wire / 27x memory amplifier.** WebDAV echoes an unparseable
+request body verbatim, and the HTML escaper expands `"` sixfold through UTF-16
+`NSMutableString` passes: one 16 MB PROPFIND produced a 96 MB response and 540 MB RSS, six
+concurrent reached 1.76 GB. The per-request and aggregate caps became the attacker's
+budget rather than his limit. Reflected strings are clamped at the single point they pass
+through. Relatedly, **PROPFIND/LOCK parsed a body of any size into a libxml2 DOM** — 16 MB
+of empty elements took the process from 5 MB to 561 MB and still answered 207 — now capped
+at `kDAVMaxRequestBodyLength`.
+
+**Header framing was ambiguous.** The block is delimited by scanning for CRLFCRLF but
+parsed by CFHTTPMessage, which ends a message at a bare LF-LF, so headers between the two
+were silently dropped while the request still answered 200 — with `X-Pad: p\n\nHost:
+evil.example`, `request.headers` came back with no Host at all and the allow-list took its
+"no Host" branch. `Content-Length : 5` and a folded `Content-Length:\r\n 5` both produced
+a content length, and that field decides how many bytes reach the disk. A single
+validating pass now requires paired CRLF, no obs-fold, `1*tchar` field names, and a
+request line of exactly `method SP target SP HTTP/1.[01]` (`GET /a HTTP/1.1 junk` was
+dispatched with a path of `/a HTTP/1.1`). All eight cases answered 200 before this.
+Header failures answer 431/400 instead of a blanket 500.
+
+**Found while writing the test for the above:** `kHeadersMaxLength` was only enforced
+while *waiting* for the terminator, so an oversized header block sent in one burst was
+found, parsed and served. The cap now applies to the block, not the buffer — which
+legitimately runs past it once body bytes arrive in the same read.
+
+**COPY did not reject a Destination inside the source.** Nothing detected it up front:
+`-[NSFileManager copyItemAtPath:]` re-entered the tree it was walking and the request was
+only refused once a path exceeded `PATH_MAX`, about 250 directories down. Whether the
+cleanup could then still remove that tree depends on how long the share's own path is, so
+this is now a precondition check, before any filesystem work.
+
+**Correction to the finding as first reported:** the claim that a refused COPY *always*
+strands ~250 undeletable directories did not reproduce under `NSTemporaryDirectory()` —
+the cleanup succeeds there. The recursion is real (verified directly against
+`NSFileManager`); the residue depends on path length.
+
+**Test-suite trap worth remembering:** once the header cap actually refused, the server
+began closing the socket mid-request, and `ConnectToLocalhostPort` had no `SO_NOSIGPIPE` —
+so the test process was killed by SIGPIPE and xctest reported it as *"Executed 23 tests,
+with 0 failures"*. Always read the executed count, never the failure count alone.
+
+**Still open after this pass:** If-None-Match precedence over If-Modified-Since, `If-Range`
+ignored on resumed downloads, `filename*` escaped with a URL-query escaper (leaves `;`
+raw, bypassing `allowedFileExtensions` at the victim's disk), NAT-PMP callbacks mutating
+state outside `_stateQueue`, `/events` reachable cross-origin via `fetch(mode:'no-cors')`,
+a trailing-dot FQDN Host answering 421, `_XMLEscape` not stripping XML-illegal control
+characters, chunked responses sent to HTTP/1.0 clients, gzip-over-Range emitting an
+identity-offset `Content-Range`, and the recorded-trace corpus still unbuildable (see the
+third pass) so no real-client interop suite has run for three passes.
+
 ### Fourth audit pass: containment, framing, and two regressions from the third pass
 
 Found by changing *technique* rather than re-reading: sanitizers, a mutational fuzzer, and
