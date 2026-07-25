@@ -27,7 +27,14 @@
 
 var ENTER_KEYCODE = 13;
 
-var _path = null;
+// The root, not null: _reload() is called with _path from handlers that can fire before
+// the first listing comes back (the Refresh button, the EventSource "open" callback), and
+// a null there used to reach path.split("/") and throw. jQuery's Callbacks.fire has no
+// try/catch and .always() sits on the same list, so the throw also skipped
+// _enableReloads() — _reloadingDisabled stuck above zero and every later reload queued
+// forever, freezing the UI and holding an /events slot open for nothing.
+var _path = "/";
+var _pathRendered = false;  // The breadcrumb starts empty, so the first listing must always draw it.
 var _pendingReloads = [];
 var _reloadingDisabled = 0;
 
@@ -70,6 +77,12 @@ function _enableReloads() {
 }
 
 function _reload(path) {
+  // Coerce at the single entry point rather than at each call site: everything below
+  // (and the server) treats a path as a string.
+  if (!path) {
+    path = "/";
+  }
+
   if (_reloadingDisabled) {
     if ($.inArray(path, _pendingReloads) < 0) {
       _pendingReloads.push(path);
@@ -88,7 +101,8 @@ function _reload(path) {
   }).done(function(data, textStatus, jqXHR) {
     var scrollPosition = $(document).scrollTop();
     
-    if (path != _path) {
+    if (!_pathRendered || (path != _path)) {
+      _pathRendered = true;
       $("#path").empty();
       if (path == "/") {
         $("#path").append('<li class="active">' + _escapeHTML(_device) + '</li>');
@@ -135,8 +149,19 @@ function _reload(path) {
           _reload(_path);
         });
       }
-      return value;
+      // jeditable puts the returned string back with .html(), so escape it — the input
+      // now holds the real name, and a "<" in it would otherwise be parsed as markup.
+      return _escapeHTML(value);
     }, {
+      // Seed the edit box with the real name from /list. jeditable otherwise pre-fills it
+      // from the element's *serialized HTML*, so "A & B.txt" arrives as "A &amp; B.txt",
+      // which never equals the name compared against above: pressing Enter without typing
+      // anything fired a move and renamed the file on disk to the escaped text — then to
+      // "A &amp;amp; B.txt" on the next pass. Silent corruption of a common character.
+      data: function(revert, settings) {
+        var name = $(this).parent().parent().data("name");
+        return (name === undefined || name === null) ? revert : String(name);
+      },
       onedit: function(settings, original) {
         _disableReloads();
       },
@@ -326,22 +351,29 @@ $(document).ready(function() {
     _reload(_path);
   });
 
-  // Restore path from URL hash on page load, or start at root
-  var initialPath = "/";
-  if (window.location.hash) {
-    var hashPath = decodeURIComponent(window.location.hash.substring(1));
-    if (hashPath && hashPath.charAt(0) === '/') {
-      initialPath = hashPath;
+  // Read the current path out of the URL hash, defaulting to the root. The hash is
+  // whatever the user typed, so decodeURIComponent throws URIError on a malformed
+  // escape such as "/#%" — uncaught here it would abort $(document).ready before the
+  // first _reload(), leaving the page permanently empty.
+  function _pathFromHash() {
+    if (!window.location.hash) {
+      return "/";
     }
+    var hashPath;
+    try {
+      hashPath = decodeURIComponent(window.location.hash.substring(1));
+    } catch (e) {
+      return "/";
+    }
+    return (hashPath && hashPath.charAt(0) === '/') ? hashPath : "/";
   }
-  _reload(initialPath);
+
+  // Restore path from URL hash on page load, or start at root
+  _reload(_pathFromHash());
 
   // Handle browser back/forward navigation
   $(window).on('hashchange', function() {
-    var hashPath = "/";
-    if (window.location.hash) {
-      hashPath = decodeURIComponent(window.location.hash.substring(1));
-    }
+    var hashPath = _pathFromHash();
     if (hashPath !== _path) {
       _reload(hashPath);
     }

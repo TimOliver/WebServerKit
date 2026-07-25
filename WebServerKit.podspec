@@ -5,39 +5,44 @@ Pod::Spec.new do |s|
   s.license  = { :type => 'BSD', :file => 'LICENSE' }
   s.homepage = 'https://github.com/TimOliver/WebServerKit'
   s.summary  = 'Lightweight GCD based HTTP server for OS X & iOS. A fork of GCDWebServer.'
-  
+
   s.source   = { :git => 'https://github.com/TimOliver/WebServerKit.git', :tag => s.version.to_s }
   s.ios.deployment_target = '12.0'
   s.osx.deployment_target = '10.15'
+  s.tvos.deployment_target = '12.0'
   s.requires_arc = true
-  
+
   s.default_subspec = 'Core'
-  
+
+  # Paths are relative to the repository root, where the sources live under "Sources/".
+  # The framework links the same set of system libraries on every platform (see
+  # OTHER_LDFLAGS in GCDWebServer.xcodeproj), so the declarations below are not
+  # per-platform either.
   s.subspec 'Core' do |cs|
-    cs.source_files = 'GCDWebServer/**/*.{h,m}'
-    cs.private_header_files = "GCDWebServer/Core/GCDWebServerPrivate.h"
+    cs.source_files = 'Sources/GCDWebServer/**/*.{h,m}'
+    cs.private_header_files = 'Sources/GCDWebServer/Core/GCDWebServerPrivate.h'
     cs.requires_arc = true
-    cs.ios.library = 'z'
-    cs.ios.frameworks = 'CoreServices', 'CFNetwork'
-    cs.osx.library = 'z'
-    cs.osx.framework = 'SystemConfiguration'
-    cs.ios.weak_framework = 'UniformTypeIdentifiers'
-    cs.osx.weak_framework = 'UniformTypeIdentifiers'
+    cs.library = 'z'
+    cs.frameworks = 'CFNetwork', 'SystemConfiguration'
+    # CoreServices supplies the pre-UTType MIME lookup and UniformTypeIdentifiers the
+    # modern one; both are resolved at runtime, so neither may be a hard link requirement.
+    cs.weak_frameworks = 'CoreServices', 'UniformTypeIdentifiers'
   end
-  
+
   s.subspec 'WebDAV' do |cs|
     cs.dependency 'WebServerKit/Core'
-    cs.source_files = 'GCDWebDAVServer/*.{h,m}'
+    cs.source_files = 'Sources/GCDWebDAVServer/*.{h,m}'
     cs.requires_arc = true
-    cs.ios.library = 'xml2'
-    cs.osx.library = 'xml2'
+    cs.library = 'xml2'
     cs.compiler_flags = '-I$(SDKROOT)/usr/include/libxml2'
   end
-  
+
   s.subspec 'WebUploader' do |cs|
     cs.dependency 'WebServerKit/Core'
-    cs.source_files = 'GCDWebUploader/*.{h,m}'
+    cs.source_files = 'Sources/GCDWebUploader/*.{h,m}'
+    # Implementation detail of the SSE endpoint, not part of the public API.
+    cs.private_header_files = 'Sources/GCDWebUploader/GCDWebUploaderSSEChannel.h'
     cs.requires_arc = true
-    cs.resources = 'GCDWebUploader/GCDWebUploader.bundle'
-  end 
+    cs.resources = 'Sources/GCDWebUploader/GCDWebUploader.bundle'
+  end
 end

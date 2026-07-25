@@ -38,7 +38,15 @@ class ViewController: UIViewController {
     let documentsPath = NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true).first!
     webServer = GCDWebUploader(uploadDirectory: documentsPath)
     webServer.delegate = self
-    webServer.allowHiddenItems = true
+
+    // The server is reachable by anything on the same network. To require a password,
+    // and/or to accept connections from this device only, start it with options instead:
+    //
+    // try? webServer.start(options: [
+    //   GCDWebServerOption_AuthenticationMethod: GCDWebServerAuthenticationMethod_Basic,
+    //   GCDWebServerOption_AuthenticationAccounts: ["user": "password"],
+    //   GCDWebServerOption_BindToLocalhost: true,
+    // ])
     if webServer.start() {
       label?.text = "GCDWebServer running locally on port \(webServer.port)"
     } else {

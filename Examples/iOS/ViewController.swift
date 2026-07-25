@@ -38,11 +38,17 @@ class ViewController: UIViewController {
     let documentsPath = NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true).first!
     webServer = GCDWebUploader(uploadDirectory: documentsPath)
     webServer.delegate = self
-    webServer.allowHiddenItems = true
 
     // Start with background suspension disabled for extended background task time
     let options: [String: Any] = [
-      GCDWebServerOption_AutomaticallySuspendInBackground: false
+      GCDWebServerOption_AutomaticallySuspendInBackground: false,
+
+      // The server is reachable by anything on the same network. Uncomment to require a
+      // password, and/or to accept connections from this device only:
+      //
+      // GCDWebServerOption_AuthenticationMethod: GCDWebServerAuthenticationMethod_Basic,
+      // GCDWebServerOption_AuthenticationAccounts: ["user": "password"],
+      // GCDWebServerOption_BindToLocalhost: true,
     ]
 
     do {
