@@ -20,6 +20,10 @@ Pod::Spec.new do |s|
   # per-platform either.
   s.subspec 'Core' do |cs|
     cs.source_files = 'Sources/GCDWebServer/**/*.{h,m}'
+    # include/ holds symlinks to the public headers so SwiftPM can expose them as the
+    # GCDWebServers module (see Package.swift). CocoaPods reads the real files directly and
+    # would otherwise see each header twice.
+    cs.exclude_files = 'Sources/GCDWebServer/include/**/*'
     cs.private_header_files = 'Sources/GCDWebServer/Core/GCDWebServerPrivate.h'
     cs.requires_arc = true
     cs.library = 'z'

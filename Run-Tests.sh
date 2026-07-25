@@ -68,5 +68,11 @@ xcodebuild build -project GCDWebServer.xcodeproj -scheme "GCDWebServers (Mac)" -
 xcodebuild build -project GCDWebServer.xcodeproj -scheme "GCDWebServers (iOS)" -configuration Release -destination 'generic/platform=iOS Simulator' "SYMROOT=$BUILD_DIR" "${SIGNING[@]}"
 xcodebuild build -project GCDWebServer.xcodeproj -scheme "GCDWebServers (tvOS)" -configuration Release -destination 'generic/platform=tvOS Simulator' "SYMROOT=$BUILD_DIR" "${SIGNING[@]}"
 
+echo "=== Swift Package Manager ==="
+# The package layout is fragile in ways a plain Xcode build cannot see: the public headers
+# are exposed to SwiftPM through a directory of symlinks, and reaching the same header by
+# two paths makes clang report duplicate interfaces. Building here catches that.
+swift build
+
 echo ""
 echo "All tests completed successfully."

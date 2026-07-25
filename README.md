@@ -47,7 +47,15 @@ Getting Started
 
 Download or check out the [latest release](https://github.com/swisspol/GCDWebServer/releases) of GCDWebServer then add the entire "GCDWebServer" subfolder to your Xcode project. If you intend to use one of the extensions like GCDWebDAVServer or GCDWebUploader, add these subfolders as well. Finally link to `libz` (via Target > Build Phases > Link Binary With Libraries) and add `$(SDKROOT)/usr/include/libxml2` to your header search paths (via Target > Build Settings > HEADER_SEARCH_PATHS).
 
-Alternatively, you can install GCDWebServer using [CocoaPods](http://cocoapods.org/) by simply adding this line to your Podfile:
+Alternatively, add it with the [Swift Package Manager](https://swift.org/package-manager/) by pointing Xcode at this repository, or by adding it to your `Package.swift`:
+
+```swift
+.package(url: "https://github.com/TimOliver/WebServerKit.git", from: "3.5.5")
+```
+
+The `GCDWebServers` product provides everything. If you would rather not link libxml2 or ship the uploader's web assets, depend on `GCDWebServerCore`, `GCDWebDAVServer` or `GCDWebUploader` individually — they mirror the CocoaPods subspecs.
+
+Or install using [CocoaPods](http://cocoapods.org/) by simply adding this line to your Podfile:
 ```
 pod "GCDWebServer", "~> 3.0"
 ```

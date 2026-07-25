@@ -33,6 +33,12 @@
 #if TARGET_OS_IPHONE
 #import <UIKit/UIKit.h>
 #endif
+#if SWIFT_PACKAGE
+// SwiftPM emits this accessor for any target that declares resources, naming it after the
+// target. Declared here rather than importing its generated header, which SwiftPM puts in
+// DerivedSources without placing that directory on this target's own include path.
+FOUNDATION_EXPORT NSBundle *GCDWebUploader_SWIFTPM_MODULE_BUNDLE(void);
+#endif
 
 #import "GCDWebServerDataRequest.h"
 #import "GCDWebServerDataResponse.h"
@@ -205,7 +211,17 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
 
 - (instancetype)initWithUploadDirectory:(NSString *)path {
     if ((self = [super init])) {
-        NSString *const bundlePath = [[NSBundle bundleForClass:[GCDWebUploader class]] pathForResource:@"GCDWebUploader" ofType:@"bundle"];
+        // SwiftPM copies the web assets into the package's own resource bundle rather than
+        // into the consumer's main bundle, and for a statically linked target
+        // +bundleForClass: returns the main bundle — so the generated accessor is the only
+        // thing that finds them there. Every other distribution (the framework, CocoaPods)
+        // keeps the bundle alongside the class.
+#if SWIFT_PACKAGE
+        NSBundle *const ownerBundle = GCDWebUploader_SWIFTPM_MODULE_BUNDLE();
+#else
+        NSBundle *const ownerBundle = [NSBundle bundleForClass:[GCDWebUploader class]];
+#endif
+        NSString *const bundlePath = [ownerBundle pathForResource:@"GCDWebUploader" ofType:@"bundle"];
 
         if (bundlePath == nil) {
             return nil;
