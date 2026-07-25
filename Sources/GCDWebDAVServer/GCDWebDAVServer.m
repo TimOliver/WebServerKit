@@ -75,7 +75,10 @@ NS_ASSUME_NONNULL_END
 
 - (instancetype)initWithUploadDirectory:(NSString *)path {
     if ((self = [super init])) {
-        _uploadDirectory = [path copy];
+        // Standardize once. Every request resolves the served root with realpath(3) to
+        // check containment, and that fails outright for a host-app path carrying a tilde
+        // or a trailing separator — which fails closed, i.e. every request gets a 403.
+        _uploadDirectory = [[path stringByStandardizingPath] copy];
         GCDWebDAVServer *const __unsafe_unretained server = self;
 
         // 9.1 PROPFIND method
@@ -164,6 +167,56 @@ NS_ASSUME_NONNULL_END
     return YES;
 }
 
+// Hidden-item protection has to cover every component of the path, not only the leaf:
+// refusing "/.git" while serving "/.git/config" protects nothing. Normalizing first means
+// a benign "." or ".." is resolved away rather than read as a name starting with a period.
+- (BOOL)_isHiddenPath:(NSString *)relativePath {
+    if (_allowHiddenItems) {
+        return NO;
+    }
+
+    for (NSString *component in [GCDWebServerNormalizePath(relativePath) pathComponents]) {
+        if ([component hasPrefix:@"."]) {  // The leading "/" component never matches.
+            return YES;
+        }
+    }
+
+    return NO;
+}
+
+// A unique, hidden sibling of `path`. Building a replacement here — rather than removing
+// what is already at `path` and writing over it — keeps the destination intact until the
+// new content is complete on disk, and keeps the final swap a rename(2) within a single
+// directory, which is atomic and cannot fail for being cross-volume.
+static NSString *_StagingPathForPath(NSString *path) {
+    NSString *const name = [@"." stringByAppendingString:[[NSProcessInfo processInfo] globallyUniqueString]];
+    return [[path stringByDeletingLastPathComponent] stringByAppendingPathComponent:name];
+}
+
+// Swap the staged item into `path`, replacing whatever is already there. rename(2) does
+// that atomically, which -moveItemAtPath: cannot (it refuses an existing destination); it
+// will not replace a *non-empty directory*, so that one case still needs an explicit
+// removal first — safe here, because by then the replacement is already complete on disk.
+- (BOOL)_replaceItemAtPath:(NSString *)path withStagedItemAtPath:(NSString *)stagingPath error:(NSError **)error {
+    if (rename([stagingPath fileSystemRepresentation], [path fileSystemRepresentation]) == 0) {
+        return YES;
+    }
+
+    if (![[NSFileManager defaultManager] removeItemAtPath:path error:error]) {
+        return NO;
+    }
+
+    if (rename([stagingPath fileSystemRepresentation], [path fileSystemRepresentation]) != 0) {
+        if (error) {
+            *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil];
+        }
+
+        return NO;
+    }
+
+    return YES;
+}
+
 static NSString *_XMLEscape(NSString *string) {
     NSMutableString *const escaped = [string mutableCopy];
     [escaped replaceOccurrencesOfString:@"&" withString:@"&amp;" options:0 range:NSMakeRange(0, escaped.length)];  // Must run first.
@@ -197,20 +250,22 @@ static inline BOOL _IsMacFinder(GCDWebServerRequest *request) {
     NSString *const absolutePath = [_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(relativePath)];
     BOOL isDirectory = NO;
 
-    if (![[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory]) {
-        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
-    }
-
-    // Verify the resolved location, not just the path text: a symlink inside the share
-    // can point out of it, and the textual normalize/prefix checks cannot see that.
+    // Containment comes before the item is stat'ed: answering 404-vs-403 from a path that
+    // has not been checked yet is an existence oracle for the whole filesystem. Verify the
+    // resolved location, not just the path text — a symlink inside the share can point out
+    // of it, and the textual normalize/prefix checks cannot see that.
     if (!GCDWebServerResolvedPathIsWithinDirectory(absolutePath, _uploadDirectory)) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Downloading \"%@\" is not allowed", relativePath];
     }
 
+    if (![[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory]) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
+    }
+
     NSString *const itemName = [absolutePath lastPathComponent];
 
-    if (([itemName hasPrefix:@"."] && !_allowHiddenItems) || (!isDirectory && ![self _checkFileExtension:itemName])) {
-        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Downlading item name \"%@\" is not allowed", itemName];
+    if ([self _isHiddenPath:relativePath] || (!isDirectory && ![self _checkFileExtension:itemName])) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Downloading \"%@\" is not allowed", relativePath];
     }
 
     // Because HEAD requests are mapped to GET ones, we need to handle directories but it's OK to return nothing per http://webdav.org/specs/rfc4918.html#rfc.section.9.4
@@ -240,6 +295,15 @@ static inline BOOL _IsMacFinder(GCDWebServerRequest *request) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_BadRequest message:@"Range uploads not supported"];
     }
 
+    // The uploaded body only exists on disk once the connection has recognized the
+    // request's framing and opened the request — -temporaryPath names a file that is never
+    // created when -hasBody is NO. Reject that here, before any filesystem work: a PUT
+    // whose framing we cannot read has nothing to store, and the alternative is to
+    // discover it only after the destination has already been replaced.
+    if (![request hasBody]) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_LengthRequired message:@"Missing or unsupported body framing for PUT"];
+    }
+
     NSString *const relativePath = request.path;
     NSString *const absolutePath = [_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(relativePath)];
     BOOL isDirectory;
@@ -267,18 +331,29 @@ static inline BOOL _IsMacFinder(GCDWebServerRequest *request) {
 
     NSString *const fileName = [absolutePath lastPathComponent];
 
-    if (([fileName hasPrefix:@"."] && !_allowHiddenItems) || ![self _checkFileExtension:fileName]) {
-        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Uploading file name \"%@\" is not allowed", fileName];
+    if ([self _isHiddenPath:relativePath] || ![self _checkFileExtension:fileName]) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Uploading to \"%@\" is not allowed", relativePath];
     }
 
     if (![self shouldUploadFileAtPath:absolutePath withTemporaryFile:request.temporaryPath]) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Uploading file to \"%@\" is not permitted", relativePath];
     }
 
-    [[NSFileManager defaultManager] removeItemAtPath:absolutePath error:NULL];
+    // Never remove the destination before its replacement is in hand. The body was
+    // streamed into NSTemporaryDirectory(), possibly on another volume, so land it beside
+    // the destination first and only then swap it in; an overwrite that fails at any point
+    // therefore leaves the existing file exactly as it was.
+    NSFileManager *const fileManager = [NSFileManager defaultManager];
+    NSString *const stagingPath = existing ? _StagingPathForPath(absolutePath) : nil;
+    NSString *const writePath = stagingPath ? stagingPath : absolutePath;
     NSError *error = nil;
 
-    if (![[NSFileManager defaultManager] moveItemAtPath:request.temporaryPath toPath:absolutePath error:&error]) {
+    if (![fileManager moveItemAtPath:request.temporaryPath toPath:writePath error:&error]) {
+        return [GCDWebServerErrorResponse responseWithServerError:kGCDWebServerHTTPStatusCode_InternalServerError underlyingError:error message:@"Failed moving uploaded file to \"%@\"", relativePath];
+    }
+
+    if (stagingPath && ![self _replaceItemAtPath:absolutePath withStagedItemAtPath:stagingPath error:&error]) {
+        [fileManager removeItemAtPath:stagingPath error:NULL];
         return [GCDWebServerErrorResponse responseWithServerError:kGCDWebServerHTTPStatusCode_InternalServerError underlyingError:error message:@"Failed moving uploaded file to \"%@\"", relativePath];
     }
 
@@ -320,8 +395,8 @@ static inline BOOL _IsMacFinder(GCDWebServerRequest *request) {
 
     NSString *const itemName = [absolutePath lastPathComponent];
 
-    if (([itemName hasPrefix:@"."] && !_allowHiddenItems) || (!isDirectory && ![self _checkFileExtension:itemName])) {
-        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Deleting item name \"%@\" is not allowed", itemName];
+    if ([self _isHiddenPath:relativePath] || (!isDirectory && ![self _checkFileExtension:itemName])) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not allowed", relativePath];
     }
 
     if (![self shouldDeleteItemAtPath:absolutePath]) {
@@ -365,10 +440,8 @@ static inline BOOL _IsMacFinder(GCDWebServerRequest *request) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Creating \"%@\" is not allowed", relativePath];
     }
 
-    NSString *const directoryName = [absolutePath lastPathComponent];
-
-    if (!_allowHiddenItems && [directoryName hasPrefix:@"."]) {
-        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Creating directory name \"%@\" is not allowed", directoryName];
+    if ([self _isHiddenPath:relativePath]) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Creating \"%@\" is not allowed", relativePath];
     }
 
     if (![self shouldCreateDirectoryAtPath:absolutePath]) {
@@ -414,7 +487,7 @@ static inline BOOL _IsMacFinder(GCDWebServerRequest *request) {
     id identifier2 = nil;
     return [[NSURL fileURLWithPath:path1] getResourceValue:&identifier1 forKey:NSURLFileResourceIdentifierKey error:NULL] &&
            [[NSURL fileURLWithPath:path2] getResourceValue:&identifier2 forKey:NSURLFileResourceIdentifierKey error:NULL] &&
-           identifier1 && [identifier1 isEqual:identifier2];
+           identifier1 && [(NSObject *)identifier1 isEqual:identifier2];
 }
 
 - (GCDWebServerResponse *)performCOPY:(GCDWebServerRequest *)request isMove:(BOOL)isMove {
@@ -429,32 +502,41 @@ static inline BOOL _IsMacFinder(GCDWebServerRequest *request) {
     NSString *const srcRelativePath = request.path;
     NSString *const srcAbsolutePath = [_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(srcRelativePath)];
 
-    NSString *dstRelativePath = request.headers[@"Destination"];
+    NSString *const destinationHeader = request.headers[@"Destination"];
     NSString *const hostHeader = request.headers[@"Host"];
 
-    // Both the Destination and Host headers are required. The Host non-nil check
-    // MUST come before -rangeOfString:: passing a nil argument to -rangeOfString:
-    // throws NSInvalidArgumentException, and as nothing catches it that terminates
-    // the whole server process — a one-request remote denial of service. (A missing
-    // Destination is already safe via the explicit nil check, but Host was not.)
-    if ((dstRelativePath == nil) || (hostHeader.length == 0)) {
-        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_BadRequest message:@"Malformed 'Destination' header: %@", dstRelativePath];
+    // Host is required because HTTP/1.1 requires it, and nothing else here enforces that;
+    // its *value* is deliberately never consulted below. The destination used to be parsed
+    // by searching for the Host value anywhere inside it and taking whatever followed as
+    // the path, so a Host of "x" turned "/victim.txt" into "/t" and silently relocated the
+    // file — any short, common, or ".local" host that happened to appear in a name did it.
+    if ((destinationHeader.length == 0) || (hostHeader.length == 0)) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_BadRequest message:@"Malformed 'Destination' header: %@", destinationHeader];
     }
 
-    NSRange range = [dstRelativePath rangeOfString:hostHeader];
+    // RFC 4918 lets Destination be an absolute URI or an absolute path. Take the path
+    // component of the URI form, and the value itself otherwise — then percent-decode
+    // exactly once, since CFURLCopyPath leaves the escapes in place (the same split
+    // GCDWebServerConnection uses to derive request.path).
+    NSString *dstRelativePath = nil;
 
-    if (range.location == NSNotFound) {
-        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_BadRequest message:@"Malformed 'Destination' header: %@", dstRelativePath];
+    if ([destinationHeader hasPrefix:@"/"]) {
+        dstRelativePath = GCDWebServerUnescapeURLString(destinationHeader);
+    } else {
+        NSURL *const destinationURL = [NSURL URLWithString:destinationHeader];
+        NSString *const escapedPath = destinationURL.scheme.length ? CFBridgingRelease(CFURLCopyPath((__bridge CFURLRef)destinationURL)) : nil;  // Not -[NSURL path], which strips a trailing slash
+        dstRelativePath = escapedPath ? GCDWebServerUnescapeURLString(escapedPath) : nil;
     }
 
-    dstRelativePath = [[dstRelativePath substringFromIndex:(range.location + range.length)] stringByRemovingPercentEncoding];
+    if (dstRelativePath.length == 0) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_BadRequest message:@"Malformed 'Destination' header: %@", destinationHeader];
+    }
+
     NSString *const dstAbsolutePath = [_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(dstRelativePath)];
 
-    // Neither source nor destination may be the upload directory itself. A malformed
-    // Destination (e.g. an invalid %-escape makes stringByRemovingPercentEncoding
-    // return nil) collapses to the root, and a MOVE with Overwrite:T would then
-    // remove the whole share before failing. (The old `!dstAbsolutePath` check was
-    // dead: normalize(nil) yields "" -> the root, never nil.)
+    // Neither source nor destination may be the upload directory itself: a Destination
+    // that collapses to the root (e.g. "/" or "/..") would otherwise let a MOVE with
+    // Overwrite:T remove the whole share before failing.
     if (!GCDWebServerPathIsInsideDirectory(srcAbsolutePath, _uploadDirectory) || !GCDWebServerPathIsInsideDirectory(dstAbsolutePath, _uploadDirectory)) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Operating on the root directory is not allowed"];
     }
@@ -485,14 +567,14 @@ static inline BOOL _IsMacFinder(GCDWebServerRequest *request) {
 
     NSString *const srcName = [srcAbsolutePath lastPathComponent];
 
-    if ((!_allowHiddenItems && [srcName hasPrefix:@"."]) || (!srcIsDirectory && ![self _checkFileExtension:srcName])) {
-        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"%@ from item name \"%@\" is not allowed", isMove ? @"Moving" : @"Copying", srcName];
+    if ([self _isHiddenPath:srcRelativePath] || (!srcIsDirectory && ![self _checkFileExtension:srcName])) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"%@ from \"%@\" is not allowed", isMove ? @"Moving" : @"Copying", srcRelativePath];
     }
 
     NSString *const dstName = [dstAbsolutePath lastPathComponent];
 
-    if ((!_allowHiddenItems && [dstName hasPrefix:@"."]) || (!srcIsDirectory && ![self _checkFileExtension:dstName])) {
-        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"%@ to item name \"%@\" is not allowed", isMove ? @"Moving" : @"Copying", dstName];
+    if ([self _isHiddenPath:dstRelativePath] || (!srcIsDirectory && ![self _checkFileExtension:dstName])) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"%@ to \"%@\" is not allowed", isMove ? @"Moving" : @"Copying", dstRelativePath];
     }
 
     NSString *const overwriteHeader = request.headers[@"Overwrite"];
@@ -517,28 +599,42 @@ static inline BOOL _IsMacFinder(GCDWebServerRequest *request) {
 
     // Reject a MOVE/COPY whose destination resolves to the source file itself — an exact
     // self-move, or a case-only rename on a case-insensitive volume (different path
-    // strings, one underlying inode). Removing the "destination" below would otherwise
-    // delete the source, i.e. the only copy of the file. RFC 4918 forbids this.
+    // strings, one underlying inode). Replacing the "destination" below would otherwise
+    // destroy the source, i.e. the only copy of the file. RFC 4918 forbids this.
     if ([self _fileAtPath:srcAbsolutePath isSameAsPath:dstAbsolutePath]) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"%@ \"%@\" onto itself is not allowed", isMove ? @"Moving" : @"Copying", srcRelativePath];
     }
 
     // Overwriting is only reachable when the precondition check above permitted it (MOVE
-    // needs Overwrite:T, COPY needs Overwrite!=F). The destination is a distinct file, so
-    // remove it first — surfacing a failure instead of ignoring it — because moveItem and
-    // copyItem both refuse to overwrite an existing item.
-    if (existing && ![fileManager removeItemAtPath:dstAbsolutePath error:&error]) {
-        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden underlyingError:error message:@"Failed replacing \"%@\"", dstRelativePath];
-    }
+    // needs Overwrite:T, COPY needs Overwrite!=F). Build the replacement under a staging
+    // name rather than removing the destination first: copying a tree takes as long as the
+    // tree is big, and a failure part way through the old destroy-then-create left the
+    // client with neither the old item nor a whole new one.
+    NSString *const stagingPath = existing ? _StagingPathForPath(dstAbsolutePath) : nil;
+    NSString *const writePath = stagingPath ? stagingPath : dstAbsolutePath;
 
     if (isMove) {
-        if (![fileManager moveItemAtPath:srcAbsolutePath toPath:dstAbsolutePath error:&error]) {
+        if (![fileManager moveItemAtPath:srcAbsolutePath toPath:writePath error:&error]) {
             return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden underlyingError:error message:@"Failed moving \"%@\" to \"%@\"", srcRelativePath, dstRelativePath];
         }
     } else {
-        if (![fileManager copyItemAtPath:srcAbsolutePath toPath:dstAbsolutePath error:&error]) {
+        if (![fileManager copyItemAtPath:srcAbsolutePath toPath:writePath error:&error]) {
+            [fileManager removeItemAtPath:writePath error:NULL];  // A failed tree copy leaves a partial tree behind.
             return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden underlyingError:error message:@"Failed copying \"%@\" to \"%@\"", srcRelativePath, dstRelativePath];
         }
+    }
+
+    if (stagingPath && ![self _replaceItemAtPath:dstAbsolutePath withStagedItemAtPath:stagingPath error:&error]) {
+        // The swap is the only step that can fail with the replacement already built, so
+        // unwind it: put a MOVE's source back rather than stranding it under the staging
+        // name, and drop a COPY's staged duplicate. Either way the destination is intact.
+        if (isMove) {
+            [fileManager moveItemAtPath:stagingPath toPath:srcAbsolutePath error:NULL];
+        } else {
+            [fileManager removeItemAtPath:stagingPath error:NULL];
+        }
+
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden underlyingError:error message:@"Failed replacing \"%@\"", dstRelativePath];
     }
 
     if (isMove) {
@@ -681,19 +777,20 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
     NSString *const absolutePath = [_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(relativePath)];
     BOOL isDirectory = NO;
 
-    if (![[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory]) {
-        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
-    }
-
-    // As in -performGET:, confirm the resolved location is still inside the share.
+    // As in -performGET:, containment is confirmed before the item is stat'ed so that the
+    // 404-vs-403 answer is not an existence oracle for paths outside the share.
     if (!GCDWebServerResolvedPathIsWithinDirectory(absolutePath, _uploadDirectory)) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Retrieving properties for \"%@\" is not allowed", relativePath];
     }
 
+    if (![[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory]) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
+    }
+
     NSString *const itemName = [absolutePath lastPathComponent];
 
-    if (([itemName hasPrefix:@"."] && !_allowHiddenItems) || (!isDirectory && ![self _checkFileExtension:itemName])) {
-        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Retrieving properties for item name \"%@\" is not allowed", itemName];
+    if ([self _isHiddenPath:relativePath] || (!isDirectory && ![self _checkFileExtension:itemName])) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Retrieving properties for \"%@\" is not allowed", relativePath];
     }
 
     NSArray *items = nil;
@@ -756,6 +853,13 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
     NSString *const absolutePath = [_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(relativePath)];
     BOOL isDirectory = NO;
 
+    // Locking neither reads nor writes content, but the resolved location is checked here
+    // — before the item is stat'ed — so that no path-handling entry point is left without
+    // one, and so the 404-vs-403 answer is not an existence oracle outside the share.
+    if (!GCDWebServerResolvedPathIsWithinDirectory(absolutePath, _uploadDirectory)) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Locking \"%@\" is not allowed", relativePath];
+    }
+
     if (![[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory]) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
     }
@@ -814,13 +918,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
 
     NSString *const itemName = [absolutePath lastPathComponent];
 
-    if ((!_allowHiddenItems && [itemName hasPrefix:@"."]) || (!isDirectory && ![self _checkFileExtension:itemName])) {
-        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Locking item name \"%@\" is not allowed", itemName];
-    }
-
-    // Locking neither reads nor writes content, but check the resolved location too so
-    // that no path-handling entry point is left without one.
-    if (!GCDWebServerResolvedPathIsWithinDirectory(absolutePath, _uploadDirectory)) {
+    if ([self _isHiddenPath:relativePath] || (!isDirectory && ![self _checkFileExtension:itemName])) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Locking \"%@\" is not allowed", relativePath];
     }
 
@@ -856,7 +954,9 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
         [xmlString appendFormat:@"<D:timeout>%@</D:timeout>\n", _XMLEscape(timeoutHeader)];
     }
 
-    [xmlString appendFormat:@"<D:locktoken><D:href>%@</D:href></D:locktoken>\n", token];
+    // Escaped like every other interpolated value here: the token is server-generated in
+    // production, but the testing-only header above lets a client supply it verbatim.
+    [xmlString appendFormat:@"<D:locktoken><D:href>%@</D:href></D:locktoken>\n", _XMLEscape(token)];
     // -stringWithFormat: renders a nil argument as "(null)" rather than raising, so this
     // stays safe even if the Host guard above is ever moved or removed.
     NSString *const lockroot = [NSString stringWithFormat:@"http://%@/%@", hostHeader, relativePath];
@@ -879,6 +979,12 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
     NSString *const absolutePath = [_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(relativePath)];
     BOOL isDirectory = NO;
 
+    // As in -performLOCK:, checked so that no path-handling entry point lacks one, and
+    // ahead of the stat so the 404-vs-403 answer reveals nothing outside the share.
+    if (!GCDWebServerResolvedPathIsWithinDirectory(absolutePath, _uploadDirectory)) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Unlocking \"%@\" is not allowed", relativePath];
+    }
+
     if (![[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory]) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
     }
@@ -891,12 +997,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
 
     NSString *const itemName = [absolutePath lastPathComponent];
 
-    if ((!_allowHiddenItems && [itemName hasPrefix:@"."]) || (!isDirectory && ![self _checkFileExtension:itemName])) {
-        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Unlocking item name \"%@\" is not allowed", itemName];
-    }
-
-    // As in -performLOCK:, checked so that no path-handling entry point lacks one.
-    if (!GCDWebServerResolvedPathIsWithinDirectory(absolutePath, _uploadDirectory)) {
+    if ([self _isHiddenPath:relativePath] || (!isDirectory && ![self _checkFileExtension:itemName])) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Unlocking \"%@\" is not allowed", relativePath];
     }
 
