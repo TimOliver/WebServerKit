@@ -33,6 +33,11 @@ static int ConnectToLocalhostPort(NSUInteger port) {
     }
     struct timeval tv = {5, 0};
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    // A server that refuses a request part way through reading it closes the socket while
+    // we may still be sending, and the rest of that send would otherwise raise SIGPIPE and
+    // kill the test process rather than returning an error.
+    int on = 1;
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
     return fd;
 }
 
@@ -185,10 +190,9 @@ static NSString* SendRawRequest(NSUInteger port, NSString* request) {
         return nil;
     }
     const char* bytes = [request UTF8String];
-    if (send(fd, bytes, strlen(bytes), 0) != (ssize_t)strlen(bytes)) {
-        close(fd);
-        return nil;
-    }
+    // A short send is not a failure: the server may legitimately have refused the request
+    // and closed the socket before we finished writing it. What matters is the reply.
+    send(fd, bytes, strlen(bytes), 0);
     BOOL sawEOF = NO;
     NSData* data = ReadToEOF(fd, &sawEOF);
     close(fd);
@@ -201,10 +205,7 @@ static NSString* SendRawDataRequest(NSUInteger port, NSData* request) {
     if (fd < 0) {
         return nil;
     }
-    if (send(fd, request.bytes, request.length, 0) != (ssize_t)request.length) {
-        close(fd);
-        return nil;
-    }
+    send(fd, request.bytes, request.length, 0);
     BOOL sawEOF = NO;
     NSData* data = ReadToEOF(fd, &sawEOF);
     close(fd);
