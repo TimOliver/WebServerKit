@@ -39,6 +39,9 @@
 #endif
 #import <dns_sd.h>
 #import <netinet/in.h>
+#import <objc/runtime.h>
+#import <signal.h>
+#import <unistd.h>
 
 #import "GCDWebServerPrivate.h"
 
@@ -83,7 +86,9 @@ GCDWebServerLoggingLevel GCDWebServerLogLevel = kGCDWebServerLoggingLevel_Info;
 #endif
 
 #if !TARGET_OS_IPHONE
-static BOOL _run;
+// Written from a signal handler and polled from the run loop below, so it has to be
+// the one type the C standard lets cross that boundary; a plain BOOL read is UB.
+static volatile sig_atomic_t _run;
 #endif
 
 #ifdef __GCDWEBSERVER_LOGGING_FACILITY_BUILTIN__
@@ -118,8 +123,12 @@ void GCDWebServerLogMessage(GCDWebServerLoggingLevel level, NSString *format, ..
 #if !TARGET_OS_IPHONE
 
 static void _SignalHandler(int signal) {
-    _run = NO;
-    printf("\n");
+    _run = 0;
+    // Only async-signal-safe calls belong here: printf() takes the stdio lock, so a
+    // signal delivered while another thread holds it would deadlock the process
+    // instead of shutting it down.
+    ssize_t result = write(STDOUT_FILENO, "\n", 1);
+    (void)result;
 }
 
 #endif
@@ -153,11 +162,36 @@ static void _ExecuteMainThreadRunLoopSources(void) {
 
 @end
 
+// Private helpers that assume they are already running on _stateQueue. They exist so the
+// public accessors can funnel through that queue without any of them re-entering it.
+@interface GCDWebServer ()
+- (BOOL)_startWithOptions:(NSDictionary<NSString *, id> *)options inBackground:(BOOL)inBackground error:(NSError **)error;
+- (void)_stopWithOptions;
+@end
+
+// Same contract, for the helpers implemented alongside their public counterparts in the
+// Extensions category.
+@interface GCDWebServer (ExtensionsPrivate)
+- (NSURL *)_serverURL;
+- (NSURL *)_bonjourServerURL;
+- (NSURL *)_publicServerURL;
+@end
+
 @implementation GCDWebServer {
     dispatch_queue_t _syncQueue;
+    // Serializes the whole start/stop lifecycle. -_start / -_stop mutate the dispatch
+    // sources, the options and the CF Bonjour/DNS refs, and the header advertises use
+    // from any thread while iOS drives the same paths from its background/foreground
+    // notifications on the main thread. Unsynchronized, two concurrent -_stop calls
+    // release the same source twice and two concurrent -_start calls over-resume a
+    // source or orphan one whose cancel handler never leaves _sourceGroup (making every
+    // later -_stop hang forever). Nothing executed on this queue ever blocks on
+    // _syncQueue or on the main queue, so its dispatch_group_wait cannot deadlock.
+    dispatch_queue_t _stateQueue;
     dispatch_group_t _sourceGroup;
     NSMutableArray<GCDWebServerHandler *> *_handlers;
     NSInteger _activeConnections;        // Accessed through _syncQueue only
+    NSInteger _reservedConnections;      // Accepted sockets not yet counted in _activeConnections; through _syncQueue only
     BOOL _connected;                     // Accessed on main thread only
     CFRunLoopTimerRef _disconnectTimer;  // Accessed on main thread only
 
@@ -194,6 +228,7 @@ static void _ExecuteMainThreadRunLoopSources(void) {
 - (instancetype)init {
     if ((self = [super init])) {
         _syncQueue = dispatch_queue_create([NSStringFromClass([self class]) UTF8String], DISPATCH_QUEUE_SERIAL);
+        _stateQueue = dispatch_queue_create("gcdwebserver.state", DISPATCH_QUEUE_SERIAL);
         _sourceGroup = dispatch_group_create();
         _handlers = [[NSMutableArray alloc] init];
 #if TARGET_OS_IPHONE
@@ -212,6 +247,7 @@ static void _ExecuteMainThreadRunLoopSources(void) {
 
 #if !OS_OBJECT_USE_OBJC_RETAIN_RELEASE
     dispatch_release(_sourceGroup);
+    dispatch_release(_stateQueue);
     dispatch_release(_syncQueue);
 #endif
 }
@@ -284,8 +320,14 @@ static void _ExecuteMainThreadRunLoopSources(void) {
     GWS_DCHECK([NSThread isMainThread]);
 
     if (_backgroundTask != UIBackgroundTaskInvalid) {
-        if (_suspendInBackground && ([[UIApplication sharedApplication] applicationState] == UIApplicationStateBackground) && _source4) {
-            [self _stop];
+        if (_suspendInBackground && ([[UIApplication sharedApplication] applicationState] == UIApplicationStateBackground)) {
+            // Test-and-stop has to happen inside _stateQueue: another thread's -stop (or
+            // the foreground reconnect) may be halfway through tearing the sources down.
+            dispatch_sync(_stateQueue, ^{
+                if (self->_source4) {
+                    [self _stop];
+                }
+            });
         }
 
         [[UIApplication sharedApplication] endBackgroundTask:_backgroundTask];
@@ -319,13 +361,24 @@ static void _ExecuteMainThreadRunLoopSources(void) {
 
         if (self->_activeConnections == 0) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                if ((self->_disconnectDelay > 0.0) && (self->_source4 != NULL)) {
+                // _disconnectDelay and _source4 belong to the lifecycle state, which -_start
+                // and -_stop mutate from _stateQueue; read a consistent snapshot rather than
+                // racing them. Blocking here is safe: nothing on _stateQueue waits on the
+                // main queue.
+                __block CFTimeInterval disconnectDelay = 0.0;
+                __block BOOL listening = NO;
+                dispatch_sync(self->_stateQueue, ^{
+                    disconnectDelay = self->_disconnectDelay;
+                    listening = (self->_source4 != NULL);
+                });
+
+                if ((disconnectDelay > 0.0) && listening) {
                     if (self->_disconnectTimer) {
                         CFRunLoopTimerInvalidate(self->_disconnectTimer);
                         CFRelease(self->_disconnectTimer);
                     }
 
-                    self->_disconnectTimer = CFRunLoopTimerCreateWithHandler(kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + self->_disconnectDelay, 0.0, 0, 0, ^(CFRunLoopTimerRef timer) {
+                    self->_disconnectTimer = CFRunLoopTimerCreateWithHandler(kCFAllocatorDefault, CFAbsoluteTimeGetCurrent() + disconnectDelay, 0.0, 0, 0, ^(CFRunLoopTimerRef timer) {
                         GWS_DCHECK([NSThread isMainThread]);
                         [self _didDisconnect];
                         CFRelease(self->_disconnectTimer);
@@ -340,16 +393,26 @@ static void _ExecuteMainThreadRunLoopSources(void) {
     });
 }
 
+// _resolutionService is created by -_start and released by -_stop, so it has to be read
+// on _stateQueue or a caller on another thread can copy from a freed CFNetService.
 - (NSString *)bonjourName {
-    CFStringRef name = _resolutionService ? CFNetServiceGetName(_resolutionService) : NULL;
+    __block NSString *result = nil;
 
-    return name && CFStringGetLength(name) ? CFBridgingRelease(CFStringCreateCopy(kCFAllocatorDefault, name)) : nil;
+    dispatch_sync(_stateQueue, ^{
+        CFStringRef name = self->_resolutionService ? CFNetServiceGetName(self->_resolutionService) : NULL;
+        result = name && CFStringGetLength(name) ? CFBridgingRelease(CFStringCreateCopy(kCFAllocatorDefault, name)) : nil;
+    });
+    return result;
 }
 
 - (NSString *)bonjourType {
-    CFStringRef type = _resolutionService ? CFNetServiceGetType(_resolutionService) : NULL;
+    __block NSString *result = nil;
 
-    return type && CFStringGetLength(type) ? CFBridgingRelease(CFStringCreateCopy(kCFAllocatorDefault, type)) : nil;
+    dispatch_sync(_stateQueue, ^{
+        CFStringRef type = self->_resolutionService ? CFNetServiceGetType(self->_resolutionService) : NULL;
+        result = type && CFStringGetLength(type) ? CFBridgingRelease(CFStringCreateCopy(kCFAllocatorDefault, type)) : nil;
+    });
+    return result;
 }
 
 - (void)addHandlerWithMatchBlock:(GCDWebServerMatchBlock)matchBlock processBlock:(GCDWebServerProcessBlock)processBlock {
@@ -379,9 +442,10 @@ static void _NetServiceRegisterCallBack(CFNetServiceRef service, CFStreamError *
             GCDWebServer *server = (__bridge GCDWebServer *)info;
             GWS_LOG_VERBOSE(@"Bonjour registration complete for %@", [server class]);
 
+            // Resolution can fail to start for environmental reasons (mDNSResponder
+            // unavailable, service already cancelled), so log it instead of aborting.
             if (!CFNetServiceResolveWithTimeout(server->_resolutionService, kBonjourResolutionTimeout, NULL)) {
                 GWS_LOG_ERROR(@"Failed starting Bonjour resolution");
-                GWS_DNOT_REACHED();
             }
         }
     }
@@ -449,6 +513,57 @@ static inline id _GetOption(NSDictionary<NSString *, id> *options, NSString *key
     return value ? value : defaultValue;
 }
 
+// The options dictionary is untyped, and every value below is consumed without a check:
+// a wrong class reaches an unrecognized selector (crash), and an out-of-range port is
+// silently truncated by htons() so the server binds something other than what was asked
+// for. Validate up front and fail closed, the same way an unknown authentication method
+// does. Returns a description of the first problem found, or nil when the options are usable.
+static NSString *_ValidateOptions(NSDictionary<NSString *, id> *options) {
+    NSDictionary<NSString *, Class> *const expectedClasses = @{
+        GCDWebServerOption_Port: [NSNumber class],
+        GCDWebServerOption_BonjourName: [NSString class],
+        GCDWebServerOption_BonjourType: [NSString class],
+        GCDWebServerOption_BonjourTXTData: [NSDictionary class],
+        GCDWebServerOption_RequestNATPortMapping: [NSNumber class],
+        GCDWebServerOption_BindToLocalhost: [NSNumber class],
+        GCDWebServerOption_MaxPendingConnections: [NSNumber class],
+        GCDWebServerOption_ServerName: [NSString class],
+        GCDWebServerOption_AuthenticationMethod: [NSString class],
+        GCDWebServerOption_AuthenticationRealm: [NSString class],
+        GCDWebServerOption_AuthenticationAccounts: [NSDictionary class],
+        GCDWebServerOption_AutomaticallyMapHEADToGET: [NSNumber class],
+        GCDWebServerOption_ConnectedStateCoalescingInterval: [NSNumber class],
+        GCDWebServerOption_DispatchQueuePriority: [NSNumber class],
+        GCDWebServerOption_ConnectionIdleTimeout: [NSNumber class],
+#if TARGET_OS_IPHONE
+        GCDWebServerOption_AutomaticallySuspendInBackground: [NSNumber class],
+#endif
+    };
+
+    for (NSString *key in expectedClasses) {
+        NSObject *const value = options[key];
+        Class const expectedClass = expectedClasses[key];
+
+        if (value && ![value isKindOfClass:expectedClass]) {
+            return [NSString stringWithFormat:@"Option \"%@\" must be of class %@", key, NSStringFromClass(expectedClass)];
+        }
+    }
+
+    NSNumber *const port = options[GCDWebServerOption_Port];
+
+    if (port && (port.unsignedIntegerValue > 65535)) {  // Also catches negatives, which wrap to a huge value.
+        return [NSString stringWithFormat:@"Option \"%@\" must be in the range 0...65535", GCDWebServerOption_Port];
+    }
+
+    id const connectionClass = options[GCDWebServerOption_ConnectionClass];
+
+    if (connectionClass && (!class_isMetaClass(object_getClass(connectionClass)) || ![(Class)connectionClass isSubclassOfClass:[GCDWebServerConnection class]])) {
+        return [NSString stringWithFormat:@"Option \"%@\" must be a subclass of GCDWebServerConnection", GCDWebServerOption_ConnectionClass];
+    }
+
+    return nil;
+}
+
 static inline NSString *_EncodeBase64(NSString *string) {
     NSData *const data = [string dataUsingEncoding:NSUTF8StringEncoding];
 
@@ -473,7 +588,9 @@ static inline NSString *_EncodeBase64(NSString *string) {
                         error:(NSError **)error {
     int listeningSocket = socket(useIPv6 ? PF_INET6 : PF_INET, SOCK_STREAM, IPPROTO_TCP);
 
-    if (listeningSocket > 0) {
+    // socket() only fails with -1; fd 0 is a perfectly good descriptor and is handed
+    // out whenever stdin has been closed, so it must not be read as an error.
+    if (listeningSocket >= 0) {
         int yes = 1;
         setsockopt(listeningSocket, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
 
@@ -529,31 +646,45 @@ static inline NSString *_EncodeBase64(NSString *string) {
             socklen_t remoteAddrLen = sizeof(remoteSockAddr);
             int socket = accept(listeningSocket, (struct sockaddr *)&remoteSockAddr, &remoteAddrLen);
 
-            if (socket > 0) {
+            // accept() only fails with -1; fd 0 is a perfectly good descriptor and is
+            // handed out whenever stdin has been closed, so it must not be read as an error.
+            if (socket >= 0) {
                 NSData *remoteAddress = [NSData dataWithBytes:&remoteSockAddr length:remoteAddrLen];
 
                 struct sockaddr_storage localSockAddr;
                 socklen_t localAddrLen = sizeof(localSockAddr);
-                NSData *localAddress = nil;
 
-                if (getsockname(socket, (struct sockaddr *)&localSockAddr, &localAddrLen) == 0) {
-                    localAddress = [NSData dataWithBytes:&localSockAddr length:localAddrLen];
-                    GWS_DCHECK((!isIPv6 && localSockAddr.ss_family == AF_INET) || (isIPv6 && localSockAddr.ss_family == AF_INET6));
-                } else {
-                    GWS_DNOT_REACHED();
+                // A peer that resets the connection between accept() and here can make
+                // getsockname() fail. Without a local address the connection would later
+                // dereference a NULL sockaddr (-isUsingIPv6, -localAddressString), so drop
+                // this socket rather than serve it.
+                if (getsockname(socket, (struct sockaddr *)&localSockAddr, &localAddrLen) != 0) {
+                    GWS_LOG_ERROR(@"Failed retrieving local address of accepted %s socket: %s (%i)", isIPv6 ? "IPv6" : "IPv4", strerror(errno), errno);
+                    close(socket);
+                    return;
                 }
+
+                NSData *localAddress = [NSData dataWithBytes:&localSockAddr length:localAddrLen];
+                GWS_DCHECK((!isIPv6 && localSockAddr.ss_family == AF_INET) || (isIPv6 && localSockAddr.ss_family == AF_INET6));
 
                 int noSigPipe = 1;
                 setsockopt(socket, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, sizeof(noSigPipe));  // Make sure this socket cannot generate SIG_PIPE
 
                 // Cap the number of simultaneous connections so a flood of (e.g. idle)
                 // connections cannot exhaust file descriptors — especially important on
-                // iOS where the per-process fd limit is small.
-                __block NSInteger activeConnections = 0;
+                // iOS where the per-process fd limit is small. The slot is reserved and
+                // released around the connection's creation because the connection itself
+                // only bumps _activeConnections part-way through -initWithServer:; testing
+                // the count and letting the connection increment it later would let the two
+                // accept sources (IPv4 and IPv6) both pass the check and exceed the cap.
+                __block BOOL reserved = NO;
                 dispatch_sync(self->_syncQueue, ^{
-                    activeConnections = self->_activeConnections;
+                    if (self->_activeConnections + self->_reservedConnections < kGCDWebServerMaxConnections) {
+                        self->_reservedConnections += 1;
+                        reserved = YES;
+                    }
                 });
-                if (activeConnections >= kGCDWebServerMaxConnections) {
+                if (!reserved) {
                     GWS_LOG_ERROR(@"Refusing %s connection: already at the %i connection limit", isIPv6 ? "IPv6" : "IPv4", (int)kGCDWebServerMaxConnections);
                     close(socket);
                     return;
@@ -561,6 +692,9 @@ static inline NSString *_EncodeBase64(NSString *string) {
 
                 GCDWebServerConnection *connection = [(GCDWebServerConnection *)[self->_connectionClass alloc] initWithServer:self localAddress:localAddress remoteAddress:remoteAddress socket:socket];  // Connection will automatically retain itself while opened
                 [connection self];                                                                                                                                                                        // Prevent compiler from complaining about unused variable / useless statement
+                dispatch_sync(self->_syncQueue, ^{
+                    self->_reservedConnections -= 1;
+                });
             } else {
                 GWS_LOG_ERROR(@"Failed accepting %s socket: %s (%i)", isIPv6 ? "IPv6" : "IPv4", strerror(errno), errno);
             }
@@ -569,6 +703,8 @@ static inline NSString *_EncodeBase64(NSString *string) {
     return source;
 }
 
+// Must run on _stateQueue (see the ivar comment). Never call a public accessor from here:
+// those funnel through the same serial queue and would deadlock.
 - (BOOL)_start:(NSError **)error {
     GWS_DCHECK(_source4 == NULL);
 
@@ -581,7 +717,10 @@ static inline NSString *_EncodeBase64(NSString *string) {
         port = _lastBoundPort;
     }
     BOOL bindToLocalhost = [(NSNumber *)_GetOption(_options, GCDWebServerOption_BindToLocalhost, @NO) boolValue];
-    NSUInteger maxPendingConnections = [(NSNumber *)_GetOption(_options, GCDWebServerOption_MaxPendingConnections, @16) unsignedIntegerValue];
+    // listen(2) takes an int backlog, so an out-of-range option would be truncated into
+    // something nonsensical (possibly negative). Clamp instead of casting blindly.
+    NSUInteger const requestedPendingConnections = [(NSNumber *)_GetOption(_options, GCDWebServerOption_MaxPendingConnections, @16) unsignedIntegerValue];
+    NSUInteger const maxPendingConnections = MIN(MAX(requestedPendingConnections, (NSUInteger)1), (NSUInteger)SOMAXCONN);
 
     struct sockaddr_in addr4;
     bzero(&addr4, sizeof(addr4));
@@ -594,13 +733,13 @@ static inline NSString *_EncodeBase64(NSString *string) {
 
     // If reusing the remembered port failed (e.g. another process took it while we
     // were suspended), fall back to letting the OS assign a fresh one.
-    if ((listeningSocket4 <= 0) && (port != 0) && (configuredPort == 0)) {
+    if ((listeningSocket4 < 0) && (port != 0) && (configuredPort == 0)) {
         port = 0;
         addr4.sin_port = htons(port);
         listeningSocket4 = [self _createListeningSocket:NO localAddress:&addr4 length:sizeof(addr4) maxPendingConnections:maxPendingConnections error:error];
     }
 
-    if (listeningSocket4 <= 0) {
+    if (listeningSocket4 < 0) {
         return NO;
     }
 
@@ -623,7 +762,7 @@ static inline NSString *_EncodeBase64(NSString *string) {
     addr6.sin6_addr = bindToLocalhost ? in6addr_loopback : in6addr_any;
     int listeningSocket6 = [self _createListeningSocket:YES localAddress:&addr6 length:sizeof(addr6) maxPendingConnections:maxPendingConnections error:error];
 
-    if (listeningSocket6 <= 0) {
+    if (listeningSocket6 < 0) {
         close(listeningSocket4);
         return NO;
     }
@@ -689,23 +828,26 @@ static inline NSString *_EncodeBase64(NSString *string) {
 
             NSDictionary *txtDataDictionary = _GetOption(_options, GCDWebServerOption_BonjourTXTData, nil);
 
-            if (txtDataDictionary != nil) {
-                NSUInteger count = txtDataDictionary.count;
-                CFStringRef keys[count];
-                CFStringRef values[count];
-                NSUInteger index = 0;
-
-                for (NSString *key in txtDataDictionary) {
-                    NSString *value = txtDataDictionary[key];
-                    keys[index] = (__bridge CFStringRef)(key);
-                    values[index] = (__bridge CFStringRef)(value);
-                    index++;
-                }
-
-                CFDictionaryRef txtDictionary = CFDictionaryCreate(CFAllocatorGetDefault(), (void *)keys, (void *)values, count, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+            // Built up in a heap dictionary rather than stack arrays sized from the
+            // caller's count: a large dictionary would overflow the stack (the arrays were
+            // VLAs) and an empty one is a zero-length VLA. Entries are also type-checked
+            // here — CFNetServiceCreateTXTDataWithDictionary requires CFString keys with
+            // CFString or CFData values, and the old code bridged whatever it was given.
+            if (txtDataDictionary.count > 0) {
+                CFMutableDictionaryRef txtDictionary = CFDictionaryCreateMutable(kCFAllocatorDefault, (CFIndex)txtDataDictionary.count, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
 
                 if (txtDictionary != NULL) {
-                    CFDataRef txtData = CFNetServiceCreateTXTDataWithDictionary(nil, txtDictionary);
+                    for (NSObject *key in txtDataDictionary) {
+                        NSObject *const value = [(NSDictionary *)txtDataDictionary objectForKey:key];
+
+                        if ([key isKindOfClass:[NSString class]] && ([value isKindOfClass:[NSString class]] || [value isKindOfClass:[NSData class]])) {
+                            CFDictionarySetValue(txtDictionary, (__bridge const void *)key, (__bridge const void *)value);
+                        } else {
+                            GWS_LOG_ERROR(@"Ignoring Bonjour TXT data entry with unsupported key or value type");
+                        }
+                    }
+
+                    CFDataRef txtData = CFNetServiceCreateTXTDataWithDictionary(kCFAllocatorDefault, txtDictionary);
 
                     if (txtData != NULL) {  // Guard: CFRelease(NULL) is a hard crash, and the dictionary may be un-encodable.
                         if (!CFNetServiceSetTXTData(_registrationService, txtData)) {
@@ -748,12 +890,12 @@ static inline NSString *_EncodeBase64(NSString *string) {
                 if (_dnsSource) {
                     CFRunLoopAddSource(CFRunLoopGetMain(), _dnsSource, kCFRunLoopCommonModes);
                 } else {
+                    // Allocation failure, not a logic error: NAT-PMP is optional, so log and
+                    // keep serving rather than abort() the host app in a Debug build.
                     GWS_LOG_ERROR(@"Failed creating CFRunLoopSource");
-                    GWS_DNOT_REACHED();
                 }
             } else {
                 GWS_LOG_ERROR(@"Failed creating CFSocket");
-                GWS_DNOT_REACHED();
             }
         } else {
             GWS_LOG_ERROR(@"Failed creating NAT port mapping (%i)", status);
@@ -762,7 +904,7 @@ static inline NSString *_EncodeBase64(NSString *string) {
 
     dispatch_resume(_source4);
     dispatch_resume(_source6);
-    GWS_LOG_INFO(@"%@ started on port %i and reachable at %@", [self class], (int)_port, self.serverURL);
+    GWS_LOG_INFO(@"%@ started on port %i and reachable at %@", [self class], (int)_port, [self _serverURL]);  // Not self.serverURL: that re-enters _stateQueue and would deadlock.
 
     if ([_delegate respondsToSelector:@selector(webServerDidStart:)]) {
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -773,6 +915,9 @@ static inline NSString *_EncodeBase64(NSString *string) {
     return YES;
 }
 
+// Must run on _stateQueue (see the ivar comment). The dispatch_group_wait below is only
+// safe because the cancel handlers run on a global queue and touch neither this queue nor
+// the main queue.
 - (void)_stop {
     GWS_DCHECK(_source4 != NULL);
 
@@ -850,22 +995,31 @@ static inline NSString *_EncodeBase64(NSString *string) {
 
 #if TARGET_OS_IPHONE
 
+// These fire on the main thread but race the host app's own -start/-stop calls, which may
+// come from any thread, so the test-and-act has to happen on _stateQueue like every other
+// lifecycle transition. Blocking the main thread here also preserves the property the
+// original main-thread-confined code relied on: the main run loop cannot dispatch a
+// CFNetService/DNSService callback while the Bonjour refs are being rebuilt.
 - (void)_didEnterBackground:(NSNotification *)notification {
     GWS_DCHECK([NSThread isMainThread]);
     GWS_LOG_DEBUG(@"Did enter background");
 
-    if ((_backgroundTask == UIBackgroundTaskInvalid) && _source4) {
-        [self _stop];
-    }
+    dispatch_sync(_stateQueue, ^{
+        if ((self->_backgroundTask == UIBackgroundTaskInvalid) && self->_source4) {
+            [self _stop];
+        }
+    });
 }
 
 - (void)_willEnterForeground:(NSNotification *)notification {
     GWS_DCHECK([NSThread isMainThread]);
     GWS_LOG_DEBUG(@"Will enter foreground");
 
-    if (!_source4) {
-        [self _start:NULL];  // TODO: There's probably nothing we can do on failure
-    }
+    dispatch_sync(_stateQueue, ^{
+        if (!self->_source4) {
+            [self _start:NULL];  // TODO: There's probably nothing we can do on failure
+        }
+    });
 }
 
 - (void)_reconnectInForeground:(NSNotification *)notification {
@@ -879,22 +1033,38 @@ static inline NSString *_EncodeBase64(NSString *string) {
     // previously assigned port, so client URLs stay valid. See
     // swisspol/GCDWebServer#292. Existing (already-accepted) connections are
     // unaffected — only the listening sockets are rebuilt.
-    if (_source4) {
-        [self _stop];
-        [self _start:NULL];  // TODO: There's probably nothing we can do on failure
-    }
+    dispatch_sync(_stateQueue, ^{
+        if (self->_source4) {
+            [self _stop];
+            [self _start:NULL];  // TODO: There's probably nothing we can do on failure
+        }
+    });
 }
 
 #endif
 
-- (BOOL)startWithOptions:(NSDictionary<NSString *, id> *)options error:(NSError **)error {
+// Runs on _stateQueue; -startWithOptions:error: is the public funnel.
+- (BOOL)_startWithOptions:(NSDictionary<NSString *, id> *)options inBackground:(BOOL)inBackground error:(NSError **)error {
     if (_options == nil) {
-        _options = options ? [options copy] : @{};
+        NSDictionary<NSString *, id> *const newOptions = options ? [options copy] : @{};
+        NSString *const invalidOption = _ValidateOptions(newOptions);
+
+        if (invalidOption) {
+            GWS_LOG_ERROR(@"Refusing to start: %@", invalidOption);
+
+            if (error) {
+                *error = [NSError errorWithDomain:kGCDWebServerErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: invalidOption}];
+            }
+
+            return NO;
+        }
+
+        _options = newOptions;
         _lastBoundPort = 0;  // Fresh session: don't inherit a port remembered from a previous run.
 #if TARGET_OS_IPHONE
         _suspendInBackground = [(NSNumber *)_GetOption(_options, GCDWebServerOption_AutomaticallySuspendInBackground, @YES) boolValue];
 
-        if (((_suspendInBackground == NO) || ([[UIApplication sharedApplication] applicationState] != UIApplicationStateBackground)) && ![self _start:error])
+        if (((_suspendInBackground == NO) || (inBackground == NO)) && ![self _start:error])
 #else
 
         if (![self _start:error])
@@ -916,10 +1086,35 @@ static inline NSString *_EncodeBase64(NSString *string) {
 #endif
         return YES;
     } else {
-        GWS_DNOT_REACHED();
+        GWS_DNOT_REACHED();  // Starting an already-started server is an API misuse by the host app
     }
 
     return NO;
+}
+
+- (BOOL)startWithOptions:(NSDictionary<NSString *, id> *)options error:(NSError **)error {
+    __block BOOL success = NO;
+    __block NSError *startError = nil;
+
+    // Sample the application state on the caller's thread, not inside the _stateQueue block
+    // below: UIApplication is main-thread-only and _stateQueue always runs on a worker
+    // thread. Callers are expected to start the server from the main thread, which is where
+    // this was read before the lifecycle funnel existed.
+#if TARGET_OS_IPHONE
+    BOOL inBackground = ([[UIApplication sharedApplication] applicationState] == UIApplicationStateBackground);
+#else
+    BOOL inBackground = NO;
+#endif
+
+    dispatch_sync(_stateQueue, ^{
+        success = [self _startWithOptions:options inBackground:inBackground error:&startError];
+    });
+
+    if (!success && error) {
+        *error = startError;
+    }
+
+    return success;
 }
 
 - (BOOL)isRunning {
@@ -930,10 +1125,16 @@ static inline NSString *_EncodeBase64(NSString *string) {
     // GCDWebServerOption_AutomaticallySuspendInBackground. Previously this
     // returned YES whenever the server had been started, so it stayed YES while
     // suspended and lied about the server's state. See swisspol/GCDWebServer#437.
-    return (_source4 != NULL);
+    __block BOOL running = NO;
+
+    dispatch_sync(_stateQueue, ^{
+        running = (self->_source4 != NULL);
+    });
+    return running;
 }
 
-- (void)stop {
+// Runs on _stateQueue; -stop is the public funnel.
+- (void)_stopWithOptions {
     if (_options) {
 #if TARGET_OS_IPHONE
 
@@ -952,15 +1153,33 @@ static inline NSString *_EncodeBase64(NSString *string) {
 
         _options = nil;
     } else {
-        GWS_DNOT_REACHED();
+        GWS_DNOT_REACHED();  // Stopping a server that was never started is an API misuse by the host app
     }
+}
+
+- (void)stop {
+    dispatch_sync(_stateQueue, ^{
+        [self _stopWithOptions];
+    });
 }
 
 @end
 
 @implementation GCDWebServer (Extensions)
 
+// The _xxx variants assume they are already on _stateQueue; the public properties funnel
+// through it so a caller on another thread can't read a half-torn-down configuration (and
+// -_start can log its URL without re-entering the queue).
 - (NSURL *)serverURL {
+    __block NSURL *url = nil;
+
+    dispatch_sync(_stateQueue, ^{
+        url = [self _serverURL];
+    });
+    return url;
+}
+
+- (NSURL *)_serverURL {
     if (_source4) {
         NSString *ipAddress = _bindToLocalhost ? @"localhost" : GCDWebServerGetPrimaryIPAddress(NO);  // We can't really use IPv6 anyway as it doesn't work great with HTTP URLs in practice
 
@@ -977,6 +1196,15 @@ static inline NSString *_EncodeBase64(NSString *string) {
 }
 
 - (NSURL *)bonjourServerURL {
+    __block NSURL *url = nil;
+
+    dispatch_sync(_stateQueue, ^{
+        url = [self _bonjourServerURL];
+    });
+    return url;
+}
+
+- (NSURL *)_bonjourServerURL {
     if (_source4 && _resolutionService) {
         NSString *name = (__bridge NSString *)CFNetServiceGetTargetHost(_resolutionService);
 
@@ -995,6 +1223,15 @@ static inline NSString *_EncodeBase64(NSString *string) {
 }
 
 - (NSURL *)publicServerURL {
+    __block NSURL *url = nil;
+
+    dispatch_sync(_stateQueue, ^{
+        url = [self _publicServerURL];
+    });
+    return url;
+}
+
+- (NSURL *)_publicServerURL {
     if (_source4 && _dnsService && _dnsAddress && _dnsPort) {
         if (_dnsPort != 80) {
             return [NSURL URLWithString:[NSString stringWithFormat:@"http://%@:%i/", _dnsAddress, (int)_dnsPort]];
@@ -1031,7 +1268,7 @@ static inline NSString *_EncodeBase64(NSString *string) {
 - (BOOL)runWithOptions:(NSDictionary<NSString *, id> *)options error:(NSError **)error {
     GWS_DCHECK([NSThread isMainThread]);
     BOOL success = NO;
-    _run = YES;
+    _run = 1;
     void (*termHandler)(int) = signal(SIGTERM, _SignalHandler);
     void (*intHandler)(int) = signal(SIGINT, _SignalHandler);
 
@@ -1215,7 +1452,13 @@ static NSString *_EscapeHTMLString(NSString *string) {
     for (NSString *entry in contents) {
         if (![entry hasPrefix:@"."]) {
             NSString *const type = [[NSFileManager defaultManager] attributesOfItemAtPath:[path stringByAppendingPathComponent:entry] error:NULL][NSFileType];
-            GWS_DCHECK(type);
+
+            // Any process can delete the entry between the directory read above and this
+            // stat, so a missing type is an ordinary race, not a logic error to assert on.
+            if (type == nil) {
+                continue;
+            }
+
             NSString *const escapedFile = [entry stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLPathAllowedCharacterSet]];
             GWS_DCHECK(escapedFile);
 
@@ -1252,6 +1495,17 @@ static NSString *_EscapeHTMLString(NSString *string) {
             processBlock:^GCDWebServerResponse *(GCDWebServerRequest *request) {
                 GCDWebServerResponse *response = nil;
                 NSString *filePath = [directoryPath stringByAppendingPathComponent:GCDWebServerNormalizePath([request.path substringFromIndex:basePath.length])];
+                // Stripping ".." textually is not containment: -attributesOfItemAtPath: uses
+                // lstat, which only refuses a symlink as the *final* component, and O_NOFOLLOW
+                // in the file response does the same — so any symlinked directory anywhere
+                // under directoryPath (a git checkout, an unpacked archive) would serve files
+                // from wherever it points. Resolve the whole path and require it to stay
+                // inside, the way every other file-serving handler in this library does.
+                if (!GCDWebServerResolvedPathIsWithinDirectory(filePath, directoryPath)) {
+                    GWS_LOG_WARNING(@"Refusing to serve \"%@\": it resolves outside \"%@\"", filePath, directoryPath);
+                    return [GCDWebServerResponse responseWithStatusCode:kGCDWebServerHTTPStatusCode_NotFound];
+                }
+
                 NSString *fileType = [[[NSFileManager defaultManager] attributesOfItemAtPath:filePath error:NULL] fileType];
 
                 if (fileType) {

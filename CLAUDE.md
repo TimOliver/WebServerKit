@@ -24,7 +24,189 @@ xcodebuild -project GCDWebServer.xcodeproj -scheme "GCDWebServers (tvOS)" -confi
 - `Examples/macOS/` - macOS example app
 - `Framework/` - Framework configuration files
 
+## Design priorities
+
+This is an **ephemeral** server: it is brought up periodically, serves for a while, and goes
+away again. It is not a long-running daemon. **Keeping each short-lived transaction clean is
+the highest priority** — ahead of throughput, ahead of leniency toward odd clients.
+
+Concretely, when a judgment call comes up:
+
+- **Refuse clearly rather than half-succeed.** A request the server cannot honour exactly
+  should fail with a status that says so, leaving prior state untouched. Silently accepting
+  something and doing an approximation of it is the worst outcome. This is why an
+  unsupported `Transfer-Encoding` is a 400 rather than an empty body, why a destructive
+  operation stages and swaps rather than removing first, and why a recursive delete refuses
+  when it would destroy a file a direct delete would have refused.
+- **A transaction must leave nothing behind.** No staging files, no temp files, no held
+  descriptors, no connection slots — on the failure paths as much as the success paths.
+  Verified after this pass: three up/down cycles mixing successful and refused operations
+  leave the share byte-identical and the temp directory at zero delta.
+- **Start/stop correctness matters more than usual**, because it happens often. Lifecycle
+  races that a daemon would hit once in its life, this hits every time it wakes.
+- The one deliberate exception to "short-lived" is the SSE `/events` stream, which is
+  long-lived by design and is bounded separately (`kMaxSSEChannels`, heartbeats, reaping).
+
 ## Recent Changes
+
+### Fourth audit pass: containment, framing, and two regressions from the third pass
+
+Found by changing *technique* rather than re-reading: sanitizers, a mutational fuzzer, and
+auditing under deliberately different frames (hostile browser, filesystem semantics, wire
+protocol). Two of the findings were defects in the third pass's own patch.
+
+**Corrections to the third pass.** The multipart budget charged part *bodies* only, so a
+part header carrying `name="<8 MB>"` was retained and charged to nothing — the OOM the
+previous entry claims to close was still open (802 MB RSS, never rejected). Part header
+blocks are now capped at `kMultiPartMaxHeadersLength`. Separately, the header-parameter
+rewrite made unquoted values terminate at `,`, but RFC 2046 allows a comma in a multipart
+boundary, so `boundary=ab,cd` truncated to `ab` and broke every upload from such a client;
+`,` now delimits only *before* a parameter name. Both have regression tests covering the
+exact case the original tests missed.
+
+**`addGETHandlerForBasePath:` had no containment check** (`GCDWebServer.m`) — the only
+file-serving path in the library without one. Textual `..` stripping is not containment:
+`lstat` and `O_NOFOLLOW` refuse a symlink solely as the *final* component, so any symlinked
+directory under the served root served whatever it pointed at. Verified by removing the new
+guard and watching a file outside the root come back. Covered by
+`testBasePathHandlerRefusesSymlinkEscape`.
+
+**WebDAV never got the hidden-item fix.** The third pass added `-_isHiddenPath:` to
+`GCDWebUploader` and this file recorded the bug class as fixed; WebDAV's nine sites still
+tested `lastPathComponent`, so `GET /.git/config` returned contents and `PUT /.git/hooks`
+wrote. WebDAV now walks every component too.
+
+**WebDAV `PUT` destroyed the target file on unrecognised framing.** `performPUT:` unlinked
+the destination *before* the replacement existed, and `Transfer-Encoding` was matched by
+exact string equality — so `gzip, chunked` and `chunked;a=b`, both RFC-legal, were read as
+"no body", the move failed, and the file was already gone. Transfer-Encoding is now parsed
+properly (list split, parameters stripped, chunked must be the sole coding; anything we
+cannot frame or decode is refused rather than silently treated as empty), and PUT/COPY/MOVE
+build the replacement under a staging name and swap it in with `rename(2)`.
+
+**Digest nonce integrity tags were forgeable.** `GCDWebServerComputeMD5Digest` hashed via
+`-UTF8String`+`strlen`, so an embedded NUL — which survives from the wire into
+`request.headers` — ended the hashed input before the per-process secret. Not an auth bypass
+(the response digest still needs HA1) but it defeated the "we minted this nonce" property.
+Both the digest helper and the constant-time credential comparison now work over full bytes.
+
+**`GCDWebServerFileResponse` stat'd and opened as two separate path walks**, so a file
+replaced between them was served with the previous file's `Content-Length` and ETag — a
+truncated body that looks complete and gets cached under a stale validator. It now opens
+once with `O_NOFOLLOW` and derives everything from `fstat` on that descriptor.
+
+Also: WebDAV `Destination` was parsed by substring-searching the `Host` *value* (with
+`Host: x`, `Destination: /moved.txt` silently landed the file at `<share>/t`) and is now
+parsed as a URI; `/delete`'s subtree vetting races `/move` and now holds the file-operation
+lock; `/events` requires `Accept: text/event-stream` so a cross-origin `<img>` cannot pin
+all 16 SSE channels; the uploader page sets `X-Frame-Options`/`frame-ancestors`/`nosniff`;
+the podspec's globs matched **zero files** (CocoaPods users got an empty pod); `_reload(null)`
+permanently wedged the web UI; renaming mangled filenames containing `&`; `Range` and
+chunk-size lines are parsed strictly (`strtol` accepted `" 5"`, `"+5"`, `"0x5"`, and `"-0"`
+as a terminator); and the example apps no longer disable `allowHiddenItems`.
+
+**Two regressions from the third pass, also fixed:** `-startWithOptions:` began touching
+`UIApplication` off the main thread once the lifecycle funnel landed (the state is now
+sampled on the caller's thread), and the idle-timeout floor was an absolute 1024 bytes/tick
+rather than a rate, which disconnected slow-but-genuine uploads at short timeouts — it is
+now `kMinReceiveBytesPerSecond` scaled by the tick length.
+
+**Negative results worth keeping.** ThreadSanitizer reports 4 data races in `-_stop` against
+the per-connection config snapshot; these are **false positives** — a 200-trial experiment
+(198 genuinely overlapping) confirms libdispatch orders a source's cancel handler after its
+in-flight event handler, an edge TSan does not model. Do not "fix" them. Separately, ~7,000
+mutated requests under ASan+UBSan produced zero memory errors, and request smuggling is
+structurally impossible (one request per connection, `Connection: Close`, leftover bytes
+never read) — verified live by pipelining.
+
+**Still open, deliberately deferred:** there is no `Host` validation anywhere, and the
+uploader's CSRF check compares `Origin` against `Host` — both attacker-controlled after DNS
+rebinding — so any website can drive the whole API once a DNS TTL flips. WebDAV has no
+origin check at all. The fix is a Host allowlist in the connection layer (IP literals,
+`localhost`, `<bonjourName>.local`, plus an option), which will reject setups that work
+today; that compatibility call is why it is not in this pass.
+
+### Third audit pass: remote DoS, lifecycle, and parsing fixes
+
+**Multipart argument accumulation (remote OOM).** `kGCDWebServerMaxInMemoryBodyLength`
+bounded only the parser's *working buffer*; every completed non-file part was retained
+in `_arguments` for the life of the request with no aggregate limit, so a body of many
+individually-legal parts grew without bound (200 MB of parts took the process to 626 MB
+before rejecting nothing). `GCDWebServerMIMEStreamParser` now carries a
+`GCDWebServerMIMEStreamBudget` — shared with every sub-parser, since nested
+`multipart/mixed` appends into the same arrays — capping total retained argument bytes at
+`kGCDWebServerMaxInMemoryBodyLength` and total parts at `kMultiPartMaxParts` (1024, which
+also bounds temp-file/inode use by file parts). Covered by
+`testMultiPartRejectsUnboundedArgumentAccumulation`.
+
+**Slow request body held a connection slot forever.** The idle timer's hard deadline
+(`kMaxHeaderPhaseTicks`) applied only while `_request` was nil, and the remaining
+zero-progress rule counts *any* byte as progress — so a client dribbling one byte per tick
+pinned a slot indefinitely, and 128 of them denied service to the whole server (verified:
+a connection survived 15 consecutive idle periods on 30 bytes). While the request body is
+still arriving the server now requires `kMinReceiveBytesPerTick` (1024) between ticks; the
+response phase keeps the laxer rule so a slow-but-live SSE reader is never cut off, and
+time inside a handler still never counts. Covered by
+`testConnectionIdleTimeoutClosesDribblingBodyClient`, with
+`testConnectionIdleTimeoutSparesSlowHandler` guarding the regression.
+
+**Unbounded SSE streams exhausted the connection pool.** `/events` registered unlimited
+channels, each pinning a connection that the 15s heartbeats kept alive forever; 128
+concurrent `GET /events` permanently denied service. Capped at `kMaxSSEChannels` (16),
+over-limit channels are `close`d so the connection ends cleanly and `EventSource` retries.
+
+**`__GCDWEBSERVER_ENABLE_TESTING__` shipped in Release.**
+`GCC_PREPROCESSOR_DEFINITIONS_NOT_USED_IN_PRECOMPS` was set at project level in *both*
+configurations, and that setting is excluded only from PCH generation — the `-D` was on
+the Release compile line. That shipped client-settable file timestamps
+(`X-GCDWebServer-CreationDate`/`-ModifiedDate` on PUT and MKCOL), a client-chosen
+`X-GCDWebServer-LockToken`, and the request/response recording machinery. Now Debug-only.
+The LOCK token is also `_XMLEscape`d, which it alone among the LOCK response values was not.
+
+**Hidden items were protected only at the leaf.** Every `allowHiddenItems` check used
+`lastPathComponent`, so a hidden *directory* was refused while `/list`, `/download`,
+`/delete`, `/upload` and `/move` all reached inside one (`/.git/config`). `-_isHiddenPath:`
+now tests every component of the normalized path.
+
+**Malformed input aborted Debug builds.** `GWS_DNOT_REACHED()` is `abort()` under `#if
+DEBUG`, and several call sites sat on ordinary remote-input paths: `GET /%FF` (undecodable
+percent-escapes → nil path, now 400 rather than 500), `?a=%FF` in a query string, a
+multipart part header without a colon or without `name=`, a `Content-Length` alongside a
+chunked `Transfer-Encoding`, and a file vanishing mid directory-listing. These now log and
+fail the request. Genuine host-app API-misuse assertions were deliberately left alone.
+
+**Header parameters matched on substrings.** `GCDWebServerExtractHeaderValueParameter`
+used `scanUpToString:`, which finds `name=` inside `filename=` and `nonce=` inside
+`cnonce=` — so a client chose which value the server read just by reordering parameters,
+and Digest auth was unusable for any RFC 2617 client sending `cnonce` before `nonce`
+(permanent 401 loop). It now requires a token boundary. This is not an auth bypass: the
+same extracted `uri` feeds both the path-binding check and HA2, so the digest stays
+self-consistent. Covered by `testHeaderValueParameterMatchesOnlyAtTokenBoundary`.
+
+**Server lifecycle was unsynchronized.** `_start`/`_stop` mutated the dispatch sources and
+Bonjour refs with no confinement while the iOS foreground/background handlers called the
+same paths on the main thread; concurrent `stop`s double-released a source, and an
+orphaned source left `_sourceGroup` permanently entered so every later `_stop` hung. All
+lifecycle mutation and the `isRunning`/`serverURL` accessors now funnel through a serial
+`_stateQueue`. Deadlock-free by construction: nothing on `_stateQueue` blocks on the main
+queue, the accept handler touches only `_syncQueue`, and the cancel handlers that
+`dispatch_group_wait` waits on run on a global queue doing only `close()` + `leave`.
+
+**gzip on an async-only response sent an empty body.** `GCDWebServerGZipEncoder` pulled its
+source through the synchronous `readData:` only, so any `GCDWebServerStreamedResponse` with
+`gzipContentEncodingEnabled` produced a valid gzip stream of zero bytes and never ran its
+stream block. `GCDWebServerBodyEncoder` now implements `asyncReadDataWithCompletion:`.
+This path had no test coverage at all; `testGZipEncoded{Data,Streamed}ResponseRoundTrips`
+now assert a full round-trip through both reader kinds.
+
+Also: `Content-Length` is parsed strictly (digits only, no overflow) instead of via
+`-integerValue`, which accepted `"5abc"` and clamped overflow to `NSIntegerMax`; the
+connection no longer `close()`s its socket in both `-initWithServer:` and `-dealloc` (a
+double close that could kill a recycled descriptor); `setValue:forAdditionalHeader:`
+rejects header *names* containing CR/LF/colon (CFHTTPMessage sanitizes values but not
+names); unsatisfiable Ranges return 416 with `Content-Range: bytes */N` instead of 500/404;
+and `GCDWebServerStreamedResponse` releases its block on `-close` to break handler retain
+cycles.
 
 ### WebDAV MOVE/COPY safety (self-move data loss)
 

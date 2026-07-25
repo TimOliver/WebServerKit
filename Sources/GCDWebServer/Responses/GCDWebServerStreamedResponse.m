@@ -65,7 +65,22 @@
 }
 
 - (void)asyncReadDataWithCompletion:(GCDWebServerBodyReaderCompletionBlock)block {
-    _block(block);
+    const GCDWebServerAsyncStreamBlock streamBlock = _block;
+
+    if (streamBlock == nil) {
+        block([NSData data], nil);  // Released by -close: report end-of-body rather than crashing
+        return;
+    }
+
+    streamBlock(block);
+}
+
+- (void)close {
+    // Release the stream block as soon as the body is done. It is kept for the lifetime of
+    // the response otherwise, and a handler block commonly captures objects that retain
+    // the response back (or the connection through it), so everything it captured would
+    // stay alive for as long as anything holds the response.
+    _block = nil;
 }
 
 - (NSString *)description {

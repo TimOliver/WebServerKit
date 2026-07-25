@@ -37,6 +37,7 @@
 
 - (instancetype)initWithMethod:(NSString *)method url:(NSURL *)url headers:(NSDictionary<NSString *, NSString *> *)headers path:(NSString *)path query:(NSDictionary<NSString *, NSString *> *)query {
     if ((self = [super initWithMethod:method url:url headers:headers path:path query:query])) {
+        _file = -1;  // Not 0, which is a legal descriptor -close: must not close by accident
         _temporaryPath = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSProcessInfo processInfo] globallyUniqueString]];
     }
 
@@ -50,7 +51,10 @@
 - (BOOL)open:(NSError **)error {
     _file = open([_temporaryPath fileSystemRepresentation], O_CREAT | O_TRUNC | O_WRONLY, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 
-    if (_file <= 0) {
+    // 0 is a legal descriptor (it is handed out whenever stdin has been closed), so only a
+    // negative result means failure. Treating 0 as one both reported a stale errno and
+    // leaked the descriptor, and the body would then be written to whatever stdin became.
+    if (_file < 0) {
         if (error) {
             *error = GCDWebServerMakePosixError(errno);
         }
@@ -62,21 +66,56 @@
 }
 
 - (BOOL)writeData:(NSData *)data error:(NSError **)error {
-    if (write(_file, data.bytes, data.length) != (ssize_t)data.length) {
-        if (error) {
-            *error = GCDWebServerMakePosixError(errno);
+    const uint8_t *bytes = data.bytes;
+    size_t remaining = data.length;
+
+    // write(2) is allowed to stop short of the whole buffer — interrupted by a signal
+    // (EINTR) or simply writing fewer bytes than asked — and neither case means the upload
+    // failed. The single unchecked call this replaces aborted the request on both, so a
+    // signal arriving mid-body lost an otherwise healthy upload.
+    while (remaining > 0) {
+        const ssize_t result = write(_file, bytes, remaining);
+
+        if (result < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+
+            if (error) {
+                *error = GCDWebServerMakePosixError(errno);
+            }
+
+            return NO;
         }
 
-        return NO;
+        if (result == 0) {
+            // Cannot happen for a regular file with a non-zero count, but a write that
+            // reports no progress and no error would otherwise spin here forever.
+            if (error) {
+                *error = GCDWebServerMakePosixError(EIO);
+            }
+
+            return NO;
+        }
+
+        bytes += result;
+        remaining -= (size_t)result;
     }
 
     return YES;
 }
 
 - (BOOL)close:(NSError **)error {
-    if (close(_file) < 0) {
+    // Take the descriptor out of the ivar first: a second -close: must not hand the same
+    // number back to close(2) after the kernel has recycled it onto an unrelated file. A
+    // negative value means -open: never ran (or already failed), which is reported as
+    // EBADF rather than closing descriptor 0.
+    const int file = _file;
+    _file = -1;
+
+    if ((file < 0) || (close(file) < 0)) {
         if (error) {
-            *error = GCDWebServerMakePosixError(errno);
+            *error = GCDWebServerMakePosixError((file < 0) ? EBADF : errno);
         }
 
         return NO;

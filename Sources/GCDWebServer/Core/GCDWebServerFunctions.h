@@ -112,8 +112,29 @@ NSString *GCDWebServerNormalizePath(NSString *path);
  *  (i.e. neither the directory itself nor outside it). Used to keep destructive
  *  file operations from ever targeting the served root directory, e.g. when a
  *  client-supplied relative path collapses to the empty string.
+ *
+ *  @warning This is a purely textual comparison and does not resolve symlinks. Pair
+ *  it with GCDWebServerResolvedPathIsWithinDirectory() before acting on a path that
+ *  came from a client.
  */
 BOOL GCDWebServerPathIsInsideDirectory(NSString *path, NSString *directory);
+
+/**
+ *  Returns YES if `path`, with all symlinks resolved, is `directory` itself or a
+ *  location inside it. Resolves intermediate path components, and works for a path
+ *  that does not exist yet (e.g. an upload destination) by resolving its parent.
+ *
+ *  Symlinks are invisible to the textual checks: GCDWebServerNormalizePath() strips
+ *  ".." before any file is touched, and GCDWebServerPathIsInsideDirectory() compares
+ *  path text, but lstat(), open() and NSFileManager all follow symlinks found in
+ *  intermediate components. A symlink placed inside the served directory by some other
+ *  means — another app, a restored backup, a synced volume — could therefore be
+ *  traversed out of it. A symlink whose target stays inside the directory still
+ *  resolves inside and remains usable.
+ *
+ *  Returns NO if either path cannot be resolved, so callers fail closed.
+ */
+BOOL GCDWebServerResolvedPathIsWithinDirectory(NSString *path, NSString *directory);
 
 #ifdef __cplusplus
 }

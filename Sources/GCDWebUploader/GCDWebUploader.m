@@ -137,13 +137,64 @@ NS_ASSUME_NONNULL_END
 @interface GCDWebUploader () <NSFilePresenter>
 @end
 
+// Render `string` as a complete JavaScript string literal, quotes included.
+//
+// -initWithHTMLTemplate:variables: substitutes raw text, and index.html places the
+// device name inside a quoted JS string ("var _device = %device%;"). HTML escaping is
+// the wrong context there: a name containing a quote would break the literal, and one
+// containing "</script>" would end the whole block. JSON string syntax is a subset of
+// JavaScript's, so let NSJSONSerialization do the escaping, then neutralise "<" as well
+// since JSON leaves it alone and it is what makes "</script>" dangerous.
+static NSString *_JavaScriptStringLiteral(NSString *string) {
+    NSData *const data = [NSJSONSerialization dataWithJSONObject:@[string ? string : @""] options:0 error:NULL];
+    NSString *const array = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
+
+    if (array.length < 2) {
+        return @"\"\"";
+    }
+
+    NSString *const literal = [array substringWithRange:NSMakeRange(1, array.length - 2)];  // Strip the enclosing "[" and "]".
+    return [literal stringByReplacingOccurrencesOfString:@"<" withString:@"\\u003c"];
+}
+
+// An SSE stream never ends by itself: it pins one of GCDWebServer's 128 connection
+// slots for as long as the browser keeps it open, and the 15s heartbeat keeps the
+// connection idle timeout from ever reaping it. Unbounded, a handful of "GET /events"
+// requests therefore denies service to the whole server, so cap concurrent streams
+// well below the connection limit. A page only ever opens one.
+static const NSUInteger kMaxSSEChannels = 16;
+
+// Body returned to a client that arrives when every SSE slot is taken. It is a complete —
+// if eventless — event stream: the "retry" field moves EventSource off its ~3 second
+// default so a refused client backs off instead of hammering the endpoint (and the log)
+// until a slot frees up.
+static NSString *const kSSERefusedStreamBody = @"retry: 30000\n\n";
+
+// First chunk of an accepted stream, restoring the prompt reconnect delay for a client
+// that was refused earlier: EventSource remembers the last "retry" value it was given.
+static NSString *const kSSEAcceptedStreamPreamble = @"retry: 3000\n\n";
+
+// A refused EventSource retries forever, so warn about refusals at most this often
+// rather than once per attempt per client.
+static const NSTimeInterval kSSERefusalLogInterval = 60.0;
+
+// Delivery of coalesced file-system changes is debounced by this much, but never
+// postponed by more than the maximum below: without a ceiling, sustained file activity
+// keeps pushing the deadline out and clients see no "external" event at all.
+static const NSTimeInterval kChangeCoalescingInterval = 0.1;
+static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
+
 @implementation GCDWebUploader {
     NSMutableArray<GCDWebUploaderSSEChannel *> *_sseChannels;  // One per connected /events client. Accessed only on _sseQueue.
     dispatch_queue_t _sseQueue;
+    BOOL _sseAcceptingChannels;  // Owned by _sseQueue. YES only between -start and -stop, while SSE is enabled.
+    NSDate *_lastSSERefusalLogDate;  // Owned by _sseQueue. Rate-limits the "at capacity" warning.
     dispatch_source_t _heartbeatTimer;
+    BOOL _heartbeatSuspended;  // Owned by _sseQueue (except in -dealloc). Keeps suspend/resume balanced.
     NSOperationQueue *_filePresenterQueue;
     NSMutableSet<NSString *> *_pendingChangedPaths;
     NSTimer *_changeCoalescingTimer;
+    NSDate *_firstPendingChangeDate;  // Main thread only, alongside _changeCoalescingTimer.
     BOOL _filePresenterRegistered;
     NSObject *_fileOperationLock;  // Serializes "pick a unique path, then create it" against concurrent requests.
 }
@@ -166,7 +217,11 @@ NS_ASSUME_NONNULL_END
             return nil;
         }
 
-        _uploadDirectory = [path copy];
+        // Standardize once, so the root has no trailing separator and no "." components:
+        // client-facing relative paths are derived by chopping _uploadDirectory.length off
+        // an absolute path, which silently produces the wrong answer for "/Docs/" and can
+        // raise NSRangeException for a pathological run of separators.
+        _uploadDirectory = [[path stringByStandardizingPath] copy];
         _serverSentEventsEnabled = YES;
         _sseChannels = [NSMutableArray array];
         _sseQueue = dispatch_queue_create("com.gcdwebuploader.sse", DISPATCH_QUEUE_SERIAL);
@@ -174,7 +229,7 @@ NS_ASSUME_NONNULL_END
         _fileOperationLock = [[NSObject alloc] init];
         _filePresenterQueue = [[NSOperationQueue alloc] init];
         _filePresenterQueue.maxConcurrentOperationCount = 1;
-        [self _startHeartbeatTimer];
+        [self _createHeartbeatTimer];
         // The NSFilePresenter is registered on -start and removed on -stop (see
         // -_updateFilePresenterRegistration) so we only participate in system file
         // coordination while actually serving, not for the object's whole lifetime.
@@ -254,15 +309,32 @@ NS_ASSUME_NONNULL_END
                              footer = [NSString stringWithFormat:[siteBundle localizedStringForKey:@"FOOTER_FORMAT" value:@"" table:nil], name, version];
                          }
 
-                         return [GCDWebServerDataResponse responseWithHTMLTemplate:(NSString *)[siteBundle pathForResource:@"index" ofType:@"html"]
-                                                                         variables:@{
-                                                                             @"device": device,
-                                                                             @"title": title,
-                                                                             @"header": header,
-                                                                             @"prologue": prologue,
-                                                                             @"epilogue": epilogue,
-                                                                             @"footer": footer
-                                                                         }];
+                         // Every value must be non-nil: a nil in a dictionary literal raises
+                         // NSInvalidArgumentException, which would abort the app on "GET /".
+                         // Both sources can legitimately be nil — -[NSHost localizedName] for a
+                         // host with no resolvable name, and the bundle keys for a bundle that
+                         // declares neither a display name nor a name.
+                         GCDWebServerDataResponse *const response =
+                             [GCDWebServerDataResponse responseWithHTMLTemplate:(NSString *)[siteBundle pathForResource:@"index" ofType:@"html"]
+                                                                      variables:@{
+                                                                          @"device": _JavaScriptStringLiteral(device),  // Substituted into a JS string literal, which supplies its own quotes.
+                                                                          @"title": title ? title : @"",
+                                                                          @"header": header ? header : @"",
+                                                                          @"prologue": prologue ? prologue : @"",
+                                                                          @"epilogue": epilogue ? epilogue : @"",
+                                                                          @"footer": footer ? footer : @""
+                                                                      }];
+
+                         // The UI's one-click delete and move buttons are worth clickjacking —
+                         // and the "#/path" fragment even lets an attacker aim the framed page
+                         // at a chosen folder — so refuse to be framed at all. Only
+                         // "frame-ancestors" is set: a full CSP would have to allow
+                         // "unsafe-eval", because the bundled tmpl.min.js compiles its
+                         // templates with "new Function".
+                         [response setValue:@"DENY" forAdditionalHeader:@"X-Frame-Options"];
+                         [response setValue:@"frame-ancestors 'none'" forAdditionalHeader:@"Content-Security-Policy"];
+                         [response setValue:@"nosniff" forAdditionalHeader:@"X-Content-Type-Options"];
+                         return response;
                      }];
 
         // File listing
@@ -322,41 +394,87 @@ NS_ASSUME_NONNULL_END
                              completionBlock([GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_NotFound message:@"SSE not enabled"]);
                              return;
                          }
+
+                         // An SSE stream never ends by itself and there are only
+                         // kMaxSSEChannels slots, so any page that can merely *open* this URL
+                         // as a subresource — "new Image().src = 'http://host:port/events'",
+                         // twenty times over, from any origin — pins every slot and silently
+                         // kills live updates for the real user. EventSource always sends
+                         // "Accept: text/event-stream", and browsers that send Sec-Fetch-Dest
+                         // label it "empty"; both are forbidden header names, so page script
+                         // cannot forge them onto an <img>/<script>/<link> load. Non-browser
+                         // clients send no Sec-Fetch-* at all and are unaffected.
+                         NSString *const accept = request.headers[@"Accept"];
+                         NSString *const fetchDest = request.headers[@"Sec-Fetch-Dest"];
+
+                         if (([accept rangeOfString:@"text/event-stream" options:NSCaseInsensitiveSearch].location == NSNotFound) ||
+                             (fetchDest.length && ([fetchDest caseInsensitiveCompare:@"empty"] != NSOrderedSame))) {
+                             completionBlock([GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_NotAcceptable message:@"This endpoint only serves \"text/event-stream\" requests"]);
+                             return;
+                         }
+
                          // Each connection gets its own channel, which buffers events so that
                          // nothing is dropped in the window between GCDWebServer consuming one
                          // reader and asking for the next (its streaming API is a ping-pong).
                          GCDWebUploaderSSEChannel *channel = [[GCDWebUploaderSSEChannel alloc] init];
                          dispatch_async(server->_sseQueue, ^{
-                             // Re-check on the SSE queue: SSE may have been disabled between the
-                             // check above and now, in which case don't register a channel that
-                             // would never be serviced or reaped — close it instead so the
-                             // connection ends cleanly rather than parking a reader forever.
-                             if (server->_serverSentEventsEnabled) {
-                                 [server->_sseChannels addObject:channel];
-                             } else {
+                             // Decide on the SSE queue, which owns _sseAcceptingChannels and
+                             // _sseChannels: the server may have been stopped (or SSE disabled)
+                             // between the check above and now, and a channel added after that
+                             // cleanup would never be serviced or reaped again — the heartbeat
+                             // that would reap it is gone too — stranding the connection on a
+                             // parked reader forever. Answering here instead ends it cleanly.
+                             if (!server->_sseAcceptingChannels) {
                                  [channel close];
+                                 completionBlock([GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_NotFound message:@"SSE not enabled"]);
+                                 return;
                              }
+
+                             if (server->_sseChannels.count >= kMaxSSEChannels) {
+                                 // At the cap: refuse rather than pin another connection slot. The
+                                 // browser's EventSource reconnects on its own, so a client that
+                                 // loses the race recovers once a slot frees up — but tell it to
+                                 // wait, and do not log once per attempt while it waits.
+                                 NSDate *const now = [NSDate date];
+
+                                 if ((server->_lastSSERefusalLogDate == nil) || ([now timeIntervalSinceDate:server->_lastSSERefusalLogDate] >= kSSERefusalLogInterval)) {
+                                     server->_lastSSERefusalLogDate = now;
+                                     [server logWarning:@"Refused a Server-Sent Events connection: already streaming to the maximum of %lu clients", (unsigned long)kMaxSSEChannels];
+                                 }
+
+                                 [channel close];
+                                 completionBlock([GCDWebServerDataResponse responseWithData:(NSData *)[kSSERefusedStreamBody dataUsingEncoding:NSUTF8StringEncoding] contentType:@"text/event-stream"]);
+                                 return;
+                             }
+
+                             [server->_sseChannels addObject:channel];
+                             // Buffered now, delivered as the stream's first chunk: undoes the
+                             // back-off above for a client that was refused on an earlier attempt.
+                             [channel enqueueData:(NSData *)[kSSEAcceptedStreamPreamble dataUsingEncoding:NSUTF8StringEncoding]];
+
+                             GCDWebServerStreamedResponse *response =
+                                 [GCDWebServerStreamedResponse responseWithContentType:@"text/event-stream"
+                                                                      asyncStreamBlock:^(GCDWebServerBodyReaderCompletionBlock dataBlock) {
+                                     dispatch_async(server->_sseQueue, ^{
+                                         [channel parkReader:^(NSData *data) {
+                                             dataBlock(data, nil);
+                                         }];
+                                     });
+                                 }];
+                             response.cacheControlMaxAge = 0;
+                             [response setValue:@"no-cache" forAdditionalHeader:@"Cache-Control"];
+                             // No "Connection: keep-alive" here: it would overwrite the connection
+                             // layer's "Connection: Close", and GCDWebServer never reads a second
+                             // request off a connection, so advertising keep-alive is a lie.
+                             completionBlock(response);
                          });
-                         GCDWebServerStreamedResponse *response =
-                             [GCDWebServerStreamedResponse responseWithContentType:@"text/event-stream"
-                                                                  asyncStreamBlock:^(GCDWebServerBodyReaderCompletionBlock dataBlock) {
-                                 dispatch_async(server->_sseQueue, ^{
-                                     [channel parkReader:^(NSData *data) {
-                                         dataBlock(data, nil);
-                                     }];
-                                 });
-                             }];
-                         response.cacheControlMaxAge = 0;
-                         [response setValue:@"no-cache" forAdditionalHeader:@"Cache-Control"];
-                         [response setValue:@"keep-alive" forAdditionalHeader:@"Connection"];
-                         completionBlock(response);
                      }];
     }
 
     return self;
 }
 
-- (void)_startHeartbeatTimer {
+- (void)_createHeartbeatTimer {
     _heartbeatTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _sseQueue);
     dispatch_source_set_timer(_heartbeatTimer,
                               dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC),
@@ -366,7 +484,30 @@ NS_ASSUME_NONNULL_END
     dispatch_source_set_event_handler(_heartbeatTimer, ^{
         [weakSelf _sendHeartbeat];
     });
-    dispatch_resume(_heartbeatTimer);
+    // Deliberately left suspended (the state a new dispatch source starts in). The
+    // heartbeat only has work to do between -start and -stop; resuming it here would wake
+    // the process every 15 seconds for the whole lifetime of an uploader that is merely
+    // alive. -_updateHeartbeatTimerState arms and disarms it.
+    _heartbeatSuspended = YES;
+}
+
+// dispatch_suspend/dispatch_resume are counted and must balance, so the flag that tracks
+// them is owned by _sseQueue — the timer's own queue — and only ever changed there.
+- (void)_updateHeartbeatTimerState {
+    BOOL const suspend = !(self.isRunning && _serverSentEventsEnabled);
+    dispatch_async(_sseQueue, ^{
+        if (self->_heartbeatSuspended == suspend) {
+            return;
+        }
+
+        self->_heartbeatSuspended = suspend;
+
+        if (suspend) {
+            dispatch_suspend(self->_heartbeatTimer);
+        } else {
+            dispatch_resume(self->_heartbeatTimer);
+        }
+    });
 }
 
 // The NSFilePresenter registration participates in system-wide file coordination,
@@ -406,24 +547,48 @@ NS_ASSUME_NONNULL_END
     }
     _serverSentEventsEnabled = enabled;
     [self _updateFilePresenterRegistration];
-    if (!enabled) {
+    [self _updateHeartbeatTimerState];
+    if (enabled) {
+        BOOL const running = self.isRunning;
         dispatch_async(_sseQueue, ^{
-            // Close before dropping: an unclosed channel with a parked reader
-            // strands its connection forever (and leaks it via a retain cycle).
-            for (GCDWebUploaderSSEChannel* channel in self->_sseChannels) {
-                [channel close];
-            }
-            [self->_sseChannels removeAllObjects];
+            self->_sseAcceptingChannels = running;
         });
+        return;
     }
+    dispatch_async(_sseQueue, ^{
+        // Stop accepting first: a registration landing after the drain below would add a
+        // channel nothing services or reaps any more, stranding its connection.
+        self->_sseAcceptingChannels = NO;
+        // Close before dropping: an unclosed channel with a parked reader
+        // strands its connection forever (and leaks it via a retain cycle).
+        for (GCDWebUploaderSSEChannel* channel in self->_sseChannels) {
+            [channel close];
+        }
+        [self->_sseChannels removeAllObjects];
+    });
 }
 
 - (BOOL)startWithOptions:(NSDictionary<NSString *, id> *)options error:(NSError **)error {
-    BOOL started = [super startWithOptions:options error:error];
-    if (started) {
-        [self _updateFilePresenterRegistration];
+    // Arm SSE registration before the listening socket goes live, so a "/events" request
+    // accepted immediately after start is not refused by the disarmed state -stop left behind.
+    BOOL const enabled = _serverSentEventsEnabled;
+    dispatch_async(_sseQueue, ^{
+        self->_sseAcceptingChannels = enabled;
+    });
+    BOOL const started = [super startWithOptions:options error:error];
+    if (!started) {
+        // -stop is not called after a failed start, so disarm what was armed above:
+        // otherwise the registry keeps accepting channels that nothing ever services or
+        // reaps (there is no heartbeat and no listening socket), stranding any connection
+        // a later start hands it.
+        dispatch_async(_sseQueue, ^{
+            self->_sseAcceptingChannels = NO;
+        });
+        return NO;
     }
-    return started;
+    [self _updateFilePresenterRegistration];
+    [self _updateHeartbeatTimerState];
+    return YES;
 }
 
 - (void)stop {
@@ -436,11 +601,20 @@ NS_ASSUME_NONNULL_END
     // connection, and the server through a retain cycle.
     [self _updateFilePresenterRegistration];
     dispatch_async(_sseQueue, ^{
+        // Disarm before draining. A "/events" registration already in flight would
+        // otherwise land in the emptied registry, where nothing ever closes or reaps it
+        // (the heartbeat is stopped too) — the connection stays parked forever, and
+        // _activeConnections never returns to zero.
+        self->_sseAcceptingChannels = NO;
         for (GCDWebUploaderSSEChannel* channel in self->_sseChannels) {
             [channel close];
         }
         [self->_sseChannels removeAllObjects];
     });
+    // Queued after the drain, so the last tick cannot race it: with no channels left the
+    // heartbeat has nothing to keep alive, and an armed timer would go on waking the
+    // process every 15 seconds for as long as the stopped uploader is retained.
+    [self _updateHeartbeatTimerState];
 }
 
 #pragma mark - NSFilePresenter
@@ -494,8 +668,18 @@ NS_ASSUME_NONNULL_END
         if (strongSelf == nil) {
             return;
         }
+        // Debouncing alone has no ceiling: sustained activity (a large copy, an app
+        // rewriting files in a loop) pushes the deadline out on every callback, so
+        // clients would never be told anything changed. Once the oldest pending change
+        // has waited long enough, stop rescheduling and let the armed timer fire.
+        NSDate *const now = [NSDate date];
+        if (strongSelf->_firstPendingChangeDate == nil) {
+            strongSelf->_firstPendingChangeDate = now;
+        } else if ([now timeIntervalSinceDate:strongSelf->_firstPendingChangeDate] >= kChangeCoalescingMaxDelay) {
+            return;
+        }
         [strongSelf->_changeCoalescingTimer invalidate];
-        strongSelf->_changeCoalescingTimer = [NSTimer scheduledTimerWithTimeInterval:0.1
+        strongSelf->_changeCoalescingTimer = [NSTimer scheduledTimerWithTimeInterval:kChangeCoalescingInterval
                                                                               repeats:NO
                                                                                 block:^(NSTimer *timer) {
             [weakSelf _flushPendingChanges];
@@ -503,7 +687,11 @@ NS_ASSUME_NONNULL_END
     });
 }
 
+// Called from the coalescing timer, i.e. on the main run loop.
 - (void)_flushPendingChanges {
+    _changeCoalescingTimer = nil;
+    _firstPendingChangeDate = nil;  // The next change opens a fresh coalescing window.
+
     NSSet *paths;
     @synchronized(_pendingChangedPaths) {
         paths = [_pendingChangedPaths copy];
@@ -555,8 +743,17 @@ NS_ASSUME_NONNULL_END
     if (!_serverSentEventsEnabled) {
         return;
     }
-    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:data options:0 error:nil];
-    NSString *json = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
+    NSError *error = nil;
+    NSData *const jsonData = [NSJSONSerialization dataWithJSONObject:data options:0 error:&error];
+    NSString *const json = jsonData ? [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding] : nil;
+
+    if (json == nil) {
+        // Formatting a nil payload yields the literal "data: (null)", on which the
+        // browser's JSON.parse throws — killing the listener rather than losing one event.
+        [self logError:@"Failed serializing Server-Sent Event \"%@\": %@", eventType, error];
+        return;
+    }
+
     NSString *sseMessage = [NSString stringWithFormat:@"event: %@\ndata: %@\n\n", eventType, json];
     NSData *messageData = [sseMessage dataUsingEncoding:NSUTF8StringEncoding];
 
@@ -569,10 +766,29 @@ NS_ASSUME_NONNULL_END
 
 - (void)dealloc {
     if (_heartbeatTimer) {
+        // libdispatch traps on the release of a suspended object, and the timer spends
+        // most of its life suspended, so resume it before letting go. Reading the flag
+        // directly is safe here: every block that writes it retains self, so none can
+        // still be in flight once -dealloc runs.
+        if (_heartbeatSuspended) {
+            _heartbeatSuspended = NO;
+            dispatch_resume(_heartbeatTimer);
+        }
+
         dispatch_source_cancel(_heartbeatTimer);
     }
     [self _unregisterFilePresenter];
-    [_changeCoalescingTimer invalidate];
+    // -invalidate must be sent from the thread that scheduled the timer (here, the main
+    // run loop) but -dealloc runs wherever the last release happened. The timer holds no
+    // strong reference back to us — it captures self weakly — so handing it to the main
+    // queue keeps it alive just long enough to be invalidated there.
+    NSTimer *const timer = _changeCoalescingTimer;
+    _changeCoalescingTimer = nil;
+    if (timer) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [timer invalidate];
+        });
+    }
 }
 
 @end
@@ -585,6 +801,54 @@ NS_ASSUME_NONNULL_END
     }
 
     return YES;
+}
+
+// -allowHiddenItems was only ever enforced on the leaf component, so a hidden
+// *directory* was refused while nothing stopped a request from reaching inside one
+// ("/.git/config" listed, downloaded, deleted and overwritten happily). Test every
+// component instead. The path is normalized first so that a benign "." or ".."
+// component is resolved away rather than mistaken for a hidden name.
+- (BOOL)_isHiddenPath:(NSString *)relativePath {
+    if (_allowHiddenItems) {
+        return NO;
+    }
+
+    for (NSString *component in [GCDWebServerNormalizePath(relativePath) pathComponents]) {
+        if ([component hasPrefix:@"."]) {  // The leading "/" component never matches.
+            return YES;
+        }
+    }
+
+    return NO;
+}
+
+// Map an absolute path inside the share back to the client-facing relative path used in
+// SSE events. Chopping _uploadDirectory.length off the front assumes the root carries no
+// trailing separator — -initWithUploadDirectory: standardizes it so that holds — but stay
+// defensive: a mismatch would otherwise yield a path the browser cannot match against the
+// folder it is viewing, or run off the end of the string.
+- (NSString *)_relativePathForAbsolutePath:(NSString *)absolutePath {
+    if ((_uploadDirectory.length == 0) || ![absolutePath hasPrefix:_uploadDirectory]) {
+        return @"/";
+    }
+
+    NSString *const relativePath = [absolutePath substringFromIndex:_uploadDirectory.length];
+    return [relativePath hasPrefix:@"/"] ? relativePath : [@"/" stringByAppendingString:relativePath];
+}
+
+// Do two paths name the same file on disk? Compares file resource identifiers (inode +
+// volume), so it also catches the case-variant pair "File.txt"/"file.txt" that resolves
+// to one file on a case-insensitive volume. Same approach as GCDWebDAVServer's MOVE/COPY.
+- (BOOL)_fileAtPath:(NSString *)path1 isSameAsPath:(NSString *)path2 {
+    if ([path1 isEqualToString:path2]) {
+        return YES;
+    }
+
+    id identifier1 = nil;
+    id identifier2 = nil;
+    return [[NSURL fileURLWithPath:path1] getResourceValue:&identifier1 forKey:NSURLFileResourceIdentifierKey error:NULL] &&
+           [[NSURL fileURLWithPath:path2] getResourceValue:&identifier2 forKey:NSURLFileResourceIdentifierKey error:NULL] &&
+           identifier1 && [(NSObject *)identifier1 isEqual:identifier2];
 }
 
 - (NSString *)_uniquePathForPath:(NSString *)path {
@@ -607,7 +871,15 @@ NS_ASSUME_NONNULL_END
 }
 
 - (GCDWebServerResponse *)listDirectory:(GCDWebServerRequest *)request {
-    NSString *const relativePath = [request query][@"path"];
+    // Default a missing "path" query parameter to the root. Left nil it survives every
+    // check below — GCDWebServerNormalizePath(nil) is @"", so the absolute path
+    // collapses to the upload directory, which exists and is a directory — and then
+    // reaches the per-entry dictionary literals, where
+    // -stringByAppendingPathComponent: on a nil receiver yields nil. Inserting nil
+    // into a dictionary literal raises NSInvalidArgumentException, and nothing here
+    // catches it, so a bare "GET /list" terminated the whole app.
+    NSString *const requestedPath = [request query][@"path"];
+    NSString *const relativePath = requestedPath ? requestedPath : @"/";
     NSString *const absolutePath = [_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(relativePath)];
     BOOL isDirectory = NO;
 
@@ -619,10 +891,14 @@ NS_ASSUME_NONNULL_END
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_BadRequest message:@"\"%@\" is not a directory", relativePath];
     }
 
-    NSString *const directoryName = [absolutePath lastPathComponent];
+    // Verify the resolved location, not just the path text: a symlink somewhere inside
+    // the share can point out of it, and normalize/prefix checks cannot see that.
+    if (!GCDWebServerResolvedPathIsWithinDirectory(absolutePath, _uploadDirectory)) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Listing \"%@\" is not allowed", relativePath];
+    }
 
-    if (!_allowHiddenItems && [directoryName hasPrefix:@"."]) {
-        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Listing directory name \"%@\" is not allowed", directoryName];
+    if ([self _isHiddenPath:relativePath]) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Listing hidden path \"%@\" is not allowed", relativePath];
     }
 
     NSError *error = nil;
@@ -638,12 +914,13 @@ NS_ASSUME_NONNULL_END
         if (_allowHiddenItems || ![item hasPrefix:@"."]) {
             NSDictionary *const attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:[absolutePath stringByAppendingPathComponent:item] error:NULL];
             NSString *const type = attributes[NSFileType];
+            NSNumber *const size = attributes[NSFileSize];  // Nil if the item vanished between the listing and this stat; must not reach the literal below.
 
-            if ([type isEqualToString:NSFileTypeRegular] && [self _checkFileExtension:item]) {
+            if ([type isEqualToString:NSFileTypeRegular] && size && [self _checkFileExtension:item]) {
                 [array addObject:@{
                     @"path": [relativePath stringByAppendingPathComponent:item],
                     @"name": item,
-                    @"size": (NSNumber *)attributes[NSFileSize]
+                    @"size": size
                 }];
             } else if ([type isEqualToString:NSFileTypeDirectory]) {
                 [array addObject:@{
@@ -658,7 +935,9 @@ NS_ASSUME_NONNULL_END
 }
 
 - (GCDWebServerResponse *)downloadFile:(GCDWebServerRequest *)request {
-    NSString *const relativePath = [request query][@"path"];
+    // Never nil, so error bodies name a path instead of "(null)" — and match -listDirectory:.
+    NSString *const requestedPath = [request query][@"path"];
+    NSString *const relativePath = requestedPath ? requestedPath : @"/";
     NSString *const absolutePath = [_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(relativePath)];
     BOOL isDirectory = NO;
 
@@ -670,9 +949,18 @@ NS_ASSUME_NONNULL_END
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_BadRequest message:@"\"%@\" is a directory", relativePath];
     }
 
+    // As in -listDirectory:, confirm the resolved location is still inside the share.
+    if (!GCDWebServerResolvedPathIsWithinDirectory(absolutePath, _uploadDirectory)) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Downloading \"%@\" is not allowed", relativePath];
+    }
+
+    if ([self _isHiddenPath:relativePath]) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Downloading hidden path \"%@\" is not allowed", relativePath];
+    }
+
     NSString *const fileName = [absolutePath lastPathComponent];
 
-    if (([fileName hasPrefix:@"."] && !_allowHiddenItems) || ![self _checkFileExtension:fileName]) {
+    if (![self _checkFileExtension:fileName]) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Downlading file name \"%@\" is not allowed", fileName];
     }
 
@@ -726,7 +1014,10 @@ static NSString *_OriginAuthority(NSString *value) {
         authority = _OriginAuthority(request.headers[@"Referer"]);  // Fall back to Referer when Origin is absent
     }
 
-    if (authority && ((host.length == 0) || ![authority isEqualToString:host])) {
+    // Compare case-insensitively: host names are, so a mixed-case Bonjour name
+    // ("http://MyMac.local:8080" against a "mymac.local:8080" Host) is the same origin
+    // and must not be refused.
+    if (authority && ((host.length == 0) || ([authority caseInsensitiveCompare:host] != NSOrderedSame))) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Cross-origin request rejected"];
     }
 
@@ -758,6 +1049,18 @@ static NSString *_OriginAuthority(NSString *value) {
     NSString *const relativePath = [[request firstArgumentForControlName:@"path"] string];
     NSString *const desiredPath = [[_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(relativePath)] stringByAppendingPathComponent:fileName];
 
+    // A non-hidden file name is not enough: the destination directory must not be hidden
+    // either, at any depth, or an upload could drop files into ".git" and friends.
+    if ([self _isHiddenPath:relativePath]) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Uploading to hidden path \"%@\" is not allowed", relativePath];
+    }
+
+    // The leaf is already reduced to a single component above, but the client-supplied
+    // "path" it is appended to may traverse a symlink out of the share.
+    if (!GCDWebServerResolvedPathIsWithinDirectory(desiredPath, _uploadDirectory)) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Uploading to \"%@\" is not allowed", relativePath];
+    }
+
     // Resolving a unique name and moving the uploaded file into place must be
     // atomic against concurrent requests, otherwise two uploads of the same
     // filename can resolve the same "unique" path and one clobbers or fails.
@@ -784,7 +1087,7 @@ static NSString *_OriginAuthority(NSString *value) {
         });
     }
 
-    NSString *const uploadedRelativePath = [absolutePath substringFromIndex:_uploadDirectory.length];
+    NSString *const uploadedRelativePath = [self _relativePathForAbsolutePath:absolutePath];
     [self _broadcastSSEEvent:@"change" data:@{@"type": @"upload", @"path": uploadedRelativePath}];
 
     return [GCDWebServerDataResponse responseWithJSONObject:@{} contentType:contentType];
@@ -808,13 +1111,26 @@ static NSString *_OriginAuthority(NSString *value) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Operating on the root directory is not allowed"];
     }
 
+    // Both endpoints must also resolve inside the share, so neither can reach out of it
+    // through a symlink (which the textual check above cannot detect).
+    if (!GCDWebServerResolvedPathIsWithinDirectory(oldAbsolutePath, _uploadDirectory) || !GCDWebServerResolvedPathIsWithinDirectory(desiredNewPath, _uploadDirectory)) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Moving \"%@\" to \"%@\" is not allowed", oldRelativePath, newRelativePath];
+    }
+
     if (![[NSFileManager defaultManager] fileExistsAtPath:oldAbsolutePath isDirectory:&isDirectory]) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_NotFound message:@"\"%@\" does not exist", oldRelativePath];
     }
 
+    // Check both endpoints for a hidden component at any depth, not just the leaf: a move
+    // out of a dot-directory would otherwise exfiltrate its contents into plain view, and
+    // a move into one would smuggle files past the same guard.
+    if ([self _isHiddenPath:oldRelativePath] || [self _isHiddenPath:newRelativePath]) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Moving \"%@\" to \"%@\" is not allowed: a hidden path is involved", oldRelativePath, newRelativePath];
+    }
+
     NSString *const oldItemName = [oldAbsolutePath lastPathComponent];
 
-    if ((!_allowHiddenItems && [oldItemName hasPrefix:@"."]) || (!isDirectory && ![self _checkFileExtension:oldItemName])) {
+    if (!isDirectory && ![self _checkFileExtension:oldItemName]) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Moving from item name \"%@\" is not allowed", oldItemName];
     }
 
@@ -825,11 +1141,23 @@ static NSString *_OriginAuthority(NSString *value) {
     NSError *error = nil;
     BOOL moved;
     @synchronized(_fileOperationLock) {
+        // A destination that IS the source is not an obstacle to route around: without
+        // this, an exact no-op move — or a case-only rename such as "File.txt" to
+        // "file.txt" on a case-insensitive volume — makes -_uniquePathForPath: see the
+        // source itself as a name collision and silently produce "file (1).txt".
+        // NSFileManager refuses a move onto an existing destination anyway, so say so
+        // plainly, matching GCDWebDAVServer's MOVE-onto-itself rejection.
+        if ([self _fileAtPath:oldAbsolutePath isSameAsPath:desiredNewPath]) {
+            return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Moving \"%@\" onto itself is not allowed", oldRelativePath];
+        }
+
         newAbsolutePath = [self _uniquePathForPath:desiredNewPath];
 
+        // The hidden check ran on newRelativePath above; -_uniquePathForPath: only ever
+        // appends " (n)" to the leaf, so it cannot turn a visible name into a hidden one.
         NSString *const newItemName = [newAbsolutePath lastPathComponent];
 
-        if ((!_allowHiddenItems && [newItemName hasPrefix:@"."]) || (!isDirectory && ![self _checkFileExtension:newItemName])) {
+        if (!isDirectory && ![self _checkFileExtension:newItemName]) {
             return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Moving to item name \"%@\" is not allowed", newItemName];
         }
 
@@ -850,8 +1178,8 @@ static NSString *_OriginAuthority(NSString *value) {
         });
     }
 
-    NSString *const movedOldRelativePath = [oldAbsolutePath substringFromIndex:_uploadDirectory.length];
-    NSString *const movedNewRelativePath = [newAbsolutePath substringFromIndex:_uploadDirectory.length];
+    NSString *const movedOldRelativePath = [self _relativePathForAbsolutePath:oldAbsolutePath];
+    NSString *const movedNewRelativePath = [self _relativePathForAbsolutePath:newAbsolutePath];
     [self _broadcastSSEEvent:@"change" data:@{@"type": @"move", @"oldPath": movedOldRelativePath, @"newPath": movedNewRelativePath}];
 
     return [GCDWebServerDataResponse responseWithJSONObject:@{}];
@@ -873,23 +1201,73 @@ static NSString *_OriginAuthority(NSString *value) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Operating on the root directory is not allowed"];
     }
 
+    // Deleting is destructive, so also confirm the resolved target is inside the share
+    // rather than something a symlink points to outside it.
+    if (!GCDWebServerResolvedPathIsWithinDirectory(absolutePath, _uploadDirectory)) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not allowed", relativePath];
+    }
+
     if (![[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory]) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
     }
 
+    if ([self _isHiddenPath:relativePath]) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Deleting hidden path \"%@\" is not allowed", relativePath];
+    }
+
     NSString *const itemName = [absolutePath lastPathComponent];
 
-    if (([itemName hasPrefix:@"."] && !_allowHiddenItems) || (!isDirectory && ![self _checkFileExtension:itemName])) {
+    if (!isDirectory && ![self _checkFileExtension:itemName]) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Deleting item name \"%@\" is not allowed", itemName];
     }
 
-    if (![self shouldDeleteItemAtPath:absolutePath]) {
-        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not permitted", relativePath];
+    // Vetting the subtree and removing it must be atomic against the other file
+    // operations: a concurrent /move can relocate a whole *directory* into this tree —
+    // and directories skip the extension check — so a tree that vetted clean can hold
+    // disallowed files by the time it is destroyed. Take the same lock they do.
+    NSError *error = nil;
+    BOOL removed;
+
+    @synchronized(_fileOperationLock) {
+        // Deleting a directory removes its whole subtree, which must not become a way to
+        // destroy files that a direct delete would refuse. The extension check above only
+        // applies to files, so vet the contents before removing a directory.
+        if (isDirectory && _allowedFileExtensions) {
+            NSDirectoryEnumerator<NSString *> *const enumerator = [[NSFileManager defaultManager] enumeratorAtPath:absolutePath];
+
+            for (NSString *subpath in enumerator) {
+                // Skip dot-names — and everything under them — whatever -allowHiddenItems
+                // says. They are incidental metadata rather than content the allow-list is
+                // meant to protect (a ".DS_Store" sits in every macOS folder, and its empty
+                // pathExtension is in no allow-list), so vetting them would make ordinary
+                // directories permanently undeletable. Note this cannot use -_isHiddenPath:,
+                // which reports NO for everything once hidden items are allowed.
+                if ([[subpath lastPathComponent] hasPrefix:@"."]) {
+                    [enumerator skipDescendants];
+                    continue;
+                }
+
+                NSString *const subpathType = [enumerator fileAttributes][NSFileType];
+
+                // An extensionless file ("README", "LICENSE") is vetted like any other: a
+                // direct DELETE of it is already refused, so letting a recursive delete
+                // destroy it would make the same request mean two different things. Refusing
+                // the folder is the honest answer — the client is told exactly which entry
+                // blocked it and can remove that first.
+                if ([subpathType isEqualToString:NSFileTypeRegular] && ![self _checkFileExtension:subpath]) {
+                    return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not allowed: it contains \"%@\"", relativePath, subpath];
+                }
+            }
+        }
+
+        if (![self shouldDeleteItemAtPath:absolutePath]) {
+            return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not permitted", relativePath];
+        }
+
+        removed = [[NSFileManager defaultManager] removeItemAtPath:absolutePath error:&error];
     }
 
-    NSError *error = nil;
-
-    if (![[NSFileManager defaultManager] removeItemAtPath:absolutePath error:&error]) {
+    if (!removed) {
         return [GCDWebServerErrorResponse responseWithServerError:kGCDWebServerHTTPStatusCode_InternalServerError underlyingError:error message:@"Failed deleting \"%@\"", relativePath];
     }
 
@@ -899,7 +1277,11 @@ static NSString *_OriginAuthority(NSString *value) {
         });
     }
 
-    [self _broadcastSSEEvent:@"change" data:@{@"type": @"delete", @"path": relativePath}];
+    // Derive the broadcast path from the resolved location, as upload/move/create do:
+    // echoing the raw client string back would make other browsers compute a directory
+    // that never matches the one they are viewing, so they would not refresh.
+    NSString *const deletedRelativePath = [self _relativePathForAbsolutePath:absolutePath];
+    [self _broadcastSSEEvent:@"change" data:@{@"type": @"delete", @"path": deletedRelativePath}];
 
     return [GCDWebServerDataResponse responseWithJSONObject:@{}];
 }
@@ -919,6 +1301,18 @@ static NSString *_OriginAuthority(NSString *value) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Operating on the root directory is not allowed"];
     }
 
+    // The parent of the new directory must resolve inside the share, so a symlinked
+    // intermediate component cannot place it outside.
+    if (!GCDWebServerResolvedPathIsWithinDirectory(desiredPath, _uploadDirectory)) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Creating \"%@\" is not allowed", relativePath];
+    }
+
+    // Refuse a hidden component anywhere, not just in the new directory's own name: the
+    // parent chain must be visible too, or /create becomes a way to populate a dot-directory.
+    if ([self _isHiddenPath:relativePath]) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Creating hidden path \"%@\" is not allowed", relativePath];
+    }
+
     // Resolving a unique name and creating the directory must be atomic: request
     // handlers run concurrently, so without this two requests for the same name
     // would both resolve the same "unique" path and the second mkdir would fail.
@@ -927,12 +1321,6 @@ static NSString *_OriginAuthority(NSString *value) {
     BOOL created;
     @synchronized(_fileOperationLock) {
         absolutePath = [self _uniquePathForPath:desiredPath];
-
-        NSString *const directoryName = [absolutePath lastPathComponent];
-
-        if (!_allowHiddenItems && [directoryName hasPrefix:@"."]) {
-            return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Creating directory name \"%@\" is not allowed", directoryName];
-        }
 
         if (![self shouldCreateDirectoryAtPath:absolutePath]) {
             return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Creating directory \"%@\" is not permitted", relativePath];
@@ -951,7 +1339,7 @@ static NSString *_OriginAuthority(NSString *value) {
         });
     }
 
-    NSString *const createdRelativePath = [[absolutePath substringFromIndex:_uploadDirectory.length] stringByAppendingString:@"/"];
+    NSString *const createdRelativePath = [[self _relativePathForAbsolutePath:absolutePath] stringByAppendingString:@"/"];
     [self _broadcastSSEEvent:@"change" data:@{@"type": @"create", @"path": createdRelativePath}];
 
     return [GCDWebServerDataResponse responseWithJSONObject:@{}];

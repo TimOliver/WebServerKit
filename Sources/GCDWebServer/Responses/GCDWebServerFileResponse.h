@@ -94,6 +94,11 @@ NS_ASSUME_NONNULL_BEGIN
  *
  *  This argument would typically be set to the value of the byteRange property
  *  of the current GCDWebServerRequest.
+ *
+ *  If the range is valid but cannot be satisfied by the file (it starts at or past
+ *  the end of it), the returned response is a bodyless "416 Requested Range Not
+ *  Satisfiable" carrying a "Content-Range" header with the current file size,
+ *  rather than nil.
  */
 - (nullable instancetype)initWithFile:(NSString *)path byteRange:(NSRange)range;
 

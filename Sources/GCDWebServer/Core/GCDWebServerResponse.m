@@ -37,6 +37,7 @@
 #define kGZipInitialBufferSize (256 * 1024)
 
 @interface GCDWebServerBodyEncoder : NSObject <GCDWebServerBodyReader>
+- (BOOL)hasAsyncReader;
 @end
 
 @interface GCDWebServerGZipEncoder : GCDWebServerBodyEncoder
@@ -62,6 +63,24 @@
 
 - (NSData *)readData:(NSError **)error {
     return [_reader readData:error];
+}
+
+// The encoder chain must expose the asynchronous path as well: a reader that only
+// implements -asyncReadDataWithCompletion: (GCDWebServerStreamedResponse does) would
+// otherwise fall through to the base -readData:, which returns empty data — encoding
+// an empty body and never running the stream block at all.
+- (void)asyncReadDataWithCompletion:(GCDWebServerBodyReaderCompletionBlock)block {
+    if ([_reader respondsToSelector:@selector(asyncReadDataWithCompletion:)]) {
+        [_reader asyncReadDataWithCompletion:[block copy]];  // The reader may park the block, so it must live on the heap
+    } else {
+        NSError *error = nil;
+        NSData *const data = [_reader readData:&error];
+        block(data, error);
+    }
+}
+
+- (BOOL)hasAsyncReader {
+    return [_reader respondsToSelector:@selector(asyncReadDataWithCompletion:)];
 }
 
 - (void)close {
@@ -103,16 +122,66 @@
     return YES;
 }
 
+// Deflates one source chunk into "encodedData" starting at "*length", growing the buffer
+// as zlib fills it and advancing "*length" by the bytes produced. The caller picks the
+// flush mode: Z_FINISH for the final (empty) chunk, Z_NO_FLUSH to let zlib buffer.
+- (BOOL)_deflateData:(NSData *)data flush:(int)flush into:(NSMutableData *)encodedData length:(NSUInteger *)length error:(NSError **)error {
+    _stream.next_in = (Bytef *)data.bytes;
+    _stream.avail_in = (uInt)data.length;
+
+    while (1) {
+        NSUInteger maxLength = encodedData.length - *length;
+        _stream.next_out = (Bytef *)((char *)encodedData.mutableBytes + *length);
+        _stream.avail_out = (uInt)maxLength;
+        int result = deflate(&_stream, flush);
+
+        if (result == Z_STREAM_END) {
+            _finished = YES;
+        } else if (result != Z_OK) {
+            if (error) {
+                *error = [NSError errorWithDomain:kZlibErrorDomain code:result userInfo:nil];
+            }
+
+            return NO;
+        }
+
+        *length += maxLength - _stream.avail_out;
+
+        if (_stream.avail_out > 0) {
+            break;
+        }
+
+        encodedData.length = 2 * encodedData.length;  // zlib has used all the output buffer so resize it and try again in case more data is available
+    }
+    GWS_DCHECK(_stream.avail_in == 0);
+    return YES;
+}
+
+// A 256 KB allocation can genuinely fail under memory pressure on a device, so this is an
+// ordinary runtime error and not a GWS_DNOT_REACHED() assertion (which aborts in Debug).
+- (NSMutableData *)_allocateEncodingBuffer:(NSError **)error {
+    NSMutableData *const encodedData = [[NSMutableData alloc] initWithLength:kGZipInitialBufferSize];
+
+    if (encodedData == nil) {
+        GWS_LOG_ERROR(@"Failed allocating gzip encoding buffer of %i bytes", kGZipInitialBufferSize);
+
+        if (error) {
+            *error = GCDWebServerMakePosixError(ENOMEM);
+        }
+    }
+
+    return encodedData;
+}
+
 - (NSData *)readData:(NSError **)error {
     NSMutableData *encodedData;
 
     if (_finished) {
         encodedData = [[NSMutableData alloc] init];
     } else {
-        encodedData = [[NSMutableData alloc] initWithLength:kGZipInitialBufferSize];
+        encodedData = [self _allocateEncodingBuffer:error];
 
         if (encodedData == nil) {
-            GWS_DNOT_REACHED();
             return nil;
         }
 
@@ -124,39 +193,70 @@
                 return nil;
             }
 
-            _stream.next_in = (Bytef *)data.bytes;
-            _stream.avail_in = (uInt)data.length;
+            const int flush = data.length ? Z_NO_FLUSH : Z_FINISH;
 
-            while (1) {
-                NSUInteger maxLength = encodedData.length - length;
-                _stream.next_out = (Bytef *)((char *)encodedData.mutableBytes + length);
-                _stream.avail_out = (uInt)maxLength;
-                int result = deflate(&_stream, data.length ? Z_NO_FLUSH : Z_FINISH);
-
-                if (result == Z_STREAM_END) {
-                    _finished = YES;
-                } else if (result != Z_OK) {
-                    if (error) {
-                        *error = [NSError errorWithDomain:kZlibErrorDomain code:result userInfo:nil];
-                    }
-
-                    return nil;
-                }
-
-                length += maxLength - _stream.avail_out;
-
-                if (_stream.avail_out > 0) {
-                    break;
-                }
-
-                encodedData.length = 2 * encodedData.length;  // zlib has used all the output buffer so resize it and try again in case more data is available
+            if (![self _deflateData:data flush:flush into:encodedData length:&length error:error]) {
+                return nil;
             }
-            GWS_DCHECK(_stream.avail_in == 0);
         } while (length == 0);  // Make sure we don't return an empty NSData if not in finished state
         encodedData.length = length;
     }
 
     return encodedData;
+}
+
+- (void)asyncReadDataWithCompletion:(GCDWebServerBodyReaderCompletionBlock)block {
+    if (![self hasAsyncReader]) {
+        // The reader below is synchronous, so keep using the synchronous loop: it reads
+        // more input when a chunk buffers to nothing instead of forcing a flush, which
+        // compresses marginally better.
+        NSError *error = nil;
+        NSData *const data = [self readData:&error];
+        block(data, error);
+        return;
+    }
+
+    if (_finished) {
+        block([NSData data], nil);
+        return;
+    }
+
+    NSError *bufferError = nil;
+    NSMutableData *const encodedData = [self _allocateEncodingBuffer:&bufferError];
+
+    if (encodedData == nil) {
+        block(nil, bufferError);
+        return;
+    }
+
+    [super asyncReadDataWithCompletion:^(NSData *data, NSError *readError) {
+        if (data == nil) {
+            block(nil, readError);
+            return;
+        }
+
+        NSError *encodeError = nil;
+        NSUInteger length = 0;
+        const int flush = data.length ? Z_NO_FLUSH : Z_FINISH;
+
+        if (![self _deflateData:data flush:flush into:encodedData length:&length error:&encodeError]) {
+            block(nil, encodeError);
+            return;
+        }
+
+        if ((length == 0) && !self->_finished) {
+            // zlib buffered the whole chunk. Empty data is the connection's end-of-body
+            // sentinel, and unlike the synchronous loop this path cannot read more input
+            // without recursing once per chunk, so force the pending output out instead.
+            if (![self _deflateData:[NSData data] flush:Z_SYNC_FLUSH into:encodedData length:&length error:&encodeError]) {
+                block(nil, encodeError);
+                return;
+            }
+        }
+
+        encodedData.length = length;
+        block(encodedData, nil);
+    }];
 }
 
 - (void)close {
@@ -190,6 +290,18 @@
 }
 
 - (void)setValue:(NSString *)value forAdditionalHeader:(NSString *)header {
+    // CFHTTPMessageSetHeaderFieldValue drops a header whose *value* contains CR or LF, but
+    // it happily serializes those characters in a header *name* — so a name assembled from
+    // untrusted input would split the response and inject headers of the attacker's
+    // choosing. No caller in this library does that, but this is the chokepoint, and a host
+    // app naming a header after request data should not be able to forge a response.
+    NSRange controlCharacter = [header rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"\r\n:"]];
+
+    if (controlCharacter.location != NSNotFound) {
+        GWS_LOG_ERROR(@"Ignoring additional response header with an invalid name \"%@\"", header);
+        return;
+    }
+
     [_additionalHeaders setValue:value forKey:header];
 }
 
@@ -242,12 +354,29 @@
 - (void)performReadDataWithCompletion:(GCDWebServerBodyReaderCompletionBlock)block {
     GWS_DCHECK(_opened);
 
+    // Guard against a body reader (typically a stream block) that invokes its completion
+    // more than once: a second call would start a second write chain on the same socket,
+    // interleaving the chunk framing, and would run -performClose twice — a double
+    // deflateEnd() for a gzip chain and a double close() of the file descriptor for a
+    // file response. Mirrors the same guard on the handler completion in
+    // -[GCDWebServerConnection _startProcessingRequest].
+    __block BOOL read = NO;
+    const GCDWebServerBodyReaderCompletionBlock guardedBlock = ^(NSData *data, NSError *error) {
+        if (read) {
+            GWS_LOG_ERROR(@"Ignoring extra body reader completion block invocation");
+            return;
+        }
+
+        read = YES;
+        block(data, error);
+    };
+
     if ([_reader respondsToSelector:@selector(asyncReadDataWithCompletion:)]) {
-        [_reader asyncReadDataWithCompletion:[block copy]];
+        [_reader asyncReadDataWithCompletion:[guardedBlock copy]];
     } else {
         NSError *error = nil;
         NSData *const data = [_reader readData:&error];
-        block(data, error);
+        guardedBlock(data, error);
     }
 }
 

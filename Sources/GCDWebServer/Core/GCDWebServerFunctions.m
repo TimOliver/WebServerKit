@@ -102,25 +102,53 @@ NSString *GCDWebServerTruncateHeaderValue(NSString *value) {
 }
 
 NSString *GCDWebServerExtractHeaderValueParameter(NSString *value, NSString *name) {
-    NSString *parameter = nil;
+    if ((value == nil) || (name.length == 0)) {
+        return nil;
+    }
 
-    if (value) {
-        NSScanner *const scanner = [[NSScanner alloc] initWithString:value];
-        [scanner setCaseSensitive:NO];  // Assume parameter names are case-insensitive
-        NSString *const string = [NSString stringWithFormat:@"%@=", name];
+    // The parameter name must match at a token boundary. A plain substring search finds
+    // "name=" inside "filename=" and "nonce=" inside "cnonce=", returning the wrong
+    // parameter whenever a client happens to order them that way — which RFC 2617 clients
+    // sending "qop"/"cnonce" do routinely, and which a multipart body may choose freely.
+    // Scanning up to the name also used to fail outright when it appeared first, since
+    // -scanUpToString: reports failure if it has nothing to skip.
+    NSCharacterSet *const boundaryCharacters = [NSCharacterSet characterSetWithCharactersInString:@" \t;,"];
+    NSString *const token = [name stringByAppendingString:@"="];
+    NSUInteger searchLocation = 0;
 
-        if ([scanner scanUpToString:string intoString:NULL]) {
-            [scanner scanString:string intoString:NULL];
+    while (searchLocation < value.length) {
+        NSRange found = [value rangeOfString:token
+                                     options:NSCaseInsensitiveSearch  // Parameter names are case-insensitive
+                                       range:NSMakeRange(searchLocation, value.length - searchLocation)];
+
+        if (found.location == NSNotFound) {
+            return nil;
+        }
+
+        if ((found.location == 0) || [boundaryCharacters characterIsMember:[value characterAtIndex:(found.location - 1)]]) {
+            NSScanner *const scanner = [[NSScanner alloc] initWithString:value];
+            [scanner setScanLocation:(found.location + found.length)];
+            NSString *parameter = nil;
 
             if ([scanner scanString:@"\"" intoString:NULL]) {
                 [scanner scanUpToString:@"\"" intoString:&parameter];
             } else {
-                [scanner scanUpToCharactersFromSet:[NSCharacterSet whitespaceCharacterSet] intoString:&parameter];
+                // Unquoted values end at whitespace or ";", so "name=upload; filename=a.txt"
+                // does not yield a trailing ";". Deliberately NOT at ",": RFC 2046 allows a
+                // comma in a multipart boundary, and terminating there truncated
+                // "boundary=ab,cd" to "ab" and broke every upload from such a client. The
+                // comma still delimits when *preceding* a name (see boundaryCharacters), which
+                // is all the comma-separated Authorization parameters need.
+                [scanner scanUpToCharactersFromSet:[NSCharacterSet characterSetWithCharactersInString:@" \t;"] intoString:&parameter];
             }
+
+            return parameter;
         }
+
+        searchLocation = found.location + found.length;
     }
 
-    return parameter;
+    return nil;
 }
 
 // http://www.w3schools.com/tags/ref_charactersets.asp
@@ -204,7 +232,10 @@ NSString *GCDWebServerGetMimeTypeForExtension(NSString *extension, NSDictionary<
 
         if (mimeType == nil) {
 #if __has_include(<UniformTypeIdentifiers/UniformTypeIdentifiers.h>)
-            if (@available(iOS 14.0, macOS 11.0, *)) {
+            // tvOS must be named explicitly: the deployment target is 12.0, and without it
+            // the "*" arm makes this branch compile for every tvOS version, calling UTType
+            // where it does not exist.
+            if (@available(iOS 14.0, macOS 11.0, tvOS 14.0, *)) {
                 UTType *type = [UTType typeWithFilenameExtension:extension];
                 mimeType = type.preferredMIMEType;
             } else
@@ -266,8 +297,10 @@ NSDictionary<NSString *, NSString *> *GCDWebServerParseURLEncodedForm(NSString *
         if (unescapedKey && unescapedValue) {
             [parameters setObject:unescapedValue forKey:unescapedKey];
         } else {
+            // -stringByRemovingPercentEncoding returns nil for an invalid escape or a
+            // sequence that is not valid UTF-8 ("?a=%FF"), which is ordinary remote input
+            // rather than an unreachable state: drop the pair instead of aborting in debug.
             GWS_LOG_WARNING(@"Failed parsing URL encoded form for key \"%@\" and value \"%@\"", key, value);
-            GWS_DNOT_REACHED();
         }
 
         if ([scanner isAtEnd]) {
@@ -283,13 +316,15 @@ NSString *GCDWebServerStringFromSockAddr(const struct sockaddr *addr, BOOL inclu
     char hostBuffer[NI_MAXHOST];
     char serviceBuffer[NI_MAXSERV];
 
-    if (getnameinfo(addr, addr->sa_len, hostBuffer, sizeof(hostBuffer), serviceBuffer, sizeof(serviceBuffer), NI_NUMERICHOST | NI_NUMERICSERV | NI_NOFQDN) != 0) {
-#if DEBUG
-        GWS_DNOT_REACHED();
-#else
-        return @"";
+    // Always return on failure. Falling through would format two uninitialized stack
+    // buffers into the result, leaking stack contents into logs — which is what happened
+    // in debug builds whenever GWS_DNOT_REACHED did not actually abort (it is a no-op
+    // under a custom or XLFacility logging facility).
+    int result = getnameinfo(addr, addr->sa_len, hostBuffer, sizeof(hostBuffer), serviceBuffer, sizeof(serviceBuffer), NI_NUMERICHOST | NI_NUMERICSERV | NI_NOFQDN);
 
-#endif
+    if (result != 0) {
+        GWS_LOG_ERROR(@"Failed converting socket address to string: %s", gai_strerror(result));
+        return @"";
     }
 
     return includeService ? [NSString stringWithFormat:@"%s:%s", hostBuffer, serviceBuffer] : (NSString *)[NSString stringWithUTF8String:hostBuffer];
@@ -360,13 +395,19 @@ NSString *GCDWebServerComputeMD5Digest(NSString *format, ...) {
     va_list arguments;
 
     va_start(arguments, format);
-    const char *string = [[[NSString alloc] initWithFormat:format arguments:arguments] UTF8String];
+    NSString *const string = [[NSString alloc] initWithFormat:format arguments:arguments];
     va_end(arguments);
+    // Hash the whole byte string, not up to the first NUL. A NUL survives from the wire into
+    // request.headers, so a -UTF8String/strlen pair let a client end the hashed input early:
+    // for a Digest nonce of "<hex>\0X" the per-process secret never reached the digest, and
+    // its integrity tag could be computed by anyone. Not an auth bypass on its own (the
+    // response digest still needs HA1) but it defeats the "we minted this nonce" property.
+    NSData *const bytes = [string dataUsingEncoding:NSUTF8StringEncoding];
     unsigned char md5[CC_MD5_DIGEST_LENGTH];
     // MD5 is mandated by HTTP Digest Auth (RFC 2617). No non-deprecated replacement exists.
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    CC_MD5(string, (CC_LONG)strlen(string), md5);
+    CC_MD5(bytes.bytes, (CC_LONG)bytes.length, md5);
 #pragma clang diagnostic pop
     char buffer[2 * CC_MD5_DIGEST_LENGTH + 1];
 
@@ -420,4 +461,47 @@ BOOL GCDWebServerPathIsInsideDirectory(NSString *path, NSString *directory) {
     }
     NSString *const prefix = [directory hasSuffix:@"/"] ? directory : [directory stringByAppendingString:@"/"];
     return [path hasPrefix:prefix];
+}
+
+// Fully resolve `path` with realpath(3). If the item does not exist yet — an upload or
+// MKCOL destination — resolve its parent instead and re-attach the leaf, so intermediate
+// symlinks are still resolved without requiring the target to exist. Returns nil when
+// nothing along the path can be resolved.
+static NSString *_RealPath(NSString *path) {
+    if (path.length == 0) {
+        return nil;
+    }
+
+    char buffer[PATH_MAX];
+    NSFileManager *const fileManager = [NSFileManager defaultManager];
+
+    if (realpath([path fileSystemRepresentation], buffer)) {
+        return [fileManager stringWithFileSystemRepresentation:buffer length:strlen(buffer)];
+    }
+
+    NSString *const parent = [path stringByDeletingLastPathComponent];
+
+    if ((parent.length == 0) || [parent isEqualToString:path]) {
+        return nil;
+    }
+
+    if (realpath([parent fileSystemRepresentation], buffer)) {
+        NSString *const resolvedParent = [fileManager stringWithFileSystemRepresentation:buffer length:strlen(buffer)];
+        return resolvedParent ? [resolvedParent stringByAppendingPathComponent:[path lastPathComponent]] : nil;
+    }
+
+    return nil;
+}
+
+BOOL GCDWebServerResolvedPathIsWithinDirectory(NSString *path, NSString *directory) {
+    NSString *const resolvedPath = _RealPath(path);
+    // Resolve the directory too: /var is itself a symlink to /private/var on Apple
+    // platforms, so a resolved path compared against an unresolved root never matches.
+    NSString *const resolvedDirectory = _RealPath(directory);
+
+    if ((resolvedPath == nil) || (resolvedDirectory == nil)) {
+        return NO;  // Fail closed rather than serving a path we could not verify.
+    }
+
+    return [resolvedPath isEqualToString:resolvedDirectory] || GCDWebServerPathIsInsideDirectory(resolvedPath, resolvedDirectory);
 }

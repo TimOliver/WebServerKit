@@ -53,6 +53,78 @@ static NSData* ReadToEOF(int fd, BOOL* sawEOF) {
     }
 }
 
+// Inverse of GZipCompress: inflate a gzip stream produced by the server's response
+// encoder, so tests can assert on what a client would actually receive.
+static NSData* GZipDecompress(NSData* input) {
+    z_stream stream;
+    bzero(&stream, sizeof(stream));
+
+    if (inflateInit2(&stream, 15 + 16) != Z_OK) {
+        return nil;
+    }
+
+    stream.next_in = (Bytef*)input.bytes;
+    stream.avail_in = (uInt)input.length;
+    NSMutableData* output = [NSMutableData dataWithLength:(64 * 1024)];
+    NSUInteger total = 0;
+    int result;
+
+    do {
+        if (total == output.length) {
+            output.length = 2 * output.length;
+        }
+
+        stream.next_out = (Bytef*)output.mutableBytes + total;
+        stream.avail_out = (uInt)(output.length - total);
+        result = inflate(&stream, Z_NO_FLUSH);
+        total = output.length - stream.avail_out;
+    } while (result == Z_OK);
+
+    inflateEnd(&stream);
+
+    if (result != Z_STREAM_END) {
+        return nil;
+    }
+
+    output.length = total;
+    return output;
+}
+
+// Drives a response through the same reader contract the connection uses, returning the
+// whole body. Handles both synchronous readers and async ones that park the completion.
+static NSData* DrainResponseBody(GCDWebServerResponse* response) {
+    [response prepareForReading];
+    NSError* error = nil;
+
+    if (![response performOpen:&error]) {
+        return nil;
+    }
+
+    NSMutableData* body = [NSMutableData data];
+
+    while (1) {
+        __block NSData* chunk = nil;
+        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+        [response performReadDataWithCompletion:^(NSData* data, NSError* readError) {
+            chunk = data;
+            dispatch_semaphore_signal(semaphore);
+        }];
+
+        if (dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC))) != 0) {
+            return nil;  // Reader never completed
+        }
+
+        if (chunk.length == 0) {
+            break;
+        }
+
+        [body appendData:chunk];
+    }
+
+    [response performClose];
+    return body;
+}
+
 // Produce a gzip stream (RFC 1952) from the given data, matching the format the
 // server's GCDWebServerGZipDecoder expects (inflateInit2 window bits 15 + 16).
 static NSData* GZipCompress(NSData* input) {
@@ -394,12 +466,18 @@ static NSString* MakeTempDirectory(void) {
 
     int fd = ConnectToLocalhostPort(uploader.port);
     XCTAssertGreaterThan(fd, 0);
-    const char* request = "GET /events HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    // The Accept header is required: /events refuses requests without it so that a
+    // cross-origin <img>/<script> cannot pin SSE channels. Without it this test would get a
+    // 406 and still pass — seeing headers then EOF — while exercising no SSE path at all.
+    const char* request = "GET /events HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\n\r\n";
     XCTAssertEqual(send(fd, request, strlen(request), 0), (ssize_t)strlen(request));
 
     // Wait for the response headers so the stream is established before stopping.
     char buffer[4096];
-    XCTAssertGreaterThan(recv(fd, buffer, sizeof(buffer), 0), (ssize_t)0);
+    ssize_t received = recv(fd, buffer, sizeof(buffer) - 1, 0);
+    XCTAssertGreaterThan(received, (ssize_t)0);
+    buffer[received] = 0;
+    XCTAssertTrue(strnstr(buffer, "text/event-stream", (size_t)received) != NULL, @"expected an SSE stream, got: %s", buffer);
 
     [uploader stop];
 
@@ -736,9 +814,18 @@ static NSString* MakeTempDirectory(void) {
     // stopped reading). A rejecting server produces an HTTP error response; a server
     // that buffered without bound would send nothing and the read would just time out.
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        NSMutableData* blob = [NSMutableData dataWithLength:(20 * 1024 * 1024)];
-        memset(blob.mutableBytes, 'a', blob.length);
-        send(fd, blob.bytes, blob.length, 0);  // partially sends then errors once the server rejects/closes; ignore
+        // Stream from a small reusable buffer rather than allocating the whole 20 MB. The
+        // bytes on the wire are identical, but the test process no longer holds 20 MB
+        // alongside the ~16 MB the server is buffering — under AddressSanitizer that peak
+        // was enough to disturb neighbouring timing-sensitive tests in the same run.
+        char chunk[64 * 1024];
+        memset(chunk, 'a', sizeof(chunk));
+
+        for (int i = 0; i < (20 * 1024 * 1024) / (int)sizeof(chunk); i++) {
+            if (send(fd, chunk, sizeof(chunk), 0) < 0) {
+                break;  // The server rejected and closed; the point is already proven
+            }
+        }
     });
 
     BOOL sawEOF = NO;
@@ -765,6 +852,16 @@ static NSString* MakeTempDirectory(void) {
 
     int fd = ConnectToLocalhostPort(server.port);
     XCTAssertGreaterThan(fd, 0);
+
+    // What is being asserted is that the connection gets closed, not that it happens within
+    // any particular wall-clock time. The deadline is three 0.5 s timer ticks, but GCD timer
+    // delivery slips under load, and running the whole suite (the chunked-framing test just
+    // before this one pushes ~16 MB through a server under AddressSanitizer) pushed it past
+    // the shared 5 s receive timeout often enough to make the suite unreliable. Give this
+    // one a wider read window; it still returns the moment the server closes.
+    struct timeval readTimeout = {30, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &readTimeout, sizeof(readTimeout));
+
     const char* partial = "GET / HTTP/1.1\r\nHost: localhost\r\n";  // deliberately never completes the header block
     XCTAssertEqual(send(fd, partial, strlen(partial), 0), (ssize_t)strlen(partial));
 
@@ -886,6 +983,49 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 // The uploader's state-changing endpoints must reject a cross-origin browser request
 // (a CSRF attempt): a request whose Origin authority differs from the Host is refused,
 // while a request with no Origin at all (a non-browser client) is allowed through.
+// Deleting a directory removes its whole subtree, so it must not become a way to destroy
+// files a direct DELETE would refuse — otherwise the same allow-list means two different
+// things depending on how the request is phrased. Dot-files are the one exception: the
+// client cannot see or address them, and every macOS folder carries a ".DS_Store".
+- (void)testUploaderRecursiveDeleteRespectsExtensionAllowList {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+
+    GCDWebUploader* server = [[GCDWebUploader alloc] initWithUploadDirectory:dir];
+    server.allowedFileExtensions = @[ @"txt" ];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    NSString* host = [NSString stringWithFormat:@"localhost:%lu", (unsigned long)server.port];
+
+    NSString* (^deleteFolder)(NSString*) = ^(NSString* name) {
+        NSString* body = [NSString stringWithFormat:@"path=/%@", name];
+        return SendRawRequest(server.port, [NSString stringWithFormat:@"POST /delete HTTP/1.1\r\nHost: %@\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %lu\r\n\r\n%@", host, (unsigned long)body.length, body]);
+    };
+
+    // A folder holding a file the client may not address must not be destroyed wholesale.
+    NSString* guarded = [dir stringByAppendingPathComponent:@"Guarded"];
+    XCTAssertTrue([fm createDirectoryAtPath:guarded withIntermediateDirectories:YES attributes:nil error:NULL]);
+    XCTAssertTrue([@"ok" writeToFile:[guarded stringByAppendingPathComponent:@"note.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([@"secret" writeToFile:[guarded stringByAppendingPathComponent:@"id_rsa"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    NSString* refused = deleteFolder(@"Guarded");
+    XCTAssertTrue([refused containsString:@"403"], @"expected 403 for a folder containing a disallowed file, got: %@", refused);
+    XCTAssertTrue([fm fileExistsAtPath:[guarded stringByAppendingPathComponent:@"id_rsa"]], @"recursive delete destroyed a file a direct delete would refuse");
+
+    // A folder whose only extra entry is filesystem noise must still be deletable.
+    NSString* ordinary = [dir stringByAppendingPathComponent:@"Ordinary"];
+    XCTAssertTrue([fm createDirectoryAtPath:ordinary withIntermediateDirectories:YES attributes:nil error:NULL]);
+    XCTAssertTrue([@"ok" writeToFile:[ordinary stringByAppendingPathComponent:@"note.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([@"junk" writeToFile:[ordinary stringByAppendingPathComponent:@".DS_Store"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    NSString* allowed = deleteFolder(@"Ordinary");
+    XCTAssertFalse([allowed containsString:@"403"], @"a .DS_Store must not make an ordinary folder undeletable, got: %@", allowed);
+    XCTAssertFalse([fm fileExistsAtPath:ordinary], @"the deletable folder was not removed: %@", allowed);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 - (void)testUploaderRejectsCrossOriginMutation {
     NSFileManager* fm = [NSFileManager defaultManager];
     NSString* dir = MakeTempDirectory();
@@ -910,6 +1050,592 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 
     [server stop];
     [fm removeItemAtPath:dir error:NULL];
+}
+
+// "GET /list" with no "path" query parameter must be answered, not crash the process.
+// A nil path survived every guard (GCDWebServerNormalizePath(nil) is @"", so the
+// absolute path collapsed to the upload directory, which exists and is a directory) and
+// then reached the per-entry dictionary literal, where -stringByAppendingPathComponent:
+// on nil yields nil — inserting nil raises NSInvalidArgumentException, which nothing
+// catches, so a single unauthenticated GET terminated the whole app. The listing must be
+// non-empty for the loop to be entered at all, so seed both a file and a subdirectory.
+- (void)testUploaderListWithoutPathParameterDoesNotCrash {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    XCTAssertTrue([@"data" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([fm createDirectoryAtPath:[dir stringByAppendingPathComponent:@"Sub"] withIntermediateDirectories:NO attributes:nil error:NULL]);
+
+    GCDWebUploader* server = [[GCDWebUploader alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* reply = SendRawRequest(server.port, @"GET /list HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertNotNil(reply, @"server appears to have crashed handling /list with no path parameter");
+    XCTAssertTrue([reply containsString:@"200"], @"a missing path should list the root, got: %@", reply);
+    // The entries must be rooted at "/", i.e. the default was applied rather than a nil
+    // path silently producing bare names. NSJSONSerialization escapes "/" as "\/".
+    XCTAssertTrue([reply containsString:@"\"\\/a.txt\""], @"file entry not rooted at the default path: %@", reply);
+    XCTAssertTrue([reply containsString:@"\"\\/Sub\\/\""], @"directory entry not rooted at the default path: %@", reply);
+
+    // The process must still be alive and serving.
+    NSString* reply2 = SendRawRequest(server.port, @"GET /list?path=/ HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertNotNil(reply2, @"server appears to have crashed after the parameterless request");
+    XCTAssertTrue([reply2 containsString:@"200"], @"server did not respond normally afterwards: %@", reply2);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// A WebDAV LOCK with no Host header must be rejected, not crash the process. The
+// <D:lockroot> href was built by chaining -stringByAppendingString: through the Host
+// header, which raises NSInvalidArgumentException on a nil argument. This is the sibling
+// of the COPY/MOVE Host crash (see -testDAVMoveWithoutHostHeaderDoesNotCrash), which the
+// LOCK path missed. Every other precondition here is attacker-supplied: the Mac Finder
+// User-Agent, Depth: 0, and an exclusive/write lockinfo body.
+- (void)testDAVLockWithoutHostHeaderDoesNotCrash {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+
+    GCDWebDAVServer* server = [[GCDWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* body = @"<?xml version=\"1.0\" encoding=\"utf-8\"?><D:lockinfo xmlns:D=\"DAV:\"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>";
+    // HTTP/1.0 so CFHTTPMessage accepts the absent Host. Target "/" (the upload
+    // directory itself), which always exists and skips the extension check.
+    NSString* request = [NSString stringWithFormat:@"LOCK / HTTP/1.0\r\nUser-Agent: WebDAVFS/3.0.0\r\nDepth: 0\r\nContent-Type: text/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)body.length, body];
+    NSString* reply = SendRawRequest(server.port, request);
+    XCTAssertNotNil(reply, @"server appears to have crashed handling LOCK with no Host header");
+    XCTAssertTrue([reply containsString:@"400"], @"missing Host must yield 400, got: %@", reply);
+
+    // The process must still be alive: a fresh, well-formed request must get a reply.
+    NSString* reply2 = SendRawRequest(server.port, @"OPTIONS / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertNotNil(reply2, @"server appears to have crashed after the malformed request");
+    XCTAssertTrue([reply2 containsString:@"200"], @"server did not respond normally after the malformed request: %@", reply2);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// A LOCK that does carry a Host must still succeed, and must report a lockroot built
+// from it — guarding the rewritten interpolation against a behavior change.
+- (void)testDAVLockWithHostHeaderReportsLockRoot {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    XCTAssertTrue([@"data" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    GCDWebDAVServer* server = [[GCDWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* body = @"<?xml version=\"1.0\" encoding=\"utf-8\"?><D:lockinfo xmlns:D=\"DAV:\"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>";
+    NSString* request = [NSString stringWithFormat:@"LOCK /a.txt HTTP/1.1\r\nHost: localhost\r\nUser-Agent: WebDAVFS/3.0.0\r\nDepth: 0\r\nContent-Type: text/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)body.length, body];
+    NSString* reply = SendRawRequest(server.port, request);
+    XCTAssertNotNil(reply);
+    XCTAssertTrue([reply containsString:@"200"], @"a well-formed LOCK should succeed, got: %@", reply);
+    XCTAssertTrue([reply containsString:@"<D:lockroot><D:href>http://localhost//a.txt</D:href></D:lockroot>"], @"lockroot not built from the Host header: %@", reply);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// GCDWebServerFileResponse must serve only regular files. S_IFREG is a value inside the
+// S_IFMT field rather than a flag, so the old "st_mode & S_IFREG" test also accepted
+// symlinks and sockets; only O_NOFOLLOW in -open: stopped a symlink being read through.
+// Constructing the response must now fail outright for a symlink, whether it points
+// outside the served directory or at a perfectly ordinary file inside it.
+- (void)testFileResponseRejectsSymlink {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    NSString* realPath = [dir stringByAppendingPathComponent:@"real.txt"];
+    XCTAssertTrue([@"payload" writeToFile:realPath atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    // A regular file is still served, with the body length taken from the file itself.
+    GCDWebServerFileResponse* ok = [GCDWebServerFileResponse responseWithFile:realPath];
+    XCTAssertNotNil(ok, @"a regular file must still be servable");
+    XCTAssertEqual(ok.contentLength, (NSUInteger)7);
+
+    // A symlink to a file inside the directory must be refused.
+    NSString* insideLink = [dir stringByAppendingPathComponent:@"inside.txt"];
+    XCTAssertTrue([fm createSymbolicLinkAtPath:insideLink withDestinationPath:realPath error:NULL]);
+    XCTAssertNil([GCDWebServerFileResponse responseWithFile:insideLink], @"a symlink must not be accepted as a regular file");
+
+    // A symlink escaping the directory must be refused too. Previously this built a
+    // response whose Content-Length came from the link rather than its target, and was
+    // only stopped later by O_NOFOLLOW failing with ELOOP.
+    NSString* outsidePath = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSProcessInfo processInfo] globallyUniqueString]];
+    XCTAssertTrue([@"secret" writeToFile:outsidePath atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    NSString* escapingLink = [dir stringByAppendingPathComponent:@"escape.txt"];
+    XCTAssertTrue([fm createSymbolicLinkAtPath:escapingLink withDestinationPath:outsidePath error:NULL]);
+    XCTAssertNil([GCDWebServerFileResponse responseWithFile:escapingLink], @"a symlink out of the served directory must not be accepted");
+
+    // A directory is still refused, as before.
+    XCTAssertNil([GCDWebServerFileResponse responseWithFile:dir]);
+
+    [fm removeItemAtPath:outsidePath error:NULL];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+#pragma mark - Symlink-resolved path containment
+
+// The textual containment checks cannot see symlinks: GCDWebServerNormalizePath strips
+// ".." before any file is touched, and GCDWebServerPathIsInsideDirectory compares path
+// text, but the filesystem follows symlinks in intermediate components. The resolved
+// check must accept a path inside the directory (whether or not it exists yet) and
+// reject one that leaves it through a link.
+- (void)testResolvedPathContainment {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    NSString* outside = MakeTempDirectory();
+    XCTAssertTrue([@"secret" writeToFile:[outside stringByAppendingPathComponent:@"secret.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([@"data" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([fm createDirectoryAtPath:[dir stringByAppendingPathComponent:@"Sub"] withIntermediateDirectories:NO attributes:nil error:NULL]);
+
+    // The directory itself and real items inside it are within.
+    XCTAssertTrue(GCDWebServerResolvedPathIsWithinDirectory(dir, dir));
+    XCTAssertTrue(GCDWebServerResolvedPathIsWithinDirectory([dir stringByAppendingPathComponent:@"a.txt"], dir));
+    XCTAssertTrue(GCDWebServerResolvedPathIsWithinDirectory([dir stringByAppendingPathComponent:@"Sub"], dir));
+
+    // A destination that does not exist yet resolves through its parent, so uploads and
+    // MKCOL keep working.
+    XCTAssertTrue(GCDWebServerResolvedPathIsWithinDirectory([dir stringByAppendingPathComponent:@"new.txt"], dir));
+    XCTAssertTrue(GCDWebServerResolvedPathIsWithinDirectory([dir stringByAppendingPathComponent:@"Sub/new.txt"], dir));
+
+    // A symlink that stays inside the directory is still usable.
+    XCTAssertTrue([fm createSymbolicLinkAtPath:[dir stringByAppendingPathComponent:@"Inside"] withDestinationPath:[dir stringByAppendingPathComponent:@"Sub"] error:NULL]);
+    XCTAssertTrue(GCDWebServerResolvedPathIsWithinDirectory([dir stringByAppendingPathComponent:@"Inside/new.txt"], dir));
+
+    // A symlink pointing out of the directory is rejected, both as the leaf and as an
+    // intermediate component (the case that string comparison misses entirely).
+    XCTAssertTrue([fm createSymbolicLinkAtPath:[dir stringByAppendingPathComponent:@"Escape"] withDestinationPath:outside error:NULL]);
+    NSString* throughLink = [dir stringByAppendingPathComponent:@"Escape/secret.txt"];
+    XCTAssertTrue(GCDWebServerPathIsInsideDirectory(throughLink, dir), @"precondition: the textual check does not catch this");
+    XCTAssertFalse(GCDWebServerResolvedPathIsWithinDirectory(throughLink, dir), @"a path traversing a symlink out of the directory must be rejected");
+    XCTAssertFalse(GCDWebServerResolvedPathIsWithinDirectory([dir stringByAppendingPathComponent:@"Escape"], dir));
+    XCTAssertFalse(GCDWebServerResolvedPathIsWithinDirectory([outside stringByAppendingPathComponent:@"secret.txt"], dir));
+
+    // Unresolvable input fails closed.
+    XCTAssertFalse(GCDWebServerResolvedPathIsWithinDirectory(@"", dir));
+    XCTAssertFalse(GCDWebServerResolvedPathIsWithinDirectory([dir stringByAppendingPathComponent:@"Nope/deeper/x.txt"], dir));
+
+    [fm removeItemAtPath:outside error:NULL];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// End to end: a WebDAV GET that reaches a file outside the share through a symlink
+// planted inside it must be refused rather than serving the file's contents.
+- (void)testDAVGetThroughEscapingSymlinkIsRefused {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    NSString* outside = MakeTempDirectory();
+    XCTAssertTrue([@"TOP-SECRET-PAYLOAD" writeToFile:[outside stringByAppendingPathComponent:@"secret.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([fm createSymbolicLinkAtPath:[dir stringByAppendingPathComponent:@"Escape"] withDestinationPath:outside error:NULL]);
+
+    GCDWebDAVServer* server = [[GCDWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* reply = SendRawRequest(server.port, @"GET /Escape/secret.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertNotNil(reply);
+    XCTAssertFalse([reply containsString:@"TOP-SECRET-PAYLOAD"], @"a file outside the share was served through a symlink: %@", reply);
+    XCTAssertTrue([reply containsString:@"403"], @"expected the traversal to be refused, got: %@", reply);
+
+    [server stop];
+    [fm removeItemAtPath:outside error:NULL];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+#pragma mark - Preflight exemption
+
+// The CORS-preflight exemption from authentication must require BOTH "Origin" and
+// "Access-Control-Request-Method", as a real browser preflight always sends both.
+// Otherwise setting a single header reaches the application's OPTIONS handler with no
+// credentials at all.
+- (void)testPreflightAuthExemptionRequiresOrigin {
+    GCDWebServer* server = [[GCDWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"OPTIONS"
+                          requestClass:[GCDWebServerRequest class]
+                          processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
+                              return [GCDWebServerDataResponse responseWithText:@"handler-reached"];
+                          }];
+    NSDictionary* options = @{
+        GCDWebServerOption_Port : @0,
+        GCDWebServerOption_BindToLocalhost : @YES,
+        GCDWebServerOption_AuthenticationMethod : GCDWebServerAuthenticationMethod_Basic,
+        GCDWebServerOption_AuthenticationAccounts : @{@"user" : @"pass"}
+    };
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    // A genuine preflight (both headers) is exempt and reaches the handler.
+    NSString* preflight = SendRawRequest(server.port, @"OPTIONS / HTTP/1.1\r\nHost: localhost\r\nOrigin: http://example.test\r\nAccess-Control-Request-Method: POST\r\n\r\n");
+    XCTAssertTrue([preflight containsString:@"handler-reached"], @"a real CORS preflight must stay exempt from auth, got: %@", preflight);
+
+    // Access-Control-Request-Method alone is not a preflight and must still need auth.
+    NSString* forged = SendRawRequest(server.port, @"OPTIONS / HTTP/1.1\r\nHost: localhost\r\nAccess-Control-Request-Method: POST\r\n\r\n");
+    XCTAssertTrue([forged containsString:@"401"], @"expected 401 without Origin, got: %@", forged);
+    XCTAssertFalse([forged containsString:@"handler-reached"], @"the OPTIONS handler ran unauthenticated: %@", forged);
+
+    // A plain OPTIONS request is unaffected and still requires auth.
+    NSString* plain = SendRawRequest(server.port, @"OPTIONS / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([plain containsString:@"401"], @"expected 401 for a plain OPTIONS, got: %@", plain);
+
+    [server stop];
+}
+
+#pragma mark - Template escaping
+
+// The device name is substituted into a JavaScript string literal in index.html, so it
+// must be escaped for that context. A name containing a quote would otherwise break the
+// literal and a name containing "</script>" would end the script block outright.
+- (void)testUploaderIndexEscapesDeviceNameForJavaScript {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+
+    GCDWebUploader* server = [[GCDWebUploader alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* page = SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertNotNil(page);
+    XCTAssertTrue([page containsString:@"200"], @"index page did not load: %@", page);
+    // Whatever this host is called, the assignment must be a syntactically closed literal
+    // and must not have left a raw "%device%" placeholder behind.
+    XCTAssertTrue([page containsString:@"var _device = \""], @"device name is not emitted as a quoted literal");
+    XCTAssertFalse([page containsString:@"%device%"], @"the device placeholder was not substituted");
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+#pragma mark - Request buffering and framing limits
+
+// Every non-file part of a multipart body is retained in memory for the life of the
+// request, so the parser's working-buffer cap does not bound them: a body made of many
+// individually-legal argument parts grew without limit (200 MB of parts took the process
+// to 626 MB) until the device killed the app.
+- (void)testMultiPartRejectsUnboundedArgumentAccumulation {
+    GCDWebServerMultiPartFormRequest* request = OpenBodyRequest([GCDWebServerMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
+    XCTAssertTrue([request hasBody]);
+
+    NSMutableData* filler = [NSMutableData dataWithLength:(512 * 1024)];
+    memset(filler.mutableBytes, 'A', filler.length);
+
+    NSError* error = nil;
+    BOOL rejected = NO;
+
+    // 64 x 512 KB is 32 MB of argument data, twice the in-memory cap.
+    for (int i = 0; i < 64; i++) {
+        NSMutableData* part = [NSMutableData data];
+        [part appendData:SSEData([NSString stringWithFormat:@"--X\r\nContent-Disposition: form-data; name=\"f%i\"\r\n\r\n", i])];
+        [part appendData:filler];
+        [part appendData:SSEData(@"\r\n")];
+
+        if (![request performWriteData:part error:&error]) {
+            rejected = YES;
+            break;
+        }
+    }
+
+    XCTAssertTrue(rejected, @"Multipart parser should reject argument parts accumulating past the in-memory cap");
+}
+
+// The budget above charges part *content*, but the control name, file name and content type
+// parsed out of a part's headers are retained per part too. A body of parts each carrying a
+// multi-megabyte name=".…" therefore grew memory without limit while the budget read zero.
+- (void)testMultiPartRejectsOversizedPartHeaders {
+    GCDWebServerMultiPartFormRequest* request = OpenBodyRequest([GCDWebServerMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
+
+    NSMutableString* hugeName = [NSMutableString string];
+    while (hugeName.length < (64 * 1024)) {
+        [hugeName appendString:@"AAAAAAAAAAAAAAAA"];
+    }
+
+    NSMutableData* part = [NSMutableData data];
+    [part appendData:SSEData([NSString stringWithFormat:@"--X\r\nContent-Disposition: form-data; name=\"%@\"\r\n\r\n\r\n", hugeName])];
+
+    NSError* error = nil;
+    XCTAssertFalse([request performWriteData:part error:&error], @"a part whose header block exceeds the cap should be rejected");
+}
+
+// A part whose Content-Disposition carries no "name" is malformed client input, not an
+// unreachable state: it must fail the parse rather than abort the process.
+- (void)testMultiPartRejectsPartWithoutControlNameWithoutAborting {
+    GCDWebServerMultiPartFormRequest* request = OpenBodyRequest([GCDWebServerMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
+    NSMutableData* body = [NSMutableData data];
+    [body appendData:SSEData(@"--X\r\nContent-Disposition: form-data; filename=\"a.txt\"\r\n\r\npayload\r\n--X--\r\n")];
+
+    NSError* error = nil;
+    XCTAssertFalse([request performWriteData:body error:&error], @"a part with no control name should be rejected");
+}
+
+// A request target whose percent-escapes are invalid or not valid UTF-8 cannot be
+// decoded. That is the client's error: it must be answered 400 and must never abort.
+- (void)testMalformedPercentEncodedPathIsRejectedNotFatal {
+    GCDWebServer* server = [[GCDWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[GCDWebServerRequest class]
+                          processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
+                              return [GCDWebServerDataResponse responseWithText:@"hello"];
+                          }];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* reply = SendRawRequest(server.port, @"GET /%FF HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertNotNil(reply);
+    XCTAssertTrue([reply containsString:@"400"], @"expected 400 for an undecodable request target, got: %@", reply);
+
+    // The server must still be serving afterwards.
+    NSString* second = SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([second containsString:@"200"], @"server stopped serving after a malformed target: %@", second);
+    [server stop];
+}
+
+// A Content-Length together with a chunked Transfer-Encoding is a framing conflict the
+// client controls: reject it with 400 rather than asserting.
+- (void)testConflictingFramingHeadersAreRejectedNotFatal {
+    GCDWebServer* server = [[GCDWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"POST"
+                          requestClass:[GCDWebServerDataRequest class]
+                          processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
+                              return [GCDWebServerDataResponse responseWithText:@"ok"];
+                          }];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* reply = SendRawRequest(server.port, @"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/plain\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n");
+    XCTAssertNotNil(reply);
+    XCTAssertTrue([reply containsString:@"400"], @"expected 400 for conflicting framing headers, got: %@", reply);
+    [server stop];
+}
+
+// A Content-Length must be exactly a run of digits. -integerValue used to accept "5abc"
+// as 5 and silently clamp an over-large value to NSIntegerMax.
+- (void)testContentLengthIsParsedStrictly {
+    NSURL* url = [NSURL URLWithString:@"http://localhost/"];
+    NSDictionary* (^headers)(NSString*) = ^(NSString* length) {
+        return @{@"Content-Type" : @"text/plain", @"Content-Length" : length};
+    };
+
+    XCTAssertNil([[GCDWebServerRequest alloc] initWithMethod:@"POST" url:url headers:headers(@"5abc") path:@"/" query:@{}]);
+    XCTAssertNil([[GCDWebServerRequest alloc] initWithMethod:@"POST" url:url headers:headers(@"-1") path:@"/" query:@{}]);
+    XCTAssertNil([[GCDWebServerRequest alloc] initWithMethod:@"POST" url:url headers:headers(@"") path:@"/" query:@{}]);
+    XCTAssertNil([[GCDWebServerRequest alloc] initWithMethod:@"POST" url:url headers:headers(@"99999999999999999999999") path:@"/" query:@{}]);
+
+    GCDWebServerRequest* valid = [[GCDWebServerRequest alloc] initWithMethod:@"POST" url:url headers:headers(@"5") path:@"/" query:@{}];
+    XCTAssertNotNil(valid);
+    XCTAssertEqual(valid.contentLength, (NSUInteger)5);
+}
+
+// A header parameter name must match at a token boundary. A plain substring search finds
+// "name=" inside "filename=" and "nonce=" inside "cnonce=", so a client could pick which
+// value the server read just by reordering the parameters — which broke Digest auth for
+// any RFC 2617 client sending cnonce before nonce.
+- (void)testHeaderValueParameterMatchesOnlyAtTokenBoundary {
+    XCTAssertEqualObjects(GCDWebServerExtractHeaderValueParameter(@"form-data; filename=\"EVIL.txt\"; name=\"upload\"", @"name"), @"upload");
+    XCTAssertEqualObjects(GCDWebServerExtractHeaderValueParameter(@"Digest realm=\"r\", cnonce=\"CLIENT\", nonce=\"REAL\"", @"nonce"), @"REAL");
+    XCTAssertEqualObjects(GCDWebServerExtractHeaderValueParameter(@"Digest realm=\"r\", nonce=\"N\", myuri=\"/shadow\", uri=\"/real\"", @"uri"), @"/real");
+    XCTAssertNil(GCDWebServerExtractHeaderValueParameter(@"form-data; filename=\"only.txt\"", @"name"));
+
+    // Ordinary cases must be unaffected.
+    XCTAssertEqualObjects(GCDWebServerExtractHeaderValueParameter(@"form-data; name=\"upload\"; filename=\"a.txt\"", @"name"), @"upload");
+    XCTAssertEqualObjects(GCDWebServerExtractHeaderValueParameter(@"form-data; name=\"upload\"; filename=\"a.txt\"", @"filename"), @"a.txt");
+    XCTAssertEqualObjects(GCDWebServerExtractHeaderValueParameter(@"multipart/form-data; boundary=ABC", @"boundary"), @"ABC");
+    XCTAssertEqualObjects(GCDWebServerExtractHeaderValueParameter(@"text/plain; charset=utf-8", @"charset"), @"utf-8");
+    XCTAssertEqualObjects(GCDWebServerExtractHeaderValueParameter(@"form-data; name=upload; filename=a.txt", @"name"), @"upload");
+
+    // RFC 2046 allows "," in a boundary, so an unquoted value must NOT terminate there —
+    // truncating "ab,cd" to "ab" makes every upload from such a client fail to parse.
+    XCTAssertEqualObjects(GCDWebServerExtractHeaderValueParameter(@"multipart/form-data; boundary=ab,cd", @"boundary"), @"ab,cd");
+    XCTAssertEqualObjects(GCDWebServerExtractHeaderValueParameter(@"multipart/form-data; boundary=ab,cd; charset=utf-8", @"boundary"), @"ab,cd");
+}
+
+// The idle timeout's zero-progress rule is defeated by a client that dribbles one byte
+// per tick: it always looks like it is "making progress" while pinning a connection slot
+// for as long as it likes. While a request body is still arriving the server must demand
+// real throughput, not merely non-zero throughput.
+- (void)testConnectionIdleTimeoutClosesDribblingBodyClient {
+    GCDWebServer* server = [[GCDWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"POST"
+                          requestClass:[GCDWebServerDataRequest class]
+                          processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
+                              return [GCDWebServerDataResponse responseWithText:@"ok"];
+                          }];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES, GCDWebServerOption_ConnectionIdleTimeout : @0.5};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    int fd = ConnectToLocalhostPort(server.port);
+    XCTAssertGreaterThan(fd, 0);
+    int on = 1;
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));  // Report a closed peer as an error, not a signal
+
+    const char* request = "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/plain\r\nContent-Length: 1000000\r\n\r\n";
+    XCTAssertEqual(send(fd, request, strlen(request), 0), (ssize_t)strlen(request));
+
+    // One byte every 0.2s: faster than the 0.5s tick, so every tick observes progress.
+    BOOL disconnected = NO;
+
+    for (int i = 0; i < 50; i++) {
+        usleep(200 * 1000);
+
+        if (send(fd, "A", 1, 0) != 1) {
+            disconnected = YES;
+            break;
+        }
+    }
+
+    close(fd);
+    [server stop];
+    XCTAssertTrue(disconnected, @"server did not disconnect a client dribbling its request body");
+}
+
+// -addGETHandlerForBasePath: was the one file-serving path with no containment check: it
+// only stripped ".." textually, and lstat/O_NOFOLLOW refuse a symlink solely as the *final*
+// component. Any symlinked directory under the served root therefore served whatever it
+// pointed at.
+- (void)testBasePathHandlerRefusesSymlinkEscape {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* root = MakeTempDirectory();
+    NSString* outside = MakeTempDirectory();
+    XCTAssertTrue([@"PUBLIC" writeToFile:[root stringByAppendingPathComponent:@"app.js"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([@"TOP-SECRET" writeToFile:[outside stringByAppendingPathComponent:@"secret.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([fm createSymbolicLinkAtPath:[root stringByAppendingPathComponent:@"linkdir"] withDestinationPath:outside error:NULL]);
+
+    GCDWebServer* server = [[GCDWebServer alloc] init];
+    [server addGETHandlerForBasePath:@"/" directoryPath:root indexFilename:nil cacheAge:0 allowRangeRequests:YES];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* escape = SendRawRequest(server.port, @"GET /linkdir/secret.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertFalse([escape containsString:@"TOP-SECRET"], @"served a file through a symlink out of the base directory");
+
+    // Ordinary assets must still be served — this handler serves the uploader's own web UI.
+    NSString* normal = SendRawRequest(server.port, @"GET /app.js HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([normal containsString:@"PUBLIC"], @"containment check broke normal asset serving: %@", normal);
+
+    [server stop];
+    [fm removeItemAtPath:root error:NULL];
+    [fm removeItemAtPath:outside error:NULL];
+}
+
+// Transfer-Encoding was matched by exact string equality against "chunked", so every other
+// legal spelling was silently read as "this message has no body": the server answered 200,
+// discarded the body unread, and WebDAV PUT (which unlinks the destination first) destroyed
+// the target file. Anything that cannot be framed or decoded must be refused instead.
+- (void)testTransferEncodingIsParsedNotStringCompared {
+    NSURL* url = [NSURL URLWithString:@"http://localhost/"];
+    GCDWebServerRequest* (^make)(NSString*) = ^(NSString* transferEncoding) {
+        return [[GCDWebServerRequest alloc] initWithMethod:@"PUT"
+                                                      url:url
+                                                  headers:@{@"Content-Type" : @"text/plain", @"Transfer-Encoding" : transferEncoding}
+                                                     path:@"/"
+                                                    query:@{}];
+    };
+
+    // Chunked, in every spelling that means chunked.
+    XCTAssertTrue(make(@"chunked").usesChunkedTransferEncoding);
+    XCTAssertTrue(make(@"CHUNKED").usesChunkedTransferEncoding);
+    XCTAssertTrue(make(@" chunked ").usesChunkedTransferEncoding);
+    XCTAssertTrue(make(@"chunked;a=b").usesChunkedTransferEncoding, @"transfer-parameters play no part in framing");
+
+    // Codings we cannot honour must be refused, never treated as an empty body.
+    XCTAssertNil(make(@"gzip, chunked"), @"a content coding we cannot decode must be refused");
+    XCTAssertNil(make(@"bogus"));
+    XCTAssertNil(make(@"chunked, gzip"), @"chunked must be the final coding");
+    XCTAssertNil(make(@""));
+
+    // "identity" means no chunked framing; length framing still applies.
+    GCDWebServerRequest* identity = make(@"identity");
+    XCTAssertNotNil(identity);
+    XCTAssertFalse(identity.usesChunkedTransferEncoding);
+}
+
+// Range halves get the same strict parsing Content-Length received: -integerValue read
+// "0x10" as 0 and " 5"/"+5"/"5abc" as 5.
+- (void)testByteRangeIsParsedStrictly {
+    NSURL* url = [NSURL URLWithString:@"http://localhost/"];
+    NSRange (^rangeFor)(NSString*) = ^(NSString* value) {
+        return [[[GCDWebServerRequest alloc] initWithMethod:@"GET" url:url headers:@{@"Range" : value} path:@"/" query:@{}] byteRange];
+    };
+
+    NSRange valid = rangeFor(@"bytes=500-999");
+    XCTAssertEqual(valid.location, (NSUInteger)500);
+    XCTAssertEqual(valid.length, (NSUInteger)500);
+
+    NSRange openEnded = rangeFor(@"bytes=9500-");
+    XCTAssertEqual(openEnded.location, (NSUInteger)9500);
+    XCTAssertEqual(openEnded.length, NSUIntegerMax);
+
+    NSRange suffix = rangeFor(@"bytes=-500");
+    XCTAssertEqual(suffix.location, NSUIntegerMax);
+    XCTAssertEqual(suffix.length, (NSUInteger)500);
+
+    // Malformed values must be ignored (the sentinel), not silently coerced to a number.
+    for (NSString* bad in @[ @"bytes=0x10-20", @"bytes=+5-20", @"bytes=5abc-20", @"bytes= 5-20", @"bytes=abc-def" ]) {
+        NSRange r = rangeFor(bad);
+        XCTAssertFalse(GCDWebServerIsValidByteRange(r), @"expected \"%@\" to be rejected, got {%lu,%lu}", bad, (unsigned long)r.location, (unsigned long)r.length);
+    }
+}
+
+// The MD5 helper hashed via -UTF8String + strlen, so an embedded NUL (which survives from
+// the wire into request.headers) ended the hashed input early — for a Digest nonce that
+// meant the per-process secret never reached the digest and its tag became forgeable.
+- (void)testMD5DigestHashesPastEmbeddedNUL {
+    unichar nul = 0;
+    NSString* withNUL = [NSString stringWithFormat:@"abc%@def", [NSString stringWithCharacters:&nul length:1]];
+    XCTAssertNotEqualObjects(GCDWebServerComputeMD5Digest(@"%@", withNUL), GCDWebServerComputeMD5Digest(@"%@", @"abc"),
+                             @"input must not be truncated at the first NUL");
+}
+
+#pragma mark - gzip response encoding
+
+// A gzip-encoded response body must decompress back to exactly what the handler produced.
+- (void)testGZipEncodedDataResponseRoundTrips {
+    NSString* text = @"the quick brown fox jumps over the lazy dog";
+    GCDWebServerDataResponse* response = [GCDWebServerDataResponse responseWithText:text];
+    response.gzipContentEncodingEnabled = YES;
+
+    NSData* encoded = DrainResponseBody(response);
+    XCTAssertNotNil(encoded);
+    NSData* decoded = GZipDecompress(encoded);
+    XCTAssertNotNil(decoded, @"response body was not a valid gzip stream");
+    XCTAssertEqualObjects([[NSString alloc] initWithData:decoded encoding:NSUTF8StringEncoding], text);
+}
+
+// The encoder pulled its source through the synchronous -readData: only, so a response
+// that implements just the async reader — every GCDWebServerStreamedResponse — silently
+// encoded an empty body and never ran its stream block at all.
+- (void)testGZipEncodedStreamedResponseRoundTrips {
+    NSArray<NSString*>* chunks = @[ @"first-", @"second-", @"third" ];
+    __block NSUInteger index = 0;
+    GCDWebServerStreamedResponse* response =
+        [GCDWebServerStreamedResponse responseWithContentType:@"text/plain"
+                                             asyncStreamBlock:^(GCDWebServerBodyReaderCompletionBlock completionBlock) {
+                                                 NSData* data = (index < chunks.count) ? SSEData(chunks[index]) : [NSData data];
+                                                 index += 1;
+                                                 completionBlock(data, nil);
+                                             }];
+    response.gzipContentEncodingEnabled = YES;
+
+    NSData* encoded = DrainResponseBody(response);
+    XCTAssertNotNil(encoded, @"streamed gzip response never completed");
+    NSData* decoded = GZipDecompress(encoded);
+    XCTAssertNotNil(decoded, @"response body was not a valid gzip stream");
+    XCTAssertEqualObjects([[NSString alloc] initWithData:decoded encoding:NSUTF8StringEncoding], [chunks componentsJoinedByString:@""]);
+}
+
+// The same streamed response without gzip must be unaffected.
+- (void)testStreamedResponseWithoutGZipRoundTrips {
+    __block NSUInteger index = 0;
+    GCDWebServerStreamedResponse* response =
+        [GCDWebServerStreamedResponse responseWithContentType:@"text/plain"
+                                             asyncStreamBlock:^(GCDWebServerBodyReaderCompletionBlock completionBlock) {
+                                                 NSData* data = (index < 3) ? SSEData(@"chunk") : [NSData data];
+                                                 index += 1;
+                                                 completionBlock(data, nil);
+                                             }];
+
+    NSData* body = DrainResponseBody(response);
+    XCTAssertEqualObjects([[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding], @"chunkchunkchunk");
 }
 
 @end
