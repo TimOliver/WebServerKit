@@ -1875,6 +1875,68 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     XCTAssertTrue([extValue containsString:@"%3B"], @"expected a percent-encoded ';': %@", disposition);
 
     [fm removeItemAtPath:root error:NULL];
+
+// The NAT-PMP callbacks arrive on the main run loop and used to mutate _dnsService /
+// _dnsAddress / _dnsPort with no confinement, racing -_stop's DNSServiceRefDeallocate and
+// every -publicServerURL read. They now take _stateQueue, which introduces a dispatch_sync
+// from the main thread into the lifecycle queue — so the thing to prove is that repeated
+// start/stop cycles still complete rather than deadlocking.
+- (void)testNATPortMappingStartStopCyclesDoNotDeadlock {
+    for (int i = 0; i < 5; i++) {
+        @autoreleasepool {
+            GCDWebServer* server = [[GCDWebServer alloc] init];
+            [server addDefaultHandlerForMethod:@"GET"
+                                  requestClass:[GCDWebServerRequest class]
+                                  processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
+                                      return [GCDWebServerDataResponse responseWithText:@"ok"];
+                                  }];
+            NSDictionary* options = @{
+                GCDWebServerOption_Port : @0,
+                GCDWebServerOption_BindToLocalhost : @YES,
+                GCDWebServerOption_RequestNATPortMapping : @YES
+            };
+            XCTAssertTrue([server startWithOptions:options error:NULL], @"cycle %i failed to start", i);
+
+            // Reading publicServerURL takes _stateQueue, the same queue the callbacks now
+            // take; doing it while the mapping request is in flight is the interesting case.
+            (void)server.publicServerURL;
+            XCTAssertTrue([SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n") containsString:@"200"]);
+
+            [server stop];
+            XCTAssertFalse(server.isRunning, @"cycle %i did not stop", i);
+        }
+    }
+}
+
+// Chunked transfer coding is HTTP/1.1 only. Sending it to a 1.0 client makes it read the
+// chunk-size lines as part of the entity body — silent corruption rather than an error.
+// Identity framing is safe here because every response carries "Connection: Close" and the
+// connection serves one request, so end-of-body by close is well defined.
+- (void)testStreamedResponseIsNotChunkedForHTTP10Clients {
+    GCDWebServer* server = [[GCDWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[GCDWebServerRequest class]
+                          processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
+                              __block int remaining = 3;
+                              return [GCDWebServerStreamedResponse responseWithContentType:@"text/plain"
+                                                                               asyncStreamBlock:^(GCDWebServerBodyReaderCompletionBlock completionBlock) {
+                                                                                   completionBlock(remaining-- > 0 ? SSEData(@"PIECE|") : [NSData data], nil);
+                                                                               }];
+                          }];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* reply10 = SendRawRequest(server.port, @"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n");
+    XCTAssertNotNil(reply10);
+    XCTAssertFalse([reply10 containsString:@"Transfer-Encoding"], @"an HTTP/1.0 client must not be sent chunked framing: %@", reply10);
+    XCTAssertTrue([reply10 hasSuffix:@"PIECE|PIECE|PIECE|"], @"the body must be the raw bytes with no chunk headers: %@", reply10);
+
+    // An HTTP/1.1 client must still get chunked framing, since there is no Content-Length.
+    NSString* reply11 = SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([reply11 containsString:@"Transfer-Encoding: chunked"], @"HTTP/1.1 must still be chunked: %@", reply11);
+    XCTAssertTrue([reply11 containsString:@"\r\n0\r\n\r\n"], @"chunked body must be terminated: %@", reply11);
+
+    [server stop];
 }
 
 // -addGETHandlerForBasePath: was the one file-serving path with no containment check: it
