@@ -76,6 +76,20 @@
 #define kGCDWebServerMaxDecompressedBodyLength (64 * 1024 * 1024)
 
 /**
+ *  Ceiling on request data held in memory across *all* live connections at once.
+ *
+ *  The two limits above are per-request, and they do not compose: with
+ *  kGCDWebServerMaxConnections concurrent requests the real ceiling was their product —
+ *  around 2 GB of chunked framing buffers, or 8 GB of inflated gzip output — many times
+ *  what any phone survives. Each per-request limit still applies; this bounds the sum.
+ *
+ *  Sized so that legitimate traffic never approaches it: real uploads stream to disk and
+ *  hold only a read-sized buffer in memory, so only a client deliberately parking large
+ *  in-memory bodies gets close.
+ */
+#define kGCDWebServerMaxTotalInMemoryLength (64 * 1024 * 1024)
+
+/**
  *  Check if a custom logging facility should be used instead.
  */
 
@@ -196,6 +210,43 @@ static inline BOOL GCDWebServerIsValidByteRange(NSRange range) {
 static inline NSError *GCDWebServerMakePosixError(int code) {
     return [NSError errorWithDomain:NSPOSIXErrorDomain code:code userInfo:@{NSLocalizedDescriptionKey: (NSString *)[NSString stringWithUTF8String:strerror(code)]}];
 }
+
+/**
+ *  A share of the process-wide in-memory ceiling, held by whatever is doing the buffering.
+ *
+ *  Deliberately an object: the bytes are returned in -dealloc, so a connection that dies
+ *  mid-body — dropped, reset, timed out — cannot leak budget and permanently shrink what
+ *  the server can serve afterwards. A holder resizes its reservation as its buffer grows.
+ */
+@interface GCDWebServerMemoryReservation : NSObject
+
+/**
+ *  Resizes this reservation. Returns NO when the process-wide ceiling would be exceeded,
+ *  leaving the existing reservation untouched so the caller can fail the request cleanly.
+ *  Shrinking always succeeds.
+ */
+- (BOOL)reserveBytes:(NSUInteger)bytes;
+
+@end
+
+/**
+ *  Current limits. These read the testing overrides below, so consult them rather than the
+ *  kGCDWebServer... constants directly.
+ */
+extern NSUInteger GCDWebServerMaxInMemoryBodyLength(void);
+extern NSUInteger GCDWebServerMaxDecompressedBodyLength(void);
+
+/**
+ *  Shrinks the limits so a test can prove a bound is enforced without moving tens of
+ *  megabytes through the server — which is slow, and under AddressSanitizer is itself
+ *  enough to lose the test runner. Pass 0 for either to restore its default.
+ */
+extern void GCDWebServerSetMemoryLimitsForTesting(NSUInteger perRequest, NSUInteger decompressed, NSUInteger total);
+
+/**
+ *  Bytes currently reserved across all live reservations. For tests and diagnostics.
+ */
+extern NSUInteger GCDWebServerReservedMemoryLength(void);
 
 extern void GCDWebServerInitializeFunctions(void);
 extern NSString *_Nullable GCDWebServerNormalizeHeaderValue(NSString *_Nullable value);

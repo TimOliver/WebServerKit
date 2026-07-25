@@ -802,26 +802,31 @@ static NSString* MakeTempDirectory(void) {
     NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES, GCDWebServerOption_ConnectionIdleTimeout : @5.0};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
+    // Shrink the bound so the property is proven with a few hundred kilobytes rather than
+    // by pushing 16 MB through the server. That volume was slow, and under the suite's
+    // AddressSanitizer build it was itself enough to lose the whole test runner — which
+    // reports as "0 failures" and silently takes the next test with it.
+    GCDWebServerSetMemoryLimitsForTesting(64 * 1024, 64 * 1024, 1024 * 1024);
+    [self addTeardownBlock:^{
+        GCDWebServerSetMemoryLimitsForTesting(0, 0, 0);
+    }];
+
     int fd = ConnectToLocalhostPort(server.port);
     XCTAssertGreaterThan(fd, 0);
     const char* head = "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\n\r\n";
     XCTAssertEqual(send(fd, head, strlen(head), 0), (ssize_t)strlen(head));
 
-    // Stream ~20 MB of 'a' (all valid hex, no CRLF) so the chunk-size line can never
-    // complete, exceeding the 16 MB + framing-slack bound. Send on a background queue
-    // so the main thread can read the server's rejection response promptly (a blocking
-    // send of the whole blob would otherwise deadlock against the server that has
-    // stopped reading). A rejecting server produces an HTTP error response; a server
-    // that buffered without bound would send nothing and the read would just time out.
+    // Stream 'a' bytes (all valid hex, no CRLF) so the chunk-size line can never complete,
+    // exceeding the framing bound. Send on a background queue so the main thread can read
+    // the server's rejection promptly — a blocking send of the whole payload would deadlock
+    // against a server that has stopped reading. A rejecting server produces an HTTP error;
+    // a server that buffered without bound would send nothing and the read would time out.
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        // Stream from a small reusable buffer rather than allocating the whole 20 MB. The
-        // bytes on the wire are identical, but the test process no longer holds 20 MB
-        // alongside the ~16 MB the server is buffering — under AddressSanitizer that peak
-        // was enough to disturb neighbouring timing-sensitive tests in the same run.
-        char chunk[64 * 1024];
+        char chunk[16 * 1024];
         memset(chunk, 'a', sizeof(chunk));
+        NSUInteger toSend = 4 * (GCDWebServerMaxInMemoryBodyLength() + (64 * 1024));
 
-        for (int i = 0; i < (20 * 1024 * 1024) / (int)sizeof(chunk); i++) {
+        for (NSUInteger sent = 0; sent < toSend; sent += sizeof(chunk)) {
             if (send(fd, chunk, sizeof(chunk), 0) < 0) {
                 break;  // The server rejected and closed; the point is already proven
             }
@@ -1584,6 +1589,47 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     NSString* withNUL = [NSString stringWithFormat:@"abc%@def", [NSString stringWithCharacters:&nul length:1]];
     XCTAssertNotEqualObjects(GCDWebServerComputeMD5Digest(@"%@", withNUL), GCDWebServerComputeMD5Digest(@"%@", @"abc"),
                              @"input must not be truncated at the first NUL");
+}
+
+#pragma mark - Aggregate in-memory budget
+
+// Every in-memory limit is per-request, and per-request limits do not compose: with the
+// connection cap the real ceiling was their product — gigabytes, far past what a phone
+// survives. A process-wide budget bounds the sum, and a reservation returns its bytes when
+// it is deallocated so a connection dying mid-body cannot permanently shrink the budget.
+- (void)testTotalInMemoryBudgetIsBoundedAndReturned {
+    GCDWebServerSetMemoryLimitsForTesting(64 * 1024, 64 * 1024, 256 * 1024);
+    [self addTeardownBlock:^{
+        GCDWebServerSetMemoryLimitsForTesting(0, 0, 0);
+    }];
+    XCTAssertEqual(GCDWebServerReservedMemoryLength(), (NSUInteger)0, @"budget should start empty");
+
+    // The pool matters: the requests are autoreleased, so they are only deallocated — and
+    // their reservations only returned — once it drains.
+    NSUInteger accepted = 0;
+
+    @autoreleasepool {
+        // More concurrent bodies than the total budget can hold at once.
+        NSMutableArray<GCDWebServerDataRequest*>* requests = [NSMutableArray array];
+        NSMutableData* payload = [NSMutableData dataWithLength:(32 * 1024)];
+
+        for (int i = 0; i < 16; i++) {
+            GCDWebServerDataRequest* request = OpenBodyRequest([GCDWebServerDataRequest class], @{});
+            [requests addObject:request];
+            NSError* error = nil;
+
+            if ([request performWriteData:payload error:&error]) {
+                accepted += 1;
+            }
+        }
+
+        XCTAssertGreaterThan(accepted, (NSUInteger)0, @"the budget refused everything; it is too tight to be usable");
+        XCTAssertLessThan(accepted, (NSUInteger)16, @"the budget accepted every body; the aggregate ceiling is not enforced");
+        XCTAssertLessThanOrEqual(GCDWebServerReservedMemoryLength(), (NSUInteger)(256 * 1024), @"reserved memory exceeded the ceiling");
+    }
+
+    // Every holder is gone, so every byte must have come back.
+    XCTAssertEqual(GCDWebServerReservedMemoryLength(), (NSUInteger)0, @"reservations leaked after their holders were released");
 }
 
 #pragma mark - Host validation (DNS rebinding)

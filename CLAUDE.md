@@ -119,6 +119,41 @@ mutated requests under ASan+UBSan produced zero memory errors, and request smugg
 structurally impossible (one request per connection, `Connection: Close`, leftover bytes
 never read) — verified live by pipelining.
 
+### Aggregate in-memory budget
+
+Every in-memory limit was per-request, and per-request limits do not compose: with
+`kGCDWebServerMaxConnections` concurrent requests the real ceiling was their product — about
+2 GB of chunked framing buffers, or 8 GB of inflated gzip output — many times what a phone
+survives. This was the same bug class fixed twice already (multipart bodies, then multipart
+part-headers); rather than wait for a third instance, the general case is now closed.
+
+`kGCDWebServerMaxTotalInMemoryLength` (64 MB) bounds the sum across all live connections.
+Every place that holds request data in memory takes a `GCDWebServerMemoryReservation` and
+resizes it as its buffer grows: data-request bodies, inflated gzip output, multipart argument
+parts, each multipart parser's working buffer, and the chunked framing buffer. Per-request
+limits still apply on top.
+
+The reservation is deliberately an **object**: the bytes are returned in `-dealloc`, so a
+connection that dies mid-body — dropped, reset, timed out — cannot leak budget and
+permanently shrink what the server can serve afterwards. Reservations that rise and fall
+(working buffers) shrink again as the parser drains them; a reservation that only grows
+(retained multipart arguments) is charged once against the shared budget object. Verified
+under load: 24 concurrent chunked bodies peaked at exactly the ceiling and never above it,
+and the reserved total returned to zero once they finished.
+
+`GCDWebServerSetMemoryLimitsForTesting` shrinks the limits so a bound can be proven without
+moving tens of megabytes. That fixed the long-standing flake in
+`testChunkedTransferRejectsUnterminatedSizeLine`, which used to push 16 MB through the server
+and lose the test runner in roughly half of full-suite runs; it now proves the same property
+against a 64 KB bound. Ten consecutive full-suite runs pass. Consult
+`GCDWebServerMaxInMemoryBodyLength()` / `GCDWebServerMaxDecompressedBodyLength()` rather than
+the `kGCDWebServer...` constants, so the overrides are honoured.
+
+Known imprecision: exhausting the budget surfaces as a 500, because the body-writer protocol
+reports failure as a plain BOOL and the connection maps any body-write failure to 500. A 503
+would be more honest; threading a status through that protocol was judged not worth
+destabilising the body-read path for.
+
 ### Host validation (DNS rebinding)
 
 Every request's `Host` is checked against an allow-list in
