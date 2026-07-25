@@ -549,6 +549,64 @@ static NSString* MakeTempDirectory(void) {
 // credentials gets 401 (and no body leaks), and correct credentials get through.
 // This exercises the per-connection path that reads the server's auth
 // configuration, guarding it against regressions.
+// The header block is framed on CRLFCRLF but parsed by CFHTTPMessage, which ends the
+// message at a bare LF-LF: every header in between was silently discarded and the request
+// still answered 200, so the server acted on a different message than the client sent.
+// Demonstrated against the Host allow-list — a Host placed after an LF-LF vanished
+// entirely, taking the request down the "no Host" branch. Framing must be unambiguous.
+- (void)testMalformedHeaderFramingIsRefused {
+    GCDWebServer* server = [[GCDWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[GCDWebServerRequest class]
+                          processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
+                              return [GCDWebServerDataResponse responseWithText:@"ok"];
+                          }];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    // Sanity: a well-formed request still works.
+    XCTAssertTrue([SendRawRequest(server.port, @"GET /a HTTP/1.1\r\nHost: localhost\r\n\r\n") containsString:@"200"]);
+
+    NSDictionary* cases = @{
+        @"bare LF-LF hiding later headers" : @"GET /a HTTP/1.1\r\nX-Pad: p\n\nHost: evil.example\r\n\r\n",
+        @"space before the colon" : @"GET /a HTTP/1.1\r\nHost: localhost\r\nContent-Length : 5\r\n\r\n",
+        @"obs-fold continuation line" : @"GET /a HTTP/1.1\r\nHost: localhost\r\nContent-Length:\r\n 5\r\n\r\n",
+        @"header line with no colon" : @"GET /a HTTP/1.1\r\nHost: localhost\r\nBogusLine\r\n\r\n",
+        @"non-token character in the field name" : @"GET /a HTTP/1.1\r\nHost: localhost\r\nX Bad: 1\r\n\r\n",
+        @"junk after the HTTP version" : @"GET /a HTTP/1.1 junk\r\nHost: localhost\r\n\r\n",
+        @"space inside the request target" : @"GET /a b HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        @"doubled spaces in the request line" : @"GET  /a  HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    };
+
+    [cases enumerateKeysAndObjectsUsingBlock:^(NSString* name, NSString* raw, BOOL* stop) {
+        NSString* reply = SendRawRequest(server.port, raw);
+        XCTAssertNotNil(reply, @"%@: no reply", name);
+        XCTAssertTrue([reply containsString:@"400"], @"%@: expected 400, got: %@", name, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+    }];
+
+    [server stop];
+}
+
+// An oversized header block is the client's error, not the server's: answering 500 told
+// the client we had failed and invited a retry of something that can never succeed.
+- (void)testOversizedHeaderBlockIsRefusedWith431 {
+    GCDWebServer* server = [[GCDWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[GCDWebServerRequest class]
+                          processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
+                              return [GCDWebServerDataResponse responseWithText:@"ok"];
+                          }];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* huge = [@"" stringByPaddingToLength:(1024 * 1024) withString:@"A" startingAtIndex:0];
+    NSString* reply = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /a HTTP/1.1\r\nHost: localhost\r\nX-Big: %@\r\n\r\n", huge]);
+    XCTAssertNotNil(reply);
+    XCTAssertTrue([reply containsString:@"431"], @"expected 431 for an oversized header block, got: %@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+
+    [server stop];
+}
+
 // A refusal that depends only on headers must be answered before the body is read.
 // Previously the connection matched a handler, read the entire body to the device's
 // temp directory, and only then ran the Host allow-list and authentication — so an
