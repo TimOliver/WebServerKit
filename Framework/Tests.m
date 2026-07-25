@@ -195,6 +195,22 @@ static NSString* SendRawRequest(NSUInteger port, NSString* request) {
     return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
 }
 
+// As SendRawRequest, but for a request whose body is not valid UTF-8 (e.g. gzip).
+static NSString* SendRawDataRequest(NSUInteger port, NSData* request) {
+    int fd = ConnectToLocalhostPort(port);
+    if (fd < 0) {
+        return nil;
+    }
+    if (send(fd, request.bytes, request.length, 0) != (ssize_t)request.length) {
+        close(fd);
+        return nil;
+    }
+    BOOL sawEOF = NO;
+    NSData* data = ReadToEOF(fd, &sawEOF);
+    close(fd);
+    return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+}
+
 static NSString* MakeTempDirectory(void) {
     NSString* dir = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSProcessInfo processInfo] globallyUniqueString]];
     [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:NULL];
@@ -755,6 +771,100 @@ static NSString* MakeTempDirectory(void) {
     NSError* error = nil;
 
     XCTAssertFalse([request performWriteData:bomb error:&error], @"gzip decoder should reject a decompression bomb");
+}
+
+// A gzip body that satisfies its Content-Length but stops part-way through the
+// deflate stream must be refused on close, not reported as a complete body. The
+// decoder only asserted this (a no-op in Release), so the handler ran on a partial
+// body — and on WebDAV PUT that replaced the target file with the fragment.
+- (void)testGZipDecoderRejectsTruncatedBody {
+    NSData* full = GZipCompress([NSMutableData dataWithLength:(64 * 1024)]);
+    XCTAssertGreaterThan(full.length, (NSUInteger)20);
+
+    GCDWebServerDataRequest* request = OpenBodyRequest([GCDWebServerDataRequest class], @{@"Content-Encoding": @"gzip"});
+    NSError* error = nil;
+
+    // The first 20 bytes are a well-formed prefix, so the write itself succeeds.
+    XCTAssertTrue([request performWriteData:[full subdataWithRange:NSMakeRange(0, 20)] error:&error]);
+    XCTAssertFalse([request performClose:&error], @"a truncated gzip stream must not close successfully");
+}
+
+// Bytes after Z_STREAM_END are either padding or a second concatenated member;
+// either way the body is not one we can reproduce, so it must be refused rather
+// than silently dropped (it was a GWS_DCHECK, i.e. an abort in Debug builds).
+- (void)testGZipDecoderRejectsTrailingDataAfterStreamEnd {
+    NSData* full = GZipCompress([NSMutableData dataWithLength:1024]);
+    GCDWebServerDataRequest* request = OpenBodyRequest([GCDWebServerDataRequest class], @{@"Content-Encoding": @"gzip"});
+    NSError* error = nil;
+
+    XCTAssertTrue([request performWriteData:full error:&error]);
+    XCTAssertFalse([request performWriteData:SSEData(@"trailing") error:&error], @"trailing data after the gzip stream must be refused");
+}
+
+// The decoder must charge the process-wide budget for the buffer it is holding, not
+// for everything it has ever inflated. Charging the running total parked the whole
+// budget for the life of the request on memory already handed downstream and freed,
+// so one cheap request locked every other connection out of every in-memory path.
+// The downstream here is a file request, which streams to disk and retains nothing.
+- (void)testGZipDecoderChargesOnlyLiveBuffersToTheBudget {
+    const NSUInteger kTotal = 2 * 1024 * 1024;
+    GCDWebServerSetMemoryLimitsForTesting(1024 * 1024, 16 * 1024 * 1024, kTotal);
+
+    @try {
+        XCTAssertEqual(GCDWebServerReservedMemoryLength(), (NSUInteger)0, @"budget should start empty");
+
+        // Inflates to 8 MB — four times the whole budget — but never more than a
+        // fraction of it at once, because the compressed input is fed in slices.
+        NSData* compressed = GZipCompress([NSMutableData dataWithLength:(8 * 1024 * 1024)]);
+        XCTAssertNotNil(compressed);
+
+        @autoreleasepool {
+            GCDWebServerFileRequest* request = OpenBodyRequest([GCDWebServerFileRequest class], @{@"Content-Encoding": @"gzip"});
+            NSError* error = nil;
+
+            for (NSUInteger offset = 0; offset < compressed.length; offset += 256) {
+                NSRange slice = NSMakeRange(offset, MIN((NSUInteger)256, compressed.length - offset));
+                XCTAssertTrue([request performWriteData:[compressed subdataWithRange:slice] error:&error],
+                              @"inflating %lu MB through a %lu MB budget must succeed when only live buffers are charged (failed at offset %lu: %@)",
+                              (unsigned long)8, (unsigned long)(kTotal / (1024 * 1024)), (unsigned long)offset, error);
+                XCTAssertLessThanOrEqual(GCDWebServerReservedMemoryLength(), kTotal, @"reserved memory exceeded the ceiling");
+            }
+
+            XCTAssertTrue([request performClose:&error], @"a complete gzip stream must close cleanly: %@", error);
+        }
+
+        XCTAssertEqual(GCDWebServerReservedMemoryLength(), (NSUInteger)0, @"the decoder leaked its reservation");
+    } @finally {
+        GCDWebServerSetMemoryLimitsForTesting(0, 0, 0);
+    }
+}
+
+// End-to-end: the data-destroying case. A PUT whose gzip body is truncated must
+// leave the existing file byte-identical and must not answer 2xx.
+- (void)testDAVPutWithTruncatedGZipBodyPreservesExistingFile {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    NSString* path = [dir stringByAppendingPathComponent:@"keep.txt"];
+    NSData* original = SSEData(@"the original contents, which must survive a refused PUT");
+    XCTAssertTrue([original writeToFile:path atomically:YES]);
+
+    GCDWebDAVServer* server = [[GCDWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSData* full = GZipCompress([NSMutableData dataWithLength:(50 * 1024)]);
+    NSData* truncated = [full subdataWithRange:NSMakeRange(0, 20)];
+    NSMutableData* raw = [NSMutableData data];
+    [raw appendData:SSEData([NSString stringWithFormat:@"PUT /keep.txt HTTP/1.1\r\nHost: localhost\r\nContent-Encoding: gzip\r\nContent-Length: %lu\r\n\r\n", (unsigned long)truncated.length])];
+    [raw appendData:truncated];
+
+    NSString* reply = SendRawDataRequest(server.port, raw);
+    XCTAssertNotNil(reply);
+    XCTAssertFalse([reply hasPrefix:@"HTTP/1.1 2"], @"a truncated gzip body must not be accepted: %@", reply);
+    XCTAssertEqualObjects([NSData dataWithContentsOfFile:path], original, @"the existing file must be untouched; reply: %@", reply);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
 }
 
 #pragma mark - Crash / DoS hardening
