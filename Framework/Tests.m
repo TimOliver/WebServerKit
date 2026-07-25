@@ -1875,6 +1875,7 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     XCTAssertTrue([extValue containsString:@"%3B"], @"expected a percent-encoded ';': %@", disposition);
 
     [fm removeItemAtPath:root error:NULL];
+}
 
 // The NAT-PMP callbacks arrive on the main run loop and used to mutate _dnsService /
 // _dnsAddress / _dnsPort with no confinement, racing -_stop's DNSServiceRefDeallocate and
