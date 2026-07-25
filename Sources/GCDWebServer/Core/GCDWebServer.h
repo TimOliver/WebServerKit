@@ -135,6 +135,33 @@ extern NSString *const GCDWebServerOption_RequestNATPortMapping;
 extern NSString *const GCDWebServerOption_BindToLocalhost;
 
 /**
+ *  Additional host names this server will answer to, beyond the ones it accepts
+ *  automatically (NSArray of NSString).
+ *
+ *  Every request's "Host" header is checked against an allow-list, and anything
+ *  else is refused with 421. This is what stops DNS rebinding: a browser sends the
+ *  *name* the page was loaded from, so a page on evil.example that has repointed
+ *  its DNS at this server still sends "Host: evil.example" — and an attacker
+ *  cannot make a browser send a raw IP address in Host while scripting from a
+ *  domain. Without this check, every same-origin protection (CORS, Origin
+ *  comparison, CSRF tokens) is bypassed, because after rebinding the attacker
+ *  genuinely *is* same-origin.
+ *
+ *  Accepted without configuration: any IP address literal, "localhost", this
+ *  machine's own host name, and the Bonjour name being advertised. Supply this
+ *  option only if the server is reached under some other name — behind a reverse
+ *  proxy, or via a custom DNS entry. Entries are compared case-insensitively and
+ *  may include a port ("files.example:8080"); without one, any port matches.
+ *
+ *  A request carrying no "Host" header at all is allowed: HTTP/1.0 and many
+ *  non-browser clients omit it, and rebinding requires a browser, which never does.
+ *
+ *  Rejections are logged with the offending name and the full accepted set, so an
+ *  unanticipated deployment reports itself rather than failing mysteriously.
+ */
+extern NSString *const GCDWebServerOption_AllowedHostNames;
+
+/**
  *  The maximum number of incoming HTTP requests that can be queued waiting to
  *  be handled before new ones are dropped (NSNumber / NSUInteger).
  *

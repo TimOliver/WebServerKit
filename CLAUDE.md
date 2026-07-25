@@ -119,12 +119,37 @@ mutated requests under ASan+UBSan produced zero memory errors, and request smugg
 structurally impossible (one request per connection, `Connection: Close`, leftover bytes
 never read) — verified live by pipelining.
 
-**Still open, deliberately deferred:** there is no `Host` validation anywhere, and the
-uploader's CSRF check compares `Origin` against `Host` — both attacker-controlled after DNS
-rebinding — so any website can drive the whole API once a DNS TTL flips. WebDAV has no
-origin check at all. The fix is a Host allowlist in the connection layer (IP literals,
-`localhost`, `<bonjourName>.local`, plus an option), which will reject setups that work
-today; that compatibility call is why it is not in this pass.
+### Host validation (DNS rebinding)
+
+Every request's `Host` is checked against an allow-list in
+`-[GCDWebServerConnection _rejectIfHostNotAllowed]`; anything else gets 421. Accepted with
+no configuration: any IP address literal, `localhost`, this machine's own host name, and the
+Bonjour name being advertised. `GCDWebServerOption_AllowedHostNames` adds more, and an entry
+may pin its own port.
+
+**Why nothing else would do.** Once a page on `evil.example` repoints its DNS here, the
+browser considers itself same-origin: CORS permits the read, an `Origin` comparison passes,
+and a CSRF token can simply be fetched from the page and replayed. The only thing that still
+differs is the *name* the browser sends in `Host` — and an attacker cannot make a browser put
+a raw IP literal there while scripting from a domain. That asymmetry is the entire defence,
+which is why IP literals are accepted by *shape* rather than by matching our own addresses.
+Do not "improve" this by resolving the Host and comparing against local interfaces: the
+attacker controls that DNS, so it resolves to us and the check evaporates.
+
+This also repairs rather than duplicates the uploader's CSRF check. That check compares
+`Origin` against `Host`, which was sound logic over an untrusted input; now that `Host` is
+validated first, the comparison means something again.
+
+It lives in the connection layer, ahead of `-preflightRequest:` (a subclassing point that
+must not be able to switch it off), so WebDAV and host-app handlers inherit it — WebDAV has
+no origin check of its own and would otherwise be the most exposed surface.
+
+A request with no `Host` at all is allowed: HTTP/1.0 and many native clients omit it, and
+rebinding requires a browser, which never does. Rejections log the offending name, the path,
+the peer and the full accepted set, deliberately loudly — this is the check most likely to
+surprise a deployment nobody anticipated, and a quiet refusal would present as "the server
+just doesn't work". Covered by `testHostValidationRefusesRebindingButAllowsRealNames`,
+`testHostValidationCoversWebDAV` and `testHostValidationHonoursConfiguredNames`.
 
 ### Third audit pass: remote DoS, lifecycle, and parsing fixes
 

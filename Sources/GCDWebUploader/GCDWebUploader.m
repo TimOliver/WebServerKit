@@ -1001,6 +1001,11 @@ static NSString *_OriginAuthority(NSString *value) {
 // always sends Origin), so reject those. Requests with no Origin/Referer at all — a
 // non-browser client such as curl or a native app — are allowed: they cannot be a
 // confused deputy. Returns a 403 response to reject, or nil to allow.
+//
+// Comparing against the client-supplied Host is only meaningful because the connection
+// layer has already validated it against an allow-list (see -_rejectIfHostNotAllowed). On
+// its own this check compares two attacker-controlled values and a DNS-rebound page passes
+// it trivially, so the two belong together.
 - (GCDWebServerResponse *)_rejectIfCrossOrigin:(GCDWebServerRequest *)request {
     NSString *const originHeader = request.headers[@"Origin"];
     NSString *const host = request.headers[@"Host"];

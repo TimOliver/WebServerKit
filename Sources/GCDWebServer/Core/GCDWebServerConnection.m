@@ -29,7 +29,9 @@
 #error GCDWebServer requires ARC
 #endif
 
+#import <arpa/inet.h>
 #import <netdb.h>
+#import <netinet/in.h>
 #import <sys/socket.h>
 #import <TargetConditionals.h>
 #ifdef __GCDWEBSERVER_ENABLE_TESTING__
@@ -93,6 +95,7 @@ NS_ASSUME_NONNULL_END
     NSString *_authenticationRealm;
     NSDictionary<NSString *, NSString *> *_authenticationBasicAccounts;
     NSDictionary<NSString *, NSString *> *_authenticationDigestAccounts;
+    NSSet<NSString *> *_allowedHostNames;
     BOOL _shouldAutomaticallyMapHEADToGET;
 
     CFHTTPMessageRef _requestMessage;
@@ -164,9 +167,135 @@ NS_ASSUME_NONNULL_END
     CFHTTPMessageSetHeaderFieldValue(_responseMessage, CFSTR("Date"), (__bridge CFStringRef)GCDWebServerFormatRFC822([NSDate date]));
 }
 
+// A textual IP address needs no allow-list entry. The interface set can change under us, so
+// enumerating our own addresses would be both racy and incomplete — and the whole check
+// rests on the fact that a browser cannot be made to put a literal in "Host" while
+// scripting from a domain, so a literal can never be a rebound name.
+static BOOL _IsIPAddressLiteral(NSString *host) {
+    if (host.length == 0) {
+        return NO;
+    }
+
+    const char *const value = host.UTF8String;
+    struct in_addr address4;
+    struct in6_addr address6;
+    return (inet_pton(AF_INET, value, &address4) == 1) || (inet_pton(AF_INET6, value, &address6) == 1);
+}
+
+// The port this connection was actually accepted on. Taken from the connection's own local
+// address rather than the server's mutable _port ivar, which -_stop clears from another
+// thread while connections are still live.
+static uint16_t _LocalPortFromAddress(NSData *localAddressData) {
+    const struct sockaddr *const address = localAddressData.bytes;
+
+    if (address == NULL) {
+        return 0;
+    }
+
+    if (address->sa_family == AF_INET) {
+        return ntohs(((const struct sockaddr_in *)address)->sin_port);
+    }
+
+    if (address->sa_family == AF_INET6) {
+        return ntohs(((const struct sockaddr_in6 *)address)->sin6_port);
+    }
+
+    return 0;
+}
+
+// Refuse a request whose "Host" names something this server does not answer to. This is the
+// only defence against DNS rebinding: once a page on evil.example repoints its DNS here, the
+// browser treats it as same-origin, so CORS, Origin comparison and CSRF tokens are all
+// satisfied — but the browser still sends the name the page was loaded from. See
+// GCDWebServerOption_AllowedHostNames.
+- (GCDWebServerResponse *)_rejectIfHostNotAllowed {
+    NSString *const hostHeader = _request.headers[@"Host"];
+
+    // No "Host" at all: HTTP/1.0 and plenty of native clients omit it, and rebinding needs
+    // a browser, which never does. There is nothing here that could have been rebound.
+    if (hostHeader.length == 0) {
+        return nil;
+    }
+
+    NSString *const normalized = [hostHeader lowercaseString];
+
+    // An allow-list entry may pin a port ("files.example:8080"), so try the value verbatim
+    // before splitting it.
+    if ([_allowedHostNames containsObject:normalized]) {
+        return nil;
+    }
+
+    NSString *name = normalized;
+    NSString *portText = nil;
+
+    if ([name hasPrefix:@"["]) {  // Bracketed IPv6 literal, optionally followed by a port
+        NSRange closing = [name rangeOfString:@"]"];
+
+        if (closing.location == NSNotFound) {
+            return [self _misdirectedResponseForHost:hostHeader];
+        }
+
+        NSString *const remainder = [name substringFromIndex:(closing.location + 1)];
+
+        if (remainder.length && ![remainder hasPrefix:@":"]) {
+            return [self _misdirectedResponseForHost:hostHeader];
+        }
+
+        portText = remainder.length ? [remainder substringFromIndex:1] : nil;
+        name = [name substringWithRange:NSMakeRange(1, closing.location - 1)];
+    } else {
+        NSRange colon = [name rangeOfString:@":" options:NSBackwardsSearch];
+
+        if (colon.location != NSNotFound) {
+            portText = [name substringFromIndex:(colon.location + 1)];
+            name = [name substringToIndex:colon.location];
+        }
+    }
+
+    // A stated port must be the one this connection arrived on; omitting it is fine, since
+    // that is what a client reaching a default port sends.
+    if (portText.length) {
+        BOOL digitsOnly = (portText.length <= 5);
+
+        for (NSUInteger i = 0; digitsOnly && (i < portText.length); i++) {
+            unichar character = [portText characterAtIndex:i];
+            digitsOnly = ((character >= '0') && (character <= '9'));
+        }
+
+        if (!digitsOnly || ([portText integerValue] != (NSInteger)_LocalPortFromAddress(_localAddressData))) {
+            return [self _misdirectedResponseForHost:hostHeader];
+        }
+    }
+
+    if (_IsIPAddressLiteral(name) || [_allowedHostNames containsObject:name]) {
+        return nil;
+    }
+
+    return [self _misdirectedResponseForHost:hostHeader];
+}
+
+- (GCDWebServerResponse *)_misdirectedResponseForHost:(NSString *)hostHeader {
+    NSString *const accepted = [[[_allowedHostNames allObjects] sortedArrayUsingSelector:@selector(compare:)] componentsJoinedByString:@", "];
+    // Deliberately loud. This is the check most likely to surprise a deployment nobody
+    // anticipated, and a quiet refusal would present as "the server just doesn't work".
+    GWS_LOG_ERROR(@"Refusing \"%@ %@\" from %@: host \"%@\" is not one this server answers to (accepted: %@, plus any IP address literal). Set GCDWebServerOption_AllowedHostNames if this name is legitimate.",
+                  _request.method, _request.path, self.remoteAddressString, hostHeader, accepted);
+    return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_MisdirectedRequest
+                                                      message:@"Host \"%@\" is not served here. Accepted: %@, or any IP address. Set GCDWebServerOption_AllowedHostNames to add one.", hostHeader, accepted];
+}
+
 - (void)_startProcessingRequest {
     GWS_DCHECK(_responseMessage == NULL);
     _requestReceived = YES;  // Nothing further is read from the socket for this request
+
+    // Ahead of -preflightRequest: deliberately. That method is a documented subclassing
+    // point, and a subclass that does not call super must not be able to switch this off.
+    GCDWebServerResponse *const misdirectedResponse = [self _rejectIfHostNotAllowed];
+
+    if (misdirectedResponse) {
+        [self _finishProcessingRequest:misdirectedResponse];
+        return;
+    }
 
     GCDWebServerResponse *preflightResponse = [self preflightRequest:_request];
 
@@ -530,6 +659,7 @@ NS_ASSUME_NONNULL_END
         _authenticationRealm = server.authenticationRealm;
         _authenticationBasicAccounts = server.authenticationBasicAccounts;
         _authenticationDigestAccounts = server.authenticationDigestAccounts;
+        _allowedHostNames = server.allowedHostNames;
         _shouldAutomaticallyMapHEADToGET = server.shouldAutomaticallyMapHEADToGET;
         _localAddressData = localAddress;
         _remoteAddressData = remoteAddress;

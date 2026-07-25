@@ -90,6 +90,7 @@ typedef NS_ENUM(NSInteger, GCDWebServerClientErrorHTTPStatusCode) {
     kGCDWebServerHTTPStatusCode_UnsupportedMediaType = 415,
     kGCDWebServerHTTPStatusCode_RequestedRangeNotSatisfiable = 416,
     kGCDWebServerHTTPStatusCode_ExpectationFailed = 417,
+    kGCDWebServerHTTPStatusCode_MisdirectedRequest = 421,
     kGCDWebServerHTTPStatusCode_UnprocessableEntity = 422,
     kGCDWebServerHTTPStatusCode_Locked = 423,
     kGCDWebServerHTTPStatusCode_FailedDependency = 424,
