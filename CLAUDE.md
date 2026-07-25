@@ -125,14 +125,41 @@ began closing the socket mid-request, and `ConnectToLocalhostPort` had no `SO_NO
 so the test process was killed by SIGPIPE and xctest reported it as *"Executed 23 tests,
 with 0 failures"*. Always read the executed count, never the failure count alone.
 
-**Still open after this pass:** If-None-Match precedence over If-Modified-Since, `If-Range`
-ignored on resumed downloads, `filename*` escaped with a URL-query escaper (leaves `;`
-raw, bypassing `allowedFileExtensions` at the victim's disk), NAT-PMP callbacks mutating
-state outside `_stateQueue`, `/events` reachable cross-origin via `fetch(mode:'no-cors')`,
-a trailing-dot FQDN Host answering 421, `_XMLEscape` not stripping XML-illegal control
-characters, chunked responses sent to HTTP/1.0 clients, gzip-over-Range emitting an
-identity-offset `Content-Range`, and the recorded-trace corpus still unbuildable (see the
-third pass) so no real-client interop suite has run for three passes.
+**Serving files honestly.** Four separate ways the server asserted something untrue about
+the bytes it was sending. `If-Modified-Since` was evaluated first and independently of
+`If-None-Match`, so a revalidation carrying a *stale* ETag still got a 304 whenever the
+replacement's mtime was not strictly newer — and per RFC 9111 §4.3.4 the client then stores
+the old body under the *new* ETag, pinning the stale copy indefinitely. `If-Range` was
+ignored entirely, so a resumed download spliced bytes of a changed file onto the prefix the
+client already held and returned 206 asserting they belonged together (this added
+`-[GCDWebServerRequest ifRange]` and an initializer taking it). `filename*` was
+percent-encoded with a URL *query* escaper, which leaves `;` — the parameter delimiter — so
+`evil.command;ok.txt` was delivered as `evil.command`, defeating `allowedFileExtensions` at
+the point that matters. And gzip is no longer applied to a partial response, whose
+`Content-Range` describes the identity coding.
+
+**Also closed:** a trailing-dot FQDN Host now normalizes (it was answering 421 for the
+server's own mDNS name); `_XMLEscape` drops control characters that are illegal in XML 1.0
+at all, which a filename may legally contain and which made `LOCK` emit documents no parser
+accepts; `/events` additionally checks `Sec-Fetch-Mode`/`Sec-Fetch-Site`, since
+`fetch(mode:'no-cors')` may set `Accept` and could still pin all sixteen channels; the
+NAT-PMP callbacks are confined to `_stateQueue` (carefully — `_DNSServiceCallBack` runs
+*inside* `DNSServiceProcessResult` and must not re-dispatch, and the delegate is notified
+asynchronously, or a delegate reading `publicServerURL` would deadlock); and chunked
+framing and interim `100 Continue` are no longer sent to HTTP/1.0 clients, which read them
+as body.
+
+**The recorded-trace corpus builds again.** The third pass's `__GCDWEBSERVER_ENABLE_TESTING__`
+change also took the definition from the `GCDWebServer (Mac)` command-line target, which
+`Run-Tests.sh` builds in Release — so all eight suites had been unrunnable for three passes.
+It is restored on that one example target, not at project level (verified: the framework's
+Release compile line still does not carry it). Four suites now pass; the other four differ
+only in expectations predating deliberate changes — `X-Content-Type-Options: nosniff`, the
+`Content-Disposition` attachment header, and reworded 403 text. **Not re-recorded**, because
+doing so would bless current behaviour wholesale in a pass that changed a great deal.
+
+**Still open:** nothing from this pass's findings. The DNS-rebinding note under the fourth
+pass is now addressed by the Host allow-list; what remains deferred there is unchanged.
 
 ### Fourth audit pass: containment, framing, and two regressions from the third pass
 
