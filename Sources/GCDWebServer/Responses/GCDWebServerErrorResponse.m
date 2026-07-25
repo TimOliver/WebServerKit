@@ -83,10 +83,29 @@ static inline NSString *_EscapeHTMLString(NSString *string) {
     return escaped;
 }
 
+// An error page is a diagnostic, not a data channel — nothing a client can act on
+// lives past the first line. Callers do reflect request-controlled text into it
+// (WebDAV echoes an unparseable request body verbatim), and _EscapeHTMLString expands
+// each `"` sixfold through UTF-16 NSMutableString passes, so an unbounded message
+// turned a single 16 MB request into a 96 MB response and ~540 MB of transient
+// memory. Clamp every reflected string here, at the one place they all pass through.
+#define kMaxReflectedMessageLength 1024
+
+static inline NSString *_ClampReflectedString(NSString *string) {
+    if (string.length <= kMaxReflectedMessageLength) {
+        return string;
+    }
+
+    // Cut on a composed-character boundary so a truncated string can never end in
+    // half a surrogate pair.
+    NSRange const boundary = [string rangeOfComposedCharacterSequenceAtIndex:kMaxReflectedMessageLength];
+    return [[string substringToIndex:boundary.location] stringByAppendingString:@"…"];
+}
+
 - (instancetype)initWithStatusCode:(NSInteger)statusCode underlyingError:(NSError *)underlyingError messageFormat:(NSString *)format arguments:(va_list)arguments {
-    NSString *const message = [[NSString alloc] initWithFormat:format arguments:arguments];
+    NSString *const message = _ClampReflectedString([[NSString alloc] initWithFormat:format arguments:arguments]);
     NSString *const title = [NSString stringWithFormat:@"HTTP Error %i", (int)statusCode];
-    NSString *const error = underlyingError ? [NSString stringWithFormat:@"[%@] %@ (%li)", _EscapeHTMLString(underlyingError.domain), _EscapeHTMLString(underlyingError.localizedDescription), (long)underlyingError.code] : @"";
+    NSString *const error = underlyingError ? [NSString stringWithFormat:@"[%@] %@ (%li)", _EscapeHTMLString(_ClampReflectedString(underlyingError.domain)), _EscapeHTMLString(_ClampReflectedString(underlyingError.localizedDescription)), (long)underlyingError.code] : @"";
     NSString *const html = [NSString stringWithFormat:@"<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>%@</title></head><body><h1>%@: %@</h1><h3>%@</h3></body></html>",
                                                 title,
                                                 title,

@@ -598,6 +598,27 @@ static NSString* MakeTempDirectory(void) {
 // HTML error body served as text/html, so it must be fully HTML-escaped. Escaping
 // only quotes leaves '<'/'>'/'&' through, allowing reflected XSS in the server's
 // origin (which can list/move/delete files).
+// An error page must not be an amplifier. WebDAV reflects an unparseable request body
+// into the message, and the HTML escaper expands `"` sixfold, so an unbounded message
+// turned one 16 MB request into a ~96 MB response and ~540 MB of transient memory.
+- (void)testErrorResponseClampsReflectedMessage {
+    NSString* const payload = [@"" stringByPaddingToLength:(4 * 1024 * 1024) withString:@"\"" startingAtIndex:0];
+    GCDWebServerErrorResponse* response = [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_BadRequest message:@"%@", payload];
+    XCTAssertNotNil(response);
+
+    [response prepareForReading];
+    NSError* error = nil;
+    XCTAssertTrue([response performOpen:&error]);
+    __block NSData* body = nil;
+    [response performReadDataWithCompletion:^(NSData* data, NSError* readError) {
+        body = data;
+    }];
+    [response performClose];
+
+    // 4 MB of quotes escaped sixfold would be 24 MB; the clamp must keep it tiny.
+    XCTAssertLessThan(body.length, (NSUInteger)(64 * 1024), @"error body was not clamped: %lu bytes", (unsigned long)body.length);
+}
+
 - (void)testErrorResponseEscapesReflectedMarkup {
     NSString* const payload = @"<script>alert(1)</script> a&b \"q\" 'z'";
     GCDWebServerErrorResponse* response = [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_NotFound message:@"\"%@\" does not exist", payload];
@@ -763,6 +784,67 @@ static NSString* MakeTempDirectory(void) {
 // 400, not crash the process. The destination parsing did [dst rangeOfString:Host]
 // with a nil Host, which throws NSInvalidArgumentException; uncaught, that terminates
 // the whole server. The server must survive and keep serving afterwards.
+// libxml2 builds a DOM many times the size of an element-dense source, and that DOM is
+// outside the request-side memory budget, so a 16 MB PROPFIND body of empty elements
+// took the process from 5 MB to 561 MB and still answered 207. Oversized bodies must be
+// refused before they are parsed.
+- (void)testDAVRefusesOversizedRequestBody {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    GCDWebDAVServer* server = [[GCDWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSMutableString* body = [NSMutableString stringWithString:@"<?xml version=\"1.0\"?><propfind xmlns=\"DAV:\"><prop>"];
+    while (body.length < (512 * 1024)) {
+        [body appendString:@"<a/>"];
+    }
+    [body appendString:@"</prop></propfind>"];
+
+    NSString* request = [NSString stringWithFormat:@"PROPFIND / HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Type: text/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)body.length, body];
+    NSString* reply = SendRawRequest(server.port, request);
+    XCTAssertNotNil(reply);
+    XCTAssertTrue([reply containsString:@"413"], @"an oversized DAV body must be refused with 413, got: %@", [reply substringToIndex:MIN((NSUInteger)80, reply.length)]);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// A COPY whose Destination is inside the source collection made copyItemAtPath: re-enter
+// the tree it was still walking, nesting directories until a path exceeded PATH_MAX. The
+// request answered 403 while leaving ~250 nested directories the server could no longer
+// delete — a refused transaction must leave nothing behind.
+- (void)testDAVCopyIntoOwnSubtreeIsRefusedAndLeavesNothingBehind {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    NSString* sub = [dir stringByAppendingPathComponent:@"d"];
+    XCTAssertTrue([fm createDirectoryAtPath:sub withIntermediateDirectories:YES attributes:nil error:NULL]);
+    XCTAssertTrue([[NSMutableData dataWithLength:(2 * 1024 * 1024)] writeToFile:[sub stringByAppendingPathComponent:@"f.bin"] atomically:YES]);
+
+    NSArray* before = [fm subpathsOfDirectoryAtPath:dir error:NULL];
+
+    GCDWebDAVServer* server = [[GCDWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* reply = SendRawRequest(server.port, @"COPY /d HTTP/1.1\r\nHost: localhost\r\nDestination: /d/sub\r\nOverwrite: T\r\n\r\n");
+    XCTAssertNotNil(reply);
+    XCTAssertTrue([reply containsString:@"403"], @"copying into its own subtree must be refused: %@", reply);
+
+    // It must be refused as a precondition, before any filesystem work. Previously the
+    // only thing that stopped it was copyItemAtPath: nesting directories until a path
+    // exceeded PATH_MAX and erroring out (NSCocoaErrorDomain 514) — so the refusal came
+    // from ~250 levels of pointless recursion, and whether the cleanup afterwards could
+    // still remove that tree depended on how long the share's own path was.
+    XCTAssertTrue([reply containsString:@"into its own subtree"], @"must be refused up front, not by the copy failing: %@", reply);
+
+    NSArray* after = [fm subpathsOfDirectoryAtPath:dir error:NULL];
+    XCTAssertEqualObjects([NSSet setWithArray:after], [NSSet setWithArray:before], @"the refused COPY left entries behind (%lu vs %lu)", (unsigned long)after.count, (unsigned long)before.count);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 - (void)testDAVMoveWithoutHostHeaderDoesNotCrash {
     NSFileManager* fm = [NSFileManager defaultManager];
     NSString* dir = MakeTempDirectory();
