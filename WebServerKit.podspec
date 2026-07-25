@@ -7,9 +7,9 @@ Pod::Spec.new do |s|
   s.summary  = 'Lightweight GCD based HTTP server for OS X & iOS. A fork of GCDWebServer.'
 
   s.source   = { :git => 'https://github.com/TimOliver/WebServerKit.git', :tag => s.version.to_s }
-  s.ios.deployment_target = '12.0'
-  s.osx.deployment_target = '10.15'
-  s.tvos.deployment_target = '12.0'
+  s.ios.deployment_target = '15.0'
+  s.osx.deployment_target = '12.0'
+  s.tvos.deployment_target = '15.0'
   s.requires_arc = true
 
   s.default_subspec = 'Core'
@@ -23,10 +23,9 @@ Pod::Spec.new do |s|
     cs.private_header_files = 'Sources/GCDWebServer/Core/GCDWebServerPrivate.h'
     cs.requires_arc = true
     cs.library = 'z'
-    cs.frameworks = 'CFNetwork', 'SystemConfiguration'
-    # CoreServices supplies the pre-UTType MIME lookup and UniformTypeIdentifiers the
-    # modern one; both are resolved at runtime, so neither may be a hard link requirement.
-    cs.weak_frameworks = 'CoreServices', 'UniformTypeIdentifiers'
+    # UniformTypeIdentifiers is present on every OS this ships against, so it is a hard
+    # link rather than a weak one, and the CoreServices MIME fallback it replaced is gone.
+    cs.frameworks = 'CFNetwork', 'SystemConfiguration', 'UniformTypeIdentifiers'
   end
 
   s.subspec 'WebDAV' do |cs|

@@ -30,14 +30,10 @@
 #endif
 
 #import <TargetConditionals.h>
-#if TARGET_OS_IPHONE
-#import <CoreServices/CoreServices.h>
-#else
+#if !TARGET_OS_IPHONE
 #import <SystemConfiguration/SystemConfiguration.h>
 #endif
-#if __has_include(<UniformTypeIdentifiers/UniformTypeIdentifiers.h>)
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
-#endif
 #import <CommonCrypto/CommonDigest.h>
 #import <ifaddrs.h>
 #import <os/lock.h>
@@ -305,26 +301,13 @@ NSString *GCDWebServerGetMimeTypeForExtension(NSString *extension, NSDictionary<
         }
 
         if (mimeType == nil) {
-#if __has_include(<UniformTypeIdentifiers/UniformTypeIdentifiers.h>)
-            // tvOS must be named explicitly: the deployment target is 12.0, and without it
-            // the "*" arm makes this branch compile for every tvOS version, calling UTType
-            // where it does not exist.
-            if (@available(iOS 14.0, macOS 11.0, tvOS 14.0, *)) {
-                UTType *type = [UTType typeWithFilenameExtension:extension];
-                mimeType = type.preferredMIMEType;
-            } else
-#endif
-            {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-                CFStringRef uti = UTTypeCreatePreferredIdentifierForTag(kUTTagClassFilenameExtension, (__bridge CFStringRef)extension, NULL);
-
-                if (uti) {
-                    mimeType = CFBridgingRelease(UTTypeCopyPreferredTagWithClass(uti, kUTTagClassMIMEType));
-                    CFRelease(uti);
-                }
-#pragma clang diagnostic pop
-            }
+            // UniformTypeIdentifiers is available unconditionally at the deployment floors
+            // this library ships against, so there is no availability check and no
+            // CoreServices fallback. That fallback used the UTTypeCreatePreferredIdentifierForTag
+            // family, which is deprecated on every current OS, and its @available clause had
+            // to name each platform by hand — omitting tvOS there was a live bug once.
+            UTType *const type = [UTType typeWithFilenameExtension:extension];
+            mimeType = type.preferredMIMEType;
         }
     }
 
