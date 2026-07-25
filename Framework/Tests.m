@@ -2006,7 +2006,74 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     XCTAssertTrue([get(@"other.example") containsString:@"421"], @"an unconfigured name should still be refused");
     XCTAssertTrue([get(@"localhost") containsString:@"served"], @"the defaults should survive adding names");
 
+    // A trailing dot is the DNS root label, so "name." is the same host as "name". A user
+    // typing a fully-qualified name, a canonicalizing client, or curl all send it, and
+    // refusing it presented as the server simply not working.
+    // Assert on the status line, not the word "served": the 421 body itself says "is not
+    // served here", so containsString:@"served" matches a refusal too — which is exactly
+    // how these three first passed against code that had no root-label handling at all.
+    XCTAssertTrue([get(@"files.example.") hasPrefix:@"HTTP/1.1 200"], @"a fully-qualified name should be accepted: %@", get(@"files.example."));
+    XCTAssertTrue([get(@"localhost.") hasPrefix:@"HTTP/1.1 200"], @"a fully-qualified default should be accepted");
+    XCTAssertTrue([get(@"pinned.example.:8080") hasPrefix:@"HTTP/1.1 200"], @"root label plus a pinned port");
+    XCTAssertTrue([get(@"other.example.") hasPrefix:@"HTTP/1.1 421"], @"stripping the root label must not accept an unknown name");
+
     [server stop];
+}
+
+// A control character below 0x20 cannot appear in an XML 1.0 document at all — there is no
+// escape for it — but a Unix filename may contain one. Emitting it raw produced a document
+// we declare as application/xml that no conforming parser accepts, breaking that resource
+// for every client.
+- (void)testDAVResponseOmitsCharactersIllegalInXML {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    NSString* name = [NSString stringWithFormat:@"a%Cb.txt", (unichar)0x01];
+    XCTAssertTrue([@"data" writeToFile:[dir stringByAppendingPathComponent:name] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    GCDWebDAVServer* server = [[GCDWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    // LOCK is the case that reaches the wire raw: PROPFIND percent-encodes its href, but
+    // <D:lockroot> interpolates the relative path through _XMLEscape only.
+    NSString* lockBody = @"<?xml version=\"1.0\" encoding=\"utf-8\"?><D:lockinfo xmlns:D=\"DAV:\"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>";
+    // Percent-encoded, because a raw control byte in the request-target is now itself a 400.
+    NSString* request = [NSString stringWithFormat:@"LOCK /a%%01b.txt HTTP/1.1\r\nHost: localhost\r\nUser-Agent: WebDAVFS/3.0.0\r\nDepth: 0\r\nContent-Type: text/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)lockBody.length, lockBody];
+    NSString* reply = SendRawRequest(server.port, request);
+    XCTAssertNotNil(reply);
+    XCTAssertTrue([reply containsString:@"200"], @"%@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+
+    NSRange body = [reply rangeOfString:@"\r\n\r\n"];
+    XCTAssertNotEqual(body.location, (NSUInteger)NSNotFound);
+    NSString* xml = [reply substringFromIndex:(body.location + body.length)];
+    NSString* illegal = [NSString stringWithFormat:@"%C", (unichar)0x01];
+    XCTAssertFalse([xml containsString:illegal], @"the emitted XML must not contain a raw 0x01");
+
+    NSXMLParser* parser = [[NSXMLParser alloc] initWithData:[xml dataUsingEncoding:NSUTF8StringEncoding]];
+    XCTAssertTrue([parser parse], @"the emitted document must be well-formed XML: %@", parser.parserError);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// The Accept gate alone does not stop a cross-origin fetch(mode:'no-cors'), which may set
+// Accept and needs no preflight — enough to pin every SSE slot without reading a byte. The
+// Sec-Fetch-* labels are set by the browser and cannot be forged by page script.
+- (void)testSSEEndpointRefusesCrossOriginNoCorsFetch {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    GCDWebUploader* server = [[GCDWebUploader alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* noCors = SendRawRequest(server.port, @"GET /events HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\nSec-Fetch-Mode: no-cors\r\nSec-Fetch-Site: cross-site\r\nSec-Fetch-Dest: empty\r\n\r\n");
+    XCTAssertTrue([noCors containsString:@"406"], @"a no-cors cross-site fetch must be refused: %@", [noCors substringToIndex:MIN((NSUInteger)40, noCors.length)]);
+
+    NSString* crossSite = SendRawRequest(server.port, @"GET /events HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\nSec-Fetch-Mode: cors\r\nSec-Fetch-Site: cross-site\r\nSec-Fetch-Dest: empty\r\n\r\n");
+    XCTAssertTrue([crossSite containsString:@"406"], @"a cross-site EventSource must be refused: %@", [crossSite substringToIndex:MIN((NSUInteger)40, crossSite.length)]);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
 }
 
 #pragma mark - gzip response encoding

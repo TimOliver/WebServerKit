@@ -404,11 +404,23 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
                          // label it "empty"; both are forbidden header names, so page script
                          // cannot forge them onto an <img>/<script>/<link> load. Non-browser
                          // clients send no Sec-Fetch-* at all and are unaffected.
+                         //
+                         // "Accept" alone is not sufficient: fetch(url, {mode: 'no-cors'})
+                         // may set it, so a page can request this URL cross-origin without a
+                         // preflight and without ever reading the reply — which is all that
+                         // is needed to hold the slot. Sec-Fetch-Mode and Sec-Fetch-Site
+                         // close that: EventSource is always a cors-mode fetch, and the
+                         // page's own EventSource is same-origin, whereas a no-cors fetch is
+                         // labelled "no-cors" and cross-site by the browser itself.
                          NSString *const accept = request.headers[@"Accept"];
                          NSString *const fetchDest = request.headers[@"Sec-Fetch-Dest"];
+                         NSString *const fetchMode = request.headers[@"Sec-Fetch-Mode"];
+                         NSString *const fetchSite = request.headers[@"Sec-Fetch-Site"];
 
                          if (([accept rangeOfString:@"text/event-stream" options:NSCaseInsensitiveSearch].location == NSNotFound) ||
-                             (fetchDest.length && ([fetchDest caseInsensitiveCompare:@"empty"] != NSOrderedSame))) {
+                             (fetchDest.length && ([fetchDest caseInsensitiveCompare:@"empty"] != NSOrderedSame)) ||
+                             (fetchMode.length && ([fetchMode caseInsensitiveCompare:@"cors"] != NSOrderedSame)) ||
+                             (fetchSite.length && ([fetchSite caseInsensitiveCompare:@"same-origin"] != NSOrderedSame))) {
                              completionBlock([GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_NotAcceptable message:@"This endpoint only serves \"text/event-stream\" requests"]);
                              return;
                          }
