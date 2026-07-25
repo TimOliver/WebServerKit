@@ -100,13 +100,44 @@ NSString *const GCDWebServerRequestAttribute_RegexCaptures = @"GCDWebServerReque
 }
 
 - (BOOL)writeData:(NSData *)data error:(NSError **)error {
-    GWS_DCHECK(!_finished);
+    // The stream already reported Z_STREAM_END, so these bytes are either padding
+    // after the member or a second concatenated member. Refuse rather than discard:
+    // silently dropping them hands the handler less data than the client sent while
+    // still answering with a success status, and the client has no way to tell.
+    // (This was a GWS_DCHECK, which aborts a Debug build on a remote request.)
+    if (_finished) {
+        if (data.length) {
+            GWS_LOG_ERROR(@"Trailing data after the end of the gzip request body");
+
+            if (error) {
+                *error = [NSError errorWithDomain:kGCDWebServerErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: @"Trailing data after end of gzip request body"}];
+            }
+
+            return NO;
+        }
+
+        return YES;
+    }
+
     _stream.next_in = (Bytef *)data.bytes;
     _stream.avail_in = (uInt)data.length;
     NSMutableData *decodedData = [[NSMutableData alloc] initWithLength:kGZipInitialBufferSize];
 
     if (decodedData == nil) {
         GWS_DNOT_REACHED();
+        return NO;
+    }
+
+    // Charge the working buffer against the process-wide budget as soon as it exists,
+    // and again below whenever it grows — see the note at the release site for why the
+    // charge tracks the live buffer rather than the running total.
+    if (![_reservation reserveBytes:decodedData.length]) {
+        GWS_LOG_ERROR(@"Refusing to inflate: the server is already holding its %lu byte in-memory limit across all connections", (unsigned long)kGCDWebServerMaxTotalInMemoryLength);
+
+        if (error) {
+            *error = [NSError errorWithDomain:kGCDWebServerErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: @"Server is at its total in-memory capacity"}];
+        }
+
         return NO;
     }
 
@@ -142,19 +173,6 @@ NSString *const GCDWebServerRequestAttribute_RegexCaptures = @"GCDWebServerReque
             return NO;
         }
 
-        // This is the worst offender for aggregate memory: the per-request ceiling times
-        // the connection cap is several gigabytes of inflated output. Hold the running
-        // total against the process-wide budget as well.
-        if (![_reservation reserveBytes:(_totalDecoded + length)]) {
-            GWS_LOG_ERROR(@"Refusing to inflate further: the server is already holding its %lu byte in-memory limit across all connections", (unsigned long)kGCDWebServerMaxTotalInMemoryLength);
-
-            if (error) {
-                *error = [NSError errorWithDomain:kGCDWebServerErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: @"Server is at its total in-memory capacity"}];
-            }
-
-            return NO;
-        }
-
         if (_stream.avail_out > 0) {
             if (result == Z_STREAM_END) {
                 _finished = YES;
@@ -171,17 +189,56 @@ NSString *const GCDWebServerRequestAttribute_RegexCaptures = @"GCDWebServerReque
         // (128 MB for the 64 MB cap) and commits it before the next check rejects it.
         NSUInteger maxBufferLength = GCDWebServerMaxDecompressedBodyLength() - _totalDecoded + 1;
         NSUInteger newBufferLength = 2 * decodedData.length;
-        decodedData.length = (newBufferLength < maxBufferLength) ? newBufferLength : maxBufferLength;
+        NSUInteger targetBufferLength = (newBufferLength < maxBufferLength) ? newBufferLength : maxBufferLength;
+
+        // Charge the larger buffer before committing to it, not after, so the budget is
+        // never briefly exceeded by an allocation we have already made.
+        if (![_reservation reserveBytes:targetBufferLength]) {
+            GWS_LOG_ERROR(@"Refusing to inflate further: the server is already holding its %lu byte in-memory limit across all connections", (unsigned long)kGCDWebServerMaxTotalInMemoryLength);
+
+            if (error) {
+                *error = [NSError errorWithDomain:kGCDWebServerErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: @"Server is at its total in-memory capacity"}];
+            }
+
+            return NO;
+        }
+
+        decodedData.length = targetBufferLength;
     }
     _totalDecoded += length;
     decodedData.length = length;
     BOOL success = length ? [super writeData:decodedData error:error] : YES;  // No need to call writer if we have no data yet
+
+    // Release the working buffer's charge now that the downstream writer has taken
+    // whatever it intends to keep and charged that itself. The reservation must track
+    // the buffer we are *holding*, not the running total we have inflated: charging
+    // `_totalDecoded` parked the whole process-wide budget for the remaining life of
+    // the request on memory that had already been handed on and freed, so one cheap
+    // request could lock every other connection out of every in-memory path.
+    [_reservation reserveBytes:0];
     return success;
 }
 
 - (BOOL)close:(NSError **)error {
-    GWS_DCHECK(_finished);
+    // A body that satisfied its Content-Length but stopped part-way through the gzip
+    // stream arrives here with _finished == NO. Reporting success would hand the
+    // handler a truncated body that looks complete — on WebDAV PUT that silently
+    // replaces the target with the partial content — so refuse instead. Close the
+    // downstream writer regardless, or its descriptor and staging file outlive the
+    // refused transaction. (This was a GWS_DCHECK, i.e. an abort in Debug builds.)
     inflateEnd(&_stream);
+
+    if (!_finished) {
+        GWS_LOG_ERROR(@"Truncated gzip request body");
+        [super close:NULL];
+
+        if (error) {
+            *error = [NSError errorWithDomain:kGCDWebServerErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: @"Truncated gzip request body"}];
+        }
+
+        return NO;
+    }
+
     return [super close:error];
 }
 
