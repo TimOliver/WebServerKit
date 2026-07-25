@@ -230,6 +230,15 @@ static void _ExecuteMainThreadRunLoopSources(void) {
 - (instancetype)init {
     if ((self = [super init])) {
         _syncQueue = dispatch_queue_create([NSStringFromClass([self class]) UTF8String], DISPATCH_QUEUE_SERIAL);
+        // The Thread Performance Checker reports a priority inversion on every -stop called
+        // from the main thread. It is NOT this queue's QoS — raising it to user-initiated or
+        // even user-interactive changes nothing, which was measured. The wait is inside
+        // -_stop itself: dispatch_group_wait blocks on the listening sources' cancel
+        // handlers, which run on dispatch_get_global_queue(_dispatchQueuePriority, 0), and
+        // that priority is a documented public option (GCDWebServerOption_DispatchQueuePriority)
+        // governing connection handling too. Left alone deliberately: the warning is
+        // diagnostic, the wait is bounded and correct, and silencing it would mean changing
+        // the priority of every accepted connection.
         _stateQueue = dispatch_queue_create("gcdwebserver.state", DISPATCH_QUEUE_SERIAL);
         _sourceGroup = dispatch_group_create();
         _handlers = [[NSMutableArray alloc] init];
@@ -591,19 +600,7 @@ static NSString *_ValidateOptions(NSDictionary<NSString *, id> *options) {
 
 static inline NSString *_EncodeBase64(NSString *string) {
     NSData *const data = [string dataUsingEncoding:NSUTF8StringEncoding];
-
-#if TARGET_OS_IPHONE || (__MAC_OS_X_VERSION_MIN_REQUIRED >= __MAC_10_9)
     return [[NSString alloc] initWithData:[data base64EncodedDataWithOptions:0] encoding:NSASCIIStringEncoding];
-
-#else
-
-    if (@available(macOS 10.9, *)) {
-        return [[NSString alloc] initWithData:[data base64EncodedDataWithOptions:0] encoding:NSASCIIStringEncoding];
-    }
-
-    return [data base64Encoding];
-
-#endif
 }
 
 - (int)_createListeningSocket:(BOOL)useIPv6
