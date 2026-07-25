@@ -421,3 +421,46 @@ BOOL GCDWebServerPathIsInsideDirectory(NSString *path, NSString *directory) {
     NSString *const prefix = [directory hasSuffix:@"/"] ? directory : [directory stringByAppendingString:@"/"];
     return [path hasPrefix:prefix];
 }
+
+// Fully resolve `path` with realpath(3). If the item does not exist yet — an upload or
+// MKCOL destination — resolve its parent instead and re-attach the leaf, so intermediate
+// symlinks are still resolved without requiring the target to exist. Returns nil when
+// nothing along the path can be resolved.
+static NSString *_RealPath(NSString *path) {
+    if (path.length == 0) {
+        return nil;
+    }
+
+    char buffer[PATH_MAX];
+    NSFileManager *const fileManager = [NSFileManager defaultManager];
+
+    if (realpath([path fileSystemRepresentation], buffer)) {
+        return [fileManager stringWithFileSystemRepresentation:buffer length:strlen(buffer)];
+    }
+
+    NSString *const parent = [path stringByDeletingLastPathComponent];
+
+    if ((parent.length == 0) || [parent isEqualToString:path]) {
+        return nil;
+    }
+
+    if (realpath([parent fileSystemRepresentation], buffer)) {
+        NSString *const resolvedParent = [fileManager stringWithFileSystemRepresentation:buffer length:strlen(buffer)];
+        return resolvedParent ? [resolvedParent stringByAppendingPathComponent:[path lastPathComponent]] : nil;
+    }
+
+    return nil;
+}
+
+BOOL GCDWebServerResolvedPathIsWithinDirectory(NSString *path, NSString *directory) {
+    NSString *const resolvedPath = _RealPath(path);
+    // Resolve the directory too: /var is itself a symlink to /private/var on Apple
+    // platforms, so a resolved path compared against an unresolved root never matches.
+    NSString *const resolvedDirectory = _RealPath(directory);
+
+    if ((resolvedPath == nil) || (resolvedDirectory == nil)) {
+        return NO;  // Fail closed rather than serving a path we could not verify.
+    }
+
+    return [resolvedPath isEqualToString:resolvedDirectory] || GCDWebServerPathIsInsideDirectory(resolvedPath, resolvedDirectory);
+}

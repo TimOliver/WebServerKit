@@ -1038,7 +1038,14 @@ static NSString *_DigestURIPath(NSString *uri) {
     // per the CORS spec, so enforcing auth here rejects it with 401 and breaks every
     // subsequent cross-origin request. Let it through to the handler so the app can
     // answer the preflight. See swisspol/GCDWebServer#479.
-    if ([request.method isEqualToString:@"OPTIONS"] && request.headers[@"Access-Control-Request-Method"]) {
+    //
+    // "Origin" is required as well as "Access-Control-Request-Method": a real preflight
+    // always carries both, so demanding both keeps the exemption to the case it exists
+    // for. Without it, any client could reach an OPTIONS handler unauthenticated just by
+    // setting one header. Note the request is still dispatched to the application's
+    // OPTIONS handler with no credentials, so such a handler must only describe
+    // capabilities — never read, write, or enumerate anything.
+    if ([request.method isEqualToString:@"OPTIONS"] && request.headers[@"Origin"] && request.headers[@"Access-Control-Request-Method"]) {
         return nil;
     }
 

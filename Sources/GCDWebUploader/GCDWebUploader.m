@@ -137,6 +137,26 @@ NS_ASSUME_NONNULL_END
 @interface GCDWebUploader () <NSFilePresenter>
 @end
 
+// Render `string` as a complete JavaScript string literal, quotes included.
+//
+// -initWithHTMLTemplate:variables: substitutes raw text, and index.html places the
+// device name inside a quoted JS string ("var _device = %device%;"). HTML escaping is
+// the wrong context there: a name containing a quote would break the literal, and one
+// containing "</script>" would end the whole block. JSON string syntax is a subset of
+// JavaScript's, so let NSJSONSerialization do the escaping, then neutralise "<" as well
+// since JSON leaves it alone and it is what makes "</script>" dangerous.
+static NSString *_JavaScriptStringLiteral(NSString *string) {
+    NSData *const data = [NSJSONSerialization dataWithJSONObject:@[string ? string : @""] options:0 error:NULL];
+    NSString *const array = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
+
+    if (array.length < 2) {
+        return @"\"\"";
+    }
+
+    NSString *const literal = [array substringWithRange:NSMakeRange(1, array.length - 2)];  // Strip the enclosing "[" and "]".
+    return [literal stringByReplacingOccurrencesOfString:@"<" withString:@"\\u003c"];
+}
+
 @implementation GCDWebUploader {
     NSMutableArray<GCDWebUploaderSSEChannel *> *_sseChannels;  // One per connected /events client. Accessed only on _sseQueue.
     dispatch_queue_t _sseQueue;
@@ -261,7 +281,7 @@ NS_ASSUME_NONNULL_END
                          // declares neither a display name nor a name.
                          return [GCDWebServerDataResponse responseWithHTMLTemplate:(NSString *)[siteBundle pathForResource:@"index" ofType:@"html"]
                                                                          variables:@{
-                                                                             @"device": device ? device : @"",
+                                                                             @"device": _JavaScriptStringLiteral(device),  // Substituted into a JS string literal, which supplies its own quotes.
                                                                              @"title": title ? title : @"",
                                                                              @"header": header ? header : @"",
                                                                              @"prologue": prologue ? prologue : @"",
@@ -632,6 +652,12 @@ NS_ASSUME_NONNULL_END
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_BadRequest message:@"\"%@\" is not a directory", relativePath];
     }
 
+    // Verify the resolved location, not just the path text: a symlink somewhere inside
+    // the share can point out of it, and normalize/prefix checks cannot see that.
+    if (!GCDWebServerResolvedPathIsWithinDirectory(absolutePath, _uploadDirectory)) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Listing \"%@\" is not allowed", relativePath];
+    }
+
     NSString *const directoryName = [absolutePath lastPathComponent];
 
     if (!_allowHiddenItems && [directoryName hasPrefix:@"."]) {
@@ -684,6 +710,11 @@ NS_ASSUME_NONNULL_END
 
     if (isDirectory) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_BadRequest message:@"\"%@\" is a directory", relativePath];
+    }
+
+    // As in -listDirectory:, confirm the resolved location is still inside the share.
+    if (!GCDWebServerResolvedPathIsWithinDirectory(absolutePath, _uploadDirectory)) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Downloading \"%@\" is not allowed", relativePath];
     }
 
     NSString *const fileName = [absolutePath lastPathComponent];
@@ -774,6 +805,12 @@ static NSString *_OriginAuthority(NSString *value) {
     NSString *const relativePath = [[request firstArgumentForControlName:@"path"] string];
     NSString *const desiredPath = [[_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(relativePath)] stringByAppendingPathComponent:fileName];
 
+    // The leaf is already reduced to a single component above, but the client-supplied
+    // "path" it is appended to may traverse a symlink out of the share.
+    if (!GCDWebServerResolvedPathIsWithinDirectory(desiredPath, _uploadDirectory)) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Uploading to \"%@\" is not allowed", relativePath];
+    }
+
     // Resolving a unique name and moving the uploaded file into place must be
     // atomic against concurrent requests, otherwise two uploads of the same
     // filename can resolve the same "unique" path and one clobbers or fails.
@@ -822,6 +859,12 @@ static NSString *_OriginAuthority(NSString *value) {
     NSString *const desiredNewPath = [_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(newRelativePath)];
     if (!GCDWebServerPathIsInsideDirectory(oldAbsolutePath, _uploadDirectory) || !GCDWebServerPathIsInsideDirectory(desiredNewPath, _uploadDirectory)) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Operating on the root directory is not allowed"];
+    }
+
+    // Both endpoints must also resolve inside the share, so neither can reach out of it
+    // through a symlink (which the textual check above cannot detect).
+    if (!GCDWebServerResolvedPathIsWithinDirectory(oldAbsolutePath, _uploadDirectory) || !GCDWebServerResolvedPathIsWithinDirectory(desiredNewPath, _uploadDirectory)) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Moving \"%@\" to \"%@\" is not allowed", oldRelativePath, newRelativePath];
     }
 
     if (![[NSFileManager defaultManager] fileExistsAtPath:oldAbsolutePath isDirectory:&isDirectory]) {
@@ -889,6 +932,12 @@ static NSString *_OriginAuthority(NSString *value) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Operating on the root directory is not allowed"];
     }
 
+    // Deleting is destructive, so also confirm the resolved target is inside the share
+    // rather than something a symlink points to outside it.
+    if (!GCDWebServerResolvedPathIsWithinDirectory(absolutePath, _uploadDirectory)) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not allowed", relativePath];
+    }
+
     if (![[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory]) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
     }
@@ -933,6 +982,12 @@ static NSString *_OriginAuthority(NSString *value) {
     // the root would otherwise create a sibling directory outside the share).
     if (!GCDWebServerPathIsInsideDirectory(desiredPath, _uploadDirectory)) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Operating on the root directory is not allowed"];
+    }
+
+    // The parent of the new directory must resolve inside the share, so a symlinked
+    // intermediate component cannot place it outside.
+    if (!GCDWebServerResolvedPathIsWithinDirectory(desiredPath, _uploadDirectory)) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Creating \"%@\" is not allowed", relativePath];
     }
 
     // Resolving a unique name and creating the directory must be atomic: request

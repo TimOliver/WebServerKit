@@ -1036,4 +1036,135 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     [fm removeItemAtPath:dir error:NULL];
 }
 
+#pragma mark - Symlink-resolved path containment
+
+// The textual containment checks cannot see symlinks: GCDWebServerNormalizePath strips
+// ".." before any file is touched, and GCDWebServerPathIsInsideDirectory compares path
+// text, but the filesystem follows symlinks in intermediate components. The resolved
+// check must accept a path inside the directory (whether or not it exists yet) and
+// reject one that leaves it through a link.
+- (void)testResolvedPathContainment {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    NSString* outside = MakeTempDirectory();
+    XCTAssertTrue([@"secret" writeToFile:[outside stringByAppendingPathComponent:@"secret.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([@"data" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([fm createDirectoryAtPath:[dir stringByAppendingPathComponent:@"Sub"] withIntermediateDirectories:NO attributes:nil error:NULL]);
+
+    // The directory itself and real items inside it are within.
+    XCTAssertTrue(GCDWebServerResolvedPathIsWithinDirectory(dir, dir));
+    XCTAssertTrue(GCDWebServerResolvedPathIsWithinDirectory([dir stringByAppendingPathComponent:@"a.txt"], dir));
+    XCTAssertTrue(GCDWebServerResolvedPathIsWithinDirectory([dir stringByAppendingPathComponent:@"Sub"], dir));
+
+    // A destination that does not exist yet resolves through its parent, so uploads and
+    // MKCOL keep working.
+    XCTAssertTrue(GCDWebServerResolvedPathIsWithinDirectory([dir stringByAppendingPathComponent:@"new.txt"], dir));
+    XCTAssertTrue(GCDWebServerResolvedPathIsWithinDirectory([dir stringByAppendingPathComponent:@"Sub/new.txt"], dir));
+
+    // A symlink that stays inside the directory is still usable.
+    XCTAssertTrue([fm createSymbolicLinkAtPath:[dir stringByAppendingPathComponent:@"Inside"] withDestinationPath:[dir stringByAppendingPathComponent:@"Sub"] error:NULL]);
+    XCTAssertTrue(GCDWebServerResolvedPathIsWithinDirectory([dir stringByAppendingPathComponent:@"Inside/new.txt"], dir));
+
+    // A symlink pointing out of the directory is rejected, both as the leaf and as an
+    // intermediate component (the case that string comparison misses entirely).
+    XCTAssertTrue([fm createSymbolicLinkAtPath:[dir stringByAppendingPathComponent:@"Escape"] withDestinationPath:outside error:NULL]);
+    NSString* throughLink = [dir stringByAppendingPathComponent:@"Escape/secret.txt"];
+    XCTAssertTrue(GCDWebServerPathIsInsideDirectory(throughLink, dir), @"precondition: the textual check does not catch this");
+    XCTAssertFalse(GCDWebServerResolvedPathIsWithinDirectory(throughLink, dir), @"a path traversing a symlink out of the directory must be rejected");
+    XCTAssertFalse(GCDWebServerResolvedPathIsWithinDirectory([dir stringByAppendingPathComponent:@"Escape"], dir));
+    XCTAssertFalse(GCDWebServerResolvedPathIsWithinDirectory([outside stringByAppendingPathComponent:@"secret.txt"], dir));
+
+    // Unresolvable input fails closed.
+    XCTAssertFalse(GCDWebServerResolvedPathIsWithinDirectory(@"", dir));
+    XCTAssertFalse(GCDWebServerResolvedPathIsWithinDirectory([dir stringByAppendingPathComponent:@"Nope/deeper/x.txt"], dir));
+
+    [fm removeItemAtPath:outside error:NULL];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// End to end: a WebDAV GET that reaches a file outside the share through a symlink
+// planted inside it must be refused rather than serving the file's contents.
+- (void)testDAVGetThroughEscapingSymlinkIsRefused {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    NSString* outside = MakeTempDirectory();
+    XCTAssertTrue([@"TOP-SECRET-PAYLOAD" writeToFile:[outside stringByAppendingPathComponent:@"secret.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([fm createSymbolicLinkAtPath:[dir stringByAppendingPathComponent:@"Escape"] withDestinationPath:outside error:NULL]);
+
+    GCDWebDAVServer* server = [[GCDWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* reply = SendRawRequest(server.port, @"GET /Escape/secret.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertNotNil(reply);
+    XCTAssertFalse([reply containsString:@"TOP-SECRET-PAYLOAD"], @"a file outside the share was served through a symlink: %@", reply);
+    XCTAssertTrue([reply containsString:@"403"], @"expected the traversal to be refused, got: %@", reply);
+
+    [server stop];
+    [fm removeItemAtPath:outside error:NULL];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+#pragma mark - Preflight exemption
+
+// The CORS-preflight exemption from authentication must require BOTH "Origin" and
+// "Access-Control-Request-Method", as a real browser preflight always sends both.
+// Otherwise setting a single header reaches the application's OPTIONS handler with no
+// credentials at all.
+- (void)testPreflightAuthExemptionRequiresOrigin {
+    GCDWebServer* server = [[GCDWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"OPTIONS"
+                          requestClass:[GCDWebServerRequest class]
+                          processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
+                              return [GCDWebServerDataResponse responseWithText:@"handler-reached"];
+                          }];
+    NSDictionary* options = @{
+        GCDWebServerOption_Port : @0,
+        GCDWebServerOption_BindToLocalhost : @YES,
+        GCDWebServerOption_AuthenticationMethod : GCDWebServerAuthenticationMethod_Basic,
+        GCDWebServerOption_AuthenticationAccounts : @{@"user" : @"pass"}
+    };
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    // A genuine preflight (both headers) is exempt and reaches the handler.
+    NSString* preflight = SendRawRequest(server.port, @"OPTIONS / HTTP/1.1\r\nHost: localhost\r\nOrigin: http://example.test\r\nAccess-Control-Request-Method: POST\r\n\r\n");
+    XCTAssertTrue([preflight containsString:@"handler-reached"], @"a real CORS preflight must stay exempt from auth, got: %@", preflight);
+
+    // Access-Control-Request-Method alone is not a preflight and must still need auth.
+    NSString* forged = SendRawRequest(server.port, @"OPTIONS / HTTP/1.1\r\nHost: localhost\r\nAccess-Control-Request-Method: POST\r\n\r\n");
+    XCTAssertTrue([forged containsString:@"401"], @"expected 401 without Origin, got: %@", forged);
+    XCTAssertFalse([forged containsString:@"handler-reached"], @"the OPTIONS handler ran unauthenticated: %@", forged);
+
+    // A plain OPTIONS request is unaffected and still requires auth.
+    NSString* plain = SendRawRequest(server.port, @"OPTIONS / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([plain containsString:@"401"], @"expected 401 for a plain OPTIONS, got: %@", plain);
+
+    [server stop];
+}
+
+#pragma mark - Template escaping
+
+// The device name is substituted into a JavaScript string literal in index.html, so it
+// must be escaped for that context. A name containing a quote would otherwise break the
+// literal and a name containing "</script>" would end the script block outright.
+- (void)testUploaderIndexEscapesDeviceNameForJavaScript {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+
+    GCDWebUploader* server = [[GCDWebUploader alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* page = SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertNotNil(page);
+    XCTAssertTrue([page containsString:@"200"], @"index page did not load: %@", page);
+    // Whatever this host is called, the assignment must be a syntactically closed literal
+    // and must not have left a raw "%device%" placeholder behind.
+    XCTAssertTrue([page containsString:@"var _device = \""], @"device name is not emitted as a quoted literal");
+    XCTAssertFalse([page containsString:@"%device%"], @"the device placeholder was not substituted");
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 @end

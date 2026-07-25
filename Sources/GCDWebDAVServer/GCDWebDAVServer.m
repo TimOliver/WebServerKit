@@ -201,6 +201,12 @@ static inline BOOL _IsMacFinder(GCDWebServerRequest *request) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
     }
 
+    // Verify the resolved location, not just the path text: a symlink inside the share
+    // can point out of it, and the textual normalize/prefix checks cannot see that.
+    if (!GCDWebServerResolvedPathIsWithinDirectory(absolutePath, _uploadDirectory)) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Downloading \"%@\" is not allowed", relativePath];
+    }
+
     NSString *const itemName = [absolutePath lastPathComponent];
 
     if (([itemName hasPrefix:@"."] && !_allowHiddenItems) || (!isDirectory && ![self _checkFileExtension:itemName])) {
@@ -244,6 +250,13 @@ static inline BOOL _IsMacFinder(GCDWebServerRequest *request) {
 
     if (![[NSFileManager defaultManager] fileExistsAtPath:[absolutePath stringByDeletingLastPathComponent] isDirectory:&isDirectory] || !isDirectory) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Conflict message:@"Missing intermediate collection(s) for \"%@\"", relativePath];
+    }
+
+    // Checked after the parent-exists test above so a genuinely missing collection still
+    // reports 409 rather than 403. The destination itself need not exist: the resolver
+    // falls back to resolving the parent, so intermediate symlinks are still caught.
+    if (!GCDWebServerResolvedPathIsWithinDirectory(absolutePath, _uploadDirectory)) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Uploading to \"%@\" is not allowed", relativePath];
     }
 
     BOOL existing = [[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory];
@@ -295,6 +308,12 @@ static inline BOOL _IsMacFinder(GCDWebServerRequest *request) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Operating on the root directory is not allowed"];
     }
 
+    // Deleting is destructive, so also confirm the resolved target is inside the share
+    // rather than whatever a symlink points to outside it.
+    if (!GCDWebServerResolvedPathIsWithinDirectory(absolutePath, _uploadDirectory)) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not allowed", relativePath];
+    }
+
     if (![[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory]) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
     }
@@ -339,6 +358,11 @@ static inline BOOL _IsMacFinder(GCDWebServerRequest *request) {
 
     if (![[NSFileManager defaultManager] fileExistsAtPath:[absolutePath stringByDeletingLastPathComponent] isDirectory:&isDirectory] || !isDirectory) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Conflict message:@"Missing intermediate collection(s) for \"%@\"", relativePath];
+    }
+
+    // After the parent-exists test, so a missing collection still reports 409 not 403.
+    if (!GCDWebServerResolvedPathIsWithinDirectory(absolutePath, _uploadDirectory)) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Creating \"%@\" is not allowed", relativePath];
     }
 
     NSString *const directoryName = [absolutePath lastPathComponent];
@@ -449,6 +473,14 @@ static inline BOOL _IsMacFinder(GCDWebServerRequest *request) {
 
     if (![[NSFileManager defaultManager] fileExistsAtPath:srcAbsolutePath isDirectory:&srcIsDirectory]) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_NotFound message:@"\"%@\" does not exist", srcRelativePath];
+    }
+
+    // Both endpoints must resolve inside the share. Checked after the destination's
+    // parent and the source's existence are established above, so those errors keep
+    // their own status codes; the destination itself need not exist, since the resolver
+    // falls back to its parent.
+    if (!GCDWebServerResolvedPathIsWithinDirectory(srcAbsolutePath, _uploadDirectory) || !GCDWebServerResolvedPathIsWithinDirectory(dstAbsolutePath, _uploadDirectory)) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"%@ \"%@\" to \"%@\" is not allowed", isMove ? @"Moving" : @"Copying", srcRelativePath, dstRelativePath];
     }
 
     NSString *const srcName = [srcAbsolutePath lastPathComponent];
@@ -653,6 +685,11 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
     }
 
+    // As in -performGET:, confirm the resolved location is still inside the share.
+    if (!GCDWebServerResolvedPathIsWithinDirectory(absolutePath, _uploadDirectory)) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Retrieving properties for \"%@\" is not allowed", relativePath];
+    }
+
     NSString *const itemName = [absolutePath lastPathComponent];
 
     if (([itemName hasPrefix:@"."] && !_allowHiddenItems) || (!isDirectory && ![self _checkFileExtension:itemName])) {
@@ -781,6 +818,12 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Locking item name \"%@\" is not allowed", itemName];
     }
 
+    // Locking neither reads nor writes content, but check the resolved location too so
+    // that no path-handling entry point is left without one.
+    if (!GCDWebServerResolvedPathIsWithinDirectory(absolutePath, _uploadDirectory)) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Locking \"%@\" is not allowed", relativePath];
+    }
+
 #ifdef __GCDWEBSERVER_ENABLE_TESTING__
     NSString *const lockTokenHeader = request.headers[@"X-GCDWebServer-LockToken"];
 
@@ -850,6 +893,11 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
 
     if ((!_allowHiddenItems && [itemName hasPrefix:@"."]) || (!isDirectory && ![self _checkFileExtension:itemName])) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Unlocking item name \"%@\" is not allowed", itemName];
+    }
+
+    // As in -performLOCK:, checked so that no path-handling entry point lacks one.
+    if (!GCDWebServerResolvedPathIsWithinDirectory(absolutePath, _uploadDirectory)) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"Unlocking \"%@\" is not allowed", relativePath];
     }
 
     [self logVerbose:@"WebDAV pretending to unlock \"%@\"", relativePath];
