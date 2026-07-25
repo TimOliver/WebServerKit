@@ -147,6 +147,16 @@ extern NSString *const GCDWebServerRequestAttribute_RegexCaptures;
 @property (nonatomic, readonly, nullable) NSString *ifNoneMatch;
 
 /**
+ *  Returns the raw "If-Range" header or nil if absent.
+ *
+ *  A client resuming a download sends this alongside "Range" to say "send me that range
+ *  only if the representation is still the one I already have". Pass it to
+ *  -[GCDWebServerFileResponse initWithFile:byteRange:isAttachment:ifRange:mimeTypeOverrides:]
+ *  so a changed file is served whole rather than as a range spliced onto a stale prefix.
+ */
+@property (nonatomic, readonly, nullable) NSString *ifRange;
+
+/**
  *  Returns the parsed "Range" header or (NSUIntegerMax, 0) if absent or malformed.
  *  The range will be set to (offset, length) if expressed from the beginning
  *  of the entity body, or (NSUIntegerMax, length) if expressed from its end.

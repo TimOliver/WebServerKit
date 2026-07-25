@@ -60,6 +60,10 @@
     return [(GCDWebServerFileResponse *)[[self class] alloc] initWithFile:path byteRange:range isAttachment:attachment mimeTypeOverrides:nil];
 }
 
++ (instancetype)responseWithFile:(NSString *)path byteRange:(NSRange)range isAttachment:(BOOL)attachment ifRange:(NSString *)ifRange {
+    return [(GCDWebServerFileResponse *)[[self class] alloc] initWithFile:path byteRange:range isAttachment:attachment ifRange:ifRange mimeTypeOverrides:nil];
+}
+
 - (instancetype)initWithFile:(NSString *)path {
     return [self initWithFile:path byteRange:NSMakeRange(NSUIntegerMax, 0) isAttachment:NO mimeTypeOverrides:nil];
 }
@@ -79,6 +83,20 @@
 // by date. The nanoseconds are still used for the ETag, which has no such quantization.
 static inline NSDate *_NSDateFromTimeSpec(const struct timespec *t) {
     return [NSDate dateWithTimeIntervalSince1970:(NSTimeInterval)t->tv_sec];
+}
+
+// RFC 8187 ext-value: percent-encode everything outside attr-char. GCDWebServerEscapeURLString
+// is a *query* escaper and leaves ";" intact — but ";" ends a header parameter, so a file
+// named "evil.command;ok.txt" reached the browser as a filename of "evil.command". That
+// truncation also defeats whatever extension allow-list accepted the name on upload, since
+// the name that lands on the victim's disk is not the name that was checked.
+static NSString *_EscapeExtValue(NSString *string) {
+    static NSCharacterSet *allowed = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        allowed = [NSCharacterSet characterSetWithCharactersInString:@"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$&+-.^_`|~"];
+    });
+    return [string stringByAddingPercentEncodingWithAllowedCharacters:allowed];
 }
 
 // The inherited initializer is reachable (+response, or a direct -init) and leaves every
@@ -104,6 +122,10 @@ static inline NSDate *_NSDateFromTimeSpec(const struct timespec *t) {
 }
 
 - (instancetype)initWithFile:(NSString *)path byteRange:(NSRange)range isAttachment:(BOOL)attachment mimeTypeOverrides:(NSDictionary<NSString *, NSString *> *)overrides {
+    return [self initWithFile:path byteRange:range isAttachment:attachment ifRange:nil mimeTypeOverrides:overrides];
+}
+
+- (instancetype)initWithFile:(NSString *)path byteRange:(NSRange)range isAttachment:(BOOL)attachment ifRange:(NSString *)ifRange mimeTypeOverrides:(NSDictionary<NSString *, NSString *> *)overrides {
     // [super init] and the sentinel come first so that every failure below can simply
     // "return nil": ARC deallocates a nil-returning initializer's receiver, so -dealloc is
     // what closes the descriptor on those paths, and it must never see a zeroed _file.
@@ -168,7 +190,37 @@ static inline NSDate *_NSDateFromTimeSpec(const struct timespec *t) {
 #endif
     NSUInteger fileSize = (NSUInteger)info.st_size;
 
+    // Derive the validators here, from the same fstat the range decision uses, so If-Range
+    // can be answered against the representation we are actually about to serve.
+    NSDate *const lastModified = _NSDateFromTimeSpec(&info.st_mtimespec);
+    NSString *const entityTag = [NSString stringWithFormat:@"\"%llu/%li/%li\"", info.st_ino, info.st_mtimespec.tv_sec, info.st_mtimespec.tv_nsec];
+
     BOOL hasByteRange = GCDWebServerIsValidByteRange(range);
+
+    // "Send me this range only if the representation is unchanged" (RFC 9110 §13.1.5).
+    // Ignoring it meant a resumed download spliced bytes from two different versions of
+    // the file together and returned 206 asserting they belonged to the same one — silent
+    // corruption on a server whose whole purpose is that files change. When it does not
+    // match we must serve the entire representation instead, which is what dropping the
+    // range does. If-Range uses *strong* comparison, so a weak tag never matches.
+    if (hasByteRange && ifRange.length) {
+        NSString *const trimmedIfRange = [ifRange stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        BOOL matches = NO;
+
+        if ([trimmedIfRange hasPrefix:@"\""]) {
+            matches = [trimmedIfRange isEqualToString:entityTag];
+        } else if (![trimmedIfRange hasPrefix:@"W/"]) {
+            NSDate *const ifRangeDate = GCDWebServerParseRFC822(trimmedIfRange);
+            // RFC822 has one-second resolution, so compare at that granularity rather than
+            // against the nanosecond mtime, which would never be equal.
+            matches = ifRangeDate && ((long)ifRangeDate.timeIntervalSince1970 == (long)info.st_mtimespec.tv_sec);
+        }
+
+        if (!matches) {
+            GWS_LOG_DEBUG(@"Ignoring byte range for \"%@\": If-Range does not match the current representation", path);
+            hasByteRange = NO;
+        }
+    }
 
     if (hasByteRange) {
         if (range.location != NSUIntegerMax) {
@@ -220,7 +272,7 @@ static inline NSDate *_NSDateFromTimeSpec(const struct timespec *t) {
         NSString *const lossyFileName = data ? [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding] : nil;
 
         if (lossyFileName) {
-            NSString *value = [NSString stringWithFormat:@"attachment; filename=\"%@\"; filename*=UTF-8''%@", lossyFileName, GCDWebServerEscapeURLString(fileName)];
+            NSString *value = [NSString stringWithFormat:@"attachment; filename=\"%@\"; filename*=UTF-8''%@", lossyFileName, _EscapeExtValue(fileName)];
             [self setValue:value forAdditionalHeader:@"Content-Disposition"];
         } else {
             // The name is remote-controlled, so a transcoding failure here is not a
@@ -229,7 +281,7 @@ static inline NSDate *_NSDateFromTimeSpec(const struct timespec *t) {
             // entirely would serve the file inline, which is exactly what it exists to
             // prevent.
             GWS_LOG_ERROR(@"Failed encoding attachment file name \"%@\" as ISO-8859-1", fileName);
-            NSString *value = [NSString stringWithFormat:@"attachment; filename*=UTF-8''%@", GCDWebServerEscapeURLString(fileName)];
+            NSString *value = [NSString stringWithFormat:@"attachment; filename*=UTF-8''%@", _EscapeExtValue(fileName)];
             [self setValue:value forAdditionalHeader:@"Content-Disposition"];
         }
         // Defense in depth: never let a browser MIME-sniff a download into active content.
@@ -238,12 +290,12 @@ static inline NSDate *_NSDateFromTimeSpec(const struct timespec *t) {
 
     self.contentType = GCDWebServerGetMimeTypeForExtension([_path pathExtension], overrides);
     self.contentLength = _size;
-    self.lastModifiedDate = _NSDateFromTimeSpec(&info.st_mtimespec);
+    self.lastModifiedDate = lastModified;
     // Quoted, as RFC 7232 requires of an entity-tag: an unquoted value is not a valid
     // opaque-tag and clients are free to reject it. The comparison in
     // -_CompareResources is literal and clients echo the value back verbatim, so the
     // quotes travel with it in "If-None-Match" and still match.
-    self.eTag = [NSString stringWithFormat:@"\"%llu/%li/%li\"", info.st_ino, info.st_mtimespec.tv_sec, info.st_mtimespec.tv_nsec];
+    self.eTag = entityTag;
 
     return self;
 }

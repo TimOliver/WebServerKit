@@ -311,7 +311,7 @@ static inline BOOL _IsMacFinder(GCDWebServerRequest *request) {
     // origin. WebDAV clients read the body regardless of the disposition, so this does
     // not affect normal file access.
     if ([request hasByteRange]) {
-        return [GCDWebServerFileResponse responseWithFile:absolutePath byteRange:request.byteRange isAttachment:YES];
+        return [GCDWebServerFileResponse responseWithFile:absolutePath byteRange:request.byteRange isAttachment:YES ifRange:request.ifRange];
     }
 
     return [GCDWebServerFileResponse responseWithFile:absolutePath isAttachment:YES];

@@ -399,6 +399,7 @@ static BOOL _ParseTransferEncoding(NSString *header, BOOL *outRejected) {
         }
 
         _ifNoneMatch = _headers[@"If-None-Match"];
+        _ifRange = _headers[@"If-Range"];
 
         _byteRange = NSMakeRange(NSUIntegerMax, 0);
         NSString *const rangeHeader = GCDWebServerNormalizeHeaderValue(_headers[@"Range"]);
