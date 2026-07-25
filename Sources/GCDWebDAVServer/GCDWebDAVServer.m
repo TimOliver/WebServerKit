@@ -704,6 +704,17 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_MethodNotAllowed message:@"LOCK method only allowed for Mac Finder"];
     }
 
+    // The Host header is required because it is interpolated into the <D:lockroot>
+    // href below, and -stringByAppendingString: raises NSInvalidArgumentException on a
+    // nil argument. Uncaught, that terminates the whole server process — the same
+    // one-request kill already fixed for COPY/MOVE, which this method missed. Host is
+    // mandatory in HTTP/1.1 but nothing else here enforces it.
+    NSString *const hostHeader = request.headers[@"Host"];
+
+    if (hostHeader.length == 0) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_BadRequest message:@"Missing 'Host' header"];
+    }
+
     NSString *const relativePath = request.path;
     NSString *const absolutePath = [_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(relativePath)];
     BOOL isDirectory = NO;
@@ -803,7 +814,9 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
     }
 
     [xmlString appendFormat:@"<D:locktoken><D:href>%@</D:href></D:locktoken>\n", token];
-    NSString *const lockroot = [@"http://" stringByAppendingString:[(NSString *)request.headers[@"Host"] stringByAppendingString:[@"/" stringByAppendingString:relativePath]]];
+    // -stringWithFormat: renders a nil argument as "(null)" rather than raising, so this
+    // stays safe even if the Host guard above is ever moved or removed.
+    NSString *const lockroot = [NSString stringWithFormat:@"http://%@/%@", hostHeader, relativePath];
     [xmlString appendFormat:@"<D:lockroot><D:href>%@</D:href></D:lockroot>\n", _XMLEscape(lockroot)];
     [xmlString appendString:@"</D:activelock>\n</D:lockdiscovery>\n"];
     [xmlString appendString:@"</D:prop>"];

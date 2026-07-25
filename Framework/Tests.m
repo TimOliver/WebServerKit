@@ -912,4 +912,128 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     [fm removeItemAtPath:dir error:NULL];
 }
 
+// "GET /list" with no "path" query parameter must be answered, not crash the process.
+// A nil path survived every guard (GCDWebServerNormalizePath(nil) is @"", so the
+// absolute path collapsed to the upload directory, which exists and is a directory) and
+// then reached the per-entry dictionary literal, where -stringByAppendingPathComponent:
+// on nil yields nil — inserting nil raises NSInvalidArgumentException, which nothing
+// catches, so a single unauthenticated GET terminated the whole app. The listing must be
+// non-empty for the loop to be entered at all, so seed both a file and a subdirectory.
+- (void)testUploaderListWithoutPathParameterDoesNotCrash {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    XCTAssertTrue([@"data" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([fm createDirectoryAtPath:[dir stringByAppendingPathComponent:@"Sub"] withIntermediateDirectories:NO attributes:nil error:NULL]);
+
+    GCDWebUploader* server = [[GCDWebUploader alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* reply = SendRawRequest(server.port, @"GET /list HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertNotNil(reply, @"server appears to have crashed handling /list with no path parameter");
+    XCTAssertTrue([reply containsString:@"200"], @"a missing path should list the root, got: %@", reply);
+    // The entries must be rooted at "/", i.e. the default was applied rather than a nil
+    // path silently producing bare names. NSJSONSerialization escapes "/" as "\/".
+    XCTAssertTrue([reply containsString:@"\"\\/a.txt\""], @"file entry not rooted at the default path: %@", reply);
+    XCTAssertTrue([reply containsString:@"\"\\/Sub\\/\""], @"directory entry not rooted at the default path: %@", reply);
+
+    // The process must still be alive and serving.
+    NSString* reply2 = SendRawRequest(server.port, @"GET /list?path=/ HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertNotNil(reply2, @"server appears to have crashed after the parameterless request");
+    XCTAssertTrue([reply2 containsString:@"200"], @"server did not respond normally afterwards: %@", reply2);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// A WebDAV LOCK with no Host header must be rejected, not crash the process. The
+// <D:lockroot> href was built by chaining -stringByAppendingString: through the Host
+// header, which raises NSInvalidArgumentException on a nil argument. This is the sibling
+// of the COPY/MOVE Host crash (see -testDAVMoveWithoutHostHeaderDoesNotCrash), which the
+// LOCK path missed. Every other precondition here is attacker-supplied: the Mac Finder
+// User-Agent, Depth: 0, and an exclusive/write lockinfo body.
+- (void)testDAVLockWithoutHostHeaderDoesNotCrash {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+
+    GCDWebDAVServer* server = [[GCDWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* body = @"<?xml version=\"1.0\" encoding=\"utf-8\"?><D:lockinfo xmlns:D=\"DAV:\"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>";
+    // HTTP/1.0 so CFHTTPMessage accepts the absent Host. Target "/" (the upload
+    // directory itself), which always exists and skips the extension check.
+    NSString* request = [NSString stringWithFormat:@"LOCK / HTTP/1.0\r\nUser-Agent: WebDAVFS/3.0.0\r\nDepth: 0\r\nContent-Type: text/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)body.length, body];
+    NSString* reply = SendRawRequest(server.port, request);
+    XCTAssertNotNil(reply, @"server appears to have crashed handling LOCK with no Host header");
+    XCTAssertTrue([reply containsString:@"400"], @"missing Host must yield 400, got: %@", reply);
+
+    // The process must still be alive: a fresh, well-formed request must get a reply.
+    NSString* reply2 = SendRawRequest(server.port, @"OPTIONS / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertNotNil(reply2, @"server appears to have crashed after the malformed request");
+    XCTAssertTrue([reply2 containsString:@"200"], @"server did not respond normally after the malformed request: %@", reply2);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// A LOCK that does carry a Host must still succeed, and must report a lockroot built
+// from it — guarding the rewritten interpolation against a behavior change.
+- (void)testDAVLockWithHostHeaderReportsLockRoot {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    XCTAssertTrue([@"data" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    GCDWebDAVServer* server = [[GCDWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* body = @"<?xml version=\"1.0\" encoding=\"utf-8\"?><D:lockinfo xmlns:D=\"DAV:\"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>";
+    NSString* request = [NSString stringWithFormat:@"LOCK /a.txt HTTP/1.1\r\nHost: localhost\r\nUser-Agent: WebDAVFS/3.0.0\r\nDepth: 0\r\nContent-Type: text/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)body.length, body];
+    NSString* reply = SendRawRequest(server.port, request);
+    XCTAssertNotNil(reply);
+    XCTAssertTrue([reply containsString:@"200"], @"a well-formed LOCK should succeed, got: %@", reply);
+    XCTAssertTrue([reply containsString:@"<D:lockroot><D:href>http://localhost//a.txt</D:href></D:lockroot>"], @"lockroot not built from the Host header: %@", reply);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// GCDWebServerFileResponse must serve only regular files. S_IFREG is a value inside the
+// S_IFMT field rather than a flag, so the old "st_mode & S_IFREG" test also accepted
+// symlinks and sockets; only O_NOFOLLOW in -open: stopped a symlink being read through.
+// Constructing the response must now fail outright for a symlink, whether it points
+// outside the served directory or at a perfectly ordinary file inside it.
+- (void)testFileResponseRejectsSymlink {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    NSString* realPath = [dir stringByAppendingPathComponent:@"real.txt"];
+    XCTAssertTrue([@"payload" writeToFile:realPath atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    // A regular file is still served, with the body length taken from the file itself.
+    GCDWebServerFileResponse* ok = [GCDWebServerFileResponse responseWithFile:realPath];
+    XCTAssertNotNil(ok, @"a regular file must still be servable");
+    XCTAssertEqual(ok.contentLength, (NSUInteger)7);
+
+    // A symlink to a file inside the directory must be refused.
+    NSString* insideLink = [dir stringByAppendingPathComponent:@"inside.txt"];
+    XCTAssertTrue([fm createSymbolicLinkAtPath:insideLink withDestinationPath:realPath error:NULL]);
+    XCTAssertNil([GCDWebServerFileResponse responseWithFile:insideLink], @"a symlink must not be accepted as a regular file");
+
+    // A symlink escaping the directory must be refused too. Previously this built a
+    // response whose Content-Length came from the link rather than its target, and was
+    // only stopped later by O_NOFOLLOW failing with ELOOP.
+    NSString* outsidePath = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSProcessInfo processInfo] globallyUniqueString]];
+    XCTAssertTrue([@"secret" writeToFile:outsidePath atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    NSString* escapingLink = [dir stringByAppendingPathComponent:@"escape.txt"];
+    XCTAssertTrue([fm createSymbolicLinkAtPath:escapingLink withDestinationPath:outsidePath error:NULL]);
+    XCTAssertNil([GCDWebServerFileResponse responseWithFile:escapingLink], @"a symlink out of the served directory must not be accepted");
+
+    // A directory is still refused, as before.
+    XCTAssertNil([GCDWebServerFileResponse responseWithFile:dir]);
+
+    [fm removeItemAtPath:outsidePath error:NULL];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 @end

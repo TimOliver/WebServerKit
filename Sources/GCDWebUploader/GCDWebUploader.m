@@ -254,14 +254,19 @@ NS_ASSUME_NONNULL_END
                              footer = [NSString stringWithFormat:[siteBundle localizedStringForKey:@"FOOTER_FORMAT" value:@"" table:nil], name, version];
                          }
 
+                         // Every value must be non-nil: a nil in a dictionary literal raises
+                         // NSInvalidArgumentException, which would abort the app on "GET /".
+                         // Both sources can legitimately be nil — -[NSHost localizedName] for a
+                         // host with no resolvable name, and the bundle keys for a bundle that
+                         // declares neither a display name nor a name.
                          return [GCDWebServerDataResponse responseWithHTMLTemplate:(NSString *)[siteBundle pathForResource:@"index" ofType:@"html"]
                                                                          variables:@{
-                                                                             @"device": device,
-                                                                             @"title": title,
-                                                                             @"header": header,
-                                                                             @"prologue": prologue,
-                                                                             @"epilogue": epilogue,
-                                                                             @"footer": footer
+                                                                             @"device": device ? device : @"",
+                                                                             @"title": title ? title : @"",
+                                                                             @"header": header ? header : @"",
+                                                                             @"prologue": prologue ? prologue : @"",
+                                                                             @"epilogue": epilogue ? epilogue : @"",
+                                                                             @"footer": footer ? footer : @""
                                                                          }];
                      }];
 
@@ -607,7 +612,15 @@ NS_ASSUME_NONNULL_END
 }
 
 - (GCDWebServerResponse *)listDirectory:(GCDWebServerRequest *)request {
-    NSString *const relativePath = [request query][@"path"];
+    // Default a missing "path" query parameter to the root. Left nil it survives every
+    // check below — GCDWebServerNormalizePath(nil) is @"", so the absolute path
+    // collapses to the upload directory, which exists and is a directory — and then
+    // reaches the per-entry dictionary literals, where
+    // -stringByAppendingPathComponent: on a nil receiver yields nil. Inserting nil
+    // into a dictionary literal raises NSInvalidArgumentException, and nothing here
+    // catches it, so a bare "GET /list" terminated the whole app.
+    NSString *const requestedPath = [request query][@"path"];
+    NSString *const relativePath = requestedPath ? requestedPath : @"/";
     NSString *const absolutePath = [_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(relativePath)];
     BOOL isDirectory = NO;
 
@@ -638,12 +651,13 @@ NS_ASSUME_NONNULL_END
         if (_allowHiddenItems || ![item hasPrefix:@"."]) {
             NSDictionary *const attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:[absolutePath stringByAppendingPathComponent:item] error:NULL];
             NSString *const type = attributes[NSFileType];
+            NSNumber *const size = attributes[NSFileSize];  // Nil if the item vanished between the listing and this stat; must not reach the literal below.
 
-            if ([type isEqualToString:NSFileTypeRegular] && [self _checkFileExtension:item]) {
+            if ([type isEqualToString:NSFileTypeRegular] && size && [self _checkFileExtension:item]) {
                 [array addObject:@{
                     @"path": [relativePath stringByAppendingPathComponent:item],
                     @"name": item,
-                    @"size": (NSNumber *)attributes[NSFileSize]
+                    @"size": size
                 }];
             } else if ([type isEqualToString:NSFileTypeDirectory]) {
                 [array addObject:@{
@@ -658,7 +672,9 @@ NS_ASSUME_NONNULL_END
 }
 
 - (GCDWebServerResponse *)downloadFile:(GCDWebServerRequest *)request {
-    NSString *const relativePath = [request query][@"path"];
+    // Never nil, so error bodies name a path instead of "(null)" — and match -listDirectory:.
+    NSString *const requestedPath = [request query][@"path"];
+    NSString *const relativePath = requestedPath ? requestedPath : @"/";
     NSString *const absolutePath = [_uploadDirectory stringByAppendingPathComponent:GCDWebServerNormalizePath(relativePath)];
     BOOL isDirectory = NO;
 

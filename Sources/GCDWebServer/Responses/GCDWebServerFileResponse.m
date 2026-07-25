@@ -79,8 +79,16 @@ static inline NSDate *_NSDateFromTimeSpec(const struct timespec *t) {
 - (instancetype)initWithFile:(NSString *)path byteRange:(NSRange)range isAttachment:(BOOL)attachment mimeTypeOverrides:(NSDictionary<NSString *, NSString *> *)overrides {
     struct stat info;
 
-    if (lstat([path fileSystemRepresentation], &info) || !(info.st_mode & S_IFREG)) {
-        GWS_DNOT_REACHED();
+    // Compare the whole file-type field, not a single bit: S_IFREG (0100000) is a value
+    // within the S_IFMT field, not a flag, so "st_mode & S_IFREG" is also non-zero for
+    // symlinks (S_IFLNK, 0120000) and sockets (S_IFSOCK, 0140000), which share that bit.
+    // Only O_NOFOLLOW in -open: kept a symlink from being read through here; the type
+    // check itself must be correct so that mitigation stays defense in depth.
+    // Not GWS_DNOT_REACHED(): this is now reachable on ordinary remote input (a request
+    // naming a symlink, socket, or an item removed since the caller's existence check),
+    // and that macro aborts in Debug builds. Callers turn the nil into a 500.
+    if (lstat([path fileSystemRepresentation], &info) || ((info.st_mode & S_IFMT) != S_IFREG)) {
+        GWS_LOG_ERROR(@"Refusing to serve \"%@\": not a regular file", path);
         return nil;
     }
 
