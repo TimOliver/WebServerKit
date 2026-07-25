@@ -1599,6 +1599,10 @@ static NSString *_EscapeHTMLString(NSString *string) {
 
 @implementation GCDWebServer (Logging)
 
++ (NSUInteger)reservedInMemoryByteCount {
+    return GCDWebServerReservedMemoryLength();
+}
+
 + (void)setLogLevel:(int)level {
 #if defined(__GCDWEBSERVER_LOGGING_FACILITY_XLFACILITY__)
     [XLSharedFacility setMinLogLevel:level];

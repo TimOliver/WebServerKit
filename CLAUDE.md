@@ -26,26 +26,57 @@ xcodebuild -project GCDWebServer.xcodeproj -scheme "GCDWebServers (tvOS)" -confi
 
 ## Design priorities
 
-This is an **ephemeral** server: it is brought up periodically, serves for a while, and goes
-away again. It is not a long-running daemon. **Keeping each short-lived transaction clean is
-the highest priority** — ahead of throughput, ahead of leniency toward odd clients.
+This library has **two deployment shapes**, and they stress different things. Earlier notes
+asserted only the first, and several decisions below were justified by that premise alone —
+so check which shape a judgment call belongs to before reasoning from it.
 
-Concretely, when a judgment call comes up:
+**Shape A — long-lived vending (the priority).** A build server (Puck) that runs for *weeks*,
+bound to localhost behind a Tailscale Serve tunnel that terminates TLS, vending ad-hoc iOS
+builds to a handful of trusted devices on the tailnet. Low concurrency, very large responses,
+and uptime measured in weeks rather than minutes.
 
-- **Refuse clearly rather than half-succeed.** A request the server cannot honour exactly
-  should fail with a status that says so, leaving prior state untouched. Silently accepting
-  something and doing an approximation of it is the worst outcome. This is why an
-  unsupported `Transfer-Encoding` is a 400 rather than an empty body, why a destructive
-  operation stages and swaps rather than removing first, and why a recursive delete refuses
-  when it would destroy a file a direct delete would have refused.
-- **A transaction must leave nothing behind.** No staging files, no temp files, no held
-  descriptors, no connection slots — on the failure paths as much as the success paths.
-  Verified after this pass: three up/down cycles mixing successful and refused operations
-  leave the share byte-identical and the temp directory at zero delta.
-- **Start/stop correctness matters more than usual**, because it happens often. Lifecycle
-  races that a daemon would hit once in its life, this hits every time it wakes.
+**Shape B — ephemeral sharing (iComics).** Brought up periodically, serves on the LAN for a
+while, goes away again. Many small operations through a browser UI, WebDAV and the uploader.
+
+What each shape depends on:
+
+- **Shape A lives or dies on not accumulating anything.** A descriptor or memory reservation
+  leaked once per request is invisible in a four-minute session and fatal in a four-week one.
+  The aggregate in-memory budget is the sharpest edge here: it is process-wide static state
+  with **no reset**, so one reservation that outlives its request permanently disables every
+  in-memory endpoint until the process is relaunched. `+[GCDWebServer reservedInMemoryByteCount]`
+  exists to be monitored for exactly this, and `testSustainedServingDoesNotAccumulateResources`
+  guards it (verified sensitive by injecting a leak and watching it fail).
+- **Shape A also depends on large-file correctness.** Multi-hundred-megabyte builds pulled
+  over WiFi mean interrupted transfers are routine, so `Range`/`If-Range` handling is a main
+  path, not an edge case: serving a range against a *changed* representation would splice two
+  builds together into an IPA that installs and then crashes. Note also that Puck rewrites
+  builds while they may be downloading — `GCDWebServerFileResponse` opening once and deriving
+  everything from `fstat` on that descriptor is what keeps an in-flight download consistent.
+- **Shape B depends on start/stop correctness**, because it happens constantly. Lifecycle
+  races a daemon meets once in its life, this meets every time it wakes.
+- **Both depend on refusing clearly rather than half-succeeding.** A request the server cannot
+  honour exactly should fail with a status that says so, leaving prior state untouched.
+  Silently accepting something and doing an approximation of it is the worst outcome. This is
+  why an unsupported `Transfer-Encoding` is a 400 rather than an empty body, why a destructive
+  operation stages and swaps rather than removing first, why a truncated gzip body is refused
+  rather than written, and why a recursive delete refuses when it would destroy a file a
+  direct delete would have refused.
+- **Both depend on a transaction leaving nothing behind.** No staging files, no temp files, no
+  held descriptors, no connection slots — on the failure paths as much as the success paths.
 - The one deliberate exception to "short-lived" is the SSE `/events` stream, which is
   long-lived by design and is bounded separately (`kMaxSSEChannels`, heartbeats, reaping).
+
+**Threat model.** Shape A is reachable only from the tailnet (Tailscale *Serve*, not Funnel)
+and binds to localhost, so the audit's assumption of a small trusted network still holds. If
+that ever becomes Funnel — i.e. public internet — this needs re-auditing with an
+internet-facing lens: there is no rate limiting, no auth backoff, and the 128-connection cap
+is trivially saturated. Plaintext transport remains a settled choice because TLS is
+terminated upstream; do not re-flag it.
+
+**Tailscale deployments must set `GCDWebServerOption_AllowedHostNames`** to the node's
+MagicDNS name (`<node>.<tailnet>.ts.net`). The Host allow-list admits localhost, IP literals
+and the Bonjour/`.local` name only, so without it every request is refused with 421.
 
 ## Recent Changes
 

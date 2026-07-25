@@ -33,7 +33,7 @@
 #if TARGET_OS_IPHONE
 #import <UIKit/UIKit.h>
 #endif
-#if SWIFT_PACKAGE
+#ifdef SWIFT_PACKAGE
 // SwiftPM emits this accessor for any target that declares resources, naming it after the
 // target. Declared here rather than importing its generated header, which SwiftPM puts in
 // DerivedSources without placing that directory on this target's own include path.
@@ -216,7 +216,7 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
         // +bundleForClass: returns the main bundle — so the generated accessor is the only
         // thing that finds them there. Every other distribution (the framework, CocoaPods)
         // keeps the bundle alongside the class.
-#if SWIFT_PACKAGE
+#ifdef SWIFT_PACKAGE
         NSBundle *const ownerBundle = GCDWebUploader_SWIFTPM_MODULE_BUNDLE();
 #else
         NSBundle *const ownerBundle = [NSBundle bundleForClass:[GCDWebUploader class]];

@@ -647,6 +647,24 @@ extern NSString *const GCDWebServerAuthenticationMethod_DigestAccess;
 + (void)setBuiltInLogger:(GCDWebServerBuiltInLoggerBlock)block;
 
 /**
+ *  Returns the number of bytes currently reserved against the in-memory budget that every
+ *  server in this process shares. Request bodies held in memory — form posts, multipart
+ *  uploads, WebDAV property and lock bodies, chunked framing buffers and inflated gzip
+ *  output — are charged here and released when the request that owns them is deallocated.
+ *
+ *  This exists to be watched by long-running hosts. When no request is in flight the value
+ *  should be zero; a reading that stays high while the server is idle means a reservation
+ *  has outlived its request, and since the budget is a hard ceiling, every in-memory
+ *  endpoint will fail once enough of them accumulate.
+ *
+ *  @warning There is deliberately no way to reset this. Reservations are released by their
+ *  owners during deallocation, so zeroing the counter would make those later releases
+ *  underflow it — turning a bounded leak into an unbounded one. Recovering from a leak
+ *  means restarting the process, which is why it is worth monitoring rather than repairing.
+ */
+@property (class, nonatomic, readonly) NSUInteger reservedInMemoryByteCount;
+
+/**
  *  Logs a message to the logging facility at the VERBOSE level.
  */
 - (void)logVerbose:(NSString *)format, ... NS_FORMAT_FUNCTION(1, 2);

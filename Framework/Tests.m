@@ -212,6 +212,13 @@ static NSString* SendRawDataRequest(NSUInteger port, NSData* request) {
     return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
 }
 
+// Descriptors currently open by this process. Used to prove that sustained serving does not
+// leak them: on a server that lives for weeks, a descriptor leaked once per request is the
+// difference between working and hitting the process limit.
+static NSUInteger OpenFileDescriptorCount(void) {
+    return [[NSFileManager defaultManager] contentsOfDirectoryAtPath:@"/dev/fd" error:NULL].count;
+}
+
 static NSString* MakeTempDirectory(void) {
     NSString* dir = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSProcessInfo processInfo] globallyUniqueString]];
     [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:NULL];
@@ -1874,6 +1881,69 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     XCTAssertFalse([extValue containsString:@";"], @"';' must be percent-encoded in filename*: %@", disposition);
     XCTAssertTrue([extValue containsString:@"%3B"], @"expected a percent-encoded ';': %@", disposition);
 
+    [fm removeItemAtPath:root error:NULL];
+}
+
+// Everything else in this suite asserts that one transaction is correct. This asserts that
+// ten thousand of them leave nothing behind, which is a different property and the one that
+// matters for a server left running for weeks rather than minutes: a descriptor or a memory
+// reservation leaked once per request is invisible in a four-minute session and fatal in a
+// four-week one. The aggregate budget is the sharpest edge — it is process-wide static state
+// with no reset, so a single reservation that never releases permanently disables every
+// in-memory endpoint until the process is relaunched.
+- (void)testSustainedServingDoesNotAccumulateResources {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* root = MakeTempDirectory();
+    // Big enough to be streamed from disk in several chunks rather than served in one go.
+    XCTAssertTrue([[NSMutableData dataWithLength:(4 * 1024 * 1024)] writeToFile:[root stringByAppendingPathComponent:@"build.bin"] atomically:YES]);
+
+    GCDWebServer* server = [[GCDWebServer alloc] init];
+    [server addGETHandlerForBasePath:@"/" directoryPath:root indexFilename:nil cacheAge:0 allowRangeRequests:YES];
+    [server addDefaultHandlerForMethod:@"POST"
+                          requestClass:[GCDWebServerDataRequest class]
+                          processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
+                              return [GCDWebServerDataResponse responseWithText:@"ok"];
+                          }];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    // Warm up first: the first requests populate caches and date formatters, so a baseline
+    // taken before them would report that one-time setup as a leak.
+    for (int i = 0; i < 10; i++) {
+        (void)SendRawRequest(server.port, @"GET /build.bin HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-1023\r\n\r\n");
+    }
+
+    NSUInteger const baselineFDs = OpenFileDescriptorCount();
+    XCTAssertEqual(GCDWebServerReservedMemoryLength(), (NSUInteger)0, @"budget should be idle at the baseline");
+
+    NSString* const body = [@"" stringByPaddingToLength:4096 withString:@"x" startingAtIndex:0];
+    NSString* const post = [NSString stringWithFormat:@"POST /submit HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/plain\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)body.length, body];
+
+    for (int i = 0; i < 150; i++) {
+        @autoreleasepool {
+            // A ranged read, the shape an interrupted download resumes with.
+            NSString* ranged = SendRawRequest(server.port, @"GET /build.bin HTTP/1.1\r\nHost: localhost\r\nRange: bytes=1048576-1049599\r\n\r\n");
+            XCTAssertTrue([ranged containsString:@"206"], @"iteration %i: %@", i, [ranged substringToIndex:MIN((NSUInteger)40, ranged.length)]);
+
+            // An in-memory body, which is what takes a reservation from the shared budget.
+            NSString* posted = SendRawRequest(server.port, post);
+            XCTAssertTrue([posted containsString:@"200"], @"iteration %i: %@", i, [posted substringToIndex:MIN((NSUInteger)40, posted.length)]);
+
+            // A refusal, so the failure paths are exercised too rather than only the happy ones.
+            (void)SendRawRequest(server.port, @"GET /nope.bin HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        }
+    }
+
+    // Connections close asynchronously, so give the last few a moment to unwind before
+    // counting; otherwise this measures timing rather than leakage.
+    [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:1.0]];
+
+    XCTAssertEqual(GCDWebServerReservedMemoryLength(), (NSUInteger)0, @"the shared memory budget did not return to zero after 150 rounds");
+
+    NSUInteger const finalFDs = OpenFileDescriptorCount();
+    XCTAssertLessThanOrEqual(finalFDs, baselineFDs + 5, @"descriptors accumulated: %lu at baseline, %lu after 450 requests", (unsigned long)baselineFDs, (unsigned long)finalFDs);
+
+    [server stop];
     [fm removeItemAtPath:root error:NULL];
 }
 
