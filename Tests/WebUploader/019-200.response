@@ -3,6 +3,7 @@ Connection: Close
 Server: GCDWebUploader
 Content-Type: text/plain
 Last-Modified: Thu, 10 Apr 2014 11:10:14 GMT
+X-Content-Type-Options: nosniff
 Date: Sat, 12 Apr 2014 05:36:17 GMT
 Content-Disposition: attachment; filename="Copy.txt"; filename*=UTF-8''Copy.txt
 Content-Length: 271
