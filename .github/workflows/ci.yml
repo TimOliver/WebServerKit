@@ -1,0 +1,47 @@
+name: CI
+
+# There was no CI at all until now, which is how the recorded-trace corpus stayed
+# unbuildable across three audit passes without anyone noticing: nothing ran it. This
+# deliberately shells out to Run-Tests.sh rather than restating the steps, so there is
+# one definition of "the tests pass" for both a laptop and a runner.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Unit tests, recorded traces, Release builds
+    runs-on: macos-15
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version || true
+
+      - name: Run the suite
+        run: ./Run-Tests.sh
+
+      # The suite is the gate; this is a separate, non-blocking signal. A warning here
+      # is worth seeing (the Debug configs build with -Weverything) but should not fail
+      # a build on a new Xcode's new diagnostics.
+      - name: Warning check
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          xcodebuild build -project GCDWebServer.xcodeproj -scheme "GCDWebServers (Mac)" -configuration Debug 2>&1 \
+            | grep -E "^/.*warning:" | sort -u | tee warnings.txt
+          if [ -s warnings.txt ]; then
+            echo "::warning::Debug build produced $(wc -l < warnings.txt) unique warning(s)"
+            exit 1
+          fi

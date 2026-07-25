@@ -1,83 +1,65 @@
-#!/bin/bash -exu -o pipefail
+#!/bin/bash -eu -o pipefail
 
-if [[ -f "/usr/local/bin/xcpretty" ]]; then
-  PRETTYFIER="xcpretty"  
-else
-  PRETTYFIER="tee"  # Passthrough stdout
-fi
+# The single entry point for everything CI runs, so "it passes locally" and "it passes
+# in CI" cannot drift apart. Three things happen here:
+#
+#   1. the XCTest suite (Framework/Tests.m), built with the address sanitizer
+#   2. the recorded-trace corpus under Tests/, replayed against a real server
+#   3. a Release build of the shipping framework for every platform
+#
+# Deployment targets are deliberately NOT overridden. This script used to build with
+# MACOSX_DEPLOYMENT_TARGET=10.7 and IPHONEOS_DEPLOYMENT_TARGET=8.0 to check the oldest
+# supported OS, but no current toolchain can link those (there is no libarclite for
+# them), so those steps could only ever fail. The project's own floors are the thing to
+# test, and they need no hardcoded version here to go stale.
 
-OSX_SDK="macosx"
-IOS_SDK="iphonesimulator"
-TVOS_SDK="appletvsimulator"
-
-OSX_SDK_VERSION=`xcodebuild -version -sdk | grep -A 1 '^MacOSX' | tail -n 1 |  awk '{ print $2 }'`
-IOS_SDK_VERSION=`xcodebuild -version -sdk | grep -A 1 '^iPhoneOS' | tail -n 1 |  awk '{ print $2 }'`
-TVOS_SDK_VERSION=`xcodebuild -version -sdk | grep -A 1 '^AppleTVOS' | tail -n 1 |  awk '{ print $2 }'`
-
-OSX_TARGET="GCDWebServer (Mac)"
-IOS_TARGET="GCDWebServer (iOS)"
-TVOS_TARGET="GCDWebServer (tvOS)"
-CONFIGURATION="Release"
-
-OSX_TEST_SCHEME="GCDWebServers (Mac)"
-
-BUILD_DIR="`pwd`/build"
-PRODUCT="$BUILD_DIR/$CONFIGURATION/GCDWebServer"
-
+BUILD_DIR="$(pwd)/build"
 PAYLOAD_ZIP="Tests/Payload.zip"
-PAYLOAD_DIR="`pwd`/build/Payload"
+PAYLOAD_DIR="$BUILD_DIR/Payload"
+TRACE_RUNNER="$BUILD_DIR/Release/GCDWebServer"
 
+# Replays one recorded suite. The payload is re-extracted each time because several
+# suites mutate it (PUT, MOVE, DELETE), and directory timestamps are normalized because
+# a ZIP does not preserve them and the traces assert on Last-Modified. touch(1) rather
+# than SetFile(1): it is in every base install, whereas SetFile ships with Xcode and is
+# missing from some CI images.
 function runTests {
-  EXECUTABLE="$1"
-  MODE="$2"
-  TESTS="$3"
-  FILE="${4:-}"
-  
+  local mode="$1" tests="$2" file="${3:-}"
+
   rm -rf "$PAYLOAD_DIR"
   ditto -x -k "$PAYLOAD_ZIP" "$PAYLOAD_DIR"
-  TZ=GMT find "$PAYLOAD_DIR" -type d -exec SetFile -d "1/1/2014 00:00:00" -m "1/1/2014 00:00:00" '{}' \;  # ZIP archives do not preserve directories dates
-  if [ "$FILE" != "" ]; then
-    cp -f "$4" "$PAYLOAD_DIR/Payload"
-    pushd "$PAYLOAD_DIR/Payload"
-    TZ=GMT SetFile -d "1/1/2014 00:00:00" -m "1/1/2014 00:00:00" `basename "$FILE"`
-    popd
+  TZ=GMT find "$PAYLOAD_DIR" -type d -exec touch -t 201401010000.00 '{}' \;
+
+  if [ -n "$file" ]; then
+    cp -f "$file" "$PAYLOAD_DIR/Payload"
+    TZ=GMT touch -t 201401010000.00 "$PAYLOAD_DIR/Payload/$(basename "$file")"
   fi
-  logLevel=2 $EXECUTABLE -mode "$MODE" -root "$PAYLOAD_DIR/Payload" -tests "$TESTS"
+
+  echo "--- $tests"
+  logLevel=2 "$TRACE_RUNNER" -mode "$mode" -root "$PAYLOAD_DIR/Payload" -tests "$tests"
 }
 
-# Run built-in OS X tests
 rm -rf "$BUILD_DIR"
-xcodebuild test -scheme "$OSX_TEST_SCHEME" "SYMROOT=$BUILD_DIR"
 
-# Build for OS X for oldest supported deployment target
-rm -rf "$BUILD_DIR"
-xcodebuild build -sdk "$OSX_SDK" -target "$OSX_TARGET" -configuration "$CONFIGURATION" "SYMROOT=$BUILD_DIR" "MACOSX_DEPLOYMENT_TARGET=10.7" | $PRETTYFIER
+echo "=== Unit tests ==="
+xcodebuild test -project GCDWebServer.xcodeproj -scheme "GCDWebServers (Mac)" -configuration Debug "SYMROOT=$BUILD_DIR"
 
-# Run tests
-runTests $PRODUCT "htmlForm" "Tests/HTMLForm"
-runTests $PRODUCT "htmlFileUpload" "Tests/HTMLFileUpload"
-runTests $PRODUCT "webServer" "Tests/WebServer"
-runTests $PRODUCT "webDAV" "Tests/WebDAV-Transmit"
-runTests $PRODUCT "webDAV" "Tests/WebDAV-Cyberduck"
-runTests $PRODUCT "webDAV" "Tests/WebDAV-Finder"
-runTests $PRODUCT "webUploader" "Tests/WebUploader"
-runTests $PRODUCT "webServer" "Tests/WebServer-Sample-Movie" "Tests/Sample-Movie.mp4"
+echo "=== Recorded traces ==="
+xcodebuild build -project GCDWebServer.xcodeproj -sdk macosx -target "GCDWebServer (Mac)" -configuration Release "SYMROOT=$BUILD_DIR"
 
-# Build for OS X for current deployment target
-rm -rf "$BUILD_DIR"
-xcodebuild build -sdk "$OSX_SDK" -target "$OSX_TARGET" -configuration "$CONFIGURATION" "SYMROOT=$BUILD_DIR" "MACOSX_DEPLOYMENT_TARGET=$OSX_SDK_VERSION" | $PRETTYFIER
+runTests htmlForm Tests/HTMLForm
+runTests htmlFileUpload Tests/HTMLFileUpload
+runTests webServer Tests/WebServer
+runTests webDAV Tests/WebDAV-Transmit
+runTests webDAV Tests/WebDAV-Cyberduck
+runTests webDAV Tests/WebDAV-Finder
+runTests webUploader Tests/WebUploader
+runTests webServer Tests/WebServer-Sample-Movie Tests/Sample-Movie.mp4
 
-# Build for iOS for oldest supported deployment target
-rm -rf "$BUILD_DIR"
-xcodebuild build -sdk "$IOS_SDK" -target "$IOS_TARGET" -configuration "$CONFIGURATION" "SYMROOT=$BUILD_DIR" "IPHONEOS_DEPLOYMENT_TARGET=8.0" | $PRETTYFIER
+echo "=== Release builds ==="
+xcodebuild build -project GCDWebServer.xcodeproj -scheme "GCDWebServers (Mac)" -configuration Release "SYMROOT=$BUILD_DIR"
+xcodebuild build -project GCDWebServer.xcodeproj -scheme "GCDWebServers (iOS)" -configuration Release -destination 'generic/platform=iOS Simulator' "SYMROOT=$BUILD_DIR"
+xcodebuild build -project GCDWebServer.xcodeproj -scheme "GCDWebServers (tvOS)" -configuration Release -destination 'generic/platform=tvOS Simulator' "SYMROOT=$BUILD_DIR"
 
-# Build for iOS for current deployment target
-rm -rf "$BUILD_DIR"
-xcodebuild build -sdk "$IOS_SDK" -target "$IOS_TARGET" -configuration "$CONFIGURATION" "SYMROOT=$BUILD_DIR" "IPHONEOS_DEPLOYMENT_TARGET=$IOS_SDK_VERSION" | $PRETTYFIER
-
-# Build for tvOS for current deployment target
-rm -rf "$BUILD_DIR"
-xcodebuild build -sdk "$TVOS_SDK" -target "$TVOS_TARGET" -configuration "$CONFIGURATION" "SYMROOT=$BUILD_DIR" "TVOS_DEPLOYMENT_TARGET=$TVOS_SDK_VERSION" | $PRETTYFIER
-
-# Done
-echo "\nAll tests completed successfully!"
+echo ""
+echo "All tests completed successfully."
