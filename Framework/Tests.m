@@ -814,9 +814,18 @@ static NSString* MakeTempDirectory(void) {
     // stopped reading). A rejecting server produces an HTTP error response; a server
     // that buffered without bound would send nothing and the read would just time out.
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        NSMutableData* blob = [NSMutableData dataWithLength:(20 * 1024 * 1024)];
-        memset(blob.mutableBytes, 'a', blob.length);
-        send(fd, blob.bytes, blob.length, 0);  // partially sends then errors once the server rejects/closes; ignore
+        // Stream from a small reusable buffer rather than allocating the whole 20 MB. The
+        // bytes on the wire are identical, but the test process no longer holds 20 MB
+        // alongside the ~16 MB the server is buffering — under AddressSanitizer that peak
+        // was enough to disturb neighbouring timing-sensitive tests in the same run.
+        char chunk[64 * 1024];
+        memset(chunk, 'a', sizeof(chunk));
+
+        for (int i = 0; i < (20 * 1024 * 1024) / (int)sizeof(chunk); i++) {
+            if (send(fd, chunk, sizeof(chunk), 0) < 0) {
+                break;  // The server rejected and closed; the point is already proven
+            }
+        }
     });
 
     BOOL sawEOF = NO;
@@ -843,6 +852,16 @@ static NSString* MakeTempDirectory(void) {
 
     int fd = ConnectToLocalhostPort(server.port);
     XCTAssertGreaterThan(fd, 0);
+
+    // What is being asserted is that the connection gets closed, not that it happens within
+    // any particular wall-clock time. The deadline is three 0.5 s timer ticks, but GCD timer
+    // delivery slips under load, and running the whole suite (the chunked-framing test just
+    // before this one pushes ~16 MB through a server under AddressSanitizer) pushed it past
+    // the shared 5 s receive timeout often enough to make the suite unreliable. Give this
+    // one a wider read window; it still returns the moment the server closes.
+    struct timeval readTimeout = {30, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &readTimeout, sizeof(readTimeout));
+
     const char* partial = "GET / HTTP/1.1\r\nHost: localhost\r\n";  // deliberately never completes the header block
     XCTAssertEqual(send(fd, partial, strlen(partial), 0), (ssize_t)strlen(partial));
 
