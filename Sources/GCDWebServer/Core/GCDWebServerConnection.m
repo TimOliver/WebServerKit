@@ -113,6 +113,7 @@ NS_ASSUME_NONNULL_END
     BOOL _idleCheckWasBusy;        // Accessed on _connectionQueue only
     NSUInteger _headerPhaseTicks;  // Idle ticks elapsed before a request was matched; on _connectionQueue only
     BOOL _requestReceived;         // Set once the body is fully read and the handler runs; on _connectionQueue only
+    BOOL _earlyChecksRun;          // Host allow-list and preflight are decided once, as early as the headers allow
     NSTimeInterval _idleTimeout;   // Seconds between idle-timer ticks; 0 when idle timeouts are disabled
     GCDWebServerMemoryReservation *_chunkReservation;  // This connection's chunked framing buffer
 
@@ -285,23 +286,38 @@ static uint16_t _LocalPortFromAddress(NSData *localAddressData) {
                                                       message:@"Host \"%@\" is not served here. Accepted: %@, or any IP address. Set GCDWebServerOption_AllowedHostNames to add one.", hostHeader, accepted];
 }
 
-- (void)_startProcessingRequest {
-    GWS_DCHECK(_responseMessage == NULL);
-    _requestReceived = YES;  // Nothing further is read from the socket for this request
+// The Host allow-list and authentication both decide on headers alone, so they can be
+// settled before a body is read — and they must be, or a client we are going to refuse
+// still gets to make the server spool an unbounded body into NSTemporaryDirectory()
+// first. Runs at most once per request: the body path consults it before reading, and
+// -_startProcessingRequest consults it for the body-less path. A rejection never reaches
+// -_startProcessingRequest, so returning nil for an already-run check is unambiguous.
+- (GCDWebServerResponse *)_responseForRejectedRequest {
+    if (_earlyChecksRun) {
+        return nil;
+    }
+
+    _earlyChecksRun = YES;
 
     // Ahead of -preflightRequest: deliberately. That method is a documented subclassing
     // point, and a subclass that does not call super must not be able to switch this off.
     GCDWebServerResponse *const misdirectedResponse = [self _rejectIfHostNotAllowed];
 
     if (misdirectedResponse) {
-        [self _finishProcessingRequest:misdirectedResponse];
-        return;
+        return misdirectedResponse;
     }
 
-    GCDWebServerResponse *preflightResponse = [self preflightRequest:_request];
+    return [self preflightRequest:_request];
+}
 
-    if (preflightResponse) {
-        [self _finishProcessingRequest:preflightResponse];
+- (void)_startProcessingRequest {
+    GWS_DCHECK(_responseMessage == NULL);
+    _requestReceived = YES;  // Nothing further is read from the socket for this request
+
+    GCDWebServerResponse *const rejectionResponse = [self _responseForRejectedRequest];
+
+    if (rejectionResponse) {
+        [self _finishProcessingRequest:rejectionResponse];
     } else {
         // Guard against an async handler that invokes its completion block more than
         // once: a second call would overwrite _responseMessage (leaking the first
@@ -584,6 +600,21 @@ static uint16_t _LocalPortFromAddress(NSData *localAddressData) {
                         self->_request.remoteAddressData = self.remoteAddressData;
 
                         if ([self->_request hasBody]) {
+                            // Decide the header-only refusals before a single body byte is
+                            // accepted. Previously a request with no credentials, a
+                            // disallowed Host, or no same-origin standing still streamed its
+                            // whole body to the device's temp directory and was only then
+                            // answered 401/421/403 — 288 MB written before the 401 in
+                            // testing. Expect: 100-continue made it worse still, explicitly
+                            // inviting a body from a client we were about to refuse.
+                            GCDWebServerResponse *const rejectionResponse = [self _responseForRejectedRequest];
+
+                            if (rejectionResponse) {
+                                self->_requestReceived = YES;  // Nothing further is read from this socket
+                                [self _finishProcessingRequest:rejectionResponse];
+                                return;
+                            }
+
                             [self->_request prepareForWriting];
 
                             if (self->_request.usesChunkedTransferEncoding || (extraData.length <= self->_request.contentLength)) {
