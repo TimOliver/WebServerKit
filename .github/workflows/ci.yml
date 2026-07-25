@@ -39,7 +39,8 @@ jobs:
         continue-on-error: true
         run: |
           set -o pipefail
-          xcodebuild build -project GCDWebServer.xcodeproj -scheme "GCDWebServers (Mac)" -configuration Debug 2>&1 \
+          xcodebuild build -project GCDWebServer.xcodeproj -scheme "GCDWebServers (Mac)" -configuration Debug \
+            CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER= 2>&1 \
             | grep -E "^/.*warning:" | sort -u | tee warnings.txt
           if [ -s warnings.txt ]; then
             echo "::warning::Debug build produced $(wc -l < warnings.txt) unique warning(s)"

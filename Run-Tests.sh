@@ -18,6 +18,13 @@ PAYLOAD_ZIP="Tests/Payload.zip"
 PAYLOAD_DIR="$BUILD_DIR/Payload"
 TRACE_RUNNER="$BUILD_DIR/Release/GCDWebServer"
 
+# Nothing built here is distributed, and the example target is configured with a specific
+# development team, so a real certificate would have to exist on every machine that runs
+# this — it does not on a CI runner ("No signing certificate Mac Development found").
+# Ad-hoc ("-") rather than CODE_SIGNING_ALLOWED=NO, because an entirely unsigned binary
+# will not execute on Apple silicon and the trace runner has to actually run.
+SIGNING=(CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER=)
+
 # Replays one recorded suite. The payload is re-extracted each time because several
 # suites mutate it (PUT, MOVE, DELETE), and directory timestamps are normalized because
 # a ZIP does not preserve them and the traces assert on Last-Modified. touch(1) rather
@@ -42,10 +49,10 @@ function runTests {
 rm -rf "$BUILD_DIR"
 
 echo "=== Unit tests ==="
-xcodebuild test -project GCDWebServer.xcodeproj -scheme "GCDWebServers (Mac)" -configuration Debug "SYMROOT=$BUILD_DIR"
+xcodebuild test -project GCDWebServer.xcodeproj -scheme "GCDWebServers (Mac)" -configuration Debug "SYMROOT=$BUILD_DIR" "${SIGNING[@]}"
 
 echo "=== Recorded traces ==="
-xcodebuild build -project GCDWebServer.xcodeproj -sdk macosx -target "GCDWebServer (Mac)" -configuration Release "SYMROOT=$BUILD_DIR"
+xcodebuild build -project GCDWebServer.xcodeproj -sdk macosx -target "GCDWebServer (Mac)" -configuration Release "SYMROOT=$BUILD_DIR" "${SIGNING[@]}"
 
 runTests htmlForm Tests/HTMLForm
 runTests htmlFileUpload Tests/HTMLFileUpload
@@ -57,9 +64,9 @@ runTests webUploader Tests/WebUploader
 runTests webServer Tests/WebServer-Sample-Movie Tests/Sample-Movie.mp4
 
 echo "=== Release builds ==="
-xcodebuild build -project GCDWebServer.xcodeproj -scheme "GCDWebServers (Mac)" -configuration Release "SYMROOT=$BUILD_DIR"
-xcodebuild build -project GCDWebServer.xcodeproj -scheme "GCDWebServers (iOS)" -configuration Release -destination 'generic/platform=iOS Simulator' "SYMROOT=$BUILD_DIR"
-xcodebuild build -project GCDWebServer.xcodeproj -scheme "GCDWebServers (tvOS)" -configuration Release -destination 'generic/platform=tvOS Simulator' "SYMROOT=$BUILD_DIR"
+xcodebuild build -project GCDWebServer.xcodeproj -scheme "GCDWebServers (Mac)" -configuration Release "SYMROOT=$BUILD_DIR" "${SIGNING[@]}"
+xcodebuild build -project GCDWebServer.xcodeproj -scheme "GCDWebServers (iOS)" -configuration Release -destination 'generic/platform=iOS Simulator' "SYMROOT=$BUILD_DIR" "${SIGNING[@]}"
+xcodebuild build -project GCDWebServer.xcodeproj -scheme "GCDWebServers (tvOS)" -configuration Release -destination 'generic/platform=tvOS Simulator' "SYMROOT=$BUILD_DIR" "${SIGNING[@]}"
 
 echo ""
 echo "All tests completed successfully."
