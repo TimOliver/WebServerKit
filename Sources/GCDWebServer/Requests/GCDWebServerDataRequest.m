@@ -38,14 +38,17 @@
 @implementation GCDWebServerDataRequest {
     NSString *_text;
     id _jsonObject;
+    GCDWebServerMemoryReservation *_reservation;
 }
 
 - (BOOL)open:(NSError **)error {
+    _reservation = [[GCDWebServerMemoryReservation alloc] init];
+
     if (self.contentLength != NSUIntegerMax) {
         // Only a capacity hint — -writeData: enforces the real in-memory cap — so clamp
         // it to that cap rather than trusting the attacker-declared Content-Length,
         // which could otherwise request a huge (or failed) up-front allocation.
-        NSUInteger capacity = MIN(self.contentLength, (NSUInteger)kGCDWebServerMaxInMemoryBodyLength);
+        NSUInteger capacity = MIN(self.contentLength, GCDWebServerMaxInMemoryBodyLength());
         _data = [[NSMutableData alloc] initWithCapacity:capacity];
     } else {
         _data = [[NSMutableData alloc] init];
@@ -63,11 +66,25 @@
 }
 
 - (BOOL)writeData:(NSData *)data error:(NSError **)error {
-    if (_data.length + data.length > kGCDWebServerMaxInMemoryBodyLength) {
-        GWS_LOG_ERROR(@"Request body exceeds the %i byte in-memory limit", (int)kGCDWebServerMaxInMemoryBodyLength);
+    NSUInteger total = _data.length + data.length;
+
+    if (total > GCDWebServerMaxInMemoryBodyLength()) {
+        GWS_LOG_ERROR(@"Request body exceeds the %lu byte in-memory limit", (unsigned long)GCDWebServerMaxInMemoryBodyLength());
 
         if (error) {
             *error = [NSError errorWithDomain:kGCDWebServerErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: @"Request body exceeds maximum in-memory size"}];
+        }
+
+        return NO;
+    }
+
+    // Per-request limits do not compose: this body also has to fit alongside every other
+    // connection's, or a flood of individually-legal requests still exhausts the process.
+    if (![_reservation reserveBytes:total]) {
+        GWS_LOG_ERROR(@"Refusing request body: the server is already holding its %lu byte in-memory limit across all connections", (unsigned long)kGCDWebServerMaxTotalInMemoryLength);
+
+        if (error) {
+            *error = [NSError errorWithDomain:kGCDWebServerErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: @"Server is at its total in-memory capacity"}];
         }
 
         return NO;

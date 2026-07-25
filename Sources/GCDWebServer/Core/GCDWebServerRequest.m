@@ -76,6 +76,7 @@ NSString *const GCDWebServerRequestAttribute_RegexCaptures = @"GCDWebServerReque
     z_stream _stream;
     BOOL _finished;
     NSUInteger _totalDecoded;
+    GCDWebServerMemoryReservation *_reservation;
 }
 
 - (BOOL)open:(NSError **)error {
@@ -94,6 +95,7 @@ NSString *const GCDWebServerRequestAttribute_RegexCaptures = @"GCDWebServerReque
         return NO;
     }
 
+    _reservation = [[GCDWebServerMemoryReservation alloc] init];
     return YES;
 }
 
@@ -130,11 +132,24 @@ NSString *const GCDWebServerRequestAttribute_RegexCaptures = @"GCDWebServerReque
         // bomb") cannot balloon the output buffer and exhaust memory. Checked inside
         // the loop, before the next doubling, so we stop growing as soon as the cap
         // is crossed rather than after allocating past it.
-        if (_totalDecoded + length > kGCDWebServerMaxDecompressedBodyLength) {
-            GWS_LOG_ERROR(@"Decompressed request body exceeds the %i byte limit", (int)kGCDWebServerMaxDecompressedBodyLength);
+        if (_totalDecoded + length > GCDWebServerMaxDecompressedBodyLength()) {
+            GWS_LOG_ERROR(@"Decompressed request body exceeds the %lu byte limit", (unsigned long)GCDWebServerMaxDecompressedBodyLength());
 
             if (error) {
                 *error = [NSError errorWithDomain:kGCDWebServerErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: @"Decompressed request body exceeds maximum size"}];
+            }
+
+            return NO;
+        }
+
+        // This is the worst offender for aggregate memory: the per-request ceiling times
+        // the connection cap is several gigabytes of inflated output. Hold the running
+        // total against the process-wide budget as well.
+        if (![_reservation reserveBytes:(_totalDecoded + length)]) {
+            GWS_LOG_ERROR(@"Refusing to inflate further: the server is already holding its %lu byte in-memory limit across all connections", (unsigned long)kGCDWebServerMaxTotalInMemoryLength);
+
+            if (error) {
+                *error = [NSError errorWithDomain:kGCDWebServerErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: @"Server is at its total in-memory capacity"}];
             }
 
             return NO;
@@ -154,7 +169,7 @@ NSString *const GCDWebServerRequestAttribute_RegexCaptures = @"GCDWebServerReque
         // cap and be rejected by the check above). Without this clamp a body that
         // inflates to just over the cap first doubles the buffer to twice the cap
         // (128 MB for the 64 MB cap) and commits it before the next check rejects it.
-        NSUInteger maxBufferLength = (NSUInteger)kGCDWebServerMaxDecompressedBodyLength - _totalDecoded + 1;
+        NSUInteger maxBufferLength = GCDWebServerMaxDecompressedBodyLength() - _totalDecoded + 1;
         NSUInteger newBufferLength = 2 * decodedData.length;
         decodedData.length = (newBufferLength < maxBufferLength) ? newBufferLength : maxBufferLength;
     }

@@ -40,10 +40,84 @@
 #endif
 #import <CommonCrypto/CommonDigest.h>
 #import <ifaddrs.h>
+#import <os/lock.h>
 #import <net/if.h>
 #import <netdb.h>
 
 #import "GCDWebServerPrivate.h"
+
+// Guards every field below. Contended only when a buffer grows, never per byte.
+static os_unfair_lock _memoryLock = OS_UNFAIR_LOCK_INIT;
+static NSUInteger _memoryReserved = 0;
+static NSUInteger _memoryCapacity = kGCDWebServerMaxTotalInMemoryLength;
+static NSUInteger _memoryPerRequestLimit = kGCDWebServerMaxInMemoryBodyLength;
+static NSUInteger _memoryDecompressedLimit = kGCDWebServerMaxDecompressedBodyLength;
+
+NSUInteger GCDWebServerMaxInMemoryBodyLength(void) {
+    os_unfair_lock_lock(&_memoryLock);
+    NSUInteger value = _memoryPerRequestLimit;
+    os_unfair_lock_unlock(&_memoryLock);
+    return value;
+}
+
+NSUInteger GCDWebServerMaxDecompressedBodyLength(void) {
+    os_unfair_lock_lock(&_memoryLock);
+    NSUInteger value = _memoryDecompressedLimit;
+    os_unfair_lock_unlock(&_memoryLock);
+    return value;
+}
+
+void GCDWebServerSetMemoryLimitsForTesting(NSUInteger perRequest, NSUInteger decompressed, NSUInteger total) {
+    os_unfair_lock_lock(&_memoryLock);
+    _memoryPerRequestLimit = perRequest ? perRequest : (NSUInteger)kGCDWebServerMaxInMemoryBodyLength;
+    _memoryDecompressedLimit = decompressed ? decompressed : (NSUInteger)kGCDWebServerMaxDecompressedBodyLength;
+    _memoryCapacity = total ? total : (NSUInteger)kGCDWebServerMaxTotalInMemoryLength;
+    os_unfair_lock_unlock(&_memoryLock);
+}
+
+NSUInteger GCDWebServerReservedMemoryLength(void) {
+    os_unfair_lock_lock(&_memoryLock);
+    NSUInteger value = _memoryReserved;
+    os_unfair_lock_unlock(&_memoryLock);
+    return value;
+}
+
+@implementation GCDWebServerMemoryReservation {
+    NSUInteger _bytes;
+}
+
+- (BOOL)reserveBytes:(NSUInteger)bytes {
+    BOOL granted = YES;
+    os_unfair_lock_lock(&_memoryLock);
+
+    if (bytes > _bytes) {
+        NSUInteger increase = bytes - _bytes;
+
+        // Refuse rather than partially grant: the caller fails the request cleanly, which
+        // is the whole point — the alternative is every connection buffering a little more
+        // until the process is killed.
+        if (_memoryReserved + increase > _memoryCapacity) {
+            granted = NO;
+        } else {
+            _memoryReserved += increase;
+            _bytes = bytes;
+        }
+    } else {
+        _memoryReserved -= (_bytes - bytes);
+        _bytes = bytes;
+    }
+
+    os_unfair_lock_unlock(&_memoryLock);
+    return granted;
+}
+
+- (void)dealloc {
+    os_unfair_lock_lock(&_memoryLock);
+    _memoryReserved -= _bytes;  // Cannot underflow: _bytes only ever moves through -reserveBytes:
+    os_unfair_lock_unlock(&_memoryLock);
+}
+
+@end
 
 static NSDateFormatter *_dateFormatterRFC822 = nil;
 static NSDateFormatter *_dateFormatterISO8601 = nil;

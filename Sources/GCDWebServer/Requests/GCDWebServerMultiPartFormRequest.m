@@ -60,9 +60,23 @@
     NSUInteger argumentBytes;  // Total bytes retained by argument parts so far
     NSUInteger partCount;      // Total completed parts (arguments and files) so far
 }
+// This body's share of the process-wide in-memory ceiling, covering the argument parts it
+// retains. Per-request limits do not compose, so without this a flood of individually-legal
+// bodies still exhausts the process. Working buffers are charged separately, per parser,
+// because they shrink again as parts are consumed.
+@property (nonatomic, readonly) GCDWebServerMemoryReservation *reservation;
 @end
 
 @implementation GCDWebServerMIMEStreamBudget
+
+- (instancetype)init {
+    if ((self = [super init])) {
+        _reservation = [[GCDWebServerMemoryReservation alloc] init];
+    }
+
+    return self;
+}
+
 @end
 
 typedef enum {
@@ -151,7 +165,8 @@ static NSData *_dashNewlineData = nil;
     int _tmpFile;
     GCDWebServerMIMEStreamParser *_subParser;
     NSUInteger _depth;  // Nesting level; 0 for the top-level parser, +1 per multipart/mixed
-    GCDWebServerMIMEStreamBudget *_budget;  // Shared with every sub-parser
+    GCDWebServerMIMEStreamBudget *_budget;              // Shared with every sub-parser
+    GCDWebServerMemoryReservation *_workingReservation;  // This parser's own working buffer
 }
 
 + (void)initialize {
@@ -200,6 +215,7 @@ static NSData *_dashNewlineData = nil;
         _state = kParserState_Start;
         _depth = depth;
         _budget = budget;
+        _workingReservation = [[GCDWebServerMemoryReservation alloc] init];
     }
 
     return self;
@@ -368,12 +384,15 @@ static NSData *_dashNewlineData = nil;
                         }
 
                         _tmpPath = nil;
-                    } else if (_budget->argumentBytes + dataLength > (NSUInteger)kGCDWebServerMaxInMemoryBodyLength) {
+                    } else if (_budget->argumentBytes + dataLength > GCDWebServerMaxInMemoryBodyLength()) {
                         // Every argument part stays in memory for the life of the request, so the
                         // working-buffer cap in -appendBytes: does not bound them: a body of many
                         // individually-legal parts would otherwise grow without limit. File parts
                         // are drained to disk and so are governed by the part count instead.
-                        GWS_LOG_ERROR(@"Multipart form arguments retained in memory exceed the %i byte limit", (int)kGCDWebServerMaxInMemoryBodyLength);
+                        GWS_LOG_ERROR(@"Multipart form arguments retained in memory exceed the %lu byte limit", (unsigned long)GCDWebServerMaxInMemoryBodyLength());
+                        success = NO;
+                    } else if (![_budget.reservation reserveBytes:(_budget->argumentBytes + dataLength)]) {
+                        GWS_LOG_ERROR(@"Refusing multipart argument: the server is already holding its %lu byte in-memory limit across all connections", (unsigned long)kGCDWebServerMaxTotalInMemoryLength);
                         success = NO;
                     } else {
                         _budget->partCount += 1;
@@ -432,13 +451,22 @@ static NSData *_dashNewlineData = nil;
     // argument part, or a malformed stream whose content contains the boundary token
     // without the trailing CRLF (which otherwise wedges the parser and grows the
     // buffer without bound).
-    if (_data.length + length > kGCDWebServerMaxInMemoryBodyLength) {
-        GWS_LOG_ERROR(@"Multipart form data buffered in memory exceeds the %i byte limit", (int)kGCDWebServerMaxInMemoryBodyLength);
+    if (_data.length + length > GCDWebServerMaxInMemoryBodyLength()) {
+        GWS_LOG_ERROR(@"Multipart form data buffered in memory exceeds the %lu byte limit", (unsigned long)GCDWebServerMaxInMemoryBodyLength());
+        return NO;
+    }
+
+    if (![_workingReservation reserveBytes:(_data.length + length)]) {
+        GWS_LOG_ERROR(@"Refusing multipart data: the server is already holding its %lu byte in-memory limit across all connections", (unsigned long)kGCDWebServerMaxTotalInMemoryLength);
         return NO;
     }
 
     [_data appendBytes:bytes length:length];
-    return [self _parseData];
+    BOOL success = [self _parseData];
+    // -_parseData drains whatever it consumed, so give the difference straight back rather
+    // than letting this parser's reservation ratchet upward across a long body.
+    [_workingReservation reserveBytes:_data.length];
+    return success;
 }
 
 - (BOOL)isAtEnd {

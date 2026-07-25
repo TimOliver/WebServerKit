@@ -114,6 +114,7 @@ NS_ASSUME_NONNULL_END
     NSUInteger _headerPhaseTicks;  // Idle ticks elapsed before a request was matched; on _connectionQueue only
     BOOL _requestReceived;         // Set once the body is fully read and the handler runs; on _connectionQueue only
     NSTimeInterval _idleTimeout;   // Seconds between idle-timer ticks; 0 when idle timeouts are disabled
+    GCDWebServerMemoryReservation *_chunkReservation;  // This connection's chunked framing buffer
 
 #ifdef __GCDWEBSERVER_ENABLE_TESTING__
     NSUInteger _connectionIndex;
@@ -456,6 +457,7 @@ static uint16_t _LocalPortFromAddress(NSData *localAddressData) {
         return;
     }
 
+    _chunkReservation = [[GCDWebServerMemoryReservation alloc] init];
     NSMutableData *const chunkData = [[NSMutableData alloc] initWithData:initialData];
     [self readNextBodyChunk:chunkData
             completionBlock:^(BOOL success) {
@@ -914,11 +916,11 @@ static inline NSUInteger _ScanHexNumber(const void *bytes, NSUInteger size) {
 
         if (length != NSNotFound) {
             if (length) {
-                if (length > kGCDWebServerMaxInMemoryBodyLength) {
+                if (length > GCDWebServerMaxInMemoryBodyLength()) {
                     // A single chunk is buffered whole in memory before being written, so
                     // cap its declared size. Legitimate chunked uploads use many smaller
                     // chunks; this only rejects a pathologically large single chunk.
-                    GWS_LOG_ERROR(@"Chunk size %lu exceeds the %i byte limit reading request body on socket %i", (unsigned long)length, (int)kGCDWebServerMaxInMemoryBodyLength, _socket);
+                    GWS_LOG_ERROR(@"Chunk size %lu exceeds the %lu byte limit reading request body on socket %i", (unsigned long)length, (unsigned long)GCDWebServerMaxInMemoryBodyLength(), _socket);
                     block(NO);
                     return;
                 }
@@ -969,8 +971,17 @@ static inline NSUInteger _ScanHexNumber(const void *bytes, NSUInteger size) {
     // bounds the buffer, so it would grow until the app is jetsam/OOM-killed (the idle
     // timeout never fires while bytes keep arriving). Bound it at one max-size chunk
     // plus framing slack: a legitimate in-flight chunk needs at most that much buffered.
-    if (chunkData.length > (NSUInteger)kGCDWebServerMaxInMemoryBodyLength + kHeadersMaxLength) {
+    if (chunkData.length > GCDWebServerMaxInMemoryBodyLength() + kHeadersMaxLength) {
         GWS_LOG_ERROR(@"Chunked transfer framing exceeds the buffer limit reading request body on socket %i", _socket);
+        block(NO);
+        return;
+    }
+
+    // That cap is per-connection, and per-connection caps do not compose: with the
+    // connection limit it allowed gigabytes in aggregate. Charge this buffer against the
+    // process-wide ceiling too, and give bytes back as the parser drains them.
+    if (![_chunkReservation reserveBytes:chunkData.length]) {
+        GWS_LOG_ERROR(@"Refusing chunked body on socket %i: the server is already holding its %lu byte in-memory limit across all connections", _socket, (unsigned long)kGCDWebServerMaxTotalInMemoryLength);
         block(NO);
         return;
     }
