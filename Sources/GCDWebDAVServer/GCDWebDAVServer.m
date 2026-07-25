@@ -45,6 +45,13 @@
 
 #define kXMLParseOptions (XML_PARSE_NONET | XML_PARSE_RECOVER | XML_PARSE_NOBLANKS | XML_PARSE_COMPACT | XML_PARSE_NOWARNING | XML_PARSE_NOERROR)
 
+// A DAV request body is a property list or a lock description: real clients send a few
+// hundred bytes. libxml2 builds a DOM many times the size of an element-dense source,
+// and that DOM is not covered by the request-side memory budget — which bounds the bytes
+// we receive, not what a handler subsequently builds out of them. A 16 MB PROPFIND body
+// of empty elements took the process from 5 MB to 561 MB and still answered 207.
+#define kDAVMaxRequestBodyLength (256 * 1024)
+
 typedef NS_ENUM(NSInteger, DAVProperties) {
     kDAVProperty_ResourceType = (1 << 0),
     kDAVProperty_CreationDate = (1 << 1),
@@ -188,6 +195,26 @@ NS_ASSUME_NONNULL_END
 // what is already at `path` and writing over it — keeps the destination intact until the
 // new content is complete on disk, and keeps the final swap a rename(2) within a single
 // directory, which is atomic and cannot fail for being cross-volume.
+static GCDWebServerErrorResponse *_ResponseIfRequestBodyTooLarge(GCDWebServerDataRequest *request) {
+    if (request.data.length <= kDAVMaxRequestBodyLength) {
+        return nil;
+    }
+
+    return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_RequestEntityTooLarge message:@"Request body is too large (%lu bytes)", (unsigned long)request.data.length];
+}
+
+// Is `path` inside `directory`, compared the way the volume would? Case-insensitive on
+// purpose: over-refusing a COPY costs nothing, whereas under-refusing one lets
+// copyItemAtPath: recurse into the tree it is still walking.
+static BOOL _PathIsInsideDirectoryOnDisk(NSString *path, NSString *directory) {
+    if ((path.length == 0) || (directory.length == 0)) {
+        return NO;
+    }
+
+    NSString *const prefix = [directory hasSuffix:@"/"] ? directory : [directory stringByAppendingString:@"/"];
+    return [path rangeOfString:prefix options:(NSCaseInsensitiveSearch | NSAnchoredSearch)].location != NSNotFound;
+}
+
 static NSString *_StagingPathForPath(NSString *path) {
     NSString *const name = [@"." stringByAppendingString:[[NSProcessInfo processInfo] globallyUniqueString]];
     return [[path stringByDeletingLastPathComponent] stringByAppendingPathComponent:name];
@@ -605,6 +632,18 @@ static inline BOOL _IsMacFinder(GCDWebServerRequest *request) {
         return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"%@ \"%@\" onto itself is not allowed", isMove ? @"Moving" : @"Copying", srcRelativePath];
     }
 
+    // Refuse a copy or move into the source's own subtree, which RFC 4918 §9.8.5 requires
+    // to be a 403. Without it -[NSFileManager copyItemAtPath:] creates the destination
+    // inside the tree it is still walking and re-enters it, nesting directories until a
+    // path exceeds PATH_MAX. The copy then fails — and its own cleanup fails for the same
+    // reason — so a request that answers 403 still leaves ~250 nested directories in the
+    // share that the server can no longer delete through its own API. Checked before the
+    // staging path is derived, since a staging sibling of the destination is inside the
+    // source too.
+    if (_PathIsInsideDirectoryOnDisk(dstAbsolutePath, srcAbsolutePath)) {
+        return [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_Forbidden message:@"%@ \"%@\" into its own subtree \"%@\" is not allowed", isMove ? @"Moving" : @"Copying", srcRelativePath, dstRelativePath];
+    }
+
     // Overwriting is only reachable when the precondition check above permitted it (MOVE
     // needs Overwrite:T, COPY needs Overwrite!=F). Build the replacement under a staging
     // name rather than removing the destination first: copying a tree takes as long as the
@@ -728,6 +767,12 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
     DAVProperties properties = 0;
 
     if (request.data.length) {
+        GCDWebServerErrorResponse *const tooLarge = _ResponseIfRequestBodyTooLarge(request);
+
+        if (tooLarge) {
+            return tooLarge;
+        }
+
         BOOL success = YES;
         xmlDocPtr document = xmlReadMemory(request.data.bytes, (int)request.data.length, NULL, NULL, kXMLParseOptions);
 
@@ -870,6 +915,12 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
     NSString *type = nil;
     NSString *owner = nil;
     NSString *token = nil;
+    GCDWebServerErrorResponse *const tooLarge = _ResponseIfRequestBodyTooLarge(request);
+
+    if (tooLarge) {
+        return tooLarge;
+    }
+
     BOOL success = YES;
     xmlDocPtr document = xmlReadMemory(request.data.bytes, (int)request.data.length, NULL, NULL, kXMLParseOptions);
 
