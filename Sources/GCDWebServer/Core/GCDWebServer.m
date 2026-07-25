@@ -471,6 +471,10 @@ static void _NetServiceResolveCallBack(CFNetServiceRef service, CFStreamError *e
     }
 }
 
+// Reached only from _SocketCallBack's DNSServiceProcessResult, which already holds
+// _stateQueue — so this must NOT dispatch onto it again: a nested dispatch_sync on a serial
+// queue deadlocks. It still runs on the main thread, because dispatch_sync executes the
+// block on the calling thread.
 static void _DNSServiceCallBack(DNSServiceRef sdRef, DNSServiceFlags flags, uint32_t interfaceIndex, DNSServiceErrorType errorCode, uint32_t externalAddress, DNSServiceProtocol protocol, uint16_t internalPort, uint16_t externalPort, uint32_t ttl, void *context) {
     GWS_DCHECK([NSThread isMainThread]);
     @autoreleasepool {
@@ -484,15 +488,20 @@ static void _DNSServiceCallBack(DNSServiceRef sdRef, DNSServiceFlags flags, uint
             addr4.sin_addr.s_addr = externalAddress;  // Already in network byte order
             server->_dnsAddress = GCDWebServerStringFromSockAddr((const struct sockaddr *)&addr4, NO);
             server->_dnsPort = ntohs(externalPort);
-            GWS_LOG_INFO(@"%@ now publicly reachable at %@", [server class], server.publicServerURL);
+            GWS_LOG_INFO(@"%@ now publicly reachable at %@", [server class], [server _publicServerURL]);  // Not .publicServerURL: that takes _stateQueue, which we hold
         } else {
             GWS_LOG_ERROR(@"DNS service error %i", errorCode);
             server->_dnsAddress = nil;
             server->_dnsPort = 0;
         }
 
+        // Notified asynchronously, and therefore outside _stateQueue: a delegate is free to
+        // call straight back into the server — -publicServerURL and -serverURL both take
+        // that queue — and doing so from inside it would deadlock.
         if ([server.delegate respondsToSelector:@selector(webServerDidUpdateNATPortMapping:)]) {
-            [server.delegate webServerDidUpdateNATPortMapping:server];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [server.delegate webServerDidUpdateNATPortMapping:server];
+            });
         }
     }
 }
@@ -501,11 +510,24 @@ static void _SocketCallBack(CFSocketRef s, CFSocketCallBackType type, CFDataRef 
     GWS_DCHECK([NSThread isMainThread]);
     @autoreleasepool {
         GCDWebServer *server = (__bridge GCDWebServer *)info;
-        DNSServiceErrorType status = DNSServiceProcessResult(server->_dnsService);
 
-        if (status != kDNSServiceErr_NoError) {
-            GWS_LOG_ERROR(@"DNS service error %i", status);
-        }
+        // _dnsService, _dnsAddress and _dnsPort are owned by _stateQueue, but this callback
+        // arrives on the main run loop: without confining it, the main thread could load the
+        // service ref here and then call into it after -_stop had already run
+        // DNSServiceRefDeallocate, and _DNSServiceCallBack's ARC store to _dnsAddress could
+        // race a read from -_publicServerURL. Safe to block: nothing running on _stateQueue
+        // waits on the main queue.
+        dispatch_sync(server->_stateQueue, ^{
+            if (server->_dnsService == NULL) {
+                return;  // Torn down between the run loop signalling us and getting here
+            }
+
+            DNSServiceErrorType status = DNSServiceProcessResult(server->_dnsService);
+
+            if (status != kDNSServiceErr_NoError) {
+                GWS_LOG_ERROR(@"DNS service error %i", status);
+            }
+        });
     }
 }
 

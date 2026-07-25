@@ -113,6 +113,7 @@ NS_ASSUME_NONNULL_END
     BOOL _idleCheckWasBusy;        // Accessed on _connectionQueue only
     NSUInteger _headerPhaseTicks;  // Idle ticks elapsed before a request was matched; on _connectionQueue only
     BOOL _requestReceived;         // Set once the body is fully read and the handler runs; on _connectionQueue only
+    BOOL _clientIsHTTP10;          // The client spoke HTTP/1.0 (or older): no chunked framing, no interim 1xx
     BOOL _earlyChecksRun;          // Host allow-list and preflight are decided once, as early as the headers allow
     NSInteger _headerFailureStatus;  // Why the header block was rejected; 500 only if nothing more specific applies
     NSTimeInterval _idleTimeout;   // Seconds between idle-timer ticks; 0 when idle timeouts are disabled
@@ -336,6 +337,23 @@ static uint16_t _LocalPortFromAddress(NSData *localAddressData) {
     }
 }
 
+// Chunked transfer coding was introduced in HTTP/1.1. Sending it to a 1.0 client makes it
+// read the chunk-size lines as part of the entity body — a silently corrupted download
+// rather than an error. Falling back to identity framing is safe here precisely because
+// every response already carries "Connection: Close" and the connection serves one request:
+// end-of-body by connection close is well defined, which is exactly how HTTP/1.0 did it.
+- (void)_readRequestBodyWithInitialData:(NSData *)initialData {
+    if (_request.usesChunkedTransferEncoding) {
+        [self _readChunkedBodyWithInitialData:initialData];
+    } else {
+        [self _readBodyWithLength:_request.contentLength initialData:initialData];
+    }
+}
+
+- (BOOL)_shouldChunkResponse {
+    return _response.usesChunkedTransferEncoding && !_clientIsHTTP10;
+}
+
 // http://www.w3.org/Protocols/rfc2616/rfc2616-sec10.html
 - (void)_finishProcessingRequest:(GCDWebServerResponse *)response {
     GWS_DCHECK(_responseMessage == NULL);
@@ -387,7 +405,7 @@ static uint16_t _LocalPortFromAddress(NSData *localAddressData) {
             CFHTTPMessageSetHeaderFieldValue(_responseMessage, CFSTR("Content-Length"), (__bridge CFStringRef)[NSString stringWithFormat:@"%lu", (unsigned long)_response.contentLength]);
         }
 
-        if (_response.usesChunkedTransferEncoding) {
+        if ([self _shouldChunkResponse]) {
             CFHTTPMessageSetHeaderFieldValue(_responseMessage, CFSTR("Transfer-Encoding"), CFSTR("chunked"));
         }
 
@@ -562,6 +580,11 @@ static uint16_t _LocalPortFromAddress(NSData *localAddressData) {
     [self readHeaders:headersData
         withCompletionBlock:^(NSData *extraData) {
             if (extraData) {
+                // An HTTP/1.0 client cannot parse a chunked body or an interim 1xx response,
+                // so remember which dialect it speaks before framing anything back at it.
+                NSString *const requestVersion = CFBridgingRelease(CFHTTPMessageCopyVersion(self->_requestMessage));
+                self->_clientIsHTTP10 = requestVersion && ![requestVersion isEqualToString:(__bridge NSString *)kCFHTTPVersion1_1];
+
                 NSString *requestMethod = CFBridgingRelease(CFHTTPMessageCopyRequestMethod(self->_requestMessage));  // Method verbs are case-sensitive and uppercase
 
                 if (self->_shouldAutomaticallyMapHEADToGET && [requestMethod isEqualToString:@"HEAD"]) {
@@ -621,16 +644,12 @@ static uint16_t _LocalPortFromAddress(NSData *localAddressData) {
                             if (self->_request.usesChunkedTransferEncoding || (extraData.length <= self->_request.contentLength)) {
                                 NSString *const expectHeader = requestHeaders[@"Expect"];
 
-                                if (expectHeader) {
+                                if (expectHeader && !self->_clientIsHTTP10) {
                                     if ([expectHeader caseInsensitiveCompare:@"100-continue"] == NSOrderedSame) {  // TODO: Actually validate request before continuing
                                         [self writeData:_continueData
                                             withCompletionBlock:^(BOOL success) {
                                                 if (success) {
-                                                    if (self->_request.usesChunkedTransferEncoding) {
-                                                        [self _readChunkedBodyWithInitialData:extraData];
-                                                    } else {
-                                                        [self _readBodyWithLength:self->_request.contentLength initialData:extraData];
-                                                    }
+                                                    [self _readRequestBodyWithInitialData:extraData];
                                                 } else {
                                                     // Without this the request is left neither answered nor
                                                     // aborted, and the connection just unwinds silently.
@@ -642,11 +661,11 @@ static uint16_t _LocalPortFromAddress(NSData *localAddressData) {
                                         [self abortRequest:self->_request withStatusCode:kGCDWebServerHTTPStatusCode_ExpectationFailed];
                                     }
                                 } else {
-                                    if (self->_request.usesChunkedTransferEncoding) {
-                                        [self _readChunkedBodyWithInitialData:extraData];
-                                    } else {
-                                        [self _readBodyWithLength:self->_request.contentLength initialData:extraData];
-                                    }
+                                    // An HTTP/1.0 client has no concept of an interim response: it would
+                                    // read "100 Continue" as the final one and then mis-parse the real
+                                    // response as the body. It is not waiting for one either, so ignore
+                                    // any Expect it sent and just read the body.
+                                    [self _readRequestBodyWithInitialData:extraData];
                                 }
                             } else {
                                 GWS_LOG_ERROR(@"Unexpected 'Content-Length' header value on socket %i", self->_socket);
@@ -1249,7 +1268,7 @@ static inline NSUInteger _ScanHexNumber(const void *bytes, NSUInteger size) {
     [_response performReadDataWithCompletion:^(NSData *data, NSError *error) {
         if (data) {
             if (data.length) {
-                if (self->_response.usesChunkedTransferEncoding) {
+                if ([self _shouldChunkResponse]) {
                     const char *hexString = [[NSString stringWithFormat:@"%lx", (unsigned long)data.length] UTF8String];
                     size_t hexLength = strlen(hexString);
                     NSData *chunk = [NSMutableData dataWithLength:(hexLength + 2 + data.length + 2)];
@@ -1281,7 +1300,7 @@ static inline NSUInteger _ScanHexNumber(const void *bytes, NSUInteger size) {
                         }
                     }];
             } else {
-                if (self->_response.usesChunkedTransferEncoding) {
+                if ([self _shouldChunkResponse]) {
                     [self writeData:_lastChunkData
                         withCompletionBlock:^(BOOL success) {
                             block(success);
