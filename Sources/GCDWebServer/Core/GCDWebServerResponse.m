@@ -332,9 +332,18 @@
     _reader = self;
 
     if (_gzipContentEncodingEnabled) {
-        GCDWebServerGZipEncoder *const encoder = [[GCDWebServerGZipEncoder alloc] initWithResponse:self reader:_reader];
-        [_encoders addObject:encoder];
-        _reader = encoder;
+        // A Content-Range describes offsets into the *selected representation*, so it is
+        // only true of the identity coding. Compressing a partial response left the 206
+        // asserting identity offsets for a gzip body, and a client reassembling ranges
+        // then concatenates independent gzip members at offsets that do not line up.
+        // Serve the range honestly rather than half-honouring both.
+        if ((_statusCode == kGCDWebServerHTTPStatusCode_PartialContent) || [self valueForAdditionalHeader:@"Content-Range"]) {
+            GWS_LOG_ERROR(@"Not gzip-encoding a partial response: its Content-Range describes the identity coding");
+        } else {
+            GCDWebServerGZipEncoder *const encoder = [[GCDWebServerGZipEncoder alloc] initWithResponse:self reader:_reader];
+            [_encoders addObject:encoder];
+            _reader = encoder;
+        }
     }
 }
 

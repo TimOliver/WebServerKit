@@ -1449,7 +1449,7 @@ static inline NSString *_EncodeBase64(NSString *string) {
                      GCDWebServerResponse *response = nil;
 
                      if (allowRangeRequests) {
-                         response = [GCDWebServerFileResponse responseWithFile:filePath byteRange:request.byteRange isAttachment:isAttachment];
+                         response = [GCDWebServerFileResponse responseWithFile:filePath byteRange:request.byteRange isAttachment:isAttachment ifRange:request.ifRange];
                          [response setValue:@"bytes" forAdditionalHeader:@"Accept-Ranges"];
                      } else {
                          response = [GCDWebServerFileResponse responseWithFile:filePath isAttachment:isAttachment];
@@ -1555,7 +1555,7 @@ static NSString *_EscapeHTMLString(NSString *string) {
                         response = [server _responseWithContentsOfDirectory:filePath];
                     } else if ([fileType isEqualToString:NSFileTypeRegular]) {
                         if (allowRangeRequests) {
-                            response = [GCDWebServerFileResponse responseWithFile:filePath byteRange:request.byteRange];
+                            response = [GCDWebServerFileResponse responseWithFile:filePath byteRange:request.byteRange isAttachment:NO ifRange:request.ifRange];
                             [response setValue:@"bytes" forAdditionalHeader:@"Accept-Ranges"];
                         } else {
                             response = [GCDWebServerFileResponse responseWithFile:filePath];

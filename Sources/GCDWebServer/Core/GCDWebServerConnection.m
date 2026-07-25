@@ -1556,21 +1556,48 @@ static NSString *_DigestURIPath(NSString *uri) {
 
 // http://www.w3.org/Protocols/rfc2616/rfc2616-sec14.html#sec14.25
 // http://www.w3.org/Protocols/rfc2616/rfc2616-sec14.html#sec14.26
-static inline BOOL _CompareResources(NSString *responseETag, NSString *requestETag, NSDate *responseLastModified, NSDate *requestLastModified) {
-    if (requestLastModified && responseLastModified) {
-        if ([responseLastModified compare:requestLastModified] != NSOrderedDescending) {
+// If-None-Match is a list, and it is compared weakly: a "W/" prefix is stripped from both
+// sides before comparing (RFC 9110 §8.8.3.2). Matching one verbatim value meant a client
+// sending either form revalidated as a miss and re-downloaded the whole body. Candidates
+// must still look like entity-tags, so a stray fragment cannot produce a false match — a
+// wrong "no" here costs a download, a wrong "yes" serves stale content.
+static BOOL _ETagMatchesIfNoneMatch(NSString *responseETag, NSString *ifNoneMatch) {
+    NSString *responseValue = [responseETag hasPrefix:@"W/"] ? [responseETag substringFromIndex:2] : responseETag;
+
+    for (NSString *candidate in [ifNoneMatch componentsSeparatedByString:@","]) {
+        NSString *trimmed = [candidate stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+
+        if ([trimmed hasPrefix:@"W/"]) {
+            trimmed = [trimmed substringFromIndex:2];
+        }
+
+        if ((trimmed.length >= 2) && [trimmed hasPrefix:@"\""] && [trimmed hasSuffix:@"\""] && [trimmed isEqualToString:responseValue]) {
             return YES;
         }
     }
 
-    if (requestETag && responseETag) {  // Per the specs "If-None-Match" must be checked after "If-Modified-Since"
-        if ([requestETag isEqualToString:@"*"]) {
-            return YES;
+    return NO;
+}
+
+// RFC 9110 §13.1.3: a recipient MUST ignore If-Modified-Since when If-None-Match is
+// present. Evaluating the date first, and independently, meant a revalidation carrying a
+// *stale* ETag still got a 304 whenever the replacement's mtime was not strictly newer —
+// routine when a file is replaced within the same second, or restored with an older mtime.
+// Per RFC 9111 §4.3.4 the client then updates its stored headers from that 304, so it
+// holds the old body under the new ETag and every later revalidation matches too: the
+// stale copy is pinned indefinitely, which is precisely what the ETag exists to prevent.
+// The comment this replaces had the precedence backwards.
+static inline BOOL _CompareResources(NSString *responseETag, NSString *requestETag, NSDate *responseLastModified, NSDate *requestLastModified) {
+    if (requestETag) {
+        if (!responseETag) {
+            return NO;
         }
 
-        if ([responseETag isEqualToString:requestETag]) {
-            return YES;
-        }
+        return [requestETag isEqualToString:@"*"] || _ETagMatchesIfNoneMatch(responseETag, requestETag);
+    }
+
+    if (requestLastModified && responseLastModified) {
+        return [responseLastModified compare:requestLastModified] != NSOrderedDescending;
     }
 
     return NO;

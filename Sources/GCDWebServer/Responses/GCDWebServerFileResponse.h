@@ -73,6 +73,15 @@ NS_ASSUME_NONNULL_BEGIN
 + (nullable instancetype)responseWithFile:(NSString *)path byteRange:(NSRange)range isAttachment:(BOOL)attachment;
 
 /**
+ *  Creates a response like +responseWithFile:byteRange:isAttachment: that also honours
+ *  the request's "If-Range" header. Pass the ifRange property of the current
+ *  GCDWebServerRequest.
+ *
+ *  See -initWithFile:byteRange:isAttachment:ifRange:mimeTypeOverrides: for details.
+ */
++ (nullable instancetype)responseWithFile:(NSString *)path byteRange:(NSRange)range isAttachment:(BOOL)attachment ifRange:(nullable NSString *)ifRange;
+
+/**
  *  Initializes a response with the contents of a file.
  */
 - (nullable instancetype)initWithFile:(NSString *)path;
@@ -103,7 +112,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (nullable instancetype)initWithFile:(NSString *)path byteRange:(NSRange)range;
 
 /**
- *  This method is the designated initializer for the class.
+ *  Initializes a response like -initWithFile:byteRange: without honouring "If-Range",
+ *  i.e. equivalent to passing nil for it below.
  *
  *  If MIME type overrides are specified, they allow to customize the built-in
  *  mapping from extensions to MIME types. Keys of the dictionary must be lowercased
@@ -111,6 +121,22 @@ NS_ASSUME_NONNULL_BEGIN
  *  MIME types.
  */
 - (nullable instancetype)initWithFile:(NSString *)path byteRange:(NSRange)range isAttachment:(BOOL)attachment mimeTypeOverrides:(nullable NSDictionary<NSString *, NSString *> *)overrides;
+
+/**
+ *  This method is the designated initializer for the class.
+ *
+ *  If MIME type overrides are specified, they allow to customize the built-in
+ *  mapping from extensions to MIME types. Keys of the dictionary must be lowercased
+ *  file extensions without the period, and the values must be the corresponding
+ *  MIME types.
+ *
+ *  If "ifRange" is non-nil — it would typically be the ifRange property of the current
+ *  GCDWebServerRequest — the byte range is honoured only while the file still matches
+ *  that validator, and the whole file is served otherwise. This is what stops a resumed
+ *  download from splicing bytes of a changed file onto the prefix the client already
+ *  holds and reporting success.
+ */
+- (nullable instancetype)initWithFile:(NSString *)path byteRange:(NSRange)range isAttachment:(BOOL)attachment ifRange:(nullable NSString *)ifRange mimeTypeOverrides:(nullable NSDictionary<NSString *, NSString *> *)overrides;
 
 @end
 

@@ -1780,6 +1780,103 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     XCTAssertTrue(disconnected, @"server did not disconnect a client dribbling its request body");
 }
 
+// RFC 9110 §13.1.3: If-Modified-Since MUST be ignored when If-None-Match is present.
+// Evaluating the date first meant a revalidation carrying a *stale* ETag still got a 304
+// whenever the replacement's mtime was not strictly newer — and the client then stores the
+// old body under the new ETag, so the stale copy is pinned for good.
+- (void)testStaleETagIsNotValidatedByAnOlderModificationDate {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* root = MakeTempDirectory();
+    NSString* path = [root stringByAppendingPathComponent:@"f.txt"];
+    XCTAssertTrue([@"ORIGINAL" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    GCDWebServer* server = [[GCDWebServer alloc] init];
+    [server addGETHandlerForBasePath:@"/" directoryPath:root indexFilename:nil cacheAge:0 allowRangeRequests:YES];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* first = SendRawRequest(server.port, @"GET /f.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([first containsString:@"200"], @"%@", first);
+
+    // Replace the contents and give the file an *older* mtime, the case that made the date
+    // comparison validate. The ETag changes because the inode/mtime do.
+    XCTAssertTrue([@"REPLACED" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    NSDate* old = [NSDate dateWithTimeIntervalSince1970:1000000];
+    XCTAssertTrue([fm setAttributes:@{NSFileModificationDate : old} ofItemAtPath:path error:NULL]);
+
+    // A revalidation quoting the ETag of the *first* version, plus a recent date.
+    NSString* reply = SendRawRequest(server.port, @"GET /f.txt HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: \"1/1/1\"\r\nIf-Modified-Since: Thu, 01 Jan 2099 00:00:00 GMT\r\n\r\n");
+    XCTAssertNotNil(reply);
+    XCTAssertFalse([reply containsString:@"304"], @"a stale ETag must not be validated by the date: %@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+    XCTAssertTrue([reply containsString:@"REPLACED"], @"the new contents must be served: %@", reply);
+
+    [server stop];
+    [fm removeItemAtPath:root error:NULL];
+}
+
+// "Send me this range only if the representation is unchanged". Ignoring If-Range meant a
+// resumed download spliced bytes from two versions of a file together under a 206 that
+// asserted they belonged to the same one.
+- (void)testIfRangeMismatchServesTheWholeRepresentation {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* root = MakeTempDirectory();
+    NSString* path = [root stringByAppendingPathComponent:@"f.txt"];
+    XCTAssertTrue([@"AAAAAAAAAAAAAAAAAAAA" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    GCDWebServer* server = [[GCDWebServer alloc] init];
+    [server addGETHandlerForBasePath:@"/" directoryPath:root indexFilename:nil cacheAge:0 allowRangeRequests:YES];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    // A matching If-Range still yields a partial response...
+    NSString* full = SendRawRequest(server.port, @"GET /f.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSRange etagRange = [full rangeOfString:@"etag: " options:NSCaseInsensitiveSearch];
+    XCTAssertNotEqual(etagRange.location, (NSUInteger)NSNotFound, @"no ETag in: %@", full);
+    if (etagRange.location == NSNotFound) {
+        [server stop];
+        return;
+    }
+    NSString* tail = [full substringFromIndex:(etagRange.location + etagRange.length)];
+    NSString* etag = [[tail componentsSeparatedByString:@"\r\n"] firstObject];
+
+    NSString* matching = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /f.txt HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-4\r\nIf-Range: %@\r\n\r\n", etag]);
+    XCTAssertTrue([matching containsString:@"206"], @"a matching If-Range must still serve the range: %@", matching);
+
+    // ...but a stale one must serve the entire representation, not a slice of a file the
+    // client has never seen.
+    NSString* stale = SendRawRequest(server.port, @"GET /f.txt HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-4\r\nIf-Range: \"0/0/0\"\r\n\r\n");
+    XCTAssertNotNil(stale);
+    XCTAssertFalse([stale containsString:@"206"], @"a stale If-Range must not produce a partial response: %@", [stale substringToIndex:MIN((NSUInteger)40, stale.length)]);
+    XCTAssertTrue([stale containsString:@"AAAAAAAAAAAAAAAAAAAA"], @"the whole representation must be served: %@", stale);
+
+    [server stop];
+    [fm removeItemAtPath:root error:NULL];
+}
+
+// The "filename*" parameter was percent-encoded with a URL *query* escaper, which leaves
+// ";" intact — and ";" ends a header parameter, so "evil.command;ok.txt" reached the
+// browser as a filename of "evil.command", bypassing whatever extension allow-list let the
+// name through on the way in.
+- (void)testAttachmentFilenameEscapesParameterDelimiters {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* root = MakeTempDirectory();
+    NSString* name = @"evil.command;ok.txt";
+    XCTAssertTrue([@"data" writeToFile:[root stringByAppendingPathComponent:name] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    GCDWebServerFileResponse* response = [GCDWebServerFileResponse responseWithFile:[root stringByAppendingPathComponent:name] isAttachment:YES];
+    XCTAssertNotNil(response);
+    NSString* disposition = [response valueForAdditionalHeader:@"Content-Disposition"];
+    XCTAssertNotNil(disposition);
+
+    NSRange extRange = [disposition rangeOfString:@"filename*=UTF-8''"];
+    XCTAssertNotEqual(extRange.location, (NSUInteger)NSNotFound, @"%@", disposition);
+    NSString* extValue = [disposition substringFromIndex:(extRange.location + extRange.length)];
+    XCTAssertFalse([extValue containsString:@";"], @"';' must be percent-encoded in filename*: %@", disposition);
+    XCTAssertTrue([extValue containsString:@"%3B"], @"expected a percent-encoded ';': %@", disposition);
+
+    [fm removeItemAtPath:root error:NULL];
+}
+
 // -addGETHandlerForBasePath: was the one file-serving path with no containment check: it
 // only stripped ".." textually, and lstat/O_NOFOLLOW refuse a symlink solely as the *final*
 // component. Any symlinked directory under the served root therefore served whatever it
