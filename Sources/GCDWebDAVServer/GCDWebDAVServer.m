@@ -244,6 +244,13 @@ static NSString *_StagingPathForPath(NSString *path) {
     return YES;
 }
 
+// A control character below 0x20 other than tab, LF and CR cannot appear in an XML 1.0
+// document *at all* — there is no escape for it, and a numeric reference to one is equally
+// illegal. A Unix filename may legally contain one, so escaping the five metacharacters was
+// not enough: a file named "a\x01b.txt" made us emit a document we declare as
+// application/xml that no conforming parser will accept ("not well-formed (invalid token)"),
+// which broke that resource for every client. Drop them, since there is nothing else a
+// well-formed document can do with them.
 static NSString *_XMLEscape(NSString *string) {
     NSMutableString *const escaped = [string mutableCopy];
     [escaped replaceOccurrencesOfString:@"&" withString:@"&amp;" options:0 range:NSMakeRange(0, escaped.length)];  // Must run first.
@@ -251,7 +258,20 @@ static NSString *_XMLEscape(NSString *string) {
     [escaped replaceOccurrencesOfString:@">" withString:@"&gt;" options:0 range:NSMakeRange(0, escaped.length)];
     [escaped replaceOccurrencesOfString:@"\"" withString:@"&quot;" options:0 range:NSMakeRange(0, escaped.length)];
     [escaped replaceOccurrencesOfString:@"'" withString:@"&apos;" options:0 range:NSMakeRange(0, escaped.length)];
-    return escaped;
+
+    NSMutableString *const sanitized = [NSMutableString stringWithCapacity:escaped.length];
+
+    [escaped enumerateSubstringsInRange:NSMakeRange(0, escaped.length)
+                                options:NSStringEnumerationByComposedCharacterSequences
+                             usingBlock:^(NSString *substring, NSRange substringRange, NSRange enclosingRange, BOOL *stop) {
+                                 unichar const character = [substring characterAtIndex:0];
+
+                                 if ((character >= 0x20) || (character == '\t') || (character == '\n') || (character == '\r')) {
+                                     [sanitized appendString:substring];
+                                 }
+                             }];
+
+    return sanitized;
 }
 
 static inline BOOL _IsMacFinder(GCDWebServerRequest *request) {

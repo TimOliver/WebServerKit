@@ -211,6 +211,14 @@ static uint16_t _LocalPortFromAddress(NSData *localAddressData) {
 // browser treats it as same-origin, so CORS, Origin comparison and CSRF tokens are all
 // satisfied — but the browser still sends the name the page was loaded from. See
 // GCDWebServerOption_AllowedHostNames.
+// "name.local." and "name.local" are the same host: the trailing dot is the DNS root label,
+// which a user typing a fully-qualified name, a canonicalizing client library, or curl will
+// all send. Refusing it answered 421 for the server's own mDNS name and read as "the server
+// just doesn't work". Only one dot is stripped; "name.local.." remains malformed.
+static NSString *_WithoutRootLabel(NSString *host) {
+    return [host hasSuffix:@"."] ? [host substringToIndex:(host.length - 1)] : host;
+}
+
 - (GCDWebServerResponse *)_rejectIfHostNotAllowed {
     NSString *const hostHeader = _request.headers[@"Host"];
 
@@ -221,13 +229,6 @@ static uint16_t _LocalPortFromAddress(NSData *localAddressData) {
     }
 
     NSString *const normalized = [hostHeader lowercaseString];
-
-    // An allow-list entry may pin a port ("files.example:8080"), so try the value verbatim
-    // before splitting it.
-    if ([_allowedHostNames containsObject:normalized]) {
-        return nil;
-    }
-
     NSString *name = normalized;
     NSString *portText = nil;
 
@@ -253,6 +254,22 @@ static uint16_t _LocalPortFromAddress(NSData *localAddressData) {
             portText = [name substringFromIndex:(colon.location + 1)];
             name = [name substringToIndex:colon.location];
         }
+    }
+
+    // Strip the DNS root label from the *name*, not from the end of the whole value, so
+    // "name.local.:8080" normalizes as well as "name.local.".
+    BOOL const isBracketed = [normalized hasPrefix:@"["];
+    name = _WithoutRootLabel(name);
+
+    // An allow-list entry may pin a port ("files.example:8080"), and such an entry is
+    // deliberately honoured verbatim — including its port — so rebuild the canonical
+    // authority and try that before validating the port against this connection.
+    NSString *const canonical = portText.length
+                                    ? [NSString stringWithFormat:(isBracketed ? @"[%@]:%@" : @"%@:%@"), name, portText]
+                                    : (isBracketed ? [NSString stringWithFormat:@"[%@]", name] : name);
+
+    if ([_allowedHostNames containsObject:canonical]) {
+        return nil;
     }
 
     // A stated port must be the one this connection arrived on; omitting it is fine, since
