@@ -114,6 +114,7 @@ NS_ASSUME_NONNULL_END
     NSUInteger _headerPhaseTicks;  // Idle ticks elapsed before a request was matched; on _connectionQueue only
     BOOL _requestReceived;         // Set once the body is fully read and the handler runs; on _connectionQueue only
     BOOL _earlyChecksRun;          // Host allow-list and preflight are decided once, as early as the headers allow
+    NSInteger _headerFailureStatus;  // Why the header block was rejected; 500 only if nothing more specific applies
     NSTimeInterval _idleTimeout;   // Seconds between idle-timer ticks; 0 when idle timeouts are disabled
     GCDWebServerMemoryReservation *_chunkReservation;  // This connection's chunked framing buffer
 
@@ -677,7 +678,11 @@ static uint16_t _LocalPortFromAddress(NSData *localAddressData) {
                     [self abortRequest:nil withStatusCode:kGCDWebServerHTTPStatusCode_BadRequest];
                 }
             } else {
-                [self abortRequest:nil withStatusCode:kGCDWebServerHTTPStatusCode_InternalServerError];
+                // A header block we could not read is the client's problem far more often
+                // than ours — it is malformed, or it is larger than kHeadersMaxLength.
+                // Answering 500 told the client the server had failed and invited a retry
+                // of something that can never succeed.
+                [self abortRequest:nil withStatusCode:self->_headerFailureStatus];
             }
         }];
 }
@@ -698,6 +703,7 @@ static uint16_t _LocalPortFromAddress(NSData *localAddressData) {
         _remoteAddressData = remoteAddress;
         _socket = socket;
         _connectionQueue = dispatch_queue_create("gcdwebserver.connection", DISPATCH_QUEUE_SERIAL);
+        _headerFailureStatus = kGCDWebServerHTTPStatusCode_InternalServerError;
         GWS_LOG_DEBUG(@"Did open connection on socket %i", _socket);
 
         NSTimeInterval idleTimeout = server.connectionIdleTimeout;
@@ -813,6 +819,156 @@ static uint16_t _LocalPortFromAddress(NSData *localAddressData) {
     });
 }
 
+// RFC 9112 §5.1: tchar, the only characters legal in a field name or a method.
+static BOOL _IsHeaderTokenCharacter(unsigned char character) {
+    if (((character >= 'a') && (character <= 'z')) || ((character >= 'A') && (character <= 'Z')) || ((character >= '0') && (character <= '9'))) {
+        return YES;
+    }
+
+    switch (character) {
+        case '!':
+        case '#':
+        case '$':
+        case '%':
+        case '&':
+        case '\'':
+        case '*':
+        case '+':
+        case '-':
+        case '.':
+        case '^':
+        case '_':
+        case '`':
+        case '|':
+        case '~':
+            return YES;
+
+        default:
+            return NO;
+    }
+}
+
+// method SP request-target SP HTTP-version, with no room for interpretation. Without
+// this a request line is split on the first two spaces and whatever remains becomes part
+// of the path: "GET /a HTTP/1.1 junk" was dispatched with a path of "/a HTTP/1.1".
+static BOOL _ValidateRequestLine(const unsigned char *line, NSUInteger length) {
+    NSUInteger firstSpace = NSNotFound;
+    NSUInteger lastSpace = NSNotFound;
+    NSUInteger spaceCount = 0;
+
+    for (NSUInteger i = 0; i < length; i++) {
+        unsigned char const character = line[i];
+
+        if (character == ' ') {
+            spaceCount += 1;
+
+            if (firstSpace == NSNotFound) {
+                firstSpace = i;
+            }
+
+            lastSpace = i;
+        } else if ((character < 0x21) || (character == 0x7F)) {
+            return NO;  // A CTL or stray whitespace inside the method, target or version
+        }
+    }
+
+    if ((spaceCount != 2) || (firstSpace == 0) || (lastSpace <= firstSpace + 1)) {
+        return NO;  // Wrong shape, empty method, or empty request-target
+    }
+
+    for (NSUInteger i = 0; i < firstSpace; i++) {
+        if (!_IsHeaderTokenCharacter(line[i])) {
+            return NO;
+        }
+    }
+
+    NSUInteger const versionLength = length - lastSpace - 1;
+    const unsigned char *const version = line + lastSpace + 1;
+
+    if ((versionLength != 8) || (memcmp(version, "HTTP/1.", 7) != 0)) {
+        return NO;
+    }
+
+    return (version[7] == '0') || (version[7] == '1');
+}
+
+// The header block is framed here by scanning for CRLFCRLF, but it is *parsed* by
+// CFHTTPMessage, which ends the message at a bare LF-LF. When the two disagree every
+// header in between was silently discarded and the request still succeeded — the server
+// acted on a different message than the client sent, which is the worst outcome for a
+// server that would rather refuse than half-succeed. Instead of reconciling the two
+// scanners, require the framing to be unambiguous: every CR paired with an LF, and no
+// obs-fold. The remaining checks are ordinary field syntax that CFHTTPMessage accepts far
+// too leniently — "Content-Length : 5" and a folded "Content-Length:\r\n 5" both yielded
+// a content length, and those fields decide how many bytes reach the disk.
+static BOOL _ValidateRequestHeaderBlock(const void *rawBytes, NSUInteger length) {
+    const unsigned char *const bytes = (const unsigned char *)rawBytes;
+
+    for (NSUInteger i = 0; i < length; i++) {
+        if (bytes[i] == '\r') {
+            if ((i + 1 >= length) || (bytes[i + 1] != '\n')) {
+                return NO;
+            }
+        } else if (bytes[i] == '\n') {
+            if ((i == 0) || (bytes[i - 1] != '\r')) {
+                return NO;
+            }
+        }
+    }
+
+    BOOL expectingRequestLine = YES;
+    NSUInteger lineStart = 0;
+
+    for (NSUInteger i = 0; i + 1 < length; i++) {
+        if ((bytes[i] != '\r') || (bytes[i + 1] != '\n')) {
+            continue;
+        }
+
+        const unsigned char *const line = bytes + lineStart;
+        NSUInteger const lineLength = i - lineStart;
+
+        if (lineLength == 0) {
+            break;  // The empty line terminates the block
+        }
+
+        if (expectingRequestLine) {
+            if (!_ValidateRequestLine(line, lineLength)) {
+                return NO;
+            }
+
+            expectingRequestLine = NO;
+        } else {
+            if ((line[0] == ' ') || (line[0] == '\t')) {
+                return NO;  // obs-fold continuation line
+            }
+
+            NSUInteger colon = NSNotFound;
+
+            for (NSUInteger j = 0; j < lineLength; j++) {
+                if (line[j] == ':') {
+                    colon = j;
+                    break;
+                }
+            }
+
+            if ((colon == NSNotFound) || (colon == 0)) {
+                return NO;  // No field name, or no colon at all
+            }
+
+            for (NSUInteger j = 0; j < colon; j++) {
+                if (!_IsHeaderTokenCharacter(line[j])) {
+                    return NO;  // Includes whitespace before the colon
+                }
+            }
+        }
+
+        lineStart = i + 2;
+        i += 1;  // Skip the LF we just consumed
+    }
+
+    return !expectingRequestLine;
+}
+
 - (void)readHeaders:(NSMutableData *)headersData withCompletionBlock:(ReadHeadersCompletionBlock)block {
     GWS_DCHECK(_requestMessage);
     [self readData:headersData
@@ -824,6 +980,7 @@ static uint16_t _LocalPortFromAddress(NSData *localAddressData) {
                 if (range.location == NSNotFound) {
                     if (headersData.length > kHeadersMaxLength) {
                         GWS_LOG_ERROR(@"Request headers exceeded %i bytes on socket %i", (int)kHeadersMaxLength, self->_socket);
+                        self->_headerFailureStatus = kGCDWebServerHTTPStatusCode_RequestHeaderFieldsTooLarge;
                         block(nil);
                     } else {
                         [self readHeaders:headersData withCompletionBlock:block];
@@ -831,15 +988,31 @@ static uint16_t _LocalPortFromAddress(NSData *localAddressData) {
                 } else {
                     NSUInteger length = range.location + range.length;
 
-                    if (CFHTTPMessageAppendBytes(self->_requestMessage, headersData.bytes, length)) {
+                    // kHeadersMaxLength was only ever enforced on the branch above, i.e.
+                    // while still waiting for the terminator. A client that sent an
+                    // oversized header block in one burst had it found, parsed and served
+                    // — the cap was skipped entirely. Bound the block itself, not the
+                    // buffer, which legitimately runs past it once body bytes arrive in the
+                    // same read.
+                    if (length > kHeadersMaxLength) {
+                        GWS_LOG_ERROR(@"Request headers exceeded %i bytes on socket %i", (int)kHeadersMaxLength, self->_socket);
+                        self->_headerFailureStatus = kGCDWebServerHTTPStatusCode_RequestHeaderFieldsTooLarge;
+                        block(nil);
+                    } else if (!_ValidateRequestHeaderBlock(headersData.bytes, length)) {
+                        GWS_LOG_ERROR(@"Rejecting malformed request line or header syntax on socket %i", self->_socket);
+                        self->_headerFailureStatus = kGCDWebServerHTTPStatusCode_BadRequest;
+                        block(nil);
+                    } else if (CFHTTPMessageAppendBytes(self->_requestMessage, headersData.bytes, length)) {
                         if (CFHTTPMessageIsHeaderComplete(self->_requestMessage)) {
                             block([headersData subdataWithRange:NSMakeRange(length, headersData.length - length)]);
                         } else {
                             GWS_LOG_ERROR(@"Failed parsing request headers from socket %i", self->_socket);
+                            self->_headerFailureStatus = kGCDWebServerHTTPStatusCode_BadRequest;
                             block(nil);
                         }
                     } else {
                         GWS_LOG_ERROR(@"Failed appending request headers data from socket %i", self->_socket);
+                        self->_headerFailureStatus = kGCDWebServerHTTPStatusCode_BadRequest;
                         block(nil);
                     }
                 }
