@@ -60,6 +60,7 @@ NSString *const GCDWebServerOption_BonjourType = @"BonjourType";
 NSString *const GCDWebServerOption_BonjourTXTData = @"BonjourTXTData";
 NSString *const GCDWebServerOption_RequestNATPortMapping = @"RequestNATPortMapping";
 NSString *const GCDWebServerOption_BindToLocalhost = @"BindToLocalhost";
+NSString *const GCDWebServerOption_AllowedHostNames = @"AllowedHostNames";
 NSString *const GCDWebServerOption_MaxPendingConnections = @"MaxPendingConnections";
 NSString *const GCDWebServerOption_ServerName = @"ServerName";
 NSString *const GCDWebServerOption_AuthenticationMethod = @"AuthenticationMethod";
@@ -196,6 +197,7 @@ static void _ExecuteMainThreadRunLoopSources(void) {
     CFRunLoopTimerRef _disconnectTimer;  // Accessed on main thread only
 
     NSDictionary<NSString *, id> *_options;
+    NSSet<NSString *> *_allowedHostNames;
     NSMutableDictionary<NSString *, NSString *> *_authenticationBasicAccounts;
     NSMutableDictionary<NSString *, NSString *> *_authenticationDigestAccounts;
     Class _connectionClass;
@@ -526,6 +528,7 @@ static NSString *_ValidateOptions(NSDictionary<NSString *, id> *options) {
         GCDWebServerOption_BonjourTXTData: [NSDictionary class],
         GCDWebServerOption_RequestNATPortMapping: [NSNumber class],
         GCDWebServerOption_BindToLocalhost: [NSNumber class],
+        GCDWebServerOption_AllowedHostNames: [NSArray class],
         GCDWebServerOption_MaxPendingConnections: [NSNumber class],
         GCDWebServerOption_ServerName: [NSString class],
         GCDWebServerOption_AuthenticationMethod: [NSString class],
@@ -814,6 +817,35 @@ static inline NSString *_EncodeBase64(NSString *string) {
     NSString *const bonjourName = _GetOption(_options, GCDWebServerOption_BonjourName, nil);
     NSString *const bonjourType = _GetOption(_options, GCDWebServerOption_BonjourType, @"_http._tcp");
 
+    // Names this server answers to. Anything else in a request's "Host" is refused: see
+    // GCDWebServerOption_AllowedHostNames for why that is the only defence against DNS
+    // rebinding. IP literals are not listed because they are recognised by shape rather
+    // than by value — the interface set can change under us, and a browser cannot be made
+    // to put a literal in Host while scripting from a domain, so any literal is safe.
+    NSMutableSet<NSString *> *const allowedHostNames = [[NSMutableSet alloc] init];
+    [allowedHostNames addObject:@"localhost"];
+    NSString *const advertisedName = (bonjourName.length ? bonjourName : _serverName);
+
+    if (advertisedName.length) {
+        [allowedHostNames addObject:[[advertisedName stringByAppendingString:@".local"] lowercaseString]];
+    }
+
+    NSString *const machineName = [[NSProcessInfo processInfo] hostName];  // Typically "<device>.local"
+
+    if (machineName.length) {
+        // A trailing dot makes an mDNS name fully qualified; browsers send it without.
+        [allowedHostNames addObject:[[machineName hasSuffix:@"."] ? [machineName substringToIndex:(machineName.length - 1)] : machineName lowercaseString]];
+    }
+
+    for (NSString *name in (NSArray *)_GetOption(_options, GCDWebServerOption_AllowedHostNames, @[])) {
+        if ([name isKindOfClass:[NSString class]] && name.length) {
+            [allowedHostNames addObject:[name lowercaseString]];
+        }
+    }
+
+    _allowedHostNames = allowedHostNames;
+    GWS_LOG_INFO(@"%@ will answer to host names %@ (and any IP address literal) on port %i", [self class], [[allowedHostNames allObjects] componentsJoinedByString:@", "], (int)_port);
+
     if (bonjourName) {
         _registrationService = CFNetServiceCreate(kCFAllocatorDefault, CFSTR("local."), (__bridge CFStringRef)bonjourType, (__bridge CFStringRef)(bonjourName.length ? bonjourName : _serverName), (SInt32)_port);
 
@@ -971,6 +1003,7 @@ static inline NSString *_EncodeBase64(NSString *string) {
     _bindToLocalhost = NO;
 
     _serverName = nil;
+    _allowedHostNames = nil;
     _authenticationRealm = nil;
     _authenticationBasicAccounts = nil;
     _authenticationDigestAccounts = nil;

@@ -214,6 +214,7 @@ extern NSString *GCDWebServerStringFromSockAddr(const struct sockaddr *addr, BOO
 @interface GCDWebServer ()
 @property (nonatomic, readonly) NSMutableArray<GCDWebServerHandler *> *handlers;
 @property (nonatomic, readonly, nullable) NSString *serverName;
+@property (nonatomic, readonly, nullable) NSSet<NSString *> *allowedHostNames;
 @property (nonatomic, readonly, nullable) NSString *authenticationRealm;
 @property (nonatomic, readonly, nullable) NSMutableDictionary<NSString *, NSString *> *authenticationBasicAccounts;
 @property (nonatomic, readonly, nullable) NSMutableDictionary<NSString *, NSString *> *authenticationDigestAccounts;

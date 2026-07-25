@@ -1586,6 +1586,96 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
                              @"input must not be truncated at the first NUL");
 }
 
+#pragma mark - Host validation (DNS rebinding)
+
+// A page on evil.example that repoints its DNS at this server is, to the browser, genuinely
+// same-origin: CORS, Origin comparison and CSRF tokens are all satisfied. The one thing that
+// still differs is the name the browser puts in Host, which is why this check exists and why
+// nothing else substitutes for it.
+- (void)testHostValidationRefusesRebindingButAllowsRealNames {
+    GCDWebServer* server = [[GCDWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[GCDWebServerRequest class]
+                          processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
+                              return [GCDWebServerDataResponse responseWithText:@"served"];
+                          }];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* (^get)(NSString*) = ^(NSString* host) {
+        return SendRawRequest(server.port, [NSString stringWithFormat:@"GET / HTTP/1.1\r\nHost: %@\r\n\r\n", host]);
+    };
+
+    // Names and literals this server genuinely answers to.
+    for (NSString* host in @[ @"localhost", @"LOCALHOST", @"127.0.0.1", @"192.168.1.42", @"[::1]" ]) {
+        XCTAssertTrue([get(host) containsString:@"served"], @"legitimate host \"%@\" was refused", host);
+    }
+    XCTAssertTrue([get([NSString stringWithFormat:@"localhost:%lu", (unsigned long)server.port]) containsString:@"served"], @"matching port was refused");
+
+    // The rebinding case, and near-misses around it.
+    for (NSString* host in @[ @"evil.example", @"localhost.evil.com", @"attacker.localhost.evil.com" ]) {
+        XCTAssertTrue([get(host) containsString:@"421"], @"host \"%@\" should have been refused", host);
+    }
+    XCTAssertTrue([get([NSString stringWithFormat:@"localhost:%lu", (unsigned long)server.port + 1]) containsString:@"421"], @"a mismatched port should be refused");
+
+    // No Host at all is allowed: HTTP/1.0 and native clients omit it, and rebinding needs a
+    // browser, which never does.
+    XCTAssertTrue([SendRawRequest(server.port, @"GET / HTTP/1.0\r\n\r\n") containsString:@"served"], @"a request with no Host should be allowed");
+
+    [server stop];
+}
+
+// The check lives in the connection layer precisely so WebDAV inherits it — WebDAV has no
+// origin check of its own, so an uploader-only fix would leave the more capable API exposed.
+- (void)testHostValidationCoversWebDAV {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    XCTAssertTrue([@"secret" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    GCDWebDAVServer* server = [[GCDWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* rebound = SendRawRequest(server.port, @"GET /a.txt HTTP/1.1\r\nHost: evil.example\r\n\r\n");
+    XCTAssertTrue([rebound containsString:@"421"], @"WebDAV did not inherit host validation: %@", rebound);
+    XCTAssertFalse([rebound containsString:@"secret"], @"WebDAV served file contents to a rebound host");
+
+    NSString* legitimate = SendRawRequest(server.port, @"GET /a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([legitimate containsString:@"secret"], @"host validation broke a legitimate WebDAV read: %@", legitimate);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// The escape hatch for anyone reached under another name — a reverse proxy, a custom DNS
+// entry. Entries may pin their own port.
+- (void)testHostValidationHonoursConfiguredNames {
+    GCDWebServer* server = [[GCDWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[GCDWebServerRequest class]
+                          processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
+                              return [GCDWebServerDataResponse responseWithText:@"served"];
+                          }];
+    NSDictionary* options = @{
+        GCDWebServerOption_Port : @0,
+        GCDWebServerOption_BindToLocalhost : @YES,
+        GCDWebServerOption_AllowedHostNames : @[ @"files.example", @"pinned.example:8080" ]
+    };
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* (^get)(NSString*) = ^(NSString* host) {
+        return SendRawRequest(server.port, [NSString stringWithFormat:@"GET / HTTP/1.1\r\nHost: %@\r\n\r\n", host]);
+    };
+
+    XCTAssertTrue([get(@"files.example") containsString:@"served"]);
+    XCTAssertTrue([get(@"FILES.EXAMPLE") containsString:@"served"], @"configured names should match case-insensitively");
+    XCTAssertTrue([get(@"pinned.example:8080") containsString:@"served"], @"an entry may pin its own port");
+    XCTAssertTrue([get(@"other.example") containsString:@"421"], @"an unconfigured name should still be refused");
+    XCTAssertTrue([get(@"localhost") containsString:@"served"], @"the defaults should survive adding names");
+
+    [server stop];
+}
+
 #pragma mark - gzip response encoding
 
 // A gzip-encoded response body must decompress back to exactly what the handler produced.
