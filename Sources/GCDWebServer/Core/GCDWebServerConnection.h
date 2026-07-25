@@ -137,13 +137,18 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSURL *)rewriteRequestURL:(NSURL *)url withMethod:(NSString *)method headers:(NSDictionary<NSString *, NSString *> *)headers;
 
 /**
- *  Assuming a valid HTTP request was received, this method is called before
+ *  Assuming valid HTTP request headers were received, this method is called before
  *  the request is processed.
  *
  *  Return a non-nil GCDWebServerResponse to bypass the request processing entirely.
  *
  *  The default implementation checks for HTTP authentication if applicable
  *  and returns a barebone 401 status code response if authentication failed.
+ *
+ *  @warning This is called as soon as the headers are available — for a request with a
+ *  body, *before* that body has been received — so that a request which is going to be
+ *  refused never causes its body to be spooled to disk. An override must therefore
+ *  decide on the headers alone and must not read the request body.
  */
 - (nullable GCDWebServerResponse *)preflightRequest:(GCDWebServerRequest *)request;
 

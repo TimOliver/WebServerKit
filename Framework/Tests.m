@@ -565,6 +565,42 @@ static NSString* MakeTempDirectory(void) {
 // credentials gets 401 (and no body leaks), and correct credentials get through.
 // This exercises the per-connection path that reads the server's auth
 // configuration, guarding it against regressions.
+// A refusal that depends only on headers must be answered before the body is read.
+// Previously the connection matched a handler, read the entire body to the device's
+// temp directory, and only then ran the Host allow-list and authentication — so an
+// unauthenticated client could make the server write an unbounded number of bytes to
+// disk (288 MB before the 401, in testing) and repeat it across the connection pool.
+//
+// The test declares a large Content-Length and sends NO body: if the refusal is decided
+// up front the reply arrives immediately, whereas the old ordering sits waiting for
+// bytes that never come until the idle timeout fires.
+- (void)testHeaderOnlyRefusalsHappenBeforeTheBodyIsRead {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    GCDWebDAVServer* server = [[GCDWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{
+        GCDWebServerOption_Port : @0,
+        GCDWebServerOption_BindToLocalhost : @YES,
+        GCDWebServerOption_AuthenticationMethod : GCDWebServerAuthenticationMethod_Basic,
+        GCDWebServerOption_AuthenticationAccounts : @{@"user" : @"pass"}
+    };
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    // (a) No credentials.
+    NSString* unauthenticated = SendRawRequest(server.port, @"PUT /big.bin HTTP/1.1\r\nHost: localhost\r\nContent-Length: 104857600\r\n\r\n");
+    XCTAssertTrue([unauthenticated containsString:@"401"], @"expected 401 before the body, got: %@", unauthenticated);
+
+    // (b) Valid credentials but a Host the allow-list does not cover. "dXNlcjpwYXNz" is
+    // base64 of "user:pass", so this fails only on the Host check.
+    NSString* badHost = SendRawRequest(server.port, @"PUT /big.bin HTTP/1.1\r\nHost: evil.example\r\nAuthorization: Basic dXNlcjpwYXNz\r\nContent-Length: 104857600\r\n\r\n");
+    XCTAssertTrue([badHost containsString:@"421"], @"expected 421 before the body, got: %@", badHost);
+
+    XCTAssertEqual([fm contentsOfDirectoryAtPath:dir error:NULL].count, (NSUInteger)0, @"nothing should have been stored");
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 - (void)testBasicAuthEnforcedOverConnection {
     GCDWebServer* server = [[GCDWebServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
