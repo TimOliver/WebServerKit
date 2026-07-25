@@ -102,7 +102,10 @@
     NSData *const data = [text dataUsingEncoding:NSUTF8StringEncoding];
 
     if (data == nil) {
-        GWS_DNOT_REACHED();
+        // Not GWS_DNOT_REACHED(): the text is whatever the caller reflected into the
+        // response — often request-derived — and this method is already declared as
+        // returning nil on failure, so a bad string must not abort a Debug build.
+        GWS_LOG_ERROR(@"Failed encoding text response as UTF-8");
         return nil;
     }
 
@@ -113,7 +116,10 @@
     NSData *const data = [html dataUsingEncoding:NSUTF8StringEncoding];
 
     if (data == nil) {
-        GWS_DNOT_REACHED();
+        // As above, and reachable with a nil argument from -initWithHTMLTemplate: below
+        // whenever the template cannot be read — an ordinary environment condition (a
+        // missing or non-UTF-8 bundle resource) that any remote request would then hit.
+        GWS_LOG_ERROR(@"Failed encoding HTML response as UTF-8");
         return nil;
     }
 
@@ -122,6 +128,11 @@
 
 - (instancetype)initWithHTMLTemplate:(NSString *)path variables:(NSDictionary<NSString *, NSString *> *)variables {
     NSMutableString *const html = [[NSMutableString alloc] initWithContentsOfFile:path encoding:NSUTF8StringEncoding error:NULL];
+
+    if (html == nil) {
+        GWS_LOG_ERROR(@"Failed reading HTML template \"%@\"", path);
+        return nil;
+    }
 
     [variables enumerateKeysAndObjectsUsingBlock:^(NSString *key, NSString *value, BOOL *stop) {
         [html replaceOccurrencesOfString:[NSString stringWithFormat:@"%%%@%%", key] withString:value options:0 range:NSMakeRange(0, html.length)];

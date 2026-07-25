@@ -72,30 +72,96 @@
     return [self initWithFile:path byteRange:range isAttachment:NO mimeTypeOverrides:nil];
 }
 
+// Truncated to whole seconds, which is all "Last-Modified" (RFC 822) can express. Keeping
+// the nanoseconds made the response date strictly newer than the "If-Modified-Since" value
+// the client echoed back from it, so -_CompareResources never validated and nothing on an
+// APFS volume (where the nanoseconds are practically never zero) could ever be revalidated
+// by date. The nanoseconds are still used for the ETag, which has no such quantization.
 static inline NSDate *_NSDateFromTimeSpec(const struct timespec *t) {
-    return [NSDate dateWithTimeIntervalSince1970:((NSTimeInterval)t->tv_sec + (NSTimeInterval)t->tv_nsec / 1000000000.0)];
+    return [NSDate dateWithTimeIntervalSince1970:(NSTimeInterval)t->tv_sec];
+}
+
+// The inherited initializer is reachable (+response, or a direct -init) and leaves every
+// ivar zeroed — and 0 is a perfectly good descriptor number, which -dealloc would then
+// close out from under whoever actually owns it. Every path that produces an instance of
+// this class has to establish the -1 sentinel before anything can deallocate it.
+- (instancetype)init {
+    if ((self = [super init])) {
+        _file = -1;
+    }
+
+    return self;
+}
+
+// A bodyless 416 for a syntactically valid but unsatisfiable range (RFC 7233 §4.4): no
+// contentType is set, so -hasBody is NO and the file-reading path is never entered.
+// Returning nil here instead — as this used to — makes callers report either 500 (the
+// WebDAV GET handler) or 404 (-addGETHandlerForBasePath:) for a file that exists, which
+// is what "curl -C -" gets when resuming an already-complete download.
+- (void)_configureAsUnsatisfiableRangeForFileSize:(NSUInteger)fileSize {
+    self.statusCode = kGCDWebServerHTTPStatusCode_RequestedRangeNotSatisfiable;
+    [self setValue:[NSString stringWithFormat:@"bytes */%lu", (unsigned long)fileSize] forAdditionalHeader:@"Content-Range"];
 }
 
 - (instancetype)initWithFile:(NSString *)path byteRange:(NSRange)range isAttachment:(BOOL)attachment mimeTypeOverrides:(NSDictionary<NSString *, NSString *> *)overrides {
+    // [super init] and the sentinel come first so that every failure below can simply
+    // "return nil": ARC deallocates a nil-returning initializer's receiver, so -dealloc is
+    // what closes the descriptor on those paths, and it must never see a zeroed _file.
+    if (!(self = [super init])) {
+        return nil;
+    }
+
+    _file = -1;  // Not 0, which is a legal descriptor -close must not close by accident
+
+    // Open the file *once*, here, and derive contentLength, lastModifiedDate and the ETag
+    // from an fstat() of that descriptor. The old lstat()-here plus open()-in--open: pair
+    // walked the path twice with the whole runtime of the request handler in between, so a
+    // file replaced in that window (PUT racing a GET) was served as the new inode's bytes
+    // under the old size, ETag and Last-Modified: a body truncated at the old length that
+    // looks complete on the wire and gets cached under a stale validator. One open also
+    // makes the regular-file check and the open atomic instead of two separate path walks.
+    // O_NONBLOCK because open(2) on a FIFO or a device node blocks until the other end
+    // shows up — the lstat-first order used to rule those out before opening them, and a
+    // blocked open would wedge the connection's serial queue for good.
+    _file = open([path fileSystemRepresentation], O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+
+    // 0 is a legal descriptor (it is handed out whenever stdin has been closed), so only a
+    // negative result means failure. O_NOFOLLOW makes a symlink fail here with ELOOP,
+    // which preserves the refusal the lstat() type check used to provide.
+    if (_file < 0) {
+        GWS_LOG_ERROR(@"Refusing to serve \"%@\": %s (%i)", path, strerror(errno), errno);
+        return nil;
+    }
+
     struct stat info;
 
     // Compare the whole file-type field, not a single bit: S_IFREG (0100000) is a value
     // within the S_IFMT field, not a flag, so "st_mode & S_IFREG" is also non-zero for
     // symlinks (S_IFLNK, 0120000) and sockets (S_IFSOCK, 0140000), which share that bit.
-    // Only O_NOFOLLOW in -open: kept a symlink from being read through here; the type
-    // check itself must be correct so that mitigation stays defense in depth.
-    // Not GWS_DNOT_REACHED(): this is now reachable on ordinary remote input (a request
-    // naming a symlink, socket, or an item removed since the caller's existence check),
+    // Not GWS_DNOT_REACHED(): this is reachable on ordinary remote input (a request naming
+    // a directory, a device node, or an item removed since the caller's existence check),
     // and that macro aborts in Debug builds. Callers turn the nil into a 500.
-    if (lstat([path fileSystemRepresentation], &info) || ((info.st_mode & S_IFMT) != S_IFREG)) {
+    if (fstat(_file, &info) || ((info.st_mode & S_IFMT) != S_IFREG)) {
         GWS_LOG_ERROR(@"Refusing to serve \"%@\": not a regular file", path);
         return nil;
+    }
+
+    // Past the type check nothing can block in open(2) anymore, so restore the blocking
+    // read semantics the body reader was written against. Failure is not fatal: O_NONBLOCK
+    // has no effect on reads from a regular file, this is only belt and braces.
+    const int flags = fcntl(_file, F_GETFL, 0);
+
+    if ((flags < 0) || (fcntl(_file, F_SETFL, flags & ~O_NONBLOCK) < 0)) {
+        GWS_LOG_ERROR(@"Failed clearing O_NONBLOCK on \"%@\": %s (%i)", path, strerror(errno), errno);
     }
 
 #ifndef __LP64__
 
     if (info.st_size >= (off_t)4294967295) {  // In 32 bit mode, we can't handle files greater than 4 GiBs (don't use "NSUIntegerMax" here to avoid potential unsigned to signed conversion issues)
-        GWS_DNOT_REACHED();
+        // As with the file-type check above: an oversized file on disk is an ordinary
+        // condition a remote request can name, not a programmer error, so it must not
+        // reach GWS_DNOT_REACHED() and abort a Debug build. Callers turn the nil into a 500.
+        GWS_LOG_ERROR(@"Refusing to serve \"%@\": too large for a 32 bit build", path);
         return nil;
     }
 
@@ -114,61 +180,84 @@ static inline NSDate *_NSDateFromTimeSpec(const struct timespec *t) {
         }
 
         if (range.length == 0) {
-            return nil;  // TODO: Return 416 status code and "Content-Range: bytes */{file length}" header
+            // The 416 carries no body, so release the descriptor now instead of holding it
+            // for the life of the response.
+            close(_file);
+            _file = -1;
+            [self _configureAsUnsatisfiableRangeForFileSize:fileSize];
+            return self;
         }
     } else {
         range.location = 0;
         range.length = fileSize;
     }
 
-    if ((self = [super init])) {
-        _path = [path copy];
-        _offset = range.location;
-        _size = range.length;
+    _path = [path copy];
+    _offset = range.location;
+    _size = range.length;
 
-        if (hasByteRange) {
-            [self setStatusCode:kGCDWebServerHTTPStatusCode_PartialContent];
-            [self setValue:[NSString stringWithFormat:@"bytes %lu-%lu/%lu", (unsigned long)_offset, (unsigned long)(_offset + _size - 1), (unsigned long)fileSize] forAdditionalHeader:@"Content-Range"];
-            GWS_LOG_DEBUG(@"Using content bytes range [%lu-%lu] for file \"%@\"", (unsigned long)_offset, (unsigned long)(_offset + _size - 1), path);
-        }
-
-        if (attachment) {
-            NSString *const fileName = [path lastPathComponent];
-            // Strip control characters (notably CR/LF) from the quoted filename before
-            // building the header. A bare CR/LF in the value makes CFNetwork drop the
-            // entire Content-Disposition header, which would serve the file inline (e.g. an
-            // uploaded ".html" as text/html on our own origin) instead of as a download — a
-            // stored-XSS vector. The quote is removed too so it cannot close the field
-            // early. The RFC 5987 filename* below is percent-encoded, so it is unaffected.
-            NSString *const safeName = [[[fileName componentsSeparatedByCharactersInSet:[NSCharacterSet controlCharacterSet]] componentsJoinedByString:@""] stringByReplacingOccurrencesOfString:@"\"" withString:@""];
-            NSData *const data = [safeName dataUsingEncoding:NSISOLatin1StringEncoding allowLossyConversion:YES];
-            NSString *const lossyFileName = data ? [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding] : nil;
-
-            if (lossyFileName) {
-                NSString *value = [NSString stringWithFormat:@"attachment; filename=\"%@\"; filename*=UTF-8''%@", lossyFileName, GCDWebServerEscapeURLString(fileName)];
-                [self setValue:value forAdditionalHeader:@"Content-Disposition"];
-            } else {
-                GWS_DNOT_REACHED();
-            }
-            // Defense in depth: never let a browser MIME-sniff a download into active content.
-            [self setValue:@"nosniff" forAdditionalHeader:@"X-Content-Type-Options"];
-        }
-
-        self.contentType = GCDWebServerGetMimeTypeForExtension([_path pathExtension], overrides);
-        self.contentLength = _size;
-        self.lastModifiedDate = _NSDateFromTimeSpec(&info.st_mtimespec);
-        self.eTag = [NSString stringWithFormat:@"%llu/%li/%li", info.st_ino, info.st_mtimespec.tv_sec, info.st_mtimespec.tv_nsec];
+    if (hasByteRange) {
+        [self setStatusCode:kGCDWebServerHTTPStatusCode_PartialContent];
+        [self setValue:[NSString stringWithFormat:@"bytes %lu-%lu/%lu", (unsigned long)_offset, (unsigned long)(_offset + _size - 1), (unsigned long)fileSize] forAdditionalHeader:@"Content-Range"];
+        GWS_LOG_DEBUG(@"Using content bytes range [%lu-%lu] for file \"%@\"", (unsigned long)_offset, (unsigned long)(_offset + _size - 1), path);
     }
+
+    if (attachment) {
+        NSString *const fileName = [path lastPathComponent];
+        // Strip control characters (notably CR/LF) from the quoted filename before
+        // building the header. A bare CR/LF in the value makes CFNetwork drop the
+        // entire Content-Disposition header, which would serve the file inline (e.g. an
+        // uploaded ".html" as text/html on our own origin) instead of as a download — a
+        // stored-XSS vector. The quote is removed too so it cannot close the field
+        // early, and the backslash with it: "evil\" would otherwise be emitted as
+        // filename="evil\" where \" reads as an escaped quote, leaving the quoted
+        // string unterminated and swallowing the parameters that follow. The RFC 5987
+        // filename* below is percent-encoded, so it is unaffected.
+        NSString *safeName = [[fileName componentsSeparatedByCharactersInSet:[NSCharacterSet controlCharacterSet]] componentsJoinedByString:@""];
+        safeName = [safeName stringByReplacingOccurrencesOfString:@"\"" withString:@""];
+        safeName = [safeName stringByReplacingOccurrencesOfString:@"\\" withString:@""];
+        NSData *const data = [safeName dataUsingEncoding:NSISOLatin1StringEncoding allowLossyConversion:YES];
+        NSString *const lossyFileName = data ? [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding] : nil;
+
+        if (lossyFileName) {
+            NSString *value = [NSString stringWithFormat:@"attachment; filename=\"%@\"; filename*=UTF-8''%@", lossyFileName, GCDWebServerEscapeURLString(fileName)];
+            [self setValue:value forAdditionalHeader:@"Content-Disposition"];
+        } else {
+            // The name is remote-controlled, so a transcoding failure here is not a
+            // programmer error to assert on. Emit the disposition without the legacy
+            // filename parameter rather than no disposition at all: dropping the header
+            // entirely would serve the file inline, which is exactly what it exists to
+            // prevent.
+            GWS_LOG_ERROR(@"Failed encoding attachment file name \"%@\" as ISO-8859-1", fileName);
+            NSString *value = [NSString stringWithFormat:@"attachment; filename*=UTF-8''%@", GCDWebServerEscapeURLString(fileName)];
+            [self setValue:value forAdditionalHeader:@"Content-Disposition"];
+        }
+        // Defense in depth: never let a browser MIME-sniff a download into active content.
+        [self setValue:@"nosniff" forAdditionalHeader:@"X-Content-Type-Options"];
+    }
+
+    self.contentType = GCDWebServerGetMimeTypeForExtension([_path pathExtension], overrides);
+    self.contentLength = _size;
+    self.lastModifiedDate = _NSDateFromTimeSpec(&info.st_mtimespec);
+    // Quoted, as RFC 7232 requires of an entity-tag: an unquoted value is not a valid
+    // opaque-tag and clients are free to reject it. The comparison in
+    // -_CompareResources is literal and clients echo the value back verbatim, so the
+    // quotes travel with it in "If-None-Match" and still match.
+    self.eTag = [NSString stringWithFormat:@"\"%llu/%li/%li\"", info.st_ino, info.st_mtimespec.tv_sec, info.st_mtimespec.tv_nsec];
 
     return self;
 }
 
 - (BOOL)open:(NSError **)error {
-    _file = open([_path fileSystemRepresentation], O_NOFOLLOW | O_RDONLY);
-
-    if (_file <= 0) {
+    // Deliberately does not open anything: the descriptor comes from the initializer, which
+    // fstat'd this exact one to produce Content-Length, Last-Modified and the ETag. Opening
+    // the path again here — this runs after the handler has returned, an unbounded gap for
+    // an async handler — could pick up a different inode and serve a body the headers no
+    // longer describe. A negative _file means the initializer never handed one over (or
+    // -close already ran), which lseek would report as EBADF anyway; say so explicitly.
+    if (_file < 0) {
         if (error) {
-            *error = GCDWebServerMakePosixError(errno);
+            *error = GCDWebServerMakePosixError(EBADF);
         }
 
         return NO;
@@ -179,7 +268,6 @@ static inline NSDate *_NSDateFromTimeSpec(const struct timespec *t) {
             *error = GCDWebServerMakePosixError(errno);
         }
 
-        close(_file);
         return NO;
     }
 
@@ -189,7 +277,13 @@ static inline NSDate *_NSDateFromTimeSpec(const struct timespec *t) {
 - (NSData *)readData:(NSError **)error {
     size_t length = MIN((NSUInteger)kFileReadBufferSize, _size);
     NSMutableData *data = [[NSMutableData alloc] initWithLength:length];
-    ssize_t result = read(_file, data.mutableBytes, length);
+    ssize_t result;
+
+    // A signal delivered mid-read is not a transfer failure: without the retry the
+    // response is silently truncated at whatever had been sent so far.
+    do {
+        result = read(_file, data.mutableBytes, length);
+    } while ((result < 0) && (errno == EINTR));
 
     if (result < 0) {
         if (error) {
@@ -215,7 +309,25 @@ static inline NSDate *_NSDateFromTimeSpec(const struct timespec *t) {
 }
 
 - (void)close {
-    close(_file);
+    // Reset the descriptor so a second -close (a body reader completing twice used to be
+    // able to cause one) cannot close an unrelated file that has since been given the
+    // same number.
+    if (_file >= 0) {
+        close(_file);
+        _file = -1;
+    }
+}
+
+- (void)dealloc {
+    // The descriptor is acquired in the initializer, but plenty of responses are destroyed
+    // without their body ever being read: a HEAD (the connection sets hasBody to NO and so
+    // never calls -performOpen:/-performClose), a 304 substituted by -overrideResponse:,
+    // a handler that simply drops the response, and every failure path of the initializer
+    // itself — ARC deallocates the receiver when an initializer returns nil. None of those
+    // reach -close, so without this each one leaks a descriptor per request.
+    if (_file >= 0) {
+        close(_file);
+    }
 }
 
 - (NSString *)description {
