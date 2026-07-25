@@ -41,6 +41,30 @@
 // worker-thread stack and crash the process. Real forms never nest beyond one level.
 #define kMultiPartMaxDepth 8
 
+// Upper bound on how many parts a single body may contain. Each completed part costs
+// either a retained NSData (an argument) or a temporary file (a file part), and both
+// live until the request is deallocated, so an otherwise-legal body made of millions of
+// tiny parts would exhaust memory or the temporary directory's inodes. Real forms send
+// a handful.
+#define kMultiPartMaxParts 1024
+
+// Upper bound on a single part's header block. See -_parseData: the strings parsed out of
+// these headers are retained per part, so they need bounding just as the content does.
+#define kMultiPartMaxHeadersLength (8 * 1024)
+
+// The in-memory budget is shared between a parser and every sub-parser it spawns: a
+// nested "multipart/mixed" part appends into the same argument and file arrays as its
+// parent, so a per-parser counter would let nesting multiply the real ceiling.
+@interface GCDWebServerMIMEStreamBudget : NSObject {
+@public
+    NSUInteger argumentBytes;  // Total bytes retained by argument parts so far
+    NSUInteger partCount;      // Total completed parts (arguments and files) so far
+}
+@end
+
+@implementation GCDWebServerMIMEStreamBudget
+@end
+
 typedef enum {
     kParserState_Undefined = 0,
     kParserState_Start,
@@ -127,6 +151,7 @@ static NSData *_dashNewlineData = nil;
     int _tmpFile;
     GCDWebServerMIMEStreamParser *_subParser;
     NSUInteger _depth;  // Nesting level; 0 for the top-level parser, +1 per multipart/mixed
+    GCDWebServerMIMEStreamBudget *_budget;  // Shared with every sub-parser
 }
 
 + (void)initialize {
@@ -146,11 +171,14 @@ static NSData *_dashNewlineData = nil;
     }
 }
 
-- (instancetype)initWithBoundary:(NSString *_Nonnull)boundary defaultControlName:(NSString *_Nullable)name arguments:(NSMutableArray<GCDWebServerMultiPartArgument *> *_Nonnull)arguments files:(NSMutableArray<GCDWebServerMultiPartFile *> *_Nonnull)files depth:(NSUInteger)depth {
+- (instancetype)initWithBoundary:(NSString *_Nonnull)boundary defaultControlName:(NSString *_Nullable)name arguments:(NSMutableArray<GCDWebServerMultiPartArgument *> *_Nonnull)arguments files:(NSMutableArray<GCDWebServerMultiPartFile *> *_Nonnull)files depth:(NSUInteger)depth budget:(GCDWebServerMIMEStreamBudget *_Nonnull)budget {
     NSData *data = boundary.length ? [[NSString stringWithFormat:@"--%@", boundary] dataUsingEncoding:NSASCIIStringEncoding] : nil;
 
     if (data == nil) {
-        GWS_DNOT_REACHED();
+        // A missing or non-ASCII "boundary" parameter is ordinary malformed client input
+        // (the caller passes the value straight from the Content-Type header), so reject
+        // it rather than abort in debug.
+        GWS_LOG_ERROR(@"Missing or invalid 'boundary' parameter for 'multipart/form-data'");
         return nil;
     }
 
@@ -168,15 +196,17 @@ static NSData *_dashNewlineData = nil;
         _arguments = arguments;
         _files = files;
         _data = [[NSMutableData alloc] initWithCapacity:kMultiPartBufferSize];
+        _tmpFile = -1;  // fd 0 is legal, so -1 (not 0) is the "no temporary file" sentinel
         _state = kParserState_Start;
         _depth = depth;
+        _budget = budget;
     }
 
     return self;
 }
 
 - (void)dealloc {
-    if (_tmpFile > 0) {
+    if (_tmpFile >= 0) {
         close(_tmpFile);
         unlink([_tmpPath fileSystemRepresentation]);
     }
@@ -194,6 +224,16 @@ static NSData *_dashNewlineData = nil;
         NSRange range = [_data rangeOfData:_newlinesData options:0 range:NSMakeRange(0, _data.length)];
 
         if (range.location != NSNotFound) {
+            // Bound the part's header block. The budget below charges only part *content*,
+            // but the control name, file name and content type parsed out of these headers
+            // are retained for the life of the request too — so without this a body of parts
+            // each carrying a multi-megabyte name=".…" grows memory without limit while the
+            // budget still reads zero. Real part headers are a few hundred bytes.
+            if (range.location > kMultiPartMaxHeadersLength) {
+                GWS_LOG_ERROR(@"Headers of a part of 'multipart/form-data' exceed the %i byte limit", (int)kMultiPartMaxHeadersLength);
+                return NO;
+            }
+
             _controlName = nil;
             _fileName = nil;
             _contentType = nil;
@@ -222,23 +262,22 @@ static NSData *_dashNewlineData = nil;
                                 _fileName = GCDWebServerExtractHeaderValueParameter(contentDisposition, @"filename");
                             }
                         }
-                    } else {
-                        GWS_DNOT_REACHED();
-                    }
+                    }  // A header line without a colon is malformed client input: skip it
                 }
 
                 if (_contentType == nil) {
                     _contentType = @"text/plain";
                 }
             } else {
+                // Part headers that are not valid UTF-8 are ordinary malformed input, not an
+                // unreachable state; leaving _controlName nil fails the parse just below.
                 GWS_LOG_ERROR(@"Failed decoding headers in part of 'multipart/form-data'");
-                GWS_DNOT_REACHED();
             }
 
             if (_controlName) {
                 if ([GCDWebServerTruncateHeaderValue(_contentType) isEqualToString:@"multipart/mixed"]) {
                     NSString *const boundary = GCDWebServerExtractHeaderValueParameter(_contentType, @"boundary");
-                    _subParser = [[GCDWebServerMIMEStreamParser alloc] initWithBoundary:boundary defaultControlName:_controlName arguments:_arguments files:_files depth:(_depth + 1)];
+                    _subParser = [[GCDWebServerMIMEStreamParser alloc] initWithBoundary:boundary defaultControlName:_controlName arguments:_arguments files:_files depth:(_depth + 1) budget:_budget];
 
                     if (_subParser == nil) {
                         // A nil sub-parser is now an expected rejection (nesting past the
@@ -251,15 +290,19 @@ static NSData *_dashNewlineData = nil;
                     NSString *const path = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSProcessInfo processInfo] globallyUniqueString]];
                     _tmpFile = open([path fileSystemRepresentation], O_CREAT | O_TRUNC | O_WRONLY, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 
-                    if (_tmpFile > 0) {
+                    if (_tmpFile >= 0) {
                         _tmpPath = [path copy];
                     } else {
-                        GWS_DNOT_REACHED();
+                        // A full or unwritable temporary directory is an environment condition
+                        // rather than an unreachable state.
+                        GWS_LOG_ERROR(@"Failed creating temporary file for part of 'multipart/form-data': %s (%i)", strerror(errno), errno);
                         success = NO;
                     }
                 }
             } else {
-                GWS_DNOT_REACHED();
+                // A part with no usable Content-Disposition "name" parameter — malformed
+                // client input, so fail the parse rather than abort in debug.
+                GWS_LOG_ERROR(@"Missing control name in part of 'multipart/form-data'");
                 success = NO;
             }
 
@@ -296,22 +339,45 @@ static NSData *_dashNewlineData = nil;
                         }
 
                         _subParser = nil;
+                    } else if (_budget->partCount >= kMultiPartMaxParts) {
+                        GWS_LOG_ERROR(@"'multipart/form-data' body exceeds the %i part limit", (int)kMultiPartMaxParts);
+                        success = NO;
+
+                        if (_tmpPath) {  // Drop the part already staged on disk rather than orphaning it
+                            close(_tmpFile);
+                            _tmpFile = -1;
+                            unlink([_tmpPath fileSystemRepresentation]);
+                            _tmpPath = nil;
+                        }
                     } else if (_tmpPath) {
                         ssize_t result = write(_tmpFile, dataBytes, dataLength);
                         int closeResult = close(_tmpFile);  // Always close (no short-circuit) so the fd never leaks on a write failure.
-                        _tmpFile = 0;
+                        _tmpFile = -1;
 
                         if ((result == (ssize_t)dataLength) && (closeResult == 0)) {
+                            _budget->partCount += 1;
                             GCDWebServerMultiPartFile *const file = [[GCDWebServerMultiPartFile alloc] initWithControlName:_controlName contentType:_contentType fileName:_fileName temporaryPath:_tmpPath];
                             [_files addObject:file];
                         } else {
-                            GWS_DNOT_REACHED();
+                            // A short write means the temporary directory filled up — an ordinary
+                            // environment condition, not an unreachable state, so fail the parse
+                            // rather than abort in debug.
+                            GWS_LOG_ERROR(@"Failed writing part of 'multipart/form-data' to disk");
                             success = NO;
                             unlink([_tmpPath fileSystemRepresentation]);  // Remove the orphaned temp file; -dealloc can't (we clear _tmpPath below).
                         }
 
                         _tmpPath = nil;
+                    } else if (_budget->argumentBytes + dataLength > (NSUInteger)kGCDWebServerMaxInMemoryBodyLength) {
+                        // Every argument part stays in memory for the life of the request, so the
+                        // working-buffer cap in -appendBytes: does not bound them: a body of many
+                        // individually-legal parts would otherwise grow without limit. File parts
+                        // are drained to disk and so are governed by the part count instead.
+                        GWS_LOG_ERROR(@"Multipart form arguments retained in memory exceed the %i byte limit", (int)kGCDWebServerMaxInMemoryBodyLength);
+                        success = NO;
                     } else {
+                        _budget->partCount += 1;
+                        _budget->argumentBytes += dataLength;
                         NSData *const data = [[NSData alloc] initWithBytes:(void *)dataBytes length:dataLength];
                         GCDWebServerMultiPartArgument *const argument = [[GCDWebServerMultiPartArgument alloc] initWithControlName:_controlName contentType:_contentType data:data];
                         [_arguments addObject:argument];
@@ -346,7 +412,8 @@ static NSData *_dashNewlineData = nil;
                     if (result == (ssize_t)length) {
                         [_data replaceBytesInRange:NSMakeRange(0, length) withBytes:NULL length:0];
                     } else {
-                        GWS_DNOT_REACHED();
+                        // As above: a short write means the temporary directory filled up.
+                        GWS_LOG_ERROR(@"Failed streaming part of 'multipart/form-data' to disk: %s (%i)", strerror(errno), errno);
                         success = NO;
                     }
                 }
@@ -405,7 +472,7 @@ static NSData *_dashNewlineData = nil;
 - (BOOL)open:(NSError **)error {
     NSString *const boundary = GCDWebServerExtractHeaderValueParameter(self.contentType, @"boundary");
 
-    _parser = [[GCDWebServerMIMEStreamParser alloc] initWithBoundary:boundary defaultControlName:nil arguments:_arguments files:_files depth:0];
+    _parser = [[GCDWebServerMIMEStreamParser alloc] initWithBoundary:boundary defaultControlName:nil arguments:_arguments files:_files depth:0 budget:[[GCDWebServerMIMEStreamBudget alloc] init]];
 
     if (_parser == nil) {
         if (error) {
