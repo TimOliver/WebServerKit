@@ -42,6 +42,7 @@
 #define kBodyReadCapacity (256 * 1024)
 #define kHeadersMaxLength (64 * 1024)  // Upper bound on total request header bytes, to cap memory for a client that never sends the terminating blank line.
 #define kMaxHeaderPhaseTicks 2  // Idle-timer ticks a connection may spend receiving its request line + headers before being closed (defeats a slowloris dribbling bytes just under the zero-progress check).
+#define kMinReceiveBytesPerSecond 32  // Throughput a connection must sustain while its request body is still arriving; see -_checkIdleTimeout.
 
 typedef void (^ReadDataCompletionBlock)(BOOL success);
 typedef void (^ReadHeadersCompletionBlock)(NSData *extraData);
@@ -108,6 +109,8 @@ NS_ASSUME_NONNULL_END
     NSUInteger _idleCheckedBytes;  // Accessed on _connectionQueue only
     BOOL _idleCheckWasBusy;        // Accessed on _connectionQueue only
     NSUInteger _headerPhaseTicks;  // Idle ticks elapsed before a request was matched; on _connectionQueue only
+    BOOL _requestReceived;         // Set once the body is fully read and the handler runs; on _connectionQueue only
+    NSTimeInterval _idleTimeout;   // Seconds between idle-timer ticks; 0 when idle timeouts are disabled
 
 #ifdef __GCDWEBSERVER_ENABLE_TESTING__
     NSUInteger _connectionIndex;
@@ -163,6 +166,7 @@ NS_ASSUME_NONNULL_END
 
 - (void)_startProcessingRequest {
     GWS_DCHECK(_responseMessage == NULL);
+    _requestReceived = YES;  // Nothing further is read from the socket for this request
 
     GCDWebServerResponse *preflightResponse = [self preflightRequest:_request];
 
@@ -346,24 +350,20 @@ NS_ASSUME_NONNULL_END
             }];
 }
 
-// Runs on _connectionQueue. The connection is considered hung when a socket read
-// or write has been pending across two consecutive timer ticks without a single
-// byte moving in either direction; requiring two ticks avoids killing an I/O
-// operation that merely started just before a tick. Time spent waiting on a
-// request handler to produce a response (no pending socket I/O) never counts, so
-// slow handlers are unaffected. Note this does not defeat a client deliberately
-// dribbling one byte per interval — any transfer at all counts as progress.
+// Runs on _connectionQueue. A connection is considered hung when a socket read or write
+// has been pending across two consecutive timer ticks without enough bytes moving in
+// either direction; requiring two ticks avoids killing an I/O operation that merely
+// started just before a tick. Time spent waiting on a request handler to produce a
+// response (no pending socket I/O) never counts, so slow handlers are unaffected. How
+// much counts as "enough" depends on the phase — see the two guards below.
 - (void)_checkIdleTimeout {
     NSUInteger transferredBytes = _totalBytesRead + _totalBytesWritten;
     BOOL waitingOnSocket = (_pendingIOCount > 0);
 
     // Absolute deadline for the request-line + headers phase (before any handler is
-    // matched, i.e. while _request is still nil — assigned on this same queue). The
-    // zero-progress check below spares slow handlers and slow bodies, but it is
-    // defeated by a client that dribbles one byte per tick to keep "progress" moving;
-    // such a client could otherwise hold a connection slot forever (128 of them = a
-    // full-server denial of service). A well-behaved client sends its small header
-    // block in far under one interval, so this never trips on legitimate traffic.
+    // matched, i.e. while _request is still nil — assigned on this same queue). Headers
+    // are small and bounded, so no legitimate client needs more than this; a deadline
+    // rather than a rate is what defeats a slowloris trickling them out forever.
     if (_request == nil) {
         _headerPhaseTicks += 1;
 
@@ -375,8 +375,27 @@ NS_ASSUME_NONNULL_END
         }
     }
 
-    if (waitingOnSocket && _idleCheckWasBusy && (transferredBytes == _idleCheckedBytes)) {
-        GWS_LOG_WARNING(@"Closing connection on socket %i: no bytes transferred while waiting on socket I/O across the idle timeout", _socket);
+    // While the request body is still arriving, require real progress rather than merely
+    // *some* progress. The zero-progress rule below is defeated by a client dribbling a
+    // single byte per tick — it costs the attacker nothing and pins a connection slot
+    // indefinitely, and kGCDWebServerMaxConnections of them deny service to the whole
+    // server. The floor is a *rate* scaled by the tick length, not a fixed count: a fixed
+    // count means the effective throughput demand rises as the configured timeout shrinks,
+    // which would disconnect a slow-but-genuine uploader on a short timeout. The response
+    // phase deliberately keeps the laxer rule so a slow but live reader (an SSE stream
+    // between heartbeats) is never cut off, and time spent inside a request handler still
+    // never counts because no socket I/O is pending.
+    NSUInteger minimumProgress = 1;
+
+    if (_request && !_requestReceived) {
+        minimumProgress = (NSUInteger)(kMinReceiveBytesPerSecond * _idleTimeout);
+        minimumProgress = MAX(minimumProgress, (NSUInteger)1);
+    }
+
+    BOOL starved = ((transferredBytes - _idleCheckedBytes) < minimumProgress);
+
+    if (waitingOnSocket && _idleCheckWasBusy && starved) {
+        GWS_LOG_WARNING(@"Closing connection on socket %i: too few bytes transferred while waiting on socket I/O across the idle timeout", _socket);
         dispatch_source_cancel(_idleTimer);
         // Shut down (rather than close) so the pending read completes with EOF or
         // the pending write errors, and the connection tears down through its
@@ -449,6 +468,10 @@ NS_ASSUME_NONNULL_END
                                                     } else {
                                                         [self _readBodyWithLength:self->_request.contentLength initialData:extraData];
                                                     }
+                                                } else {
+                                                    // Without this the request is left neither answered nor
+                                                    // aborted, and the connection just unwinds silently.
+                                                    [self abortRequest:self->_request withStatusCode:kGCDWebServerHTTPStatusCode_InternalServerError];
                                                 }
                                             }];
                                     } else {
@@ -471,12 +494,25 @@ NS_ASSUME_NONNULL_END
                         }
                     } else {
                         self->_request = [[GCDWebServerRequest alloc] initWithMethod:requestMethod url:requestURL headers:requestHeaders path:requestPath query:requestQuery];
-                        GWS_DCHECK(self->_request);
-                        [self abortRequest:self->_request withStatusCode:kGCDWebServerHTTPStatusCode_NotImplemented];
+
+                        if (self->_request) {
+                            [self abortRequest:self->_request withStatusCode:kGCDWebServerHTTPStatusCode_NotImplemented];
+                        } else {
+                            // The base request rejected these headers too — a framing conflict
+                            // such as "Content-Length" together with a chunked "Transfer-Encoding"
+                            // — so no handler could have matched. That is a malformed request
+                            // rather than an unimplemented one, and must not assert.
+                            GWS_LOG_ERROR(@"Rejecting malformed request headers on socket %i", self->_socket);
+                            [self abortRequest:nil withStatusCode:kGCDWebServerHTTPStatusCode_BadRequest];
+                        }
                     }
                 } else {
-                    [self abortRequest:nil withStatusCode:kGCDWebServerHTTPStatusCode_InternalServerError];
-                    GWS_DNOT_REACHED();
+                    // Reachable on ordinary malformed input, not an unreachable state: a
+                    // request-target whose percent-escapes are invalid or not valid UTF-8
+                    // (e.g. "GET /%FF") makes GCDWebServerUnescapeURLString return nil. That
+                    // is the client's error, so answer 400 rather than 500 — and never abort.
+                    GWS_LOG_ERROR(@"Failed decoding request target on socket %i", self->_socket);
+                    [self abortRequest:nil withStatusCode:kGCDWebServerHTTPStatusCode_BadRequest];
                 }
             } else {
                 [self abortRequest:nil withStatusCode:kGCDWebServerHTTPStatusCode_InternalServerError];
@@ -502,6 +538,7 @@ NS_ASSUME_NONNULL_END
         GWS_LOG_DEBUG(@"Did open connection on socket %i", _socket);
 
         NSTimeInterval idleTimeout = server.connectionIdleTimeout;
+        _idleTimeout = idleTimeout;
 
         if (idleTimeout > 0.0) {
             _idleTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _connectionQueue);
@@ -517,7 +554,10 @@ NS_ASSUME_NONNULL_END
         [_server willStartConnection:self];
 
         if (![self open]) {
-            close(_socket);
+            // Don't close here: returning nil deallocates self immediately and -dealloc is
+            // the sole owner of the descriptor. Closing twice would, once the number has
+            // been recycled by a concurrent accept on the other address family, tear down
+            // an unrelated live connection.
             return nil;
         }
 
@@ -679,21 +719,54 @@ NS_ASSUME_NONNULL_END
         }];
 }
 
+// Parse a chunk-size line: one or more hex digits and nothing else. strtol() also accepted
+// leading whitespace, a sign and a "0x" prefix — so " 5", "+5" and "0x5" all read as 5, and
+// "-0" was taken as the last-chunk marker — while the old fixed 32-byte line cap rejected a
+// legal size padded with leading zeros. Bound the number of *significant* digits instead,
+// which both keeps the value well inside NSUInteger and needs no stack buffer at all.
 static inline NSUInteger _ScanHexNumber(const void *bytes, NSUInteger size) {
-    // A chunk-size line is a short hex number. Reject absurd lengths up front rather
-    // than allocating an attacker-sized stack VLA (`char buffer[size + 1]`), which a
-    // long chunk-size line would blow the worker-thread stack with. A fixed buffer also
-    // lets us bound the copy.
-    if ((size == 0) || (size > 32)) {
+    const unsigned char *const characters = (const unsigned char *)bytes;
+    NSUInteger index = 0;
+
+    if (size == 0) {
         return NSNotFound;
     }
-    char buffer[33];
-    bcopy(bytes, buffer, size);
-    buffer[size] = 0;
-    char *end = NULL;
-    errno = 0;
-    long result = strtol(buffer, &end, 16);
-    return (((end != NULL) && (*end == 0) && (result >= 0) && (errno != ERANGE)) ? (NSUInteger)result : NSNotFound);
+
+    while ((index < size) && (characters[index] == '0')) {  // Leading zeros are legal and carry no value
+        index += 1;
+    }
+
+    if (index == size) {
+        return 0;  // All zeros: the last-chunk marker
+    }
+
+    NSUInteger value = 0;
+    NSUInteger digits = 0;
+
+    for (; index < size; index++) {
+        unsigned char character = characters[index];
+        NSUInteger digit;
+
+        if ((character >= '0') && (character <= '9')) {
+            digit = (NSUInteger)(character - '0');
+        } else if ((character >= 'a') && (character <= 'f')) {
+            digit = (NSUInteger)(character - 'a' + 10);
+        } else if ((character >= 'A') && (character <= 'F')) {
+            digit = (NSUInteger)(character - 'A' + 10);
+        } else {
+            return NSNotFound;
+        }
+
+        digits += 1;
+
+        if (digits > 15) {  // 60 bits: far beyond any legal chunk, and cannot overflow
+            return NSNotFound;
+        }
+
+        value = (value << 4) | digit;
+    }
+
+    return value;
 }
 
 - (void)readNextBodyChunk:(NSMutableData *)chunkData completionBlock:(ReadBodyCompletionBlock)block {
@@ -944,10 +1017,18 @@ static BOOL _ConstantTimeEqualStrings(NSString *a, NSString *b) {
     if ((a == nil) || (b == nil)) {
         return NO;
     }
-    const char *ca = a.UTF8String;
-    const char *cb = b.UTF8String;
-    size_t la = strlen(ca);
-    size_t lb = strlen(cb);
+    // Compare the full byte strings: -UTF8String with strlen stops at an embedded NUL, which
+    // a client can put in a header, so "X" and "X\0Y" compared equal.
+    NSData *const da = [a dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *const db = [b dataUsingEncoding:NSUTF8StringEncoding];
+
+    if ((da == nil) || (db == nil)) {
+        return NO;
+    }
+    const char *ca = da.bytes;
+    const char *cb = db.bytes;
+    size_t la = da.length;
+    size_t lb = db.length;
     size_t n = (la > lb) ? la : lb;
     unsigned char diff = (unsigned char)(la ^ lb);
     for (size_t i = 0; i < n; i++) {
@@ -1171,6 +1252,7 @@ static inline BOOL _CompareResources(NSString *responseETag, NSString *requestET
 - (void)abortRequest:(GCDWebServerRequest *)request withStatusCode:(NSInteger)statusCode {
     GWS_DCHECK(_responseMessage == NULL);
     GWS_DCHECK((statusCode >= 400) && (statusCode < 600));
+    _requestReceived = YES;  // Reading is over either way; only the error response remains
     [self _initializeResponseHeadersWithStatusCode:statusCode];
     [self writeHeadersWithCompletionBlock:^(BOOL success){
         // Nothing more to do

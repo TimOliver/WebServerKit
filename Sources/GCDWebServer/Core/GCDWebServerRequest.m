@@ -172,6 +172,93 @@ NSString *const GCDWebServerRequestAttribute_RegexCaptures = @"GCDWebServerReque
 
 @end
 
+// Parse an unsigned header value strictly: ASCII digits only, at least one, no overflow.
+// Used for "Content-Length" and for the two halves of a "Range".
+// -integerValue accepts "5abc" as 5, silently clamps an over-large value to NSIntegerMax
+// and tolerates a leading sign, so the framing the server uses could differ from what the
+// header literally says. NSUIntegerMax itself is refused because it is the "no body"
+// sentinel for _contentLength.
+static BOOL _ParseUnsignedHeaderValue(NSString *header, NSUInteger *outLength) {
+    if (header.length == 0) {
+        return NO;
+    }
+
+    unsigned long long value = 0;
+
+    for (NSUInteger i = 0; i < header.length; i++) {
+        unichar character = [header characterAtIndex:i];
+
+        if ((character < '0') || (character > '9')) {
+            return NO;
+        }
+
+        unsigned long long digit = (unsigned long long)(character - '0');
+
+        if (value > (ULLONG_MAX - digit) / 10) {
+            return NO;
+        }
+
+        value = value * 10 + digit;
+    }
+
+    if (value >= (unsigned long long)NSUIntegerMax) {
+        return NO;
+    }
+
+    *outLength = (NSUInteger)value;
+    return YES;
+}
+
+// Parse a "Transfer-Encoding" list (RFC 7230 §3.3.1). Returns YES when the body uses
+// chunked framing; sets *outRejected when the framing cannot be honoured at all.
+//
+// This used to be an exact string comparison against "chunked", which quietly answered
+// "this message has no body" for every legal spelling that isn't the bare token —
+// "chunked;a=b", "gzip, chunked", "identity, chunked". The server then replied 200 while
+// silently discarding the body, and WebDAV PUT (which unlinks the destination before
+// writing) destroyed the target file outright. Anything we cannot frame or decode must be
+// refused instead, so the caller never mistakes an unread body for an empty one.
+static BOOL _ParseTransferEncoding(NSString *header, BOOL *outRejected) {
+    *outRejected = NO;
+    NSMutableArray<NSString *> *const codings = [[NSMutableArray alloc] init];
+
+    for (NSString *coding in [header componentsSeparatedByString:@","]) {
+        NSString *token = coding;
+        NSRange parameters = [token rangeOfString:@";"];  // Transfer-parameters play no part in framing
+
+        if (parameters.location != NSNotFound) {
+            token = [token substringToIndex:parameters.location];
+        }
+
+        token = [[token stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]] lowercaseString];
+
+        if (token.length) {
+            [codings addObject:token];
+        }
+    }
+
+    if (codings.count == 0) {
+        *outRejected = YES;
+        return NO;
+    }
+
+    // Only "chunked" (as the sole and final coding) and "identity" can be honoured. A
+    // content coding such as "gzip" would have to be decoded to recover the payload, and
+    // storing the still-encoded bytes as if they were the body is worse than refusing.
+    if (codings.count == 1) {
+        if ([codings.firstObject isEqualToString:@"chunked"]) {
+            return YES;
+        }
+
+        if ([codings.firstObject isEqualToString:@"identity"]) {
+            return NO;  // Framing comes from Content-Length
+        }
+    }
+
+    *outRejected = YES;
+    return NO;
+}
+
 @implementation GCDWebServerRequest {
     BOOL _opened;
     NSMutableArray<GCDWebServerBodyDecoder *> *_decoders;
@@ -188,15 +275,28 @@ NSString *const GCDWebServerRequestAttribute_RegexCaptures = @"GCDWebServerReque
         _query = query;
 
         _contentType = GCDWebServerNormalizeHeaderValue(_headers[@"Content-Type"]);
-        _usesChunkedTransferEncoding = [GCDWebServerNormalizeHeaderValue(_headers[@"Transfer-Encoding"]) isEqualToString:@"chunked"];
+        NSString *const transferEncodingHeader = _headers[@"Transfer-Encoding"];
+
+        if (transferEncodingHeader) {
+            BOOL rejected = NO;
+            _usesChunkedTransferEncoding = _ParseTransferEncoding(transferEncodingHeader, &rejected);
+
+            if (rejected) {
+                GWS_LOG_WARNING(@"Unsupported 'Transfer-Encoding' header '%@' for '%@' request on \"%@\"", transferEncodingHeader, _method, _URL);
+                return nil;
+            }
+        }
+
         NSString *const lengthHeader = _headers[@"Content-Length"];
 
         if (lengthHeader) {
-            NSInteger length = [lengthHeader integerValue];
+            NSUInteger length = 0;
 
-            if (_usesChunkedTransferEncoding || (length < 0)) {
+            // Both a "Content-Length" and a chunked "Transfer-Encoding" is a framing
+            // conflict the client controls entirely, so reject it — but without aborting in
+            // debug, since it is remote input rather than an unreachable state.
+            if (_usesChunkedTransferEncoding || !_ParseUnsignedHeaderValue(lengthHeader, &length)) {
                 GWS_LOG_WARNING(@"Invalid 'Content-Length' header '%@' for '%@' request on \"%@\"", lengthHeader, _method, _URL);
-                GWS_DNOT_REACHED();
                 return nil;
             }
 
@@ -239,18 +339,24 @@ NSString *const GCDWebServerRequestAttribute_RegexCaptures = @"GCDWebServerReque
                     components = [(NSString *)[components firstObject] componentsSeparatedByString:@"-"];
 
                     if (components.count == 2) {
+                        // Both halves are parsed strictly, the same way Content-Length is:
+                        // -integerValue read "0x10" as 0, " 5"/"+5"/"5abc" as 5 and clamped an
+                        // over-large value to NSIntegerMax, so the range the server served
+                        // could differ from the one the header literally asked for.
                         NSString *const startString = components[0];
-                        NSInteger startValue = [startString integerValue];
                         NSString *const endString = components[1];
-                        NSInteger endValue = [endString integerValue];
+                        NSUInteger startValue = 0;
+                        NSUInteger endValue = 0;
+                        BOOL hasStart = _ParseUnsignedHeaderValue(startString, &startValue);
+                        BOOL hasEnd = _ParseUnsignedHeaderValue(endString, &endValue);
 
-                        if (startString.length && (startValue >= 0) && endString.length && (endValue >= startValue) && (endValue != NSIntegerMax)) {  // The second 500 bytes: "500-999"
+                        if (hasStart && hasEnd && (endValue >= startValue)) {  // The second 500 bytes: "500-999"
                             _byteRange.location = startValue;
-                            _byteRange.length = (NSUInteger)endValue - (NSUInteger)startValue + 1;  // Computed unsigned, and endValue != NSIntegerMax, so "+ 1" cannot signed-overflow (a huge end value from -integerValue clamps to NSIntegerMax and is treated as an invalid range)
-                        } else if (startString.length && (startValue >= 0)) {  // The bytes after 9500 bytes: "9500-"
+                            _byteRange.length = endValue - startValue + 1;  // endValue < NSUIntegerMax, so this cannot overflow
+                        } else if (hasStart && (endString.length == 0)) {  // The bytes after 9500 bytes: "9500-"
                             _byteRange.location = startValue;
                             _byteRange.length = NSUIntegerMax;
-                        } else if (endString.length && (endValue > 0)) {  // The final 500 bytes: "-500"
+                        } else if (hasEnd && (startString.length == 0) && (endValue > 0)) {  // The final 500 bytes: "-500"
                             _byteRange.location = NSUIntegerMax;
                             _byteRange.length = endValue;
                         }
