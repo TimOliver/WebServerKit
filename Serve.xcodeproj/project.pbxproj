@@ -1,0 +1,1773 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 54;
+	objects = {
+
+/* Begin PBXAggregateTarget section */
+		E274F876187E77D8009E0582 /* Build All */ = {
+			isa = PBXAggregateTarget;
+			buildConfigurationList = E274F879187E77D8009E0582 /* Build configuration list for PBXAggregateTarget "Build All" */;
+			buildPhases = (
+			);
+			dependencies = (
+				CE54F3941AE84FCA003C110E /* PBXTargetDependency */,
+				CE54F3961AE84FCA003C110E /* PBXTargetDependency */,
+				E2DDD1941BE6941C002CE867 /* PBXTargetDependency */,
+				E274F87B187E77E3009E0582 /* PBXTargetDependency */,
+				E2DDD20E1BE69EEE002CE867 /* PBXTargetDependency */,
+				E2DDD1DC1BE69911002CE867 /* PBXTargetDependency */,
+			);
+			name = "Build All";
+			productName = "Build All";
+		};
+/* End PBXAggregateTarget section */
+
+/* Begin PBXBuildFile section */
+		CEE28CF41AE0051F00F4023C /* Serve.h in Headers */ = {isa = PBXBuildFile; fileRef = CEE28CF31AE0051F00F4023C /* Serve.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D091AE006C200F4023C /* SRVServer.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE1618F99C810095C089 /* SRVServer.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D0A1AE006C300F4023C /* SRVServer.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE1618F99C810095C089 /* SRVServer.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D0B1AE006CC00F4023C /* SRVServer.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE1718F99C810095C089 /* SRVServer.m */; };
+		CEE28D0C1AE006CD00F4023C /* SRVServer.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE1718F99C810095C089 /* SRVServer.m */; };
+		CEE28D0D1AE006D700F4023C /* SRVConnection.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE1818F99C810095C089 /* SRVConnection.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D0E1AE006D800F4023C /* SRVConnection.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE1818F99C810095C089 /* SRVConnection.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D0F1AE006DE00F4023C /* SRVConnection.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE1918F99C810095C089 /* SRVConnection.m */; };
+		CEE28D101AE006DF00F4023C /* SRVConnection.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE1918F99C810095C089 /* SRVConnection.m */; };
+		CEE28D111AE006E200F4023C /* SRVFunctions.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE1A18F99C810095C089 /* SRVFunctions.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D121AE006E300F4023C /* SRVFunctions.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE1A18F99C810095C089 /* SRVFunctions.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D131AE006E900F4023C /* SRVFunctions.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE1B18F99C810095C089 /* SRVFunctions.m */; };
+		CEE28D141AE006EA00F4023C /* SRVFunctions.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE1B18F99C810095C089 /* SRVFunctions.m */; };
+		CEE28D151AE006ED00F4023C /* SRVHTTPStatusCodes.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE1C18F99C810095C089 /* SRVHTTPStatusCodes.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D161AE006EE00F4023C /* SRVHTTPStatusCodes.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE1C18F99C810095C089 /* SRVHTTPStatusCodes.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D191AE006FD00F4023C /* SRVRequest.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE1E18F99C810095C089 /* SRVRequest.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D1A1AE006FD00F4023C /* SRVRequest.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE1E18F99C810095C089 /* SRVRequest.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D1B1AE0070300F4023C /* SRVRequest.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE1F18F99C810095C089 /* SRVRequest.m */; };
+		CEE28D1C1AE0070400F4023C /* SRVRequest.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE1F18F99C810095C089 /* SRVRequest.m */; };
+		CEE28D1D1AE0070600F4023C /* SRVResponse.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE2018F99C810095C089 /* SRVResponse.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D1E1AE0070700F4023C /* SRVResponse.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE2018F99C810095C089 /* SRVResponse.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D1F1AE0070D00F4023C /* SRVResponse.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE2118F99C810095C089 /* SRVResponse.m */; };
+		CEE28D201AE0070E00F4023C /* SRVResponse.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE2118F99C810095C089 /* SRVResponse.m */; };
+		CEE28D211AE0071200F4023C /* SRVDataRequest.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE2318F99C810095C089 /* SRVDataRequest.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D221AE0071300F4023C /* SRVDataRequest.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE2318F99C810095C089 /* SRVDataRequest.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D231AE0071A00F4023C /* SRVDataRequest.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE2418F99C810095C089 /* SRVDataRequest.m */; };
+		CEE28D241AE0071B00F4023C /* SRVDataRequest.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE2418F99C810095C089 /* SRVDataRequest.m */; };
+		CEE28D251AE0071E00F4023C /* SRVFileRequest.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE2518F99C810095C089 /* SRVFileRequest.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D261AE0071E00F4023C /* SRVFileRequest.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE2518F99C810095C089 /* SRVFileRequest.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D271AE0072400F4023C /* SRVFileRequest.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE2618F99C810095C089 /* SRVFileRequest.m */; };
+		CEE28D281AE0072400F4023C /* SRVFileRequest.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE2618F99C810095C089 /* SRVFileRequest.m */; };
+		CEE28D291AE0072800F4023C /* SRVMultiPartFormRequest.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE2718F99C810095C089 /* SRVMultiPartFormRequest.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D2A1AE0072800F4023C /* SRVMultiPartFormRequest.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE2718F99C810095C089 /* SRVMultiPartFormRequest.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D2B1AE0073000F4023C /* SRVMultiPartFormRequest.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE2818F99C810095C089 /* SRVMultiPartFormRequest.m */; };
+		CEE28D2C1AE0073000F4023C /* SRVMultiPartFormRequest.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE2818F99C810095C089 /* SRVMultiPartFormRequest.m */; };
+		CEE28D2D1AE0073300F4023C /* SRVURLEncodedFormRequest.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE2918F99C810095C089 /* SRVURLEncodedFormRequest.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D2E1AE0073400F4023C /* SRVURLEncodedFormRequest.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE2918F99C810095C089 /* SRVURLEncodedFormRequest.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D2F1AE0073C00F4023C /* SRVURLEncodedFormRequest.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE2A18F99C810095C089 /* SRVURLEncodedFormRequest.m */; };
+		CEE28D301AE0073C00F4023C /* SRVURLEncodedFormRequest.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE2A18F99C810095C089 /* SRVURLEncodedFormRequest.m */; };
+		CEE28D311AE0074200F4023C /* SRVDataResponse.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE2C18F99C810095C089 /* SRVDataResponse.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D321AE0074200F4023C /* SRVDataResponse.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE2C18F99C810095C089 /* SRVDataResponse.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D331AE0074900F4023C /* SRVDataResponse.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE2D18F99C810095C089 /* SRVDataResponse.m */; };
+		CEE28D341AE0074A00F4023C /* SRVDataResponse.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE2D18F99C810095C089 /* SRVDataResponse.m */; };
+		CEE28D351AE0074D00F4023C /* SRVErrorResponse.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE2E18F99C810095C089 /* SRVErrorResponse.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D361AE0074E00F4023C /* SRVErrorResponse.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE2E18F99C810095C089 /* SRVErrorResponse.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D371AE0075900F4023C /* SRVErrorResponse.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE2F18F99C810095C089 /* SRVErrorResponse.m */; };
+		CEE28D381AE0075900F4023C /* SRVErrorResponse.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE2F18F99C810095C089 /* SRVErrorResponse.m */; };
+		CEE28D391AE0075C00F4023C /* SRVFileResponse.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE3018F99C810095C089 /* SRVFileResponse.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D3A1AE0075D00F4023C /* SRVFileResponse.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE3018F99C810095C089 /* SRVFileResponse.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D3B1AE0076400F4023C /* SRVFileResponse.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE3118F99C810095C089 /* SRVFileResponse.m */; };
+		CEE28D3C1AE0076400F4023C /* SRVFileResponse.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE3118F99C810095C089 /* SRVFileResponse.m */; };
+		CEE28D3D1AE0076700F4023C /* SRVStreamedResponse.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE3218F99C810095C089 /* SRVStreamedResponse.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D3E1AE0076800F4023C /* SRVStreamedResponse.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE3218F99C810095C089 /* SRVStreamedResponse.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D3F1AE0076E00F4023C /* SRVStreamedResponse.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE3318F99C810095C089 /* SRVStreamedResponse.m */; };
+		CEE28D401AE0076F00F4023C /* SRVStreamedResponse.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE3318F99C810095C089 /* SRVStreamedResponse.m */; };
+		CEE28D411AE0077800F4023C /* SRVDAVServer.h in Headers */ = {isa = PBXBuildFile; fileRef = E2A0E80818F3432600C580B1 /* SRVDAVServer.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D421AE0077800F4023C /* SRVDAVServer.h in Headers */ = {isa = PBXBuildFile; fileRef = E2A0E80818F3432600C580B1 /* SRVDAVServer.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D431AE0077F00F4023C /* SRVDAVServer.m in Sources */ = {isa = PBXBuildFile; fileRef = E2A0E80918F3432600C580B1 /* SRVDAVServer.m */; };
+		CEE28D441AE0078000F4023C /* SRVDAVServer.m in Sources */ = {isa = PBXBuildFile; fileRef = E2A0E80918F3432600C580B1 /* SRVDAVServer.m */; };
+		CEE28D451AE0078600F4023C /* SRVUploader.bundle in Resources */ = {isa = PBXBuildFile; fileRef = E2BE850718E77ECA0061360B /* SRVUploader.bundle */; };
+		CEE28D461AE0078600F4023C /* SRVUploader.bundle in Resources */ = {isa = PBXBuildFile; fileRef = E2BE850718E77ECA0061360B /* SRVUploader.bundle */; };
+		CEE28D471AE0078A00F4023C /* SRVUploader.h in Headers */ = {isa = PBXBuildFile; fileRef = E2BE850818E77ECA0061360B /* SRVUploader.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D481AE0078B00F4023C /* SRVUploader.h in Headers */ = {isa = PBXBuildFile; fileRef = E2BE850818E77ECA0061360B /* SRVUploader.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		CEE28D491AE0079100F4023C /* SRVUploader.m in Sources */ = {isa = PBXBuildFile; fileRef = E2BE850918E77ECA0061360B /* SRVUploader.m */; };
+		CEE28D4A1AE0079200F4023C /* SRVUploader.m in Sources */ = {isa = PBXBuildFile; fileRef = E2BE850918E77ECA0061360B /* SRVUploader.m */; };
+		CEE28D521AE00A7A00F4023C /* Serve.h in Headers */ = {isa = PBXBuildFile; fileRef = CEE28CF31AE0051F00F4023C /* Serve.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		E221128F1690B6470048D2B2 /* main.m in Sources */ = {isa = PBXBuildFile; fileRef = E221128E1690B6470048D2B2 /* main.m */; };
+		E240392B1BA09207000B7089 /* Serve.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CEE28CD11AE004D800F4023C /* Serve.framework */; };
+		E24039321BA092B7000B7089 /* Tests.m in Sources */ = {isa = PBXBuildFile; fileRef = E24039311BA092B7000B7089 /* Tests.m */; };
+		E24A3C0721E2879F00C58878 /* Serve.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CEE28CEF1AE0051F00F4023C /* Serve.framework */; };
+		E24A3C0821E287A300C58878 /* Serve.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E2DDD18B1BE69404002CE867 /* Serve.framework */; };
+		E24A3C0E21E28D3C00C58878 /* Serve.framework in Copy Frameworks */ = {isa = PBXBuildFile; fileRef = CEE28CEF1AE0051F00F4023C /* Serve.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		E24A3C0F21E28EFB00C58878 /* Serve.framework in Copy Frameworks */ = {isa = PBXBuildFile; fileRef = E2DDD18B1BE69404002CE867 /* Serve.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		E28BAE3418F99C810095C089 /* SRVServer.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE1718F99C810095C089 /* SRVServer.m */; };
+		E28BAE3618F99C810095C089 /* SRVConnection.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE1918F99C810095C089 /* SRVConnection.m */; };
+		E28BAE3818F99C810095C089 /* SRVFunctions.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE1B18F99C810095C089 /* SRVFunctions.m */; };
+		E28BAE3A18F99C810095C089 /* SRVRequest.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE1F18F99C810095C089 /* SRVRequest.m */; };
+		E28BAE3C18F99C810095C089 /* SRVResponse.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE2118F99C810095C089 /* SRVResponse.m */; };
+		E28BAE3E18F99C810095C089 /* SRVDataRequest.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE2418F99C810095C089 /* SRVDataRequest.m */; };
+		E28BAE4018F99C810095C089 /* SRVFileRequest.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE2618F99C810095C089 /* SRVFileRequest.m */; };
+		E28BAE4218F99C810095C089 /* SRVMultiPartFormRequest.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE2818F99C810095C089 /* SRVMultiPartFormRequest.m */; };
+		E28BAE4418F99C810095C089 /* SRVURLEncodedFormRequest.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE2A18F99C810095C089 /* SRVURLEncodedFormRequest.m */; };
+		E28BAE4618F99C810095C089 /* SRVDataResponse.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE2D18F99C810095C089 /* SRVDataResponse.m */; };
+		E28BAE4818F99C810095C089 /* SRVErrorResponse.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE2F18F99C810095C089 /* SRVErrorResponse.m */; };
+		E28BAE4A18F99C810095C089 /* SRVFileResponse.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE3118F99C810095C089 /* SRVFileResponse.m */; };
+		E28BAE4C18F99C810095C089 /* SRVStreamedResponse.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE3318F99C810095C089 /* SRVStreamedResponse.m */; };
+		E2A0E80A18F3432600C580B1 /* SRVDAVServer.m in Sources */ = {isa = PBXBuildFile; fileRef = E2A0E80918F3432600C580B1 /* SRVDAVServer.m */; };
+		E2BE850C18E785940061360B /* SRVUploader.m in Sources */ = {isa = PBXBuildFile; fileRef = E2BE850918E77ECA0061360B /* SRVUploader.m */; };
+		E2BE850F18E788990061360B /* SRVUploader.bundle in CopyFiles */ = {isa = PBXBuildFile; fileRef = E2BE850718E77ECA0061360B /* SRVUploader.bundle */; };
+		E2DDD1951BE69427002CE867 /* SRVUploader.bundle in Resources */ = {isa = PBXBuildFile; fileRef = E2BE850718E77ECA0061360B /* SRVUploader.bundle */; };
+		E2DDD1961BE6945F002CE867 /* SRVServer.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE1718F99C810095C089 /* SRVServer.m */; };
+		E2DDD1971BE6945F002CE867 /* SRVConnection.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE1918F99C810095C089 /* SRVConnection.m */; };
+		E2DDD1981BE6945F002CE867 /* SRVFunctions.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE1B18F99C810095C089 /* SRVFunctions.m */; };
+		E2DDD1991BE6945F002CE867 /* SRVRequest.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE1F18F99C810095C089 /* SRVRequest.m */; };
+		E2DDD19A1BE6945F002CE867 /* SRVResponse.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE2118F99C810095C089 /* SRVResponse.m */; };
+		E2DDD19B1BE6945F002CE867 /* SRVDataRequest.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE2418F99C810095C089 /* SRVDataRequest.m */; };
+		E2DDD19C1BE6945F002CE867 /* SRVFileRequest.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE2618F99C810095C089 /* SRVFileRequest.m */; };
+		E2DDD19D1BE6945F002CE867 /* SRVMultiPartFormRequest.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE2818F99C810095C089 /* SRVMultiPartFormRequest.m */; };
+		E2DDD19E1BE6945F002CE867 /* SRVURLEncodedFormRequest.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE2A18F99C810095C089 /* SRVURLEncodedFormRequest.m */; };
+		E2DDD19F1BE6945F002CE867 /* SRVDataResponse.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE2D18F99C810095C089 /* SRVDataResponse.m */; };
+		E2DDD1A01BE6945F002CE867 /* SRVErrorResponse.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE2F18F99C810095C089 /* SRVErrorResponse.m */; };
+		E2DDD1A11BE6945F002CE867 /* SRVFileResponse.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE3118F99C810095C089 /* SRVFileResponse.m */; };
+		E2DDD1A21BE6945F002CE867 /* SRVStreamedResponse.m in Sources */ = {isa = PBXBuildFile; fileRef = E28BAE3318F99C810095C089 /* SRVStreamedResponse.m */; };
+		E2DDD1A31BE6945F002CE867 /* SRVDAVServer.m in Sources */ = {isa = PBXBuildFile; fileRef = E2A0E80918F3432600C580B1 /* SRVDAVServer.m */; };
+		E2DDD1A41BE6945F002CE867 /* SRVUploader.m in Sources */ = {isa = PBXBuildFile; fileRef = E2BE850918E77ECA0061360B /* SRVUploader.m */; };
+		E2DDD1A51BE6947F002CE867 /* SRVServer.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE1618F99C810095C089 /* SRVServer.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		E2DDD1A61BE6947F002CE867 /* SRVConnection.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE1818F99C810095C089 /* SRVConnection.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		E2DDD1A71BE6947F002CE867 /* SRVFunctions.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE1A18F99C810095C089 /* SRVFunctions.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		E2DDD1A81BE6947F002CE867 /* SRVHTTPStatusCodes.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE1C18F99C810095C089 /* SRVHTTPStatusCodes.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		E2DDD1A91BE6947F002CE867 /* SRVRequest.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE1E18F99C810095C089 /* SRVRequest.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		E2DDD1AA1BE6947F002CE867 /* SRVResponse.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE2018F99C810095C089 /* SRVResponse.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		E2DDD1AB1BE6947F002CE867 /* SRVDataRequest.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE2318F99C810095C089 /* SRVDataRequest.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		E2DDD1AC1BE6947F002CE867 /* SRVFileRequest.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE2518F99C810095C089 /* SRVFileRequest.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		E2DDD1AD1BE6947F002CE867 /* SRVMultiPartFormRequest.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE2718F99C810095C089 /* SRVMultiPartFormRequest.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		E2DDD1AE1BE6947F002CE867 /* SRVURLEncodedFormRequest.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE2918F99C810095C089 /* SRVURLEncodedFormRequest.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		E2DDD1AF1BE6947F002CE867 /* SRVDataResponse.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE2C18F99C810095C089 /* SRVDataResponse.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		E2DDD1B01BE6947F002CE867 /* SRVErrorResponse.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE2E18F99C810095C089 /* SRVErrorResponse.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		E2DDD1B11BE6947F002CE867 /* SRVFileResponse.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE3018F99C810095C089 /* SRVFileResponse.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		E2DDD1B21BE6947F002CE867 /* SRVStreamedResponse.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE3218F99C810095C089 /* SRVStreamedResponse.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		E2DDD1B31BE6947F002CE867 /* SRVDAVServer.h in Headers */ = {isa = PBXBuildFile; fileRef = E2A0E80818F3432600C580B1 /* SRVDAVServer.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		E2DDD1B41BE6947F002CE867 /* SRVUploader.h in Headers */ = {isa = PBXBuildFile; fileRef = E2BE850818E77ECA0061360B /* SRVUploader.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		E2DDD1B51BE6947F002CE867 /* Serve.h in Headers */ = {isa = PBXBuildFile; fileRef = CEE28CF31AE0051F00F4023C /* Serve.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		E2DDD1CE1BE698A8002CE867 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2DDD1CD1BE698A8002CE867 /* AppDelegate.swift */; };
+		E2DDD1D11BE698A8002CE867 /* ViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2DDD1D01BE698A8002CE867 /* ViewController.swift */; };
+		E2DDD1D41BE698A8002CE867 /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = E2DDD1D21BE698A8002CE867 /* Main.storyboard */; };
+		E2DDD1D61BE698A8002CE867 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E2DDD1D51BE698A8002CE867 /* Assets.xcassets */; };
+		E2DDD1FD1BE69EE5002CE867 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2DDD1FC1BE69EE5002CE867 /* AppDelegate.swift */; };
+		E2DDD2001BE69EE5002CE867 /* ViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2DDD1FF1BE69EE5002CE867 /* ViewController.swift */; };
+		E2DDD2031BE69EE5002CE867 /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = E2DDD2011BE69EE5002CE867 /* Main.storyboard */; };
+		E2DDD2051BE69EE5002CE867 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E2DDD2041BE69EE5002CE867 /* Assets.xcassets */; };
+		E2DDD2081BE69EE5002CE867 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = E2DDD2061BE69EE5002CE867 /* LaunchScreen.storyboard */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		CE54F3931AE84FCA003C110E /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 08FB7793FE84155DC02AAC07 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = CEE28CD01AE004D800F4023C;
+			remoteInfo = "Serve (Mac)";
+		};
+		CE54F3951AE84FCA003C110E /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 08FB7793FE84155DC02AAC07 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = CEE28CEE1AE0051F00F4023C;
+			remoteInfo = "Serve (iOS)";
+		};
+		E240392C1BA09207000B7089 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 08FB7793FE84155DC02AAC07 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = CEE28CD01AE004D800F4023C;
+			remoteInfo = "Serve (Mac)";
+		};
+		E24A3C0321E2879000C58878 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 08FB7793FE84155DC02AAC07 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = CEE28CEE1AE0051F00F4023C;
+			remoteInfo = "Serve (iOS)";
+		};
+		E24A3C0521E2879700C58878 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 08FB7793FE84155DC02AAC07 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = E2DDD18A1BE69404002CE867;
+			remoteInfo = "Serve (tvOS)";
+		};
+		E274F87A187E77E3009E0582 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 08FB7793FE84155DC02AAC07 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 8DD76FA90486AB0100D96B5E;
+			remoteInfo = "Serve Example (Mac)";
+		};
+		E2DDD1931BE6941C002CE867 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 08FB7793FE84155DC02AAC07 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = E2DDD18A1BE69404002CE867;
+			remoteInfo = "Serve Example (tvOS)";
+		};
+		E2DDD1DB1BE69911002CE867 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 08FB7793FE84155DC02AAC07 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = E2DDD1C61BE698A8002CE867;
+			remoteInfo = "Serve Example (tvOS)";
+		};
+		E2DDD20D1BE69EEE002CE867 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 08FB7793FE84155DC02AAC07 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = E2DDD1F51BE69EE4002CE867;
+			remoteInfo = "Serve Example (iOS)";
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		E24A3C0C21E28D1E00C58878 /* Copy Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				E24A3C0E21E28D3C00C58878 /* Serve.framework in Copy Frameworks */,
+			);
+			name = "Copy Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E24A3C0D21E28D2300C58878 /* Copy Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				E24A3C0F21E28EFB00C58878 /* Serve.framework in Copy Frameworks */,
+			);
+			name = "Copy Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E2BE850E18E788910061360B /* CopyFiles */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 16;
+			files = (
+				E2BE850F18E788990061360B /* SRVUploader.bundle in CopyFiles */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		8DD76FB20486AB0100D96B5E /* ServeExample */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = ServeExample; sourceTree = BUILT_PRODUCTS_DIR; };
+		CEE28CD11AE004D800F4023C /* Serve.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Serve.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		CEE28CEF1AE0051F00F4023C /* Serve.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Serve.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		CEE28CF21AE0051F00F4023C /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		CEE28CF31AE0051F00F4023C /* Serve.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Serve.h; sourceTree = "<group>"; };
+		E221128E1690B6470048D2B2 /* main.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = main.m; sourceTree = "<group>"; };
+		E24039251BA09207000B7089 /* Tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = Tests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		E24039311BA092B7000B7089 /* Tests.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = Tests.m; sourceTree = "<group>"; };
+		E24A3C4021E2940600C58878 /* module.modulemap */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.module-map"; path = module.modulemap; sourceTree = "<group>"; };
+		E28BAE1618F99C810095C089 /* SRVServer.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SRVServer.h; sourceTree = "<group>"; };
+		E28BAE1718F99C810095C089 /* SRVServer.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SRVServer.m; sourceTree = "<group>"; };
+		E28BAE1818F99C810095C089 /* SRVConnection.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SRVConnection.h; sourceTree = "<group>"; };
+		E28BAE1918F99C810095C089 /* SRVConnection.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SRVConnection.m; sourceTree = "<group>"; };
+		E28BAE1A18F99C810095C089 /* SRVFunctions.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SRVFunctions.h; sourceTree = "<group>"; };
+		E28BAE1B18F99C810095C089 /* SRVFunctions.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SRVFunctions.m; sourceTree = "<group>"; };
+		E28BAE1C18F99C810095C089 /* SRVHTTPStatusCodes.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SRVHTTPStatusCodes.h; sourceTree = "<group>"; };
+		E28BAE1D18F99C810095C089 /* SRVPrivate.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SRVPrivate.h; sourceTree = "<group>"; };
+		E28BAE1E18F99C810095C089 /* SRVRequest.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SRVRequest.h; sourceTree = "<group>"; };
+		E28BAE1F18F99C810095C089 /* SRVRequest.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SRVRequest.m; sourceTree = "<group>"; };
+		E28BAE2018F99C810095C089 /* SRVResponse.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SRVResponse.h; sourceTree = "<group>"; };
+		E28BAE2118F99C810095C089 /* SRVResponse.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SRVResponse.m; sourceTree = "<group>"; };
+		E28BAE2318F99C810095C089 /* SRVDataRequest.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SRVDataRequest.h; sourceTree = "<group>"; };
+		E28BAE2418F99C810095C089 /* SRVDataRequest.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SRVDataRequest.m; sourceTree = "<group>"; };
+		E28BAE2518F99C810095C089 /* SRVFileRequest.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SRVFileRequest.h; sourceTree = "<group>"; };
+		E28BAE2618F99C810095C089 /* SRVFileRequest.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SRVFileRequest.m; sourceTree = "<group>"; };
+		E28BAE2718F99C810095C089 /* SRVMultiPartFormRequest.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SRVMultiPartFormRequest.h; sourceTree = "<group>"; };
+		E28BAE2818F99C810095C089 /* SRVMultiPartFormRequest.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SRVMultiPartFormRequest.m; sourceTree = "<group>"; };
+		E28BAE2918F99C810095C089 /* SRVURLEncodedFormRequest.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SRVURLEncodedFormRequest.h; sourceTree = "<group>"; };
+		E28BAE2A18F99C810095C089 /* SRVURLEncodedFormRequest.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SRVURLEncodedFormRequest.m; sourceTree = "<group>"; };
+		E28BAE2C18F99C810095C089 /* SRVDataResponse.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SRVDataResponse.h; sourceTree = "<group>"; };
+		E28BAE2D18F99C810095C089 /* SRVDataResponse.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SRVDataResponse.m; sourceTree = "<group>"; };
+		E28BAE2E18F99C810095C089 /* SRVErrorResponse.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SRVErrorResponse.h; sourceTree = "<group>"; };
+		E28BAE2F18F99C810095C089 /* SRVErrorResponse.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SRVErrorResponse.m; sourceTree = "<group>"; };
+		E28BAE3018F99C810095C089 /* SRVFileResponse.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SRVFileResponse.h; sourceTree = "<group>"; };
+		E28BAE3118F99C810095C089 /* SRVFileResponse.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SRVFileResponse.m; sourceTree = "<group>"; };
+		E28BAE3218F99C810095C089 /* SRVStreamedResponse.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SRVStreamedResponse.h; sourceTree = "<group>"; };
+		E28BAE3318F99C810095C089 /* SRVStreamedResponse.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SRVStreamedResponse.m; sourceTree = "<group>"; };
+		E2A0E80818F3432600C580B1 /* SRVDAVServer.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SRVDAVServer.h; sourceTree = "<group>"; };
+		E2A0E80918F3432600C580B1 /* SRVDAVServer.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SRVDAVServer.m; sourceTree = "<group>"; };
+		E2BE850718E77ECA0061360B /* SRVUploader.bundle */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.plug-in"; path = SRVUploader.bundle; sourceTree = "<group>"; };
+		E2BE850818E77ECA0061360B /* SRVUploader.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SRVUploader.h; sourceTree = "<group>"; };
+		F1A2B3C4D5E6F708090A0B0C /* SRVUploaderSSEChannel.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SRVUploaderSSEChannel.h; sourceTree = "<group>"; };
+		E2BE850918E77ECA0061360B /* SRVUploader.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SRVUploader.m; sourceTree = "<group>"; };
+		E2DDD18B1BE69404002CE867 /* Serve.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Serve.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		E2DDD1C71BE698A8002CE867 /* SRVServer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SRVServer.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		E2DDD1CD1BE698A8002CE867 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		E2DDD1D01BE698A8002CE867 /* ViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewController.swift; sourceTree = "<group>"; };
+		E2DDD1D31BE698A8002CE867 /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/Main.storyboard; sourceTree = "<group>"; };
+		E2DDD1D51BE698A8002CE867 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		E2DDD1D71BE698A8002CE867 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		E2DDD1F61BE69EE4002CE867 /* SRVServer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SRVServer.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		E2DDD1FC1BE69EE5002CE867 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		E2DDD1FF1BE69EE5002CE867 /* ViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewController.swift; sourceTree = "<group>"; };
+		E2DDD2021BE69EE5002CE867 /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/Main.storyboard; sourceTree = "<group>"; };
+		E2DDD2041BE69EE5002CE867 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		E2DDD2071BE69EE5002CE867 /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/LaunchScreen.storyboard; sourceTree = "<group>"; };
+		E2DDD2091BE69EE5002CE867 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		8DD76FAD0486AB0100D96B5E /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CEE28CCD1AE004D800F4023C /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CEE28CEB1AE0051F00F4023C /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E24039221BA09207000B7089 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E240392B1BA09207000B7089 /* Serve.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E2DDD1871BE69404002CE867 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E2DDD1C41BE698A8002CE867 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E24A3C0821E287A300C58878 /* Serve.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E2DDD1F31BE69EE4002CE867 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E24A3C0721E2879F00C58878 /* Serve.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		08FB7794FE84155DC02AAC07 /* LittleCMS */ = {
+			isa = PBXGroup;
+			children = (
+				228C211F2F385A7A00AC49DD /* Sources */,
+				228C21112F38582100AC49DD /* Examples */,
+				CEE28D081AE0053E00F4023C /* Framework */,
+				1AB674ADFE9D54B511CA2CBB /* Products */,
+			);
+			indentWidth = 2;
+			name = LittleCMS;
+			sourceTree = "<group>";
+			tabWidth = 2;
+		};
+		1AB674ADFE9D54B511CA2CBB /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				8DD76FB20486AB0100D96B5E /* SRVServer */,
+				CEE28CD11AE004D800F4023C /* Serve.framework */,
+				CEE28CEF1AE0051F00F4023C /* Serve.framework */,
+				E24039251BA09207000B7089 /* Tests.xctest */,
+				E2DDD18B1BE69404002CE867 /* Serve.framework */,
+				E2DDD1C71BE698A8002CE867 /* SRVServer.app */,
+				E2DDD1F61BE69EE4002CE867 /* SRVServer.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		228C21112F38582100AC49DD /* Examples */ = {
+			isa = PBXGroup;
+			children = (
+				E221128D1690B6470048D2B2 /* Mac */,
+				E2DDD1F71BE69EE5002CE867 /* iOS */,
+				E2DDD1C81BE698A8002CE867 /* tvOS */,
+			);
+			path = Examples;
+			sourceTree = "<group>";
+		};
+		228C211F2F385A7A00AC49DD /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				E28BAE1418F99C810095C089 /* SRVServer */,
+				E2A0E80718F3432600C580B1 /* SRVDAVServer */,
+				E2BE850618E77ECA0061360B /* SRVUploader */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		CEE28D081AE0053E00F4023C /* Framework */ = {
+			isa = PBXGroup;
+			children = (
+				E24A3C4021E2940600C58878 /* module.modulemap */,
+				CEE28CF31AE0051F00F4023C /* Serve.h */,
+				CEE28CF21AE0051F00F4023C /* Info.plist */,
+				E24039311BA092B7000B7089 /* Tests.m */,
+			);
+			path = Framework;
+			sourceTree = "<group>";
+		};
+		E221128D1690B6470048D2B2 /* Mac */ = {
+			isa = PBXGroup;
+			children = (
+				E221128E1690B6470048D2B2 /* main.m */,
+			);
+			path = Mac;
+			sourceTree = "<group>";
+		};
+		E28BAE1418F99C810095C089 /* SRVServer */ = {
+			isa = PBXGroup;
+			children = (
+				E28BAE1518F99C810095C089 /* Core */,
+				E28BAE2218F99C810095C089 /* Requests */,
+				E28BAE2B18F99C810095C089 /* Responses */,
+			);
+			path = Serve;
+			sourceTree = "<group>";
+		};
+		E28BAE1518F99C810095C089 /* Core */ = {
+			isa = PBXGroup;
+			children = (
+				E28BAE1618F99C810095C089 /* SRVServer.h */,
+				E28BAE1718F99C810095C089 /* SRVServer.m */,
+				E28BAE1818F99C810095C089 /* SRVConnection.h */,
+				E28BAE1918F99C810095C089 /* SRVConnection.m */,
+				E28BAE1A18F99C810095C089 /* SRVFunctions.h */,
+				E28BAE1B18F99C810095C089 /* SRVFunctions.m */,
+				E28BAE1C18F99C810095C089 /* SRVHTTPStatusCodes.h */,
+				E28BAE1D18F99C810095C089 /* SRVPrivate.h */,
+				E28BAE1E18F99C810095C089 /* SRVRequest.h */,
+				E28BAE1F18F99C810095C089 /* SRVRequest.m */,
+				E28BAE2018F99C810095C089 /* SRVResponse.h */,
+				E28BAE2118F99C810095C089 /* SRVResponse.m */,
+			);
+			path = Core;
+			sourceTree = "<group>";
+		};
+		E28BAE2218F99C810095C089 /* Requests */ = {
+			isa = PBXGroup;
+			children = (
+				E28BAE2318F99C810095C089 /* SRVDataRequest.h */,
+				E28BAE2418F99C810095C089 /* SRVDataRequest.m */,
+				E28BAE2518F99C810095C089 /* SRVFileRequest.h */,
+				E28BAE2618F99C810095C089 /* SRVFileRequest.m */,
+				E28BAE2718F99C810095C089 /* SRVMultiPartFormRequest.h */,
+				E28BAE2818F99C810095C089 /* SRVMultiPartFormRequest.m */,
+				E28BAE2918F99C810095C089 /* SRVURLEncodedFormRequest.h */,
+				E28BAE2A18F99C810095C089 /* SRVURLEncodedFormRequest.m */,
+			);
+			path = Requests;
+			sourceTree = "<group>";
+		};
+		E28BAE2B18F99C810095C089 /* Responses */ = {
+			isa = PBXGroup;
+			children = (
+				E28BAE2C18F99C810095C089 /* SRVDataResponse.h */,
+				E28BAE2D18F99C810095C089 /* SRVDataResponse.m */,
+				E28BAE2E18F99C810095C089 /* SRVErrorResponse.h */,
+				E28BAE2F18F99C810095C089 /* SRVErrorResponse.m */,
+				E28BAE3018F99C810095C089 /* SRVFileResponse.h */,
+				E28BAE3118F99C810095C089 /* SRVFileResponse.m */,
+				E28BAE3218F99C810095C089 /* SRVStreamedResponse.h */,
+				E28BAE3318F99C810095C089 /* SRVStreamedResponse.m */,
+			);
+			path = Responses;
+			sourceTree = "<group>";
+		};
+		E2A0E80718F3432600C580B1 /* SRVDAVServer */ = {
+			isa = PBXGroup;
+			children = (
+				E2A0E80818F3432600C580B1 /* SRVDAVServer.h */,
+				E2A0E80918F3432600C580B1 /* SRVDAVServer.m */,
+			);
+			path = ServeWebDAV;
+			sourceTree = "<group>";
+		};
+		E2BE850618E77ECA0061360B /* SRVUploader */ = {
+			isa = PBXGroup;
+			children = (
+				E2BE850718E77ECA0061360B /* SRVUploader.bundle */,
+				E2BE850818E77ECA0061360B /* SRVUploader.h */,
+				F1A2B3C4D5E6F708090A0B0C /* SRVUploaderSSEChannel.h */,
+				E2BE850918E77ECA0061360B /* SRVUploader.m */,
+			);
+			path = ServeUploader;
+			sourceTree = "<group>";
+		};
+		E2DDD1C81BE698A8002CE867 /* tvOS */ = {
+			isa = PBXGroup;
+			children = (
+				E2DDD1CD1BE698A8002CE867 /* AppDelegate.swift */,
+				E2DDD1D01BE698A8002CE867 /* ViewController.swift */,
+				E2DDD1D21BE698A8002CE867 /* Main.storyboard */,
+				E2DDD1D51BE698A8002CE867 /* Assets.xcassets */,
+				E2DDD1D71BE698A8002CE867 /* Info.plist */,
+			);
+			path = tvOS;
+			sourceTree = "<group>";
+		};
+		E2DDD1F71BE69EE5002CE867 /* iOS */ = {
+			isa = PBXGroup;
+			children = (
+				E2DDD1FC1BE69EE5002CE867 /* AppDelegate.swift */,
+				E2DDD1FF1BE69EE5002CE867 /* ViewController.swift */,
+				E2DDD2011BE69EE5002CE867 /* Main.storyboard */,
+				E2DDD2041BE69EE5002CE867 /* Assets.xcassets */,
+				E2DDD2061BE69EE5002CE867 /* LaunchScreen.storyboard */,
+				E2DDD2091BE69EE5002CE867 /* Info.plist */,
+			);
+			path = iOS;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXHeadersBuildPhase section */
+		CEE28CCE1AE004D800F4023C /* Headers */ = {
+			isa = PBXHeadersBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CEE28D521AE00A7A00F4023C /* Serve.h in Headers */,
+				CEE28D151AE006ED00F4023C /* SRVHTTPStatusCodes.h in Headers */,
+				CEE28D191AE006FD00F4023C /* SRVRequest.h in Headers */,
+				CEE28D091AE006C200F4023C /* SRVServer.h in Headers */,
+				CEE28D351AE0074D00F4023C /* SRVErrorResponse.h in Headers */,
+				CEE28D2D1AE0073300F4023C /* SRVURLEncodedFormRequest.h in Headers */,
+				CEE28D1D1AE0070600F4023C /* SRVResponse.h in Headers */,
+				CEE28D391AE0075C00F4023C /* SRVFileResponse.h in Headers */,
+				CEE28D291AE0072800F4023C /* SRVMultiPartFormRequest.h in Headers */,
+				CEE28D3D1AE0076700F4023C /* SRVStreamedResponse.h in Headers */,
+				CEE28D0D1AE006D700F4023C /* SRVConnection.h in Headers */,
+				CEE28D211AE0071200F4023C /* SRVDataRequest.h in Headers */,
+				CEE28D311AE0074200F4023C /* SRVDataResponse.h in Headers */,
+				CEE28D111AE006E200F4023C /* SRVFunctions.h in Headers */,
+				CEE28D251AE0071E00F4023C /* SRVFileRequest.h in Headers */,
+				CEE28D411AE0077800F4023C /* SRVDAVServer.h in Headers */,
+				CEE28D471AE0078A00F4023C /* SRVUploader.h in Headers */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CEE28CEC1AE0051F00F4023C /* Headers */ = {
+			isa = PBXHeadersBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CEE28CF41AE0051F00F4023C /* Serve.h in Headers */,
+				CEE28D261AE0071E00F4023C /* SRVFileRequest.h in Headers */,
+				CEE28D321AE0074200F4023C /* SRVDataResponse.h in Headers */,
+				CEE28D121AE006E300F4023C /* SRVFunctions.h in Headers */,
+				CEE28D221AE0071300F4023C /* SRVDataRequest.h in Headers */,
+				CEE28D1A1AE006FD00F4023C /* SRVRequest.h in Headers */,
+				CEE28D0E1AE006D800F4023C /* SRVConnection.h in Headers */,
+				CEE28D161AE006EE00F4023C /* SRVHTTPStatusCodes.h in Headers */,
+				CEE28D3A1AE0075D00F4023C /* SRVFileResponse.h in Headers */,
+				CEE28D2A1AE0072800F4023C /* SRVMultiPartFormRequest.h in Headers */,
+				CEE28D3E1AE0076800F4023C /* SRVStreamedResponse.h in Headers */,
+				CEE28D1E1AE0070700F4023C /* SRVResponse.h in Headers */,
+				CEE28D2E1AE0073400F4023C /* SRVURLEncodedFormRequest.h in Headers */,
+				CEE28D0A1AE006C300F4023C /* SRVServer.h in Headers */,
+				CEE28D361AE0074E00F4023C /* SRVErrorResponse.h in Headers */,
+				CEE28D421AE0077800F4023C /* SRVDAVServer.h in Headers */,
+				CEE28D481AE0078B00F4023C /* SRVUploader.h in Headers */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E2DDD1881BE69404002CE867 /* Headers */ = {
+			isa = PBXHeadersBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E2DDD1A51BE6947F002CE867 /* SRVServer.h in Headers */,
+				E2DDD1A61BE6947F002CE867 /* SRVConnection.h in Headers */,
+				E2DDD1A71BE6947F002CE867 /* SRVFunctions.h in Headers */,
+				E2DDD1A81BE6947F002CE867 /* SRVHTTPStatusCodes.h in Headers */,
+				E2DDD1A91BE6947F002CE867 /* SRVRequest.h in Headers */,
+				E2DDD1AA1BE6947F002CE867 /* SRVResponse.h in Headers */,
+				E2DDD1AB1BE6947F002CE867 /* SRVDataRequest.h in Headers */,
+				E2DDD1AC1BE6947F002CE867 /* SRVFileRequest.h in Headers */,
+				E2DDD1AD1BE6947F002CE867 /* SRVMultiPartFormRequest.h in Headers */,
+				E2DDD1AE1BE6947F002CE867 /* SRVURLEncodedFormRequest.h in Headers */,
+				E2DDD1AF1BE6947F002CE867 /* SRVDataResponse.h in Headers */,
+				E2DDD1B01BE6947F002CE867 /* SRVErrorResponse.h in Headers */,
+				E2DDD1B11BE6947F002CE867 /* SRVFileResponse.h in Headers */,
+				E2DDD1B21BE6947F002CE867 /* SRVStreamedResponse.h in Headers */,
+				E2DDD1B31BE6947F002CE867 /* SRVDAVServer.h in Headers */,
+				E2DDD1B41BE6947F002CE867 /* SRVUploader.h in Headers */,
+				E2DDD1B51BE6947F002CE867 /* Serve.h in Headers */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXHeadersBuildPhase section */
+
+/* Begin PBXNativeTarget section */
+		8DD76FA90486AB0100D96B5E /* Serve Example (Mac) */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 1DEB928508733DD80010E9CD /* Build configuration list for PBXNativeTarget "Serve Example (Mac)" */;
+			buildPhases = (
+				E21F038418FB37D80043AD1E /* Delete SRVUploader.bundle */,
+				E2BE850E18E788910061360B /* CopyFiles */,
+				8DD76FAB0486AB0100D96B5E /* Sources */,
+				8DD76FAD0486AB0100D96B5E /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "Serve Example (Mac)";
+			productInstallPath = "$(HOME)/bin";
+			productName = LittleCMS;
+			productReference = 8DD76FB20486AB0100D96B5E /* SRVServer */;
+			productType = "com.apple.product-type.tool";
+		};
+		CEE28CD01AE004D800F4023C /* Serve (Mac) */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CEE28CE81AE004D800F4023C /* Build configuration list for PBXNativeTarget "Serve (Mac)" */;
+			buildPhases = (
+				CEE28CCC1AE004D800F4023C /* Sources */,
+				CEE28CCD1AE004D800F4023C /* Frameworks */,
+				CEE28CCE1AE004D800F4023C /* Headers */,
+				CEE28CCF1AE004D800F4023C /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "Serve (Mac)";
+			productName = Serve;
+			productReference = CEE28CD11AE004D800F4023C /* Serve.framework */;
+			productType = "com.apple.product-type.framework";
+		};
+		CEE28CEE1AE0051F00F4023C /* Serve (iOS) */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CEE28D021AE0052000F4023C /* Build configuration list for PBXNativeTarget "Serve (iOS)" */;
+			buildPhases = (
+				CEE28CEA1AE0051F00F4023C /* Sources */,
+				CEE28CEB1AE0051F00F4023C /* Frameworks */,
+				CEE28CEC1AE0051F00F4023C /* Headers */,
+				CEE28CED1AE0051F00F4023C /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "Serve (iOS)";
+			productName = Serve;
+			productReference = CEE28CEF1AE0051F00F4023C /* Serve.framework */;
+			productType = "com.apple.product-type.framework";
+		};
+		E24039241BA09207000B7089 /* Tests (Mac) */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E240392E1BA09207000B7089 /* Build configuration list for PBXNativeTarget "Tests (Mac)" */;
+			buildPhases = (
+				E24039211BA09207000B7089 /* Sources */,
+				E24039221BA09207000B7089 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				E240392D1BA09207000B7089 /* PBXTargetDependency */,
+			);
+			name = "Tests (Mac)";
+			productName = "Serve Tests (Mac)";
+			productReference = E24039251BA09207000B7089 /* Tests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		E2DDD18A1BE69404002CE867 /* Serve (tvOS) */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E2DDD1921BE69404002CE867 /* Build configuration list for PBXNativeTarget "Serve (tvOS)" */;
+			buildPhases = (
+				E2DDD1861BE69404002CE867 /* Sources */,
+				E2DDD1871BE69404002CE867 /* Frameworks */,
+				E2DDD1881BE69404002CE867 /* Headers */,
+				E2DDD1891BE69404002CE867 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "Serve (tvOS)";
+			productName = "Serve Example (tvOS)";
+			productReference = E2DDD18B1BE69404002CE867 /* Serve.framework */;
+			productType = "com.apple.product-type.framework";
+		};
+		E2DDD1C61BE698A8002CE867 /* Serve Example (tvOS) */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E2DDD1D81BE698A8002CE867 /* Build configuration list for PBXNativeTarget "Serve Example (tvOS)" */;
+			buildPhases = (
+				E2DDD1C51BE698A8002CE867 /* Resources */,
+				E24A3C0D21E28D2300C58878 /* Copy Frameworks */,
+				E2DDD1C31BE698A8002CE867 /* Sources */,
+				E2DDD1C41BE698A8002CE867 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				E24A3C0621E2879700C58878 /* PBXTargetDependency */,
+			);
+			name = "Serve Example (tvOS)";
+			productName = tvOS;
+			productReference = E2DDD1C71BE698A8002CE867 /* SRVServer.app */;
+			productType = "com.apple.product-type.application";
+		};
+		E2DDD1F51BE69EE4002CE867 /* Serve Example (iOS) */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E2DDD20A1BE69EE5002CE867 /* Build configuration list for PBXNativeTarget "Serve Example (iOS)" */;
+			buildPhases = (
+				E2DDD1F41BE69EE4002CE867 /* Resources */,
+				E24A3C0C21E28D1E00C58878 /* Copy Frameworks */,
+				E2DDD1F21BE69EE4002CE867 /* Sources */,
+				E2DDD1F31BE69EE4002CE867 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				E24A3C0421E2879000C58878 /* PBXTargetDependency */,
+			);
+			name = "Serve Example (iOS)";
+			productName = "Serve Example (iOS)";
+			productReference = E2DDD1F61BE69EE4002CE867 /* SRVServer.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		08FB7793FE84155DC02AAC07 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 2630;
+				TargetAttributes = {
+					CEE28CD01AE004D800F4023C = {
+						CreatedOnToolsVersion = 6.3;
+					};
+					CEE28CEE1AE0051F00F4023C = {
+						CreatedOnToolsVersion = 6.3;
+					};
+					E24039241BA09207000B7089 = {
+						CreatedOnToolsVersion = 6.4;
+					};
+					E2DDD18A1BE69404002CE867 = {
+						CreatedOnToolsVersion = 7.1;
+						ProvisioningStyle = Manual;
+					};
+					E2DDD1C61BE698A8002CE867 = {
+						CreatedOnToolsVersion = 7.1;
+					};
+					E2DDD1F51BE69EE4002CE867 = {
+						CreatedOnToolsVersion = 7.1;
+					};
+				};
+			};
+			buildConfigurationList = 1DEB928908733DD80010E9CD /* Build configuration list for PBXProject "SRVServer" */;
+			compatibilityVersion = "Xcode 8.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 1;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 08FB7794FE84155DC02AAC07 /* LittleCMS */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				E274F876187E77D8009E0582 /* Build All */,
+				8DD76FA90486AB0100D96B5E /* Serve Example (Mac) */,
+				E2DDD1F51BE69EE4002CE867 /* Serve Example (iOS) */,
+				E2DDD1C61BE698A8002CE867 /* Serve Example (tvOS) */,
+				CEE28CD01AE004D800F4023C /* Serve (Mac) */,
+				CEE28CEE1AE0051F00F4023C /* Serve (iOS) */,
+				E2DDD18A1BE69404002CE867 /* Serve (tvOS) */,
+				E24039241BA09207000B7089 /* Tests (Mac) */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		CEE28CCF1AE004D800F4023C /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CEE28D451AE0078600F4023C /* SRVUploader.bundle in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CEE28CED1AE0051F00F4023C /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CEE28D461AE0078600F4023C /* SRVUploader.bundle in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E2DDD1891BE69404002CE867 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E2DDD1951BE69427002CE867 /* SRVUploader.bundle in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E2DDD1C51BE698A8002CE867 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E2DDD1D61BE698A8002CE867 /* Assets.xcassets in Resources */,
+				E2DDD1D41BE698A8002CE867 /* Main.storyboard in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E2DDD1F41BE69EE4002CE867 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E2DDD2081BE69EE5002CE867 /* LaunchScreen.storyboard in Resources */,
+				E2DDD2051BE69EE5002CE867 /* Assets.xcassets in Resources */,
+				E2DDD2031BE69EE5002CE867 /* Main.storyboard in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		E21F038418FB37D80043AD1E /* Delete SRVUploader.bundle */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Delete SRVUploader.bundle";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "if [ \"$CONFIGURATION\" == \"Debug\" ]; then\n  cd \"$BUILT_PRODUCTS_DIR\"\n  rm -rf \"SRVUploader.bundle\"\nfi\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		8DD76FAB0486AB0100D96B5E /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E28BAE4618F99C810095C089 /* SRVDataResponse.m in Sources */,
+				E28BAE3818F99C810095C089 /* SRVFunctions.m in Sources */,
+				E28BAE4A18F99C810095C089 /* SRVFileResponse.m in Sources */,
+				E28BAE4418F99C810095C089 /* SRVURLEncodedFormRequest.m in Sources */,
+				E28BAE3A18F99C810095C089 /* SRVRequest.m in Sources */,
+				E28BAE3418F99C810095C089 /* SRVServer.m in Sources */,
+				E28BAE3618F99C810095C089 /* SRVConnection.m in Sources */,
+				E28BAE3C18F99C810095C089 /* SRVResponse.m in Sources */,
+				E28BAE4018F99C810095C089 /* SRVFileRequest.m in Sources */,
+				E28BAE4C18F99C810095C089 /* SRVStreamedResponse.m in Sources */,
+				E28BAE3E18F99C810095C089 /* SRVDataRequest.m in Sources */,
+				E2A0E80A18F3432600C580B1 /* SRVDAVServer.m in Sources */,
+				E28BAE4218F99C810095C089 /* SRVMultiPartFormRequest.m in Sources */,
+				E2BE850C18E785940061360B /* SRVUploader.m in Sources */,
+				E221128F1690B6470048D2B2 /* main.m in Sources */,
+				E28BAE4818F99C810095C089 /* SRVErrorResponse.m in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CEE28CCC1AE004D800F4023C /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CEE28D1B1AE0070300F4023C /* SRVRequest.m in Sources */,
+				CEE28D2F1AE0073C00F4023C /* SRVURLEncodedFormRequest.m in Sources */,
+				CEE28D0F1AE006DE00F4023C /* SRVConnection.m in Sources */,
+				CEE28D231AE0071A00F4023C /* SRVDataRequest.m in Sources */,
+				CEE28D2B1AE0073000F4023C /* SRVMultiPartFormRequest.m in Sources */,
+				CEE28D271AE0072400F4023C /* SRVFileRequest.m in Sources */,
+				CEE28D1F1AE0070D00F4023C /* SRVResponse.m in Sources */,
+				CEE28D3B1AE0076400F4023C /* SRVFileResponse.m in Sources */,
+				CEE28D3F1AE0076E00F4023C /* SRVStreamedResponse.m in Sources */,
+				CEE28D331AE0074900F4023C /* SRVDataResponse.m in Sources */,
+				CEE28D431AE0077F00F4023C /* SRVDAVServer.m in Sources */,
+				CEE28D0B1AE006CC00F4023C /* SRVServer.m in Sources */,
+				CEE28D131AE006E900F4023C /* SRVFunctions.m in Sources */,
+				CEE28D371AE0075900F4023C /* SRVErrorResponse.m in Sources */,
+				CEE28D491AE0079100F4023C /* SRVUploader.m in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CEE28CEA1AE0051F00F4023C /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				CEE28D1C1AE0070400F4023C /* SRVRequest.m in Sources */,
+				CEE28D301AE0073C00F4023C /* SRVURLEncodedFormRequest.m in Sources */,
+				CEE28D101AE006DF00F4023C /* SRVConnection.m in Sources */,
+				CEE28D241AE0071B00F4023C /* SRVDataRequest.m in Sources */,
+				CEE28D2C1AE0073000F4023C /* SRVMultiPartFormRequest.m in Sources */,
+				CEE28D281AE0072400F4023C /* SRVFileRequest.m in Sources */,
+				CEE28D201AE0070E00F4023C /* SRVResponse.m in Sources */,
+				CEE28D3C1AE0076400F4023C /* SRVFileResponse.m in Sources */,
+				CEE28D401AE0076F00F4023C /* SRVStreamedResponse.m in Sources */,
+				CEE28D341AE0074A00F4023C /* SRVDataResponse.m in Sources */,
+				CEE28D441AE0078000F4023C /* SRVDAVServer.m in Sources */,
+				CEE28D0C1AE006CD00F4023C /* SRVServer.m in Sources */,
+				CEE28D141AE006EA00F4023C /* SRVFunctions.m in Sources */,
+				CEE28D381AE0075900F4023C /* SRVErrorResponse.m in Sources */,
+				CEE28D4A1AE0079200F4023C /* SRVUploader.m in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E24039211BA09207000B7089 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E24039321BA092B7000B7089 /* Tests.m in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E2DDD1861BE69404002CE867 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E2DDD1961BE6945F002CE867 /* SRVServer.m in Sources */,
+				E2DDD1971BE6945F002CE867 /* SRVConnection.m in Sources */,
+				E2DDD1981BE6945F002CE867 /* SRVFunctions.m in Sources */,
+				E2DDD1991BE6945F002CE867 /* SRVRequest.m in Sources */,
+				E2DDD19A1BE6945F002CE867 /* SRVResponse.m in Sources */,
+				E2DDD19B1BE6945F002CE867 /* SRVDataRequest.m in Sources */,
+				E2DDD19C1BE6945F002CE867 /* SRVFileRequest.m in Sources */,
+				E2DDD19D1BE6945F002CE867 /* SRVMultiPartFormRequest.m in Sources */,
+				E2DDD19E1BE6945F002CE867 /* SRVURLEncodedFormRequest.m in Sources */,
+				E2DDD19F1BE6945F002CE867 /* SRVDataResponse.m in Sources */,
+				E2DDD1A01BE6945F002CE867 /* SRVErrorResponse.m in Sources */,
+				E2DDD1A11BE6945F002CE867 /* SRVFileResponse.m in Sources */,
+				E2DDD1A21BE6945F002CE867 /* SRVStreamedResponse.m in Sources */,
+				E2DDD1A31BE6945F002CE867 /* SRVDAVServer.m in Sources */,
+				E2DDD1A41BE6945F002CE867 /* SRVUploader.m in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E2DDD1C31BE698A8002CE867 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E2DDD1D11BE698A8002CE867 /* ViewController.swift in Sources */,
+				E2DDD1CE1BE698A8002CE867 /* AppDelegate.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E2DDD1F21BE69EE4002CE867 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E2DDD2001BE69EE5002CE867 /* ViewController.swift in Sources */,
+				E2DDD1FD1BE69EE5002CE867 /* AppDelegate.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		CE54F3941AE84FCA003C110E /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = CEE28CD01AE004D800F4023C /* Serve (Mac) */;
+			targetProxy = CE54F3931AE84FCA003C110E /* PBXContainerItemProxy */;
+		};
+		CE54F3961AE84FCA003C110E /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = CEE28CEE1AE0051F00F4023C /* Serve (iOS) */;
+			targetProxy = CE54F3951AE84FCA003C110E /* PBXContainerItemProxy */;
+		};
+		E240392D1BA09207000B7089 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = CEE28CD01AE004D800F4023C /* Serve (Mac) */;
+			targetProxy = E240392C1BA09207000B7089 /* PBXContainerItemProxy */;
+		};
+		E24A3C0421E2879000C58878 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = CEE28CEE1AE0051F00F4023C /* Serve (iOS) */;
+			targetProxy = E24A3C0321E2879000C58878 /* PBXContainerItemProxy */;
+		};
+		E24A3C0621E2879700C58878 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = E2DDD18A1BE69404002CE867 /* Serve (tvOS) */;
+			targetProxy = E24A3C0521E2879700C58878 /* PBXContainerItemProxy */;
+		};
+		E274F87B187E77E3009E0582 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 8DD76FA90486AB0100D96B5E /* Serve Example (Mac) */;
+			targetProxy = E274F87A187E77E3009E0582 /* PBXContainerItemProxy */;
+		};
+		E2DDD1941BE6941C002CE867 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = E2DDD18A1BE69404002CE867 /* Serve (tvOS) */;
+			targetProxy = E2DDD1931BE6941C002CE867 /* PBXContainerItemProxy */;
+		};
+		E2DDD1DC1BE69911002CE867 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = E2DDD1C61BE698A8002CE867 /* Serve Example (tvOS) */;
+			targetProxy = E2DDD1DB1BE69911002CE867 /* PBXContainerItemProxy */;
+		};
+		E2DDD20E1BE69EEE002CE867 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = E2DDD1F51BE69EE4002CE867 /* Serve Example (iOS) */;
+			targetProxy = E2DDD20D1BE69EEE002CE867 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin PBXVariantGroup section */
+		E2DDD1D21BE698A8002CE867 /* Main.storyboard */ = {
+			isa = PBXVariantGroup;
+			children = (
+				E2DDD1D31BE698A8002CE867 /* Base */,
+			);
+			name = Main.storyboard;
+			sourceTree = "<group>";
+		};
+		E2DDD2011BE69EE5002CE867 /* Main.storyboard */ = {
+			isa = PBXVariantGroup;
+			children = (
+				E2DDD2021BE69EE5002CE867 /* Base */,
+			);
+			name = Main.storyboard;
+			sourceTree = "<group>";
+		};
+		E2DDD2061BE69EE5002CE867 /* LaunchScreen.storyboard */ = {
+			isa = PBXVariantGroup;
+			children = (
+				E2DDD2071BE69EE5002CE867 /* Base */,
+			);
+			name = LaunchScreen.storyboard;
+			sourceTree = "<group>";
+		};
+/* End PBXVariantGroup section */
+
+/* Begin XCBuildConfiguration section */
+		1DEB928608733DD80010E9CD /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "Apple Development";
+				GCC_PREPROCESSOR_DEFINITIONS_NOT_USED_IN_PRECOMPS = __SERVE_ENABLE_TESTING__;
+				CODE_SIGN_STYLE = Automatic;
+				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = 6LF3GMKZAB;
+				ENABLE_HARDENED_RUNTIME = YES;
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "net.pol-online.ServeExample";
+				PRODUCT_NAME = ServeExample;
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		1DEB928708733DD80010E9CD /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "Apple Development";
+				GCC_PREPROCESSOR_DEFINITIONS_NOT_USED_IN_PRECOMPS = __SERVE_ENABLE_TESTING__;
+				CODE_SIGN_STYLE = Automatic;
+				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = 6LF3GMKZAB;
+				ENABLE_HARDENED_RUNTIME = YES;
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "net.pol-online.ServeExample";
+				PRODUCT_NAME = ServeExample;
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		1DEB928A08733DD80010E9CD /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				BUNDLE_VERSION_STRING = 3.5.4;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				DEAD_CODE_STRIPPING = YES;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = "DEBUG=1";
+				GCC_PREPROCESSOR_DEFINITIONS_NOT_USED_IN_PRECOMPS = __SERVE_ENABLE_TESTING__;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				HEADER_SEARCH_PATHS = "$(SDKROOT)/usr/include/libxml2";
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				ONLY_ACTIVE_ARCH = YES;
+				OTHER_LDFLAGS = (
+					"-framework",
+					UniformTypeIdentifiers,
+					"-framework",
+					Foundation,
+					"-framework",
+					SystemConfiguration,
+					"-framework",
+					CFNetwork,
+					"-lxml2",
+					"-lz",
+				);
+				"OTHER_LDFLAGS[sdk=iphoneos*]" = (
+					"$(inherited)",
+					"-weak_framework",
+					UIKit,
+				);
+				"OTHER_LDFLAGS[sdk=iphonesimulator*]" = (
+					"$(inherited)",
+					"-weak_framework",
+					UIKit,
+				);
+				"OTHER_LDFLAGS[sdk=appletvos*]" = (
+					"$(inherited)",
+					"-weak_framework",
+					UIKit,
+				);
+				"OTHER_LDFLAGS[sdk=appletvsimulator*]" = (
+					"$(inherited)",
+					"-weak_framework",
+					UIKit,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "net.pol-online.Serve";
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+				TVOS_DEPLOYMENT_TARGET = 15.0;
+				WARNING_CFLAGS = (
+					"-Wall",
+					"-Weverything",
+					"-Wshadow",
+					"-Wshorten-64-to-32",
+					"-Wstrict-prototypes",
+					"-Wdeprecated-declarations",
+					"-Wno-vla",
+					"-Wno-explicit-ownership-type",
+					"-Wno-gnu-statement-expression",
+					"-Wno-direct-ivar-access",
+					"-Wno-assign-enum",
+					"-Wno-format-nonliteral",
+					"-Wno-cast-align",
+					"-Wno-padded",
+					"-Wno-documentation",
+					"-Wno-documentation-unknown-command",
+					"-Wno-objc-missing-property-synthesis",
+					"-Wno-cstring-format-directive",
+					"-Wno-reserved-id-macro",
+					"-Wno-reserved-identifier",
+					"-Wno-pre-c11-compat",
+					"-Wno-cast-qual",
+					"-Wno-missing-include-dirs",
+				);
+			};
+			name = Debug;
+		};
+		1DEB928B08733DD80010E9CD /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				BUNDLE_VERSION_STRING = 3.5.4;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				DEAD_CODE_STRIPPING = YES;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_TREAT_WARNINGS_AS_ERRORS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				HEADER_SEARCH_PATHS = "$(SDKROOT)/usr/include/libxml2";
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				OTHER_LDFLAGS = (
+					"-framework",
+					UniformTypeIdentifiers,
+					"-framework",
+					Foundation,
+					"-framework",
+					SystemConfiguration,
+					"-framework",
+					CFNetwork,
+					"-lxml2",
+					"-lz",
+				);
+				"OTHER_LDFLAGS[sdk=iphoneos*]" = (
+					"$(inherited)",
+					"-weak_framework",
+					UIKit,
+				);
+				"OTHER_LDFLAGS[sdk=iphonesimulator*]" = (
+					"$(inherited)",
+					"-weak_framework",
+					UIKit,
+				);
+				"OTHER_LDFLAGS[sdk=appletvos*]" = (
+					"$(inherited)",
+					"-weak_framework",
+					UIKit,
+				);
+				"OTHER_LDFLAGS[sdk=appletvsimulator*]" = (
+					"$(inherited)",
+					"-weak_framework",
+					UIKit,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "net.pol-online.Serve";
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_TREAT_WARNINGS_AS_ERRORS = YES;
+				SWIFT_VERSION = 5.0;
+				TVOS_DEPLOYMENT_TARGET = 15.0;
+				WARNING_CFLAGS = "-Wall";
+			};
+			name = Release;
+		};
+		CEE28CE41AE004D800F4023C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				DEAD_CODE_STRIPPING = YES;
+				DEFINES_MODULE = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				ENABLE_MODULE_VERIFIER = YES;
+				INFOPLIST_FILE = Framework/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				MODULE_VERIFIER_SUPPORTED_LANGUAGES = "objective-c objective-c++";
+				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 gnu++14";
+				PRODUCT_BUNDLE_IDENTIFIER = "${PRODUCT_BUNDLE_IDENTIFIER}";
+				PRODUCT_NAME = Serve;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				WARNING_CFLAGS = (
+					"-Wall",
+					"-Weverything",
+					"-Wshadow",
+					"-Wshorten-64-to-32",
+					"-Wstrict-prototypes",
+					"-Wdeprecated-declarations",
+					"-Wno-vla",
+					"-Wno-explicit-ownership-type",
+					"-Wno-gnu-statement-expression",
+					"-Wno-direct-ivar-access",
+					"-Wno-assign-enum",
+					"-Wno-format-nonliteral",
+					"-Wno-cast-align",
+					"-Wno-padded",
+					"-Wno-documentation",
+					"-Wno-documentation-unknown-command",
+					"-Wno-objc-missing-property-synthesis",
+					"-Wno-cstring-format-directive",
+					"-Wno-reserved-id-macro",
+					"-Wno-reserved-identifier",
+					"-Wno-pre-c11-compat",
+					"-Wno-cast-qual",
+					"-Wno-declaration-after-statement",
+					"-Wno-missing-include-dirs",
+				);
+			};
+			name = Debug;
+		};
+		CEE28CE51AE004D800F4023C /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				DEAD_CODE_STRIPPING = YES;
+				DEFINES_MODULE = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				ENABLE_MODULE_VERIFIER = YES;
+				INFOPLIST_FILE = Framework/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				MODULE_VERIFIER_SUPPORTED_LANGUAGES = "objective-c objective-c++";
+				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 gnu++14";
+				PRODUCT_BUNDLE_IDENTIFIER = "${PRODUCT_BUNDLE_IDENTIFIER}";
+				PRODUCT_NAME = Serve;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Release;
+		};
+		CEE28D031AE0052000F4023C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "";
+				DEFINES_MODULE = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				ENABLE_MODULE_VERIFIER = YES;
+				INFOPLIST_FILE = Framework/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				MODULEMAP_FILE = Framework/module.modulemap;
+				MODULE_VERIFIER_SUPPORTED_LANGUAGES = "objective-c objective-c++";
+				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 gnu++14";
+				PRODUCT_BUNDLE_IDENTIFIER = "${PRODUCT_BUNDLE_IDENTIFIER}";
+				PRODUCT_NAME = Serve;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				WARNING_CFLAGS = (
+					"-Wall",
+					"-Weverything",
+					"-Wshadow",
+					"-Wshorten-64-to-32",
+					"-Wstrict-prototypes",
+					"-Wdeprecated-declarations",
+					"-Wno-vla",
+					"-Wno-explicit-ownership-type",
+					"-Wno-gnu-statement-expression",
+					"-Wno-direct-ivar-access",
+					"-Wno-assign-enum",
+					"-Wno-format-nonliteral",
+					"-Wno-cast-align",
+					"-Wno-padded",
+					"-Wno-documentation",
+					"-Wno-documentation-unknown-command",
+					"-Wno-objc-missing-property-synthesis",
+					"-Wno-cstring-format-directive",
+					"-Wno-reserved-id-macro",
+					"-Wno-reserved-identifier",
+					"-Wno-pre-c11-compat",
+					"-Wno-cast-qual",
+					"-Wno-declaration-after-statement",
+					"-Wno-missing-include-dirs",
+				);
+			};
+			name = Debug;
+		};
+		CEE28D041AE0052000F4023C /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "";
+				DEFINES_MODULE = YES;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				ENABLE_MODULE_VERIFIER = YES;
+				INFOPLIST_FILE = Framework/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				MODULEMAP_FILE = Framework/module.modulemap;
+				MODULE_VERIFIER_SUPPORTED_LANGUAGES = "objective-c objective-c++";
+				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 gnu++14";
+				PRODUCT_BUNDLE_IDENTIFIER = "${PRODUCT_BUNDLE_IDENTIFIER}";
+				PRODUCT_NAME = Serve;
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		E240392F1BA09207000B7089 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				DEAD_CODE_STRIPPING = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/Sources/ServeUploader",
+				);
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(DEVELOPER_FRAMEWORKS_DIR)",
+					"$(inherited)",
+				);
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				PRODUCT_NAME = Tests;
+				SDKROOT = macosx;
+				WARNING_CFLAGS = (
+					"$(inherited)",
+					"-Wno-gnu-zero-variadic-macro-arguments",
+				);
+			};
+			name = Debug;
+		};
+		E24039301BA09207000B7089 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				DEAD_CODE_STRIPPING = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/Sources/ServeUploader",
+				);
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(DEVELOPER_FRAMEWORKS_DIR)",
+					"$(inherited)",
+				);
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				PRODUCT_NAME = Tests;
+				SDKROOT = macosx;
+				WARNING_CFLAGS = (
+					"$(inherited)",
+					"-Wno-gnu-zero-variadic-macro-arguments",
+				);
+			};
+			name = Release;
+		};
+		E274F877187E77D8009E0582 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				DEAD_CODE_STRIPPING = YES;
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+			};
+			name = Debug;
+		};
+		E274F878187E77D8009E0582 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				DEAD_CODE_STRIPPING = YES;
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+			};
+			name = Release;
+		};
+		E2DDD1901BE69404002CE867 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "";
+				CODE_SIGN_STYLE = Manual;
+				DEFINES_MODULE = YES;
+				DEVELOPMENT_TEAM = "";
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				ENABLE_MODULE_VERIFIER = YES;
+				INFOPLIST_FILE = Framework/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				MODULE_VERIFIER_SUPPORTED_LANGUAGES = "objective-c objective-c++";
+				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 gnu++14";
+				PRODUCT_BUNDLE_IDENTIFIER = "${PRODUCT_BUNDLE_IDENTIFIER}";
+				PRODUCT_NAME = Serve;
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SDKROOT = appletvos;
+				SKIP_INSTALL = YES;
+				TVOS_DEPLOYMENT_TARGET = 15.0;
+				WARNING_CFLAGS = (
+					"-Wall",
+					"-Weverything",
+					"-Wshadow",
+					"-Wshorten-64-to-32",
+					"-Wstrict-prototypes",
+					"-Wdeprecated-declarations",
+					"-Wno-vla",
+					"-Wno-explicit-ownership-type",
+					"-Wno-gnu-statement-expression",
+					"-Wno-direct-ivar-access",
+					"-Wno-assign-enum",
+					"-Wno-format-nonliteral",
+					"-Wno-cast-align",
+					"-Wno-padded",
+					"-Wno-documentation",
+					"-Wno-documentation-unknown-command",
+					"-Wno-objc-missing-property-synthesis",
+					"-Wno-cstring-format-directive",
+					"-Wno-reserved-id-macro",
+					"-Wno-reserved-identifier",
+					"-Wno-pre-c11-compat",
+					"-Wno-cast-qual",
+					"-Wno-declaration-after-statement",
+					"-Wno-missing-include-dirs",
+				);
+			};
+			name = Debug;
+		};
+		E2DDD1911BE69404002CE867 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "";
+				CODE_SIGN_STYLE = Manual;
+				DEFINES_MODULE = YES;
+				DEVELOPMENT_TEAM = "";
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				DYLIB_INSTALL_NAME_BASE = "@rpath";
+				ENABLE_MODULE_VERIFIER = YES;
+				INFOPLIST_FILE = Framework/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				MODULE_VERIFIER_SUPPORTED_LANGUAGES = "objective-c objective-c++";
+				MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = "gnu17 gnu++14";
+				PRODUCT_BUNDLE_IDENTIFIER = "${PRODUCT_BUNDLE_IDENTIFIER}";
+				PRODUCT_NAME = Serve;
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SDKROOT = appletvos;
+				SKIP_INSTALL = YES;
+				TVOS_DEPLOYMENT_TARGET = 15.0;
+			};
+			name = Release;
+		};
+		E2DDD1D91BE698A8002CE867 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEVELOPMENT_TEAM = 6LF3GMKZAB;
+				INFOPLIST_FILE = Examples/tvOS/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "net.pol-online.ServeExample";
+				PRODUCT_NAME = ServeExample;
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SDKROOT = appletvos;
+				TVOS_DEPLOYMENT_TARGET = 15.0;
+			};
+			name = Debug;
+		};
+		E2DDD1DA1BE698A8002CE867 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEVELOPMENT_TEAM = 6LF3GMKZAB;
+				INFOPLIST_FILE = Examples/tvOS/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "net.pol-online.ServeExample";
+				PRODUCT_NAME = ServeExample;
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SDKROOT = appletvos;
+				TVOS_DEPLOYMENT_TARGET = 15.0;
+			};
+			name = Release;
+		};
+		E2DDD20B1BE69EE5002CE867 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COPY_PHASE_STRIP = NO;
+				DEVELOPMENT_TEAM = 6LF3GMKZAB;
+				ENABLE_BITCODE = YES;
+				INFOPLIST_FILE = Examples/iOS/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "net.pol-online.ServeExample";
+				PRODUCT_NAME = ServeExample;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		E2DDD20C1BE69EE5002CE867 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COPY_PHASE_STRIP = NO;
+				DEVELOPMENT_TEAM = 6LF3GMKZAB;
+				ENABLE_BITCODE = YES;
+				INFOPLIST_FILE = Examples/iOS/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 12.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "net.pol-online.ServeExample";
+				PRODUCT_NAME = ServeExample;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		1DEB928508733DD80010E9CD /* Build configuration list for PBXNativeTarget "Serve Example (Mac)" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1DEB928608733DD80010E9CD /* Debug */,
+				1DEB928708733DD80010E9CD /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		1DEB928908733DD80010E9CD /* Build configuration list for PBXProject "SRVServer" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1DEB928A08733DD80010E9CD /* Debug */,
+				1DEB928B08733DD80010E9CD /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		CEE28CE81AE004D800F4023C /* Build configuration list for PBXNativeTarget "Serve (Mac)" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CEE28CE41AE004D800F4023C /* Debug */,
+				CEE28CE51AE004D800F4023C /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		CEE28D021AE0052000F4023C /* Build configuration list for PBXNativeTarget "Serve (iOS)" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CEE28D031AE0052000F4023C /* Debug */,
+				CEE28D041AE0052000F4023C /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E240392E1BA09207000B7089 /* Build configuration list for PBXNativeTarget "Tests (Mac)" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E240392F1BA09207000B7089 /* Debug */,
+				E24039301BA09207000B7089 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E274F879187E77D8009E0582 /* Build configuration list for PBXAggregateTarget "Build All" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E274F877187E77D8009E0582 /* Debug */,
+				E274F878187E77D8009E0582 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E2DDD1921BE69404002CE867 /* Build configuration list for PBXNativeTarget "Serve (tvOS)" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E2DDD1901BE69404002CE867 /* Debug */,
+				E2DDD1911BE69404002CE867 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E2DDD1D81BE698A8002CE867 /* Build configuration list for PBXNativeTarget "Serve Example (tvOS)" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E2DDD1D91BE698A8002CE867 /* Debug */,
+				E2DDD1DA1BE698A8002CE867 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E2DDD20A1BE69EE5002CE867 /* Build configuration list for PBXNativeTarget "Serve Example (iOS)" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E2DDD20B1BE69EE5002CE867 /* Debug */,
+				E2DDD20C1BE69EE5002CE867 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 08FB7793FE84155DC02AAC07 /* Project object */;
+}

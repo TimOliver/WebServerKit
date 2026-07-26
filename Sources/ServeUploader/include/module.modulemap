@@ -1,0 +1,9 @@
+// A hand-written map because the target's public headers sit next to
+// SRVUploader.bundle, and SwiftPM refuses an umbrella header with sibling
+// directories. Pointing at the headers from here keeps the bundle where the Xcode
+// project and the podspec already expect it.
+module ServeUploader {
+    header "../SRVUploader.h"
+    header "../SRVUploaderSSEChannel.h"
+    export *
+}

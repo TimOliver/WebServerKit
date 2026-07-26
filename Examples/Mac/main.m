@@ -27,17 +27,17 @@
 
 #import <libgen.h>
 
-#import "GCDWebDAVServer.h"
-#import "GCDWebServer.h"
-#import "GCDWebServerDataRequest.h"
-#import "GCDWebServerDataResponse.h"
-#import "GCDWebServerMultiPartFormRequest.h"
-#import "GCDWebServerStreamedResponse.h"
-#import "GCDWebServerURLEncodedFormRequest.h"
-#import "GCDWebUploader.h"
+#import "SRVDAVServer.h"
+#import "SRVServer.h"
+#import "SRVDataRequest.h"
+#import "SRVDataResponse.h"
+#import "SRVMultiPartFormRequest.h"
+#import "SRVStreamedResponse.h"
+#import "SRVURLEncodedFormRequest.h"
+#import "SRVUploader.h"
 
-#ifndef __GCDWEBSERVER_ENABLE_TESTING__
-#error __GCDWEBSERVER_ENABLE_TESTING__ must be defined
+#ifndef __SERVE_ENABLE_TESTING__
+#error __SERVE_ENABLE_TESTING__ must be defined
 #endif
 
 typedef enum {
@@ -51,7 +51,7 @@ typedef enum {
     kMode_AsyncResponse
 } Mode;
 
-@interface Delegate : NSObject <GCDWebServerDelegate, GCDWebDAVServerDelegate, GCDWebUploaderDelegate>
+@interface Delegate : NSObject <SRVDelegate, SRVDAVServerDelegate, SRVUploaderDelegate>
 @end
 
 @implementation Delegate
@@ -60,71 +60,71 @@ typedef enum {
     fprintf(stdout, "<DELEGATE METHOD \"%s\" CALLED>\n", [NSStringFromSelector(selector) UTF8String]);
 }
 
-- (void)webServerDidStart:(GCDWebServer *)server {
+- (void)webServerDidStart:(SRVServer *)server {
     [self _logDelegateCall:_cmd];
 }
 
-- (void)webServerDidCompleteBonjourRegistration:(GCDWebServer *)server {
+- (void)webServerDidCompleteBonjourRegistration:(SRVServer *)server {
     [self _logDelegateCall:_cmd];
 }
 
-- (void)webServerDidUpdateNATPortMapping:(GCDWebServer *)server {
+- (void)webServerDidUpdateNATPortMapping:(SRVServer *)server {
     [self _logDelegateCall:_cmd];
 }
 
-- (void)webServerDidConnect:(GCDWebServer *)server {
+- (void)webServerDidConnect:(SRVServer *)server {
     [self _logDelegateCall:_cmd];
 }
 
-- (void)webServerDidDisconnect:(GCDWebServer *)server {
+- (void)webServerDidDisconnect:(SRVServer *)server {
     [self _logDelegateCall:_cmd];
 }
 
-- (void)webServerDidStop:(GCDWebServer *)server {
+- (void)webServerDidStop:(SRVServer *)server {
     [self _logDelegateCall:_cmd];
 }
 
-- (void)davServer:(GCDWebDAVServer *)server didDownloadFileAtPath:(NSString *)path {
+- (void)davServer:(SRVDAVServer *)server didDownloadFileAtPath:(NSString *)path {
     [self _logDelegateCall:_cmd];
 }
 
-- (void)davServer:(GCDWebDAVServer *)server didUploadFileAtPath:(NSString *)path {
+- (void)davServer:(SRVDAVServer *)server didUploadFileAtPath:(NSString *)path {
     [self _logDelegateCall:_cmd];
 }
 
-- (void)davServer:(GCDWebDAVServer *)server didMoveItemFromPath:(NSString *)fromPath toPath:(NSString *)toPath {
+- (void)davServer:(SRVDAVServer *)server didMoveItemFromPath:(NSString *)fromPath toPath:(NSString *)toPath {
     [self _logDelegateCall:_cmd];
 }
 
-- (void)davServer:(GCDWebDAVServer *)server didCopyItemFromPath:(NSString *)fromPath toPath:(NSString *)toPath {
+- (void)davServer:(SRVDAVServer *)server didCopyItemFromPath:(NSString *)fromPath toPath:(NSString *)toPath {
     [self _logDelegateCall:_cmd];
 }
 
-- (void)davServer:(GCDWebDAVServer *)server didDeleteItemAtPath:(NSString *)path {
+- (void)davServer:(SRVDAVServer *)server didDeleteItemAtPath:(NSString *)path {
     [self _logDelegateCall:_cmd];
 }
 
-- (void)davServer:(GCDWebDAVServer *)server didCreateDirectoryAtPath:(NSString *)path {
+- (void)davServer:(SRVDAVServer *)server didCreateDirectoryAtPath:(NSString *)path {
     [self _logDelegateCall:_cmd];
 }
 
-- (void)webUploader:(GCDWebUploader *)uploader didDownloadFileAtPath:(NSString *)path {
+- (void)webUploader:(SRVUploader *)uploader didDownloadFileAtPath:(NSString *)path {
     [self _logDelegateCall:_cmd];
 }
 
-- (void)webUploader:(GCDWebUploader *)uploader didUploadFileAtPath:(NSString *)path {
+- (void)webUploader:(SRVUploader *)uploader didUploadFileAtPath:(NSString *)path {
     [self _logDelegateCall:_cmd];
 }
 
-- (void)webUploader:(GCDWebUploader *)uploader didMoveItemFromPath:(NSString *)fromPath toPath:(NSString *)toPath {
+- (void)webUploader:(SRVUploader *)uploader didMoveItemFromPath:(NSString *)fromPath toPath:(NSString *)toPath {
     [self _logDelegateCall:_cmd];
 }
 
-- (void)webUploader:(GCDWebUploader *)uploader didDeleteItemAtPath:(NSString *)path {
+- (void)webUploader:(SRVUploader *)uploader didDeleteItemAtPath:(NSString *)path {
     [self _logDelegateCall:_cmd];
 }
 
-- (void)webUploader:(GCDWebUploader *)uploader didCreateDirectoryAtPath:(NSString *)path {
+- (void)webUploader:(SRVUploader *)uploader didCreateDirectoryAtPath:(NSString *)path {
     [self _logDelegateCall:_cmd];
 }
 
@@ -201,12 +201,12 @@ int main(int argc, const char *argv[]) {
             }
         }
 
-        GCDWebServer *webServer = nil;
+        SRVServer *webServer = nil;
         switch (mode) {
         // Simply serve contents of home directory
         case kMode_WebServer: {
             fprintf(stdout, "Running in Web Server mode from \"%s\"\n", [rootDirectory UTF8String]);
-            webServer = [[GCDWebServer alloc] init];
+            webServer = [[SRVServer alloc] init];
             [webServer addGETHandlerForBasePath:@"/" directoryPath:rootDirectory indexFilename:nil cacheAge:0 allowRangeRequests:YES];
             break;
         }
@@ -214,11 +214,11 @@ int main(int argc, const char *argv[]) {
         // Renders a HTML page
         case kMode_HTMLPage: {
             fprintf(stdout, "Running in HTML Page mode\n");
-            webServer = [[GCDWebServer alloc] init];
+            webServer = [[SRVServer alloc] init];
             [webServer addDefaultHandlerForMethod:@"GET"
-                                     requestClass:[GCDWebServerRequest class]
-                                     processBlock:^GCDWebServerResponse *(GCDWebServerRequest *request) {
-                                         return [GCDWebServerDataResponse responseWithHTML:@"<html><body><p>Hello World</p></body></html>"];
+                                     requestClass:[SRVRequest class]
+                                     processBlock:^SRVResponse *(SRVRequest *request) {
+                                         return [SRVDataResponse responseWithHTML:@"<html><body><p>Hello World</p></body></html>"];
                                      }];
             break;
         }
@@ -226,11 +226,11 @@ int main(int argc, const char *argv[]) {
         // Implements an HTML form
         case kMode_HTMLForm: {
             fprintf(stdout, "Running in HTML Form mode\n");
-            webServer = [[GCDWebServer alloc] init];
+            webServer = [[SRVServer alloc] init];
             [webServer addHandlerForMethod:@"GET"
                                       path:@"/"
-                              requestClass:[GCDWebServerRequest class]
-                              processBlock:^GCDWebServerResponse *(GCDWebServerRequest *request) {
+                              requestClass:[SRVRequest class]
+                              processBlock:^SRVResponse *(SRVRequest *request) {
                                   NSString *html = @" \
             <html><body> \
               <form name=\"input\" action=\"/\" method=\"post\" enctype=\"application/x-www-form-urlencoded\"> \
@@ -239,15 +239,15 @@ int main(int argc, const char *argv[]) {
               </form> \
             </body></html> \
           ";
-                                  return [GCDWebServerDataResponse responseWithHTML:html];
+                                  return [SRVDataResponse responseWithHTML:html];
                               }];
             [webServer addHandlerForMethod:@"POST"
                                       path:@"/"
-                              requestClass:[GCDWebServerURLEncodedFormRequest class]
-                              processBlock:^GCDWebServerResponse *(GCDWebServerRequest *request) {
-                                  NSString *value = [[(GCDWebServerURLEncodedFormRequest *)request arguments] objectForKey:@"value"];
+                              requestClass:[SRVURLEncodedFormRequest class]
+                              processBlock:^SRVResponse *(SRVRequest *request) {
+                                  NSString *value = [[(SRVURLEncodedFormRequest *)request arguments] objectForKey:@"value"];
                                   NSString *html = [NSString stringWithFormat:@"<html><body><p>%@</p></body></html>", value];
-                                  return [GCDWebServerDataResponse responseWithHTML:html];
+                                  return [SRVDataResponse responseWithHTML:html];
                               }];
             break;
         }
@@ -255,7 +255,7 @@ int main(int argc, const char *argv[]) {
         // Implements HTML file upload
         case kMode_HTMLFileUpload: {
             fprintf(stdout, "Running in HTML File Upload mode\n");
-            webServer = [[GCDWebServer alloc] init];
+            webServer = [[SRVServer alloc] init];
             NSString *formHTML = @" \
           <form name=\"input\" action=\"/\" method=\"post\" enctype=\"multipart/form-data\"> \
           <input type=\"hidden\" name=\"secret\" value=\"42\"> \
@@ -265,28 +265,28 @@ int main(int argc, const char *argv[]) {
         ";
             [webServer addHandlerForMethod:@"GET"
                                       path:@"/"
-                              requestClass:[GCDWebServerRequest class]
-                              processBlock:^GCDWebServerResponse *(GCDWebServerRequest *request) {
+                              requestClass:[SRVRequest class]
+                              processBlock:^SRVResponse *(SRVRequest *request) {
                                   NSString *html = [NSString stringWithFormat:@"<html><body>%@</body></html>", formHTML];
-                                  return [GCDWebServerDataResponse responseWithHTML:html];
+                                  return [SRVDataResponse responseWithHTML:html];
                               }];
             [webServer addHandlerForMethod:@"POST"
                                       path:@"/"
-                              requestClass:[GCDWebServerMultiPartFormRequest class]
-                              processBlock:^GCDWebServerResponse *(GCDWebServerRequest *request) {
+                              requestClass:[SRVMultiPartFormRequest class]
+                              processBlock:^SRVResponse *(SRVRequest *request) {
                                   NSMutableString *string = [NSMutableString string];
 
-                                  for (GCDWebServerMultiPartArgument *argument in [(GCDWebServerMultiPartFormRequest *)request arguments]) {
+                                  for (SRVMultiPartArgument *argument in [(SRVMultiPartFormRequest *)request arguments]) {
                                       [string appendFormat:@"%@ = %@<br>", argument.controlName, argument.string];
                                   }
 
-                                  for (GCDWebServerMultiPartFile *file in [(GCDWebServerMultiPartFormRequest *)request files]) {
+                                  for (SRVMultiPartFile *file in [(SRVMultiPartFormRequest *)request files]) {
                                       NSDictionary *attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:file.temporaryPath error:NULL];
                                       [string appendFormat:@"%@ = &quot;%@&quot; (%@ | %llu %@)<br>", file.controlName, file.fileName, file.mimeType, attributes.fileSize >= 1000 ? attributes.fileSize / 1000 : attributes.fileSize, attributes.fileSize >= 1000 ? @"KB" : @"Bytes"];
                                   }
 
                                   NSString *html = [NSString stringWithFormat:@"<html><body><p>%@</p><hr>%@</body></html>", string, formHTML];
-                                  return [GCDWebServerDataResponse responseWithHTML:html];
+                                  return [SRVDataResponse responseWithHTML:html];
                               }];
             break;
         }
@@ -294,27 +294,27 @@ int main(int argc, const char *argv[]) {
         // Serve home directory through WebDAV
         case kMode_WebDAV: {
             fprintf(stdout, "Running in WebDAV mode from \"%s\"\n", [rootDirectory UTF8String]);
-            webServer = [[GCDWebDAVServer alloc] initWithUploadDirectory:rootDirectory];
+            webServer = [[SRVDAVServer alloc] initWithUploadDirectory:rootDirectory];
             break;
         }
 
         // Serve home directory through web uploader
         case kMode_WebUploader: {
             fprintf(stdout, "Running in Web Uploader mode from \"%s\"\n", [rootDirectory UTF8String]);
-            webServer = [[GCDWebUploader alloc] initWithUploadDirectory:rootDirectory];
+            webServer = [[SRVUploader alloc] initWithUploadDirectory:rootDirectory];
             break;
         }
 
         // Test streaming responses
         case kMode_StreamingResponse: {
             fprintf(stdout, "Running in Streaming Response mode\n");
-            webServer = [[GCDWebServer alloc] init];
+            webServer = [[SRVServer alloc] init];
             [webServer addHandlerForMethod:@"GET"
                                       path:@"/sync"
-                              requestClass:[GCDWebServerRequest class]
-                              processBlock:^GCDWebServerResponse *(GCDWebServerRequest *request) {
+                              requestClass:[SRVRequest class]
+                              processBlock:^SRVResponse *(SRVRequest *request) {
                                   __block int countDown = 10;
-                                  return [GCDWebServerStreamedResponse responseWithContentType:@"text/plain"
+                                  return [SRVStreamedResponse responseWithContentType:@"text/plain"
                                                                                    streamBlock:^NSData *(NSError **error) {
                                                                                        usleep(100 * 1000);
 
@@ -327,11 +327,11 @@ int main(int argc, const char *argv[]) {
                               }];
             [webServer addHandlerForMethod:@"GET"
                                       path:@"/async"
-                              requestClass:[GCDWebServerRequest class]
-                              processBlock:^GCDWebServerResponse *(GCDWebServerRequest *request) {
+                              requestClass:[SRVRequest class]
+                              processBlock:^SRVResponse *(SRVRequest *request) {
                                   __block int countDown = 10;
-                                  return [GCDWebServerStreamedResponse responseWithContentType:@"text/plain"
-                                                                              asyncStreamBlock:^(GCDWebServerBodyReaderCompletionBlock completionBlock) {
+                                  return [SRVStreamedResponse responseWithContentType:@"text/plain"
+                                                                              asyncStreamBlock:^(SRVBodyReaderCompletionBlock completionBlock) {
                                                                                   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                                                                                       NSData *data = countDown ? [[NSString stringWithFormat:@"%i\n", countDown--] dataUsingEncoding:NSUTF8StringEncoding] : [NSData data];
                                                                                       completionBlock(data, nil);
@@ -344,24 +344,24 @@ int main(int argc, const char *argv[]) {
         // Test async responses
         case kMode_AsyncResponse: {
             fprintf(stdout, "Running in Async Response mode\n");
-            webServer = [[GCDWebServer alloc] init];
+            webServer = [[SRVServer alloc] init];
             [webServer addHandlerForMethod:@"GET"
                                       path:@"/async"
-                              requestClass:[GCDWebServerRequest class]
-                         asyncProcessBlock:^(GCDWebServerRequest *request, GCDWebServerCompletionBlock completionBlock) {
+                              requestClass:[SRVRequest class]
+                         asyncProcessBlock:^(SRVRequest *request, SRVCompletionBlock completionBlock) {
                              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-                                 GCDWebServerDataResponse *response = [GCDWebServerDataResponse responseWithData:(NSData *)[@"Hello World!" dataUsingEncoding:NSUTF8StringEncoding] contentType:@"text/plain"];
+                                 SRVDataResponse *response = [SRVDataResponse responseWithData:(NSData *)[@"Hello World!" dataUsingEncoding:NSUTF8StringEncoding] contentType:@"text/plain"];
                                  completionBlock(response);
                              });
                          }];
             [webServer addHandlerForMethod:@"GET"
                                       path:@"/async2"
-                              requestClass:[GCDWebServerRequest class]
-                         asyncProcessBlock:^(GCDWebServerRequest *request, GCDWebServerCompletionBlock handlerCompletionBlock) {
+                              requestClass:[SRVRequest class]
+                         asyncProcessBlock:^(SRVRequest *request, SRVCompletionBlock handlerCompletionBlock) {
                              dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
                                  __block int countDown = 10;
-                                 GCDWebServerStreamedResponse *response = [GCDWebServerStreamedResponse responseWithContentType:@"text/plain"
-                                                                                                               asyncStreamBlock:^(GCDWebServerBodyReaderCompletionBlock readerCompletionBlock) {
+                                 SRVStreamedResponse *response = [SRVStreamedResponse responseWithContentType:@"text/plain"
+                                                                                                               asyncStreamBlock:^(SRVBodyReaderCompletionBlock readerCompletionBlock) {
                                                                                                                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                                                                                                                        NSData *data = countDown ? [[NSString stringWithFormat:@"%i\n", countDown--] dataUsingEncoding:NSUTF8StringEncoding] : [NSData data];
                                                                                                                        readerCompletionBlock(data, nil);
@@ -382,7 +382,7 @@ int main(int argc, const char *argv[]) {
                 webServer.delegate = delegate;
 #endif
                 fprintf(stdout, "<RUNNING TESTS FROM \"%s\">\n\n", [testDirectory UTF8String]);
-                result = (int)[webServer runTestsWithOptions:@{GCDWebServerOption_Port: @8080} inDirectory:testDirectory];
+                result = (int)[webServer runTestsWithOptions:@{SRVOption_Port: @8080} inDirectory:testDirectory];
             } else {
                 webServer.delegate = delegate;
 
@@ -393,19 +393,19 @@ int main(int argc, const char *argv[]) {
 
                 fprintf(stdout, "\n");
                 NSMutableDictionary *options = [NSMutableDictionary dictionary];
-                [options setObject:@8080 forKey:GCDWebServerOption_Port];
-                [options setObject:@(requestNATPortMapping) forKey:GCDWebServerOption_RequestNATPortMapping];
-                [options setObject:@(bindToLocalhost) forKey:GCDWebServerOption_BindToLocalhost];
-                [options setObject:@"" forKey:GCDWebServerOption_BonjourName];
+                [options setObject:@8080 forKey:SRVOption_Port];
+                [options setObject:@(requestNATPortMapping) forKey:SRVOption_RequestNATPortMapping];
+                [options setObject:@(bindToLocalhost) forKey:SRVOption_BindToLocalhost];
+                [options setObject:@"" forKey:SRVOption_BonjourName];
 
                 if (authenticationUser && authenticationPassword) {
-                    [options setValue:authenticationRealm forKey:GCDWebServerOption_AuthenticationRealm];
-                    [options setObject:@{authenticationUser: authenticationPassword} forKey:GCDWebServerOption_AuthenticationAccounts];
+                    [options setValue:authenticationRealm forKey:SRVOption_AuthenticationRealm];
+                    [options setObject:@{authenticationUser: authenticationPassword} forKey:SRVOption_AuthenticationAccounts];
 
                     if ([authenticationMethod isEqualToString:@"Basic"]) {
-                        [options setObject:GCDWebServerAuthenticationMethod_Basic forKey:GCDWebServerOption_AuthenticationMethod];
+                        [options setObject:SRVAuthenticationMethod_Basic forKey:SRVOption_AuthenticationMethod];
                     } else if ([authenticationMethod isEqualToString:@"Digest"]) {
-                        [options setObject:GCDWebServerAuthenticationMethod_DigestAccess forKey:GCDWebServerOption_AuthenticationMethod];
+                        [options setObject:SRVAuthenticationMethod_DigestAccess forKey:SRVOption_AuthenticationMethod];
                     }
                 }
 

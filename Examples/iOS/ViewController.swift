@@ -25,37 +25,37 @@
  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-import GCDWebServers
+import Serve
 import UIKit
 
 class ViewController: UIViewController {
   @IBOutlet var label: UILabel?
-  var webServer: GCDWebUploader!
+  var webServer: SRVUploader!
 
   override func viewWillAppear(_ animated: Bool) {
     super.viewWillAppear(animated)
 
     let documentsPath = NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true).first!
-    webServer = GCDWebUploader(uploadDirectory: documentsPath)
+    webServer = SRVUploader(uploadDirectory: documentsPath)
     webServer.delegate = self
 
     // Start with background suspension disabled for extended background task time
     let options: [String: Any] = [
-      GCDWebServerOption_AutomaticallySuspendInBackground: false,
+      SRVOption_AutomaticallySuspendInBackground: false,
 
       // The server is reachable by anything on the same network. Uncomment to require a
       // password, and/or to accept connections from this device only:
       //
-      // GCDWebServerOption_AuthenticationMethod: GCDWebServerAuthenticationMethod_Basic,
-      // GCDWebServerOption_AuthenticationAccounts: ["user": "password"],
-      // GCDWebServerOption_BindToLocalhost: true,
+      // SRVOption_AuthenticationMethod: SRVAuthenticationMethod_Basic,
+      // SRVOption_AuthenticationAccounts: ["user": "password"],
+      // SRVOption_BindToLocalhost: true,
     ]
 
     do {
       try webServer.start(options: options)
-      label?.text = "GCDWebServer running locally on port \(webServer.port)"
+      label?.text = "SRVServer running locally on port \(webServer.port)"
     } catch {
-      label?.text = "GCDWebServer not running: \(error.localizedDescription)"
+      label?.text = "SRVServer not running: \(error.localizedDescription)"
     }
   }
 
@@ -67,24 +67,24 @@ class ViewController: UIViewController {
   }
 }
 
-extension ViewController: GCDWebUploaderDelegate {
-  func webUploader(_: GCDWebUploader, didUploadFileAtPath path: String) {
+extension ViewController: SRVUploaderDelegate {
+  func webUploader(_: SRVUploader, didUploadFileAtPath path: String) {
     print("[UPLOAD] \(path)")
   }
 
-  func webUploader(_: GCDWebUploader, didDownloadFileAtPath path: String) {
+  func webUploader(_: SRVUploader, didDownloadFileAtPath path: String) {
     print("[DOWNLOAD] \(path)")
   }
 
-  func webUploader(_: GCDWebUploader, didMoveItemFromPath fromPath: String, toPath: String) {
+  func webUploader(_: SRVUploader, didMoveItemFromPath fromPath: String, toPath: String) {
     print("[MOVE] \(fromPath) -> \(toPath)")
   }
 
-  func webUploader(_: GCDWebUploader, didCreateDirectoryAtPath path: String) {
+  func webUploader(_: SRVUploader, didCreateDirectoryAtPath path: String) {
     print("[CREATE] \(path)")
   }
 
-  func webUploader(_: GCDWebUploader, didDeleteItemAtPath path: String) {
+  func webUploader(_: SRVUploader, didDeleteItemAtPath path: String) {
     print("[DELETE] \(path)")
   }
 }

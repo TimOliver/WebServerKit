@@ -4,5 +4,5 @@ Host: localhost:8080
 Connection: Keep-Alive
 User-Agent: Cyberduck/4.4.3 (Mac OS X/10.9.2) (x86_64)
 Accept-Encoding: gzip,deflate
-X-GCDWebServer-CreationDate: 2014-04-12T04:53:35+00:00
+X-Serve-CreationDate: 2014-04-12T04:53:35+00:00
 

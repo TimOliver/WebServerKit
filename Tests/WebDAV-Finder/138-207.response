@@ -3,7 +3,7 @@ Cache-Control: no-cache
 Content-Length: 1037
 Content-Type: application/xml; charset="utf-8"
 Connection: Close
-Server: GCDWebDAVServer
+Server: Serve
 Date: Sat, 12 Apr 2014 05:11:26 GMT
 
 <?xml version="1.0" encoding="utf-8" ?><D:multistatus xmlns:D="DAV:">
