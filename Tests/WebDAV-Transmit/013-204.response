@@ -1,6 +1,6 @@
 HTTP/1.1 204 No Content
 Cache-Control: no-cache
 Connection: Close
-Server: GCDWebDAVServer
+Server: Serve
 Date: Sat, 12 Apr 2014 04:50:04 GMT
 

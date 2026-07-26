@@ -7,7 +7,7 @@ Accept: */*
 User-Agent: WebDAVFS/3.0.1 (03018000) Darwin/13.1.0 (x86_64)
 Content-Length: 229
 Connection: keep-alive
-X-GCDWebServer-LockToken: urn:uuid:34F304E0-C45C-4CA7-9DF7-23833547F994
+X-Serve-LockToken: urn:uuid:34F304E0-C45C-4CA7-9DF7-23833547F994
 
 <?xml version="1.0" encoding="utf-8"?>
 <D:lockinfo xmlns:D="DAV:">

@@ -16,7 +16,7 @@
 BUILD_DIR="$(pwd)/build"
 PAYLOAD_ZIP="Tests/Payload.zip"
 PAYLOAD_DIR="$BUILD_DIR/Payload"
-TRACE_RUNNER="$BUILD_DIR/Release/GCDWebServer"
+TRACE_RUNNER="$BUILD_DIR/Release/ServeExample"
 
 # Nothing built here is distributed, and the example target is configured with a specific
 # development team, so a real certificate would have to exist on every machine that runs
@@ -49,10 +49,10 @@ function runTests {
 rm -rf "$BUILD_DIR"
 
 echo "=== Unit tests ==="
-xcodebuild test -project GCDWebServer.xcodeproj -scheme "GCDWebServers (Mac)" -configuration Debug "SYMROOT=$BUILD_DIR" "${SIGNING[@]}"
+xcodebuild test -project Serve.xcodeproj -scheme "Serve (Mac)" -configuration Debug "SYMROOT=$BUILD_DIR" "${SIGNING[@]}"
 
 echo "=== Recorded traces ==="
-xcodebuild build -project GCDWebServer.xcodeproj -sdk macosx -target "GCDWebServer (Mac)" -configuration Release "SYMROOT=$BUILD_DIR" "${SIGNING[@]}"
+xcodebuild build -project Serve.xcodeproj -sdk macosx -target "Serve Example (Mac)" -configuration Release "SYMROOT=$BUILD_DIR" "${SIGNING[@]}"
 
 runTests htmlForm Tests/HTMLForm
 runTests htmlFileUpload Tests/HTMLFileUpload
@@ -64,9 +64,9 @@ runTests webUploader Tests/WebUploader
 runTests webServer Tests/WebServer-Sample-Movie Tests/Sample-Movie.mp4
 
 echo "=== Release builds ==="
-xcodebuild build -project GCDWebServer.xcodeproj -scheme "GCDWebServers (Mac)" -configuration Release "SYMROOT=$BUILD_DIR" "${SIGNING[@]}"
-xcodebuild build -project GCDWebServer.xcodeproj -scheme "GCDWebServers (iOS)" -configuration Release -destination 'generic/platform=iOS Simulator' "SYMROOT=$BUILD_DIR" "${SIGNING[@]}"
-xcodebuild build -project GCDWebServer.xcodeproj -scheme "GCDWebServers (tvOS)" -configuration Release -destination 'generic/platform=tvOS Simulator' "SYMROOT=$BUILD_DIR" "${SIGNING[@]}"
+xcodebuild build -project Serve.xcodeproj -scheme "Serve (Mac)" -configuration Release "SYMROOT=$BUILD_DIR" "${SIGNING[@]}"
+xcodebuild build -project Serve.xcodeproj -scheme "Serve (iOS)" -configuration Release -destination 'generic/platform=iOS Simulator' "SYMROOT=$BUILD_DIR" "${SIGNING[@]}"
+xcodebuild build -project Serve.xcodeproj -scheme "Serve (tvOS)" -configuration Release -destination 'generic/platform=tvOS Simulator' "SYMROOT=$BUILD_DIR" "${SIGNING[@]}"
 
 echo "=== Swift Package Manager ==="
 # The package layout is fragile in ways a plain Xcode build cannot see: the public headers

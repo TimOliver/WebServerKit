@@ -1,12 +1,12 @@
-#import <GCDWebServers/GCDWebServers.h>
+#import <Serve/Serve.h>
 #import <XCTest/XCTest.h>
 
 #import <netinet/in.h>
 #import <sys/socket.h>
 #import <zlib.h>
 
-#import "GCDWebServerPrivate.h"
-#import "GCDWebUploaderSSEChannel.h"
+#import "SRVPrivate.h"
+#import "SRVUploaderSSEChannel.h"
 
 #pragma clang diagnostic ignored "-Weverything"  // Prevent "messaging to unqualified id" warnings
 
@@ -97,7 +97,7 @@ static NSData* GZipDecompress(NSData* input) {
 
 // Drives a response through the same reader contract the connection uses, returning the
 // whole body. Handles both synchronous readers and async ones that park the completion.
-static NSData* DrainResponseBody(GCDWebServerResponse* response) {
+static NSData* DrainResponseBody(SRVResponse* response) {
     [response prepareForReading];
     NSError* error = nil;
 
@@ -131,7 +131,7 @@ static NSData* DrainResponseBody(GCDWebServerResponse* response) {
 }
 
 // Produce a gzip stream (RFC 1952) from the given data, matching the format the
-// server's GCDWebServerGZipDecoder expects (inflateInit2 window bits 15 + 16).
+// server's SRVGZipDecoder expects (inflateInit2 window bits 15 + 16).
 static NSData* GZipCompress(NSData* input) {
     z_stream stream;
     bzero(&stream, sizeof(stream));
@@ -168,14 +168,14 @@ static NSData* GZipCompress(NSData* input) {
 }
 
 // Build a request of the given class with a body, ready to receive performWriteData:.
-static __kindof GCDWebServerRequest* OpenBodyRequest(Class requestClass, NSDictionary* extraHeaders) {
+static __kindof SRVRequest* OpenBodyRequest(Class requestClass, NSDictionary* extraHeaders) {
     NSURL* url = [NSURL URLWithString:@"http://localhost/"];
     // A Content-Length is required for the request to keep its Content-Type (and
     // thus hasBody); its value is only a capacity hint here — writing past it via
     // performWriteData: directly is fine (only the connection enforces the length).
     NSMutableDictionary* headers = [NSMutableDictionary dictionaryWithDictionary:@{@"Content-Type": @"application/octet-stream", @"Content-Length": @"1024"}];
     [headers addEntriesFromDictionary:extraHeaders];
-    GCDWebServerRequest* request = [[requestClass alloc] initWithMethod:@"POST" url:url headers:headers path:@"/" query:@{}];
+    SRVRequest* request = [[requestClass alloc] initWithMethod:@"POST" url:url headers:headers path:@"/" query:@{}];
     [request prepareForWriting];
     NSError* error = nil;
     [request performOpen:&error];
@@ -231,60 +231,60 @@ static NSString* MakeTempDirectory(void) {
 @implementation Tests
 
 - (void)testWebServer {
-    GCDWebServer *server = [[GCDWebServer alloc] init];
+    SRVServer *server = [[SRVServer alloc] init];
 
     XCTAssertNotNil(server);
 }
 
 - (void)testDAVServer {
-    GCDWebDAVServer *server = [[GCDWebDAVServer alloc] init];
+    SRVDAVServer *server = [[SRVDAVServer alloc] init];
 
     XCTAssertNotNil(server);
 }
 
 - (void)testWebUploader {
-    GCDWebUploader *server = [[GCDWebUploader alloc] init];
+    SRVUploader *server = [[SRVUploader alloc] init];
 
     XCTAssertNotNil(server);
 }
 
 - (void)testPaths {
-    XCTAssertEqualObjects(GCDWebServerNormalizePath(@""), @"");
-    XCTAssertEqualObjects(GCDWebServerNormalizePath(@"/foo/"), @"/foo");
-    XCTAssertEqualObjects(GCDWebServerNormalizePath(@"foo/bar"), @"foo/bar");
-    XCTAssertEqualObjects(GCDWebServerNormalizePath(@"foo//bar"), @"foo/bar");
-    XCTAssertEqualObjects(GCDWebServerNormalizePath(@"foo/bar//"), @"foo/bar");
-    XCTAssertEqualObjects(GCDWebServerNormalizePath(@"foo/./bar"), @"foo/bar");
-    XCTAssertEqualObjects(GCDWebServerNormalizePath(@"foo/bar/."), @"foo/bar");
-    XCTAssertEqualObjects(GCDWebServerNormalizePath(@"foo/../bar"), @"bar");
-    XCTAssertEqualObjects(GCDWebServerNormalizePath(@"/foo/../bar"), @"/bar");
-    XCTAssertEqualObjects(GCDWebServerNormalizePath(@"/foo/.."), @"/");
-    XCTAssertEqualObjects(GCDWebServerNormalizePath(@"/.."), @"/");
-    XCTAssertEqualObjects(GCDWebServerNormalizePath(@"."), @"");
-    XCTAssertEqualObjects(GCDWebServerNormalizePath(@".."), @"");
-    XCTAssertEqualObjects(GCDWebServerNormalizePath(@"../.."), @"");
+    XCTAssertEqualObjects(SRVNormalizePath(@""), @"");
+    XCTAssertEqualObjects(SRVNormalizePath(@"/foo/"), @"/foo");
+    XCTAssertEqualObjects(SRVNormalizePath(@"foo/bar"), @"foo/bar");
+    XCTAssertEqualObjects(SRVNormalizePath(@"foo//bar"), @"foo/bar");
+    XCTAssertEqualObjects(SRVNormalizePath(@"foo/bar//"), @"foo/bar");
+    XCTAssertEqualObjects(SRVNormalizePath(@"foo/./bar"), @"foo/bar");
+    XCTAssertEqualObjects(SRVNormalizePath(@"foo/bar/."), @"foo/bar");
+    XCTAssertEqualObjects(SRVNormalizePath(@"foo/../bar"), @"bar");
+    XCTAssertEqualObjects(SRVNormalizePath(@"/foo/../bar"), @"/bar");
+    XCTAssertEqualObjects(SRVNormalizePath(@"/foo/.."), @"/");
+    XCTAssertEqualObjects(SRVNormalizePath(@"/.."), @"/");
+    XCTAssertEqualObjects(SRVNormalizePath(@"."), @"");
+    XCTAssertEqualObjects(SRVNormalizePath(@".."), @"");
+    XCTAssertEqualObjects(SRVNormalizePath(@"../.."), @"");
 
     // An embedded NUL is treated as a terminator, so the extension check and the actual
     // file access can no longer disagree (which would bypass an extension allow-list).
     unichar nul = 0;
     NSString *const nulStr = [NSString stringWithCharacters:&nul length:1];
-    XCTAssertEqualObjects(GCDWebServerNormalizePath([[@"secret.dat" stringByAppendingString:nulStr] stringByAppendingString:@".png"]), @"secret.dat");
+    XCTAssertEqualObjects(SRVNormalizePath([[@"secret.dat" stringByAppendingString:nulStr] stringByAppendingString:@".png"]), @"secret.dat");
 }
 
 // A misspelled AuthenticationMethod must fail closed (refuse to start) rather than
 // silently run the server with no authentication at all.
 - (void)testUnknownAuthenticationMethodFailsClosed {
-    GCDWebServer *server = [[GCDWebServer alloc] init];
-    [server addDefaultHandlerForMethod:@"GET" requestClass:[GCDWebServerRequest class] processBlock:^GCDWebServerResponse *(GCDWebServerRequest *request) {
-        return [GCDWebServerDataResponse responseWithText:@"ok"];
+    SRVServer *server = [[SRVServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET" requestClass:[SRVRequest class] processBlock:^SRVResponse *(SRVRequest *request) {
+        return [SRVDataResponse responseWithText:@"ok"];
     }];
 
     NSError *error = nil;
     BOOL started = [server startWithOptions:@{
-        GCDWebServerOption_Port : @(0),
-        GCDWebServerOption_BindToLocalhost : @(YES),
-        GCDWebServerOption_AuthenticationMethod : @"Digest",  // typo for "DigestAccess"
-        GCDWebServerOption_AuthenticationAccounts : @{@"user" : @"password"}
+        SRVOption_Port : @(0),
+        SRVOption_BindToLocalhost : @(YES),
+        SRVOption_AuthenticationMethod : @"Digest",  // typo for "DigestAccess"
+        SRVOption_AuthenticationAccounts : @{@"user" : @"password"}
     } error:&error];
     XCTAssertFalse(started);
     XCTAssertNotNil(error);
@@ -295,10 +295,10 @@ static NSString* MakeTempDirectory(void) {
     // The correctly-spelled method still starts.
     NSError *validError = nil;
     BOOL validStarted = [server startWithOptions:@{
-        GCDWebServerOption_Port : @(0),
-        GCDWebServerOption_BindToLocalhost : @(YES),
-        GCDWebServerOption_AuthenticationMethod : GCDWebServerAuthenticationMethod_DigestAccess,
-        GCDWebServerOption_AuthenticationAccounts : @{@"user" : @"password"}
+        SRVOption_Port : @(0),
+        SRVOption_BindToLocalhost : @(YES),
+        SRVOption_AuthenticationMethod : SRVAuthenticationMethod_DigestAccess,
+        SRVOption_AuthenticationAccounts : @{@"user" : @"password"}
     } error:&validError];
     XCTAssertTrue(validStarted);
     if (validStarted) {
@@ -318,7 +318,7 @@ static NSString* MakeTempDirectory(void) {
     BOOL wrote = [@"<script>alert(1)</script>" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:&writeError];
     XCTAssertTrue(wrote, @"could not create test file: %@", writeError);
 
-    GCDWebServerFileResponse *const response = [GCDWebServerFileResponse responseWithFile:path isAttachment:YES];
+    SRVFileResponse *const response = [SRVFileResponse responseWithFile:path isAttachment:YES];
     XCTAssertNotNil(response);
     NSString *const disposition = [response valueForAdditionalHeader:@"Content-Disposition"];
     XCTAssertNotNil(disposition);
@@ -330,12 +330,12 @@ static NSString* MakeTempDirectory(void) {
     [[NSFileManager defaultManager] removeItemAtPath:path error:NULL];
 }
 
-#pragma mark - GCDWebUploaderSSEChannel
+#pragma mark - SRVUploaderSSEChannel
 
 // Messages produced while no reader is parked must be buffered and later
 // delivered in FIFO order — not dropped.
 - (void)testSSEChannelBuffersMessagesUntilReaderParks {
-    GCDWebUploaderSSEChannel* channel = [[GCDWebUploaderSSEChannel alloc] initWithCapacity:100];
+    SRVUploaderSSEChannel* channel = [[SRVUploaderSSEChannel alloc] initWithCapacity:100];
 
     [channel enqueueData:SSEData(@"a")];
     [channel enqueueData:SSEData(@"b")];
@@ -356,7 +356,7 @@ static NSString* MakeTempDirectory(void) {
 
 // A message enqueued while a reader is parked is delivered to it immediately.
 - (void)testSSEChannelDeliversToParkedReaderOnEnqueue {
-    GCDWebUploaderSSEChannel* channel = [[GCDWebUploaderSSEChannel alloc] initWithCapacity:100];
+    SRVUploaderSSEChannel* channel = [[SRVUploaderSSEChannel alloc] initWithCapacity:100];
 
     __block NSData* received = nil;
     [channel parkReader:^(NSData* data) { received = data; }];
@@ -371,7 +371,7 @@ static NSString* MakeTempDirectory(void) {
 // The bug this class fixes: a burst of events arriving between ping-pong reads
 // must all survive and be delivered in order once the reader re-parks.
 - (void)testSSEChannelDoesNotDropBurstBetweenReads {
-    GCDWebUploaderSSEChannel* channel = [[GCDWebUploaderSSEChannel alloc] initWithCapacity:100];
+    SRVUploaderSSEChannel* channel = [[SRVUploaderSSEChannel alloc] initWithCapacity:100];
 
     NSMutableArray<NSString*>* received = [NSMutableArray array];
     void (^reader)(NSData*) = ^(NSData* data) {
@@ -395,7 +395,7 @@ static NSString* MakeTempDirectory(void) {
 // Parking a reader signals the client is alive, so it resets the idle-heartbeat
 // counter the owner uses to reap connections that have stopped reading.
 - (void)testSSEChannelParkingResetsIdleHeartbeats {
-    GCDWebUploaderSSEChannel* channel = [[GCDWebUploaderSSEChannel alloc] initWithCapacity:100];
+    SRVUploaderSSEChannel* channel = [[SRVUploaderSSEChannel alloc] initWithCapacity:100];
     channel.idleHeartbeats = 5;
     [channel parkReader:^(NSData* data) {}];
     XCTAssertEqual(channel.idleHeartbeats, (NSUInteger)0);
@@ -404,7 +404,7 @@ static NSString* MakeTempDirectory(void) {
 // When the buffer overflows (e.g. a dead connection), the oldest messages are
 // dropped so memory stays bounded.
 - (void)testSSEChannelDropsOldestBeyondCapacity {
-    GCDWebUploaderSSEChannel* channel = [[GCDWebUploaderSSEChannel alloc] initWithCapacity:2];
+    SRVUploaderSSEChannel* channel = [[SRVUploaderSSEChannel alloc] initWithCapacity:2];
 
     [channel enqueueData:SSEData(@"1")];
     [channel enqueueData:SSEData(@"2")];
@@ -421,10 +421,10 @@ static NSString* MakeTempDirectory(void) {
 }
 
 // Closing a channel must complete a parked reader with the empty-data sentinel
-// (GCDWebServer's end-of-stream marker) so the connection winds down cleanly
+// (SRVServer's end-of-stream marker) so the connection winds down cleanly
 // instead of waiting forever on a channel nothing will ever write to again.
 - (void)testSSEChannelCloseDeliversEndOfStreamToParkedReader {
-    GCDWebUploaderSSEChannel* channel = [[GCDWebUploaderSSEChannel alloc] initWithCapacity:100];
+    SRVUploaderSSEChannel* channel = [[SRVUploaderSSEChannel alloc] initWithCapacity:100];
 
     __block NSData* received = nil;
     [channel parkReader:^(NSData* data) { received = data; }];
@@ -439,7 +439,7 @@ static NSString* MakeTempDirectory(void) {
 // A reader parked after close (e.g. a connection whose channel was reaped or
 // orphaned by -stop) must complete immediately with end-of-stream, never park.
 - (void)testSSEChannelParkAfterCloseCompletesImmediately {
-    GCDWebUploaderSSEChannel* channel = [[GCDWebUploaderSSEChannel alloc] initWithCapacity:100];
+    SRVUploaderSSEChannel* channel = [[SRVUploaderSSEChannel alloc] initWithCapacity:100];
     [channel close];
 
     __block NSData* received = nil;
@@ -451,7 +451,7 @@ static NSString* MakeTempDirectory(void) {
 // After close, the buffer is dropped and further messages are discarded: the
 // next reader must see end-of-stream, not stale events.
 - (void)testSSEChannelDropsMessagesAfterClose {
-    GCDWebUploaderSSEChannel* channel = [[GCDWebUploaderSSEChannel alloc] initWithCapacity:100];
+    SRVUploaderSSEChannel* channel = [[SRVUploaderSSEChannel alloc] initWithCapacity:100];
 
     [channel enqueueData:SSEData(@"before")];
     [channel close];
@@ -465,7 +465,7 @@ static NSString* MakeTempDirectory(void) {
 
 // Double-close must not fire the end-of-stream sentinel twice.
 - (void)testSSEChannelCloseIsIdempotent {
-    GCDWebUploaderSSEChannel* channel = [[GCDWebUploaderSSEChannel alloc] initWithCapacity:100];
+    SRVUploaderSSEChannel* channel = [[SRVUploaderSSEChannel alloc] initWithCapacity:100];
 
     __block NSUInteger callCount = 0;
     [channel parkReader:^(NSData* data) { callCount += 1; }];
@@ -483,9 +483,9 @@ static NSString* MakeTempDirectory(void) {
 - (void)testStopClosesActiveSSEConnections {
     NSString* directory = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSProcessInfo processInfo] globallyUniqueString]];
     XCTAssertTrue([[NSFileManager defaultManager] createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:NULL]);
-    GCDWebUploader* uploader = [[GCDWebUploader alloc] initWithUploadDirectory:directory];
+    SRVUploader* uploader = [[SRVUploader alloc] initWithUploadDirectory:directory];
     XCTAssertNotNil(uploader);
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES};
     XCTAssertTrue([uploader startWithOptions:options error:NULL]);
 
     int fd = ConnectToLocalhostPort(uploader.port);
@@ -518,13 +518,13 @@ static NSString* MakeTempDirectory(void) {
 // socket I/O must be disconnected once the idle timeout elapses, instead of
 // holding a connection slot (and file descriptor) forever.
 - (void)testConnectionIdleTimeoutClosesSilentConnection {
-    GCDWebServer* server = [[GCDWebServer alloc] init];
+    SRVServer* server = [[SRVServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
-                          requestClass:[GCDWebServerRequest class]
-                          processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
-                              return [GCDWebServerDataResponse responseWithText:@"hello"];
+                          requestClass:[SRVRequest class]
+                          processBlock:^SRVResponse*(SRVRequest* request) {
+                              return [SRVDataResponse responseWithText:@"hello"];
                           }];
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES, GCDWebServerOption_ConnectionIdleTimeout : @0.5};
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES, SRVOption_ConnectionIdleTimeout : @0.5};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     int fd = ConnectToLocalhostPort(server.port);
@@ -542,15 +542,15 @@ static NSString* MakeTempDirectory(void) {
 // I/O. A handler that takes longer than the timeout to produce a response (no
 // pending reads or writes during that window) must not have its connection cut.
 - (void)testConnectionIdleTimeoutSparesSlowHandler {
-    GCDWebServer* server = [[GCDWebServer alloc] init];
+    SRVServer* server = [[SRVServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
-                          requestClass:[GCDWebServerRequest class]
-                     asyncProcessBlock:^(GCDWebServerRequest* request, GCDWebServerCompletionBlock completionBlock) {
+                          requestClass:[SRVRequest class]
+                     asyncProcessBlock:^(SRVRequest* request, SRVCompletionBlock completionBlock) {
                          dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * (double)NSEC_PER_SEC)), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-                             completionBlock([GCDWebServerDataResponse responseWithText:@"slow-response-body"]);
+                             completionBlock([SRVDataResponse responseWithText:@"slow-response-body"]);
                          });
                      }];
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES, GCDWebServerOption_ConnectionIdleTimeout : @0.5};
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES, SRVOption_ConnectionIdleTimeout : @0.5};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     int fd = ConnectToLocalhostPort(server.port);
@@ -579,13 +579,13 @@ static NSString* MakeTempDirectory(void) {
 // Demonstrated against the Host allow-list — a Host placed after an LF-LF vanished
 // entirely, taking the request down the "no Host" branch. Framing must be unambiguous.
 - (void)testMalformedHeaderFramingIsRefused {
-    GCDWebServer* server = [[GCDWebServer alloc] init];
+    SRVServer* server = [[SRVServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
-                          requestClass:[GCDWebServerRequest class]
-                          processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
-                              return [GCDWebServerDataResponse responseWithText:@"ok"];
+                          requestClass:[SRVRequest class]
+                          processBlock:^SRVResponse*(SRVRequest* request) {
+                              return [SRVDataResponse responseWithText:@"ok"];
                           }];
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     // Sanity: a well-formed request still works.
@@ -614,13 +614,13 @@ static NSString* MakeTempDirectory(void) {
 // An oversized header block is the client's error, not the server's: answering 500 told
 // the client we had failed and invited a retry of something that can never succeed.
 - (void)testOversizedHeaderBlockIsRefusedWith431 {
-    GCDWebServer* server = [[GCDWebServer alloc] init];
+    SRVServer* server = [[SRVServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
-                          requestClass:[GCDWebServerRequest class]
-                          processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
-                              return [GCDWebServerDataResponse responseWithText:@"ok"];
+                          requestClass:[SRVRequest class]
+                          processBlock:^SRVResponse*(SRVRequest* request) {
+                              return [SRVDataResponse responseWithText:@"ok"];
                           }];
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     NSString* huge = [@"" stringByPaddingToLength:(1024 * 1024) withString:@"A" startingAtIndex:0];
@@ -643,12 +643,12 @@ static NSString* MakeTempDirectory(void) {
 - (void)testHeaderOnlyRefusalsHappenBeforeTheBodyIsRead {
     NSFileManager* fm = [NSFileManager defaultManager];
     NSString* dir = MakeTempDirectory();
-    GCDWebDAVServer* server = [[GCDWebDAVServer alloc] initWithUploadDirectory:dir];
+    SRVDAVServer* server = [[SRVDAVServer alloc] initWithUploadDirectory:dir];
     NSDictionary* options = @{
-        GCDWebServerOption_Port : @0,
-        GCDWebServerOption_BindToLocalhost : @YES,
-        GCDWebServerOption_AuthenticationMethod : GCDWebServerAuthenticationMethod_Basic,
-        GCDWebServerOption_AuthenticationAccounts : @{@"user" : @"pass"}
+        SRVOption_Port : @0,
+        SRVOption_BindToLocalhost : @YES,
+        SRVOption_AuthenticationMethod : SRVAuthenticationMethod_Basic,
+        SRVOption_AuthenticationAccounts : @{@"user" : @"pass"}
     };
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
@@ -668,17 +668,17 @@ static NSString* MakeTempDirectory(void) {
 }
 
 - (void)testBasicAuthEnforcedOverConnection {
-    GCDWebServer* server = [[GCDWebServer alloc] init];
+    SRVServer* server = [[SRVServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
-                          requestClass:[GCDWebServerRequest class]
-                          processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
-                              return [GCDWebServerDataResponse responseWithText:@"secret-body"];
+                          requestClass:[SRVRequest class]
+                          processBlock:^SRVResponse*(SRVRequest* request) {
+                              return [SRVDataResponse responseWithText:@"secret-body"];
                           }];
     NSDictionary* options = @{
-        GCDWebServerOption_Port : @0,
-        GCDWebServerOption_BindToLocalhost : @YES,
-        GCDWebServerOption_AuthenticationMethod : GCDWebServerAuthenticationMethod_Basic,
-        GCDWebServerOption_AuthenticationAccounts : @{@"user" : @"pass"}
+        SRVOption_Port : @0,
+        SRVOption_BindToLocalhost : @YES,
+        SRVOption_AuthenticationMethod : SRVAuthenticationMethod_Basic,
+        SRVOption_AuthenticationAccounts : @{@"user" : @"pass"}
     };
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
@@ -721,7 +721,7 @@ static NSString* MakeTempDirectory(void) {
 // turned one 16 MB request into a ~96 MB response and ~540 MB of transient memory.
 - (void)testErrorResponseClampsReflectedMessage {
     NSString* const payload = [@"" stringByPaddingToLength:(4 * 1024 * 1024) withString:@"\"" startingAtIndex:0];
-    GCDWebServerErrorResponse* response = [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_BadRequest message:@"%@", payload];
+    SRVErrorResponse* response = [SRVErrorResponse responseWithClientError:kSRVHTTPStatusCode_BadRequest message:@"%@", payload];
     XCTAssertNotNil(response);
 
     [response prepareForReading];
@@ -739,7 +739,7 @@ static NSString* MakeTempDirectory(void) {
 
 - (void)testErrorResponseEscapesReflectedMarkup {
     NSString* const payload = @"<script>alert(1)</script> a&b \"q\" 'z'";
-    GCDWebServerErrorResponse* response = [GCDWebServerErrorResponse responseWithClientError:kGCDWebServerHTTPStatusCode_NotFound message:@"\"%@\" does not exist", payload];
+    SRVErrorResponse* response = [SRVErrorResponse responseWithClientError:kSRVHTTPStatusCode_NotFound message:@"\"%@\" does not exist", payload];
     XCTAssertNotNil(response);
 
     [response prepareForReading];
@@ -772,8 +772,8 @@ static NSString* MakeTempDirectory(void) {
     NSString* path = [dir stringByAppendingPathComponent:@"a.txt"];
     XCTAssertTrue([@"important" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    GCDWebDAVServer* server = [[GCDWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    SRVDAVServer* server = [[SRVDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     NSString* reply = SendRawRequest(server.port, @"MOVE /a.txt HTTP/1.1\r\nHost: localhost\r\nDestination: http://localhost/a.txt\r\nOverwrite: T\r\n\r\n");
@@ -794,8 +794,8 @@ static NSString* MakeTempDirectory(void) {
     XCTAssertTrue([@"source" writeToFile:srcPath atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
     XCTAssertTrue([@"destination" writeToFile:dstPath atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    GCDWebDAVServer* server = [[GCDWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    SRVDAVServer* server = [[SRVDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     NSString* reply = SendRawRequest(server.port, @"COPY /a.txt HTTP/1.1\r\nHost: localhost\r\nDestination: http://localhost/b.txt\r\nOverwrite: T\r\n\r\n");
@@ -818,8 +818,8 @@ static NSString* MakeTempDirectory(void) {
     XCTAssertTrue([@"source" writeToFile:srcPath atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
     XCTAssertTrue([@"destination" writeToFile:dstPath atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    GCDWebDAVServer* server = [[GCDWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    SRVDAVServer* server = [[SRVDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     NSString* reply = SendRawRequest(server.port, @"MOVE /a.txt HTTP/1.1\r\nHost: localhost\r\nDestination: http://localhost/b.txt\r\nOverwrite: T\r\n\r\n");
@@ -838,7 +838,7 @@ static NSString* MakeTempDirectory(void) {
 // request) must be rejected once it exceeds the in-memory cap, rather than
 // growing unbounded and exhausting memory on the device.
 - (void)testDataRequestRejectsBodyExceedingInMemoryCap {
-    GCDWebServerDataRequest* request = OpenBodyRequest([GCDWebServerDataRequest class], @{});
+    SRVDataRequest* request = OpenBodyRequest([SRVDataRequest class], @{});
     XCTAssertTrue([request hasBody]);
 
     NSData* chunk = [NSMutableData dataWithLength:(1024 * 1024)];  // 1 MB
@@ -859,7 +859,7 @@ static NSString* MakeTempDirectory(void) {
 // boundary token not followed by CRLF: it can never advance, so the buffer
 // would grow without bound. It must reject once the buffer exceeds the cap.
 - (void)testMultiPartParserRejectsUnboundedBufferingFromFakeBoundary {
-    GCDWebServerMultiPartFormRequest* request = OpenBodyRequest([GCDWebServerMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
+    SRVMultiPartFormRequest* request = OpenBodyRequest([SRVMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
     XCTAssertTrue([request hasBody]);
 
     // A file part header, then content that begins with the boundary token "--X"
@@ -890,7 +890,7 @@ static NSString* MakeTempDirectory(void) {
     XCTAssertNotNil(bomb);
     XCTAssertLessThan(bomb.length, (NSUInteger)(1024 * 1024));  // sanity: compressed form is tiny
 
-    GCDWebServerDataRequest* request = OpenBodyRequest([GCDWebServerDataRequest class], @{@"Content-Encoding": @"gzip"});
+    SRVDataRequest* request = OpenBodyRequest([SRVDataRequest class], @{@"Content-Encoding": @"gzip"});
     NSError* error = nil;
 
     XCTAssertFalse([request performWriteData:bomb error:&error], @"gzip decoder should reject a decompression bomb");
@@ -904,7 +904,7 @@ static NSString* MakeTempDirectory(void) {
     NSData* full = GZipCompress([NSMutableData dataWithLength:(64 * 1024)]);
     XCTAssertGreaterThan(full.length, (NSUInteger)20);
 
-    GCDWebServerDataRequest* request = OpenBodyRequest([GCDWebServerDataRequest class], @{@"Content-Encoding": @"gzip"});
+    SRVDataRequest* request = OpenBodyRequest([SRVDataRequest class], @{@"Content-Encoding": @"gzip"});
     NSError* error = nil;
 
     // The first 20 bytes are a well-formed prefix, so the write itself succeeds.
@@ -914,10 +914,10 @@ static NSString* MakeTempDirectory(void) {
 
 // Bytes after Z_STREAM_END are either padding or a second concatenated member;
 // either way the body is not one we can reproduce, so it must be refused rather
-// than silently dropped (it was a GWS_DCHECK, i.e. an abort in Debug builds).
+// than silently dropped (it was a SRV_DCHECK, i.e. an abort in Debug builds).
 - (void)testGZipDecoderRejectsTrailingDataAfterStreamEnd {
     NSData* full = GZipCompress([NSMutableData dataWithLength:1024]);
-    GCDWebServerDataRequest* request = OpenBodyRequest([GCDWebServerDataRequest class], @{@"Content-Encoding": @"gzip"});
+    SRVDataRequest* request = OpenBodyRequest([SRVDataRequest class], @{@"Content-Encoding": @"gzip"});
     NSError* error = nil;
 
     XCTAssertTrue([request performWriteData:full error:&error]);
@@ -931,10 +931,10 @@ static NSString* MakeTempDirectory(void) {
 // The downstream here is a file request, which streams to disk and retains nothing.
 - (void)testGZipDecoderChargesOnlyLiveBuffersToTheBudget {
     const NSUInteger kTotal = 2 * 1024 * 1024;
-    GCDWebServerSetMemoryLimitsForTesting(1024 * 1024, 16 * 1024 * 1024, kTotal);
+    SRVSetMemoryLimitsForTesting(1024 * 1024, 16 * 1024 * 1024, kTotal);
 
     @try {
-        XCTAssertEqual(GCDWebServerReservedMemoryLength(), (NSUInteger)0, @"budget should start empty");
+        XCTAssertEqual(SRVReservedMemoryLength(), (NSUInteger)0, @"budget should start empty");
 
         // Inflates to 8 MB — four times the whole budget — but never more than a
         // fraction of it at once, because the compressed input is fed in slices.
@@ -942,7 +942,7 @@ static NSString* MakeTempDirectory(void) {
         XCTAssertNotNil(compressed);
 
         @autoreleasepool {
-            GCDWebServerFileRequest* request = OpenBodyRequest([GCDWebServerFileRequest class], @{@"Content-Encoding": @"gzip"});
+            SRVFileRequest* request = OpenBodyRequest([SRVFileRequest class], @{@"Content-Encoding": @"gzip"});
             NSError* error = nil;
 
             for (NSUInteger offset = 0; offset < compressed.length; offset += 256) {
@@ -950,15 +950,15 @@ static NSString* MakeTempDirectory(void) {
                 XCTAssertTrue([request performWriteData:[compressed subdataWithRange:slice] error:&error],
                               @"inflating %lu MB through a %lu MB budget must succeed when only live buffers are charged (failed at offset %lu: %@)",
                               (unsigned long)8, (unsigned long)(kTotal / (1024 * 1024)), (unsigned long)offset, error);
-                XCTAssertLessThanOrEqual(GCDWebServerReservedMemoryLength(), kTotal, @"reserved memory exceeded the ceiling");
+                XCTAssertLessThanOrEqual(SRVReservedMemoryLength(), kTotal, @"reserved memory exceeded the ceiling");
             }
 
             XCTAssertTrue([request performClose:&error], @"a complete gzip stream must close cleanly: %@", error);
         }
 
-        XCTAssertEqual(GCDWebServerReservedMemoryLength(), (NSUInteger)0, @"the decoder leaked its reservation");
+        XCTAssertEqual(SRVReservedMemoryLength(), (NSUInteger)0, @"the decoder leaked its reservation");
     } @finally {
-        GCDWebServerSetMemoryLimitsForTesting(0, 0, 0);
+        SRVSetMemoryLimitsForTesting(0, 0, 0);
     }
 }
 
@@ -971,8 +971,8 @@ static NSString* MakeTempDirectory(void) {
     NSData* original = SSEData(@"the original contents, which must survive a refused PUT");
     XCTAssertTrue([original writeToFile:path atomically:YES]);
 
-    GCDWebDAVServer* server = [[GCDWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    SRVDAVServer* server = [[SRVDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     NSData* full = GZipCompress([NSMutableData dataWithLength:(50 * 1024)]);
@@ -1003,8 +1003,8 @@ static NSString* MakeTempDirectory(void) {
 - (void)testDAVRefusesOversizedRequestBody {
     NSFileManager* fm = [NSFileManager defaultManager];
     NSString* dir = MakeTempDirectory();
-    GCDWebDAVServer* server = [[GCDWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    SRVDAVServer* server = [[SRVDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     NSMutableString* body = [NSMutableString stringWithString:@"<?xml version=\"1.0\"?><propfind xmlns=\"DAV:\"><prop>"];
@@ -1035,8 +1035,8 @@ static NSString* MakeTempDirectory(void) {
 
     NSArray* before = [fm subpathsOfDirectoryAtPath:dir error:NULL];
 
-    GCDWebDAVServer* server = [[GCDWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    SRVDAVServer* server = [[SRVDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     NSString* reply = SendRawRequest(server.port, @"COPY /d HTTP/1.1\r\nHost: localhost\r\nDestination: /d/sub\r\nOverwrite: T\r\n\r\n");
@@ -1063,8 +1063,8 @@ static NSString* MakeTempDirectory(void) {
     NSString* path = [dir stringByAppendingPathComponent:@"a.txt"];
     XCTAssertTrue([@"data" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    GCDWebDAVServer* server = [[GCDWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    SRVDAVServer* server = [[SRVDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     // Destination present, Host absent (HTTP/1.0 so CFHTTPMessage accepts no Host).
@@ -1087,22 +1087,22 @@ static NSString* MakeTempDirectory(void) {
 // The per-chunk cap only applies after a size line is parsed; the framing scan itself
 // was previously unbounded.
 - (void)testChunkedTransferRejectsUnterminatedSizeLine {
-    GCDWebServer* server = [[GCDWebServer alloc] init];
+    SRVServer* server = [[SRVServer alloc] init];
     [server addDefaultHandlerForMethod:@"POST"
-                          requestClass:[GCDWebServerDataRequest class]
-                          processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
-                              return [GCDWebServerDataResponse responseWithText:@"ok"];
+                          requestClass:[SRVDataRequest class]
+                          processBlock:^SRVResponse*(SRVRequest* request) {
+                              return [SRVDataResponse responseWithText:@"ok"];
                           }];
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES, GCDWebServerOption_ConnectionIdleTimeout : @5.0};
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES, SRVOption_ConnectionIdleTimeout : @5.0};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     // Shrink the bound so the property is proven with a few hundred kilobytes rather than
     // by pushing 16 MB through the server. That volume was slow, and under the suite's
     // AddressSanitizer build it was itself enough to lose the whole test runner — which
     // reports as "0 failures" and silently takes the next test with it.
-    GCDWebServerSetMemoryLimitsForTesting(64 * 1024, 64 * 1024, 1024 * 1024);
+    SRVSetMemoryLimitsForTesting(64 * 1024, 64 * 1024, 1024 * 1024);
     [self addTeardownBlock:^{
-        GCDWebServerSetMemoryLimitsForTesting(0, 0, 0);
+        SRVSetMemoryLimitsForTesting(0, 0, 0);
     }];
 
     int fd = ConnectToLocalhostPort(server.port);
@@ -1118,7 +1118,7 @@ static NSString* MakeTempDirectory(void) {
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         char chunk[16 * 1024];
         memset(chunk, 'a', sizeof(chunk));
-        NSUInteger toSend = 4 * (GCDWebServerMaxInMemoryBodyLength() + (64 * 1024));
+        NSUInteger toSend = 4 * (SRVMaxInMemoryBodyLength() + (64 * 1024));
 
         for (NSUInteger sent = 0; sent < toSend; sent += sizeof(chunk)) {
             if (send(fd, chunk, sizeof(chunk), 0) < 0) {
@@ -1140,13 +1140,13 @@ static NSString* MakeTempDirectory(void) {
 // slot forever. Dribbling faster than one tick guarantees the zero-progress check is
 // not what closes it, so a close proves the header deadline works.
 - (void)testConnectionClosesSlowlorisHeaderDribble {
-    GCDWebServer* server = [[GCDWebServer alloc] init];
+    SRVServer* server = [[SRVServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
-                          requestClass:[GCDWebServerRequest class]
-                          processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
-                              return [GCDWebServerDataResponse responseWithText:@"hello"];
+                          requestClass:[SRVRequest class]
+                          processBlock:^SRVResponse*(SRVRequest* request) {
+                              return [SRVDataResponse responseWithText:@"hello"];
                           }];
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES, GCDWebServerOption_ConnectionIdleTimeout : @0.5};
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES, SRVOption_ConnectionIdleTimeout : @0.5};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     int fd = ConnectToLocalhostPort(server.port);
@@ -1205,13 +1205,13 @@ static NSData* NestedMultipartMixedBody(NSString* top, NSUInteger levels) {
 // accepted; nesting beyond it is rejected (before it can recurse deeply and crash).
 - (void)testMultiPartRejectsDeeplyNestedMixed {
     // Within the cap: parses successfully.
-    GCDWebServerMultiPartFormRequest* shallow = OpenBodyRequest([GCDWebServerMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=top"});
+    SRVMultiPartFormRequest* shallow = OpenBodyRequest([SRVMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=top"});
     NSError* error = nil;
     XCTAssertTrue([shallow performWriteData:NestedMultipartMixedBody(@"top", 2) error:&error], @"shallow nesting should parse: %@", error);
     XCTAssertTrue([shallow performClose:&error], @"shallow nesting should finish cleanly: %@", error);
 
     // Beyond the cap: rejected rather than recursing to the crash depth.
-    GCDWebServerMultiPartFormRequest* deep = OpenBodyRequest([GCDWebServerMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=top"});
+    SRVMultiPartFormRequest* deep = OpenBodyRequest([SRVMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=top"});
     XCTAssertFalse([deep performWriteData:NestedMultipartMixedBody(@"top", 20) error:&error], @"deeply nested multipart/mixed must be rejected");
 }
 
@@ -1237,18 +1237,18 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 // a different URI (the "uri" directive was previously never checked against the
 // request line, so a captured header authenticated any same-method resource).
 - (void)testDigestAuthRoundTripAndURIBinding {
-    GCDWebServer* server = [[GCDWebServer alloc] init];
+    SRVServer* server = [[SRVServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
-                          requestClass:[GCDWebServerRequest class]
-                          processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
-                              return [GCDWebServerDataResponse responseWithText:@"secret-body"];
+                          requestClass:[SRVRequest class]
+                          processBlock:^SRVResponse*(SRVRequest* request) {
+                              return [SRVDataResponse responseWithText:@"secret-body"];
                           }];
     NSDictionary* options = @{
-        GCDWebServerOption_Port : @0,
-        GCDWebServerOption_BindToLocalhost : @YES,
-        GCDWebServerOption_AuthenticationMethod : GCDWebServerAuthenticationMethod_DigestAccess,
-        GCDWebServerOption_AuthenticationRealm : @"test",
-        GCDWebServerOption_AuthenticationAccounts : @{@"user" : @"pass"}
+        SRVOption_Port : @0,
+        SRVOption_BindToLocalhost : @YES,
+        SRVOption_AuthenticationMethod : SRVAuthenticationMethod_DigestAccess,
+        SRVOption_AuthenticationRealm : @"test",
+        SRVOption_AuthenticationAccounts : @{@"user" : @"pass"}
     };
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
@@ -1259,9 +1259,9 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     XCTAssertNotNil(nonce, @"no nonce in challenge: %@", challenge);
 
     // Compute a valid Digest response for GET /secret and authenticate.
-    NSString* ha1 = GCDWebServerComputeMD5Digest(@"%@:%@:%@", @"user", @"test", @"pass");
-    NSString* ha2Secret = GCDWebServerComputeMD5Digest(@"%@:%@", @"GET", @"/secret");
-    NSString* response = GCDWebServerComputeMD5Digest(@"%@:%@:%@", ha1, nonce, ha2Secret);
+    NSString* ha1 = SRVComputeMD5Digest(@"%@:%@:%@", @"user", @"test", @"pass");
+    NSString* ha2Secret = SRVComputeMD5Digest(@"%@:%@", @"GET", @"/secret");
+    NSString* response = SRVComputeMD5Digest(@"%@:%@:%@", ha1, nonce, ha2Secret);
     NSString* authForSecret = [NSString stringWithFormat:@"Authorization: Digest username=\"user\", realm=\"test\", nonce=\"%@\", uri=\"/secret\", response=\"%@\"", nonce, response];
 
     NSString* ok = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /secret HTTP/1.1\r\nHost: localhost\r\n%@\r\n\r\n", authForSecret]);
@@ -1290,9 +1290,9 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     NSFileManager* fm = [NSFileManager defaultManager];
     NSString* dir = MakeTempDirectory();
 
-    GCDWebUploader* server = [[GCDWebUploader alloc] initWithUploadDirectory:dir];
+    SRVUploader* server = [[SRVUploader alloc] initWithUploadDirectory:dir];
     server.allowedFileExtensions = @[ @"txt" ];
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
     NSString* host = [NSString stringWithFormat:@"localhost:%lu", (unsigned long)server.port];
 
@@ -1329,8 +1329,8 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     NSFileManager* fm = [NSFileManager defaultManager];
     NSString* dir = MakeTempDirectory();
 
-    GCDWebUploader* server = [[GCDWebUploader alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    SRVUploader* server = [[SRVUploader alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     NSString* host = [NSString stringWithFormat:@"localhost:%lu", (unsigned long)server.port];
@@ -1352,7 +1352,7 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 }
 
 // "GET /list" with no "path" query parameter must be answered, not crash the process.
-// A nil path survived every guard (GCDWebServerNormalizePath(nil) is @"", so the
+// A nil path survived every guard (SRVNormalizePath(nil) is @"", so the
 // absolute path collapsed to the upload directory, which exists and is a directory) and
 // then reached the per-entry dictionary literal, where -stringByAppendingPathComponent:
 // on nil yields nil — inserting nil raises NSInvalidArgumentException, which nothing
@@ -1364,8 +1364,8 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     XCTAssertTrue([@"data" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
     XCTAssertTrue([fm createDirectoryAtPath:[dir stringByAppendingPathComponent:@"Sub"] withIntermediateDirectories:NO attributes:nil error:NULL]);
 
-    GCDWebUploader* server = [[GCDWebUploader alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    SRVUploader* server = [[SRVUploader alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     NSString* reply = SendRawRequest(server.port, @"GET /list HTTP/1.1\r\nHost: localhost\r\n\r\n");
@@ -1395,8 +1395,8 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     NSFileManager* fm = [NSFileManager defaultManager];
     NSString* dir = MakeTempDirectory();
 
-    GCDWebDAVServer* server = [[GCDWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    SRVDAVServer* server = [[SRVDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     NSString* body = @"<?xml version=\"1.0\" encoding=\"utf-8\"?><D:lockinfo xmlns:D=\"DAV:\"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>";
@@ -1423,8 +1423,8 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     NSString* dir = MakeTempDirectory();
     XCTAssertTrue([@"data" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    GCDWebDAVServer* server = [[GCDWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    SRVDAVServer* server = [[SRVDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     NSString* body = @"<?xml version=\"1.0\" encoding=\"utf-8\"?><D:lockinfo xmlns:D=\"DAV:\"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>";
@@ -1438,7 +1438,7 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     [fm removeItemAtPath:dir error:NULL];
 }
 
-// GCDWebServerFileResponse must serve only regular files. S_IFREG is a value inside the
+// SRVFileResponse must serve only regular files. S_IFREG is a value inside the
 // S_IFMT field rather than a flag, so the old "st_mode & S_IFREG" test also accepted
 // symlinks and sockets; only O_NOFOLLOW in -open: stopped a symlink being read through.
 // Constructing the response must now fail outright for a symlink, whether it points
@@ -1450,14 +1450,14 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     XCTAssertTrue([@"payload" writeToFile:realPath atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
     // A regular file is still served, with the body length taken from the file itself.
-    GCDWebServerFileResponse* ok = [GCDWebServerFileResponse responseWithFile:realPath];
+    SRVFileResponse* ok = [SRVFileResponse responseWithFile:realPath];
     XCTAssertNotNil(ok, @"a regular file must still be servable");
     XCTAssertEqual(ok.contentLength, (NSUInteger)7);
 
     // A symlink to a file inside the directory must be refused.
     NSString* insideLink = [dir stringByAppendingPathComponent:@"inside.txt"];
     XCTAssertTrue([fm createSymbolicLinkAtPath:insideLink withDestinationPath:realPath error:NULL]);
-    XCTAssertNil([GCDWebServerFileResponse responseWithFile:insideLink], @"a symlink must not be accepted as a regular file");
+    XCTAssertNil([SRVFileResponse responseWithFile:insideLink], @"a symlink must not be accepted as a regular file");
 
     // A symlink escaping the directory must be refused too. Previously this built a
     // response whose Content-Length came from the link rather than its target, and was
@@ -1466,10 +1466,10 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     XCTAssertTrue([@"secret" writeToFile:outsidePath atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
     NSString* escapingLink = [dir stringByAppendingPathComponent:@"escape.txt"];
     XCTAssertTrue([fm createSymbolicLinkAtPath:escapingLink withDestinationPath:outsidePath error:NULL]);
-    XCTAssertNil([GCDWebServerFileResponse responseWithFile:escapingLink], @"a symlink out of the served directory must not be accepted");
+    XCTAssertNil([SRVFileResponse responseWithFile:escapingLink], @"a symlink out of the served directory must not be accepted");
 
     // A directory is still refused, as before.
-    XCTAssertNil([GCDWebServerFileResponse responseWithFile:dir]);
+    XCTAssertNil([SRVFileResponse responseWithFile:dir]);
 
     [fm removeItemAtPath:outsidePath error:NULL];
     [fm removeItemAtPath:dir error:NULL];
@@ -1477,8 +1477,8 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 
 #pragma mark - Symlink-resolved path containment
 
-// The textual containment checks cannot see symlinks: GCDWebServerNormalizePath strips
-// ".." before any file is touched, and GCDWebServerPathIsInsideDirectory compares path
+// The textual containment checks cannot see symlinks: SRVNormalizePath strips
+// ".." before any file is touched, and SRVPathIsInsideDirectory compares path
 // text, but the filesystem follows symlinks in intermediate components. The resolved
 // check must accept a path inside the directory (whether or not it exists yet) and
 // reject one that leaves it through a link.
@@ -1491,31 +1491,31 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     XCTAssertTrue([fm createDirectoryAtPath:[dir stringByAppendingPathComponent:@"Sub"] withIntermediateDirectories:NO attributes:nil error:NULL]);
 
     // The directory itself and real items inside it are within.
-    XCTAssertTrue(GCDWebServerResolvedPathIsWithinDirectory(dir, dir));
-    XCTAssertTrue(GCDWebServerResolvedPathIsWithinDirectory([dir stringByAppendingPathComponent:@"a.txt"], dir));
-    XCTAssertTrue(GCDWebServerResolvedPathIsWithinDirectory([dir stringByAppendingPathComponent:@"Sub"], dir));
+    XCTAssertTrue(SRVResolvedPathIsWithinDirectory(dir, dir));
+    XCTAssertTrue(SRVResolvedPathIsWithinDirectory([dir stringByAppendingPathComponent:@"a.txt"], dir));
+    XCTAssertTrue(SRVResolvedPathIsWithinDirectory([dir stringByAppendingPathComponent:@"Sub"], dir));
 
     // A destination that does not exist yet resolves through its parent, so uploads and
     // MKCOL keep working.
-    XCTAssertTrue(GCDWebServerResolvedPathIsWithinDirectory([dir stringByAppendingPathComponent:@"new.txt"], dir));
-    XCTAssertTrue(GCDWebServerResolvedPathIsWithinDirectory([dir stringByAppendingPathComponent:@"Sub/new.txt"], dir));
+    XCTAssertTrue(SRVResolvedPathIsWithinDirectory([dir stringByAppendingPathComponent:@"new.txt"], dir));
+    XCTAssertTrue(SRVResolvedPathIsWithinDirectory([dir stringByAppendingPathComponent:@"Sub/new.txt"], dir));
 
     // A symlink that stays inside the directory is still usable.
     XCTAssertTrue([fm createSymbolicLinkAtPath:[dir stringByAppendingPathComponent:@"Inside"] withDestinationPath:[dir stringByAppendingPathComponent:@"Sub"] error:NULL]);
-    XCTAssertTrue(GCDWebServerResolvedPathIsWithinDirectory([dir stringByAppendingPathComponent:@"Inside/new.txt"], dir));
+    XCTAssertTrue(SRVResolvedPathIsWithinDirectory([dir stringByAppendingPathComponent:@"Inside/new.txt"], dir));
 
     // A symlink pointing out of the directory is rejected, both as the leaf and as an
     // intermediate component (the case that string comparison misses entirely).
     XCTAssertTrue([fm createSymbolicLinkAtPath:[dir stringByAppendingPathComponent:@"Escape"] withDestinationPath:outside error:NULL]);
     NSString* throughLink = [dir stringByAppendingPathComponent:@"Escape/secret.txt"];
-    XCTAssertTrue(GCDWebServerPathIsInsideDirectory(throughLink, dir), @"precondition: the textual check does not catch this");
-    XCTAssertFalse(GCDWebServerResolvedPathIsWithinDirectory(throughLink, dir), @"a path traversing a symlink out of the directory must be rejected");
-    XCTAssertFalse(GCDWebServerResolvedPathIsWithinDirectory([dir stringByAppendingPathComponent:@"Escape"], dir));
-    XCTAssertFalse(GCDWebServerResolvedPathIsWithinDirectory([outside stringByAppendingPathComponent:@"secret.txt"], dir));
+    XCTAssertTrue(SRVPathIsInsideDirectory(throughLink, dir), @"precondition: the textual check does not catch this");
+    XCTAssertFalse(SRVResolvedPathIsWithinDirectory(throughLink, dir), @"a path traversing a symlink out of the directory must be rejected");
+    XCTAssertFalse(SRVResolvedPathIsWithinDirectory([dir stringByAppendingPathComponent:@"Escape"], dir));
+    XCTAssertFalse(SRVResolvedPathIsWithinDirectory([outside stringByAppendingPathComponent:@"secret.txt"], dir));
 
     // Unresolvable input fails closed.
-    XCTAssertFalse(GCDWebServerResolvedPathIsWithinDirectory(@"", dir));
-    XCTAssertFalse(GCDWebServerResolvedPathIsWithinDirectory([dir stringByAppendingPathComponent:@"Nope/deeper/x.txt"], dir));
+    XCTAssertFalse(SRVResolvedPathIsWithinDirectory(@"", dir));
+    XCTAssertFalse(SRVResolvedPathIsWithinDirectory([dir stringByAppendingPathComponent:@"Nope/deeper/x.txt"], dir));
 
     [fm removeItemAtPath:outside error:NULL];
     [fm removeItemAtPath:dir error:NULL];
@@ -1530,8 +1530,8 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     XCTAssertTrue([@"TOP-SECRET-PAYLOAD" writeToFile:[outside stringByAppendingPathComponent:@"secret.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
     XCTAssertTrue([fm createSymbolicLinkAtPath:[dir stringByAppendingPathComponent:@"Escape"] withDestinationPath:outside error:NULL]);
 
-    GCDWebDAVServer* server = [[GCDWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    SRVDAVServer* server = [[SRVDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     NSString* reply = SendRawRequest(server.port, @"GET /Escape/secret.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
@@ -1551,17 +1551,17 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 // Otherwise setting a single header reaches the application's OPTIONS handler with no
 // credentials at all.
 - (void)testPreflightAuthExemptionRequiresOrigin {
-    GCDWebServer* server = [[GCDWebServer alloc] init];
+    SRVServer* server = [[SRVServer alloc] init];
     [server addDefaultHandlerForMethod:@"OPTIONS"
-                          requestClass:[GCDWebServerRequest class]
-                          processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
-                              return [GCDWebServerDataResponse responseWithText:@"handler-reached"];
+                          requestClass:[SRVRequest class]
+                          processBlock:^SRVResponse*(SRVRequest* request) {
+                              return [SRVDataResponse responseWithText:@"handler-reached"];
                           }];
     NSDictionary* options = @{
-        GCDWebServerOption_Port : @0,
-        GCDWebServerOption_BindToLocalhost : @YES,
-        GCDWebServerOption_AuthenticationMethod : GCDWebServerAuthenticationMethod_Basic,
-        GCDWebServerOption_AuthenticationAccounts : @{@"user" : @"pass"}
+        SRVOption_Port : @0,
+        SRVOption_BindToLocalhost : @YES,
+        SRVOption_AuthenticationMethod : SRVAuthenticationMethod_Basic,
+        SRVOption_AuthenticationAccounts : @{@"user" : @"pass"}
     };
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
@@ -1590,8 +1590,8 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     NSFileManager* fm = [NSFileManager defaultManager];
     NSString* dir = MakeTempDirectory();
 
-    GCDWebUploader* server = [[GCDWebUploader alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    SRVUploader* server = [[SRVUploader alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     NSString* page = SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
@@ -1613,7 +1613,7 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 // individually-legal argument parts grew without limit (200 MB of parts took the process
 // to 626 MB) until the device killed the app.
 - (void)testMultiPartRejectsUnboundedArgumentAccumulation {
-    GCDWebServerMultiPartFormRequest* request = OpenBodyRequest([GCDWebServerMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
+    SRVMultiPartFormRequest* request = OpenBodyRequest([SRVMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
     XCTAssertTrue([request hasBody]);
 
     NSMutableData* filler = [NSMutableData dataWithLength:(512 * 1024)];
@@ -1642,7 +1642,7 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 // parsed out of a part's headers are retained per part too. A body of parts each carrying a
 // multi-megabyte name=".…" therefore grew memory without limit while the budget read zero.
 - (void)testMultiPartRejectsOversizedPartHeaders {
-    GCDWebServerMultiPartFormRequest* request = OpenBodyRequest([GCDWebServerMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
+    SRVMultiPartFormRequest* request = OpenBodyRequest([SRVMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
 
     NSMutableString* hugeName = [NSMutableString string];
     while (hugeName.length < (64 * 1024)) {
@@ -1659,7 +1659,7 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 // A part whose Content-Disposition carries no "name" is malformed client input, not an
 // unreachable state: it must fail the parse rather than abort the process.
 - (void)testMultiPartRejectsPartWithoutControlNameWithoutAborting {
-    GCDWebServerMultiPartFormRequest* request = OpenBodyRequest([GCDWebServerMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
+    SRVMultiPartFormRequest* request = OpenBodyRequest([SRVMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
     NSMutableData* body = [NSMutableData data];
     [body appendData:SSEData(@"--X\r\nContent-Disposition: form-data; filename=\"a.txt\"\r\n\r\npayload\r\n--X--\r\n")];
 
@@ -1670,13 +1670,13 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 // A request target whose percent-escapes are invalid or not valid UTF-8 cannot be
 // decoded. That is the client's error: it must be answered 400 and must never abort.
 - (void)testMalformedPercentEncodedPathIsRejectedNotFatal {
-    GCDWebServer* server = [[GCDWebServer alloc] init];
+    SRVServer* server = [[SRVServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
-                          requestClass:[GCDWebServerRequest class]
-                          processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
-                              return [GCDWebServerDataResponse responseWithText:@"hello"];
+                          requestClass:[SRVRequest class]
+                          processBlock:^SRVResponse*(SRVRequest* request) {
+                              return [SRVDataResponse responseWithText:@"hello"];
                           }];
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     NSString* reply = SendRawRequest(server.port, @"GET /%FF HTTP/1.1\r\nHost: localhost\r\n\r\n");
@@ -1692,13 +1692,13 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 // A Content-Length together with a chunked Transfer-Encoding is a framing conflict the
 // client controls: reject it with 400 rather than asserting.
 - (void)testConflictingFramingHeadersAreRejectedNotFatal {
-    GCDWebServer* server = [[GCDWebServer alloc] init];
+    SRVServer* server = [[SRVServer alloc] init];
     [server addDefaultHandlerForMethod:@"POST"
-                          requestClass:[GCDWebServerDataRequest class]
-                          processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
-                              return [GCDWebServerDataResponse responseWithText:@"ok"];
+                          requestClass:[SRVDataRequest class]
+                          processBlock:^SRVResponse*(SRVRequest* request) {
+                              return [SRVDataResponse responseWithText:@"ok"];
                           }];
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     NSString* reply = SendRawRequest(server.port, @"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/plain\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n");
@@ -1715,12 +1715,12 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
         return @{@"Content-Type" : @"text/plain", @"Content-Length" : length};
     };
 
-    XCTAssertNil([[GCDWebServerRequest alloc] initWithMethod:@"POST" url:url headers:headers(@"5abc") path:@"/" query:@{}]);
-    XCTAssertNil([[GCDWebServerRequest alloc] initWithMethod:@"POST" url:url headers:headers(@"-1") path:@"/" query:@{}]);
-    XCTAssertNil([[GCDWebServerRequest alloc] initWithMethod:@"POST" url:url headers:headers(@"") path:@"/" query:@{}]);
-    XCTAssertNil([[GCDWebServerRequest alloc] initWithMethod:@"POST" url:url headers:headers(@"99999999999999999999999") path:@"/" query:@{}]);
+    XCTAssertNil([[SRVRequest alloc] initWithMethod:@"POST" url:url headers:headers(@"5abc") path:@"/" query:@{}]);
+    XCTAssertNil([[SRVRequest alloc] initWithMethod:@"POST" url:url headers:headers(@"-1") path:@"/" query:@{}]);
+    XCTAssertNil([[SRVRequest alloc] initWithMethod:@"POST" url:url headers:headers(@"") path:@"/" query:@{}]);
+    XCTAssertNil([[SRVRequest alloc] initWithMethod:@"POST" url:url headers:headers(@"99999999999999999999999") path:@"/" query:@{}]);
 
-    GCDWebServerRequest* valid = [[GCDWebServerRequest alloc] initWithMethod:@"POST" url:url headers:headers(@"5") path:@"/" query:@{}];
+    SRVRequest* valid = [[SRVRequest alloc] initWithMethod:@"POST" url:url headers:headers(@"5") path:@"/" query:@{}];
     XCTAssertNotNil(valid);
     XCTAssertEqual(valid.contentLength, (NSUInteger)5);
 }
@@ -1730,22 +1730,22 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 // value the server read just by reordering the parameters — which broke Digest auth for
 // any RFC 2617 client sending cnonce before nonce.
 - (void)testHeaderValueParameterMatchesOnlyAtTokenBoundary {
-    XCTAssertEqualObjects(GCDWebServerExtractHeaderValueParameter(@"form-data; filename=\"EVIL.txt\"; name=\"upload\"", @"name"), @"upload");
-    XCTAssertEqualObjects(GCDWebServerExtractHeaderValueParameter(@"Digest realm=\"r\", cnonce=\"CLIENT\", nonce=\"REAL\"", @"nonce"), @"REAL");
-    XCTAssertEqualObjects(GCDWebServerExtractHeaderValueParameter(@"Digest realm=\"r\", nonce=\"N\", myuri=\"/shadow\", uri=\"/real\"", @"uri"), @"/real");
-    XCTAssertNil(GCDWebServerExtractHeaderValueParameter(@"form-data; filename=\"only.txt\"", @"name"));
+    XCTAssertEqualObjects(SRVExtractHeaderValueParameter(@"form-data; filename=\"EVIL.txt\"; name=\"upload\"", @"name"), @"upload");
+    XCTAssertEqualObjects(SRVExtractHeaderValueParameter(@"Digest realm=\"r\", cnonce=\"CLIENT\", nonce=\"REAL\"", @"nonce"), @"REAL");
+    XCTAssertEqualObjects(SRVExtractHeaderValueParameter(@"Digest realm=\"r\", nonce=\"N\", myuri=\"/shadow\", uri=\"/real\"", @"uri"), @"/real");
+    XCTAssertNil(SRVExtractHeaderValueParameter(@"form-data; filename=\"only.txt\"", @"name"));
 
     // Ordinary cases must be unaffected.
-    XCTAssertEqualObjects(GCDWebServerExtractHeaderValueParameter(@"form-data; name=\"upload\"; filename=\"a.txt\"", @"name"), @"upload");
-    XCTAssertEqualObjects(GCDWebServerExtractHeaderValueParameter(@"form-data; name=\"upload\"; filename=\"a.txt\"", @"filename"), @"a.txt");
-    XCTAssertEqualObjects(GCDWebServerExtractHeaderValueParameter(@"multipart/form-data; boundary=ABC", @"boundary"), @"ABC");
-    XCTAssertEqualObjects(GCDWebServerExtractHeaderValueParameter(@"text/plain; charset=utf-8", @"charset"), @"utf-8");
-    XCTAssertEqualObjects(GCDWebServerExtractHeaderValueParameter(@"form-data; name=upload; filename=a.txt", @"name"), @"upload");
+    XCTAssertEqualObjects(SRVExtractHeaderValueParameter(@"form-data; name=\"upload\"; filename=\"a.txt\"", @"name"), @"upload");
+    XCTAssertEqualObjects(SRVExtractHeaderValueParameter(@"form-data; name=\"upload\"; filename=\"a.txt\"", @"filename"), @"a.txt");
+    XCTAssertEqualObjects(SRVExtractHeaderValueParameter(@"multipart/form-data; boundary=ABC", @"boundary"), @"ABC");
+    XCTAssertEqualObjects(SRVExtractHeaderValueParameter(@"text/plain; charset=utf-8", @"charset"), @"utf-8");
+    XCTAssertEqualObjects(SRVExtractHeaderValueParameter(@"form-data; name=upload; filename=a.txt", @"name"), @"upload");
 
     // RFC 2046 allows "," in a boundary, so an unquoted value must NOT terminate there —
     // truncating "ab,cd" to "ab" makes every upload from such a client fail to parse.
-    XCTAssertEqualObjects(GCDWebServerExtractHeaderValueParameter(@"multipart/form-data; boundary=ab,cd", @"boundary"), @"ab,cd");
-    XCTAssertEqualObjects(GCDWebServerExtractHeaderValueParameter(@"multipart/form-data; boundary=ab,cd; charset=utf-8", @"boundary"), @"ab,cd");
+    XCTAssertEqualObjects(SRVExtractHeaderValueParameter(@"multipart/form-data; boundary=ab,cd", @"boundary"), @"ab,cd");
+    XCTAssertEqualObjects(SRVExtractHeaderValueParameter(@"multipart/form-data; boundary=ab,cd; charset=utf-8", @"boundary"), @"ab,cd");
 }
 
 // The idle timeout's zero-progress rule is defeated by a client that dribbles one byte
@@ -1753,13 +1753,13 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 // for as long as it likes. While a request body is still arriving the server must demand
 // real throughput, not merely non-zero throughput.
 - (void)testConnectionIdleTimeoutClosesDribblingBodyClient {
-    GCDWebServer* server = [[GCDWebServer alloc] init];
+    SRVServer* server = [[SRVServer alloc] init];
     [server addDefaultHandlerForMethod:@"POST"
-                          requestClass:[GCDWebServerDataRequest class]
-                          processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
-                              return [GCDWebServerDataResponse responseWithText:@"ok"];
+                          requestClass:[SRVDataRequest class]
+                          processBlock:^SRVResponse*(SRVRequest* request) {
+                              return [SRVDataResponse responseWithText:@"ok"];
                           }];
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES, GCDWebServerOption_ConnectionIdleTimeout : @0.5};
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES, SRVOption_ConnectionIdleTimeout : @0.5};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     int fd = ConnectToLocalhostPort(server.port);
@@ -1797,9 +1797,9 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     NSString* path = [root stringByAppendingPathComponent:@"f.txt"];
     XCTAssertTrue([@"ORIGINAL" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    GCDWebServer* server = [[GCDWebServer alloc] init];
+    SRVServer* server = [[SRVServer alloc] init];
     [server addGETHandlerForBasePath:@"/" directoryPath:root indexFilename:nil cacheAge:0 allowRangeRequests:YES];
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     NSString* first = SendRawRequest(server.port, @"GET /f.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
@@ -1830,9 +1830,9 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     NSString* path = [root stringByAppendingPathComponent:@"f.txt"];
     XCTAssertTrue([@"AAAAAAAAAAAAAAAAAAAA" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    GCDWebServer* server = [[GCDWebServer alloc] init];
+    SRVServer* server = [[SRVServer alloc] init];
     [server addGETHandlerForBasePath:@"/" directoryPath:root indexFilename:nil cacheAge:0 allowRangeRequests:YES];
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     // A matching If-Range still yields a partial response...
@@ -1870,7 +1870,7 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     NSString* name = @"evil.command;ok.txt";
     XCTAssertTrue([@"data" writeToFile:[root stringByAppendingPathComponent:name] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    GCDWebServerFileResponse* response = [GCDWebServerFileResponse responseWithFile:[root stringByAppendingPathComponent:name] isAttachment:YES];
+    SRVFileResponse* response = [SRVFileResponse responseWithFile:[root stringByAppendingPathComponent:name] isAttachment:YES];
     XCTAssertNotNil(response);
     NSString* disposition = [response valueForAdditionalHeader:@"Content-Disposition"];
     XCTAssertNotNil(disposition);
@@ -1897,14 +1897,14 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     // Big enough to be streamed from disk in several chunks rather than served in one go.
     XCTAssertTrue([[NSMutableData dataWithLength:(4 * 1024 * 1024)] writeToFile:[root stringByAppendingPathComponent:@"build.bin"] atomically:YES]);
 
-    GCDWebServer* server = [[GCDWebServer alloc] init];
+    SRVServer* server = [[SRVServer alloc] init];
     [server addGETHandlerForBasePath:@"/" directoryPath:root indexFilename:nil cacheAge:0 allowRangeRequests:YES];
     [server addDefaultHandlerForMethod:@"POST"
-                          requestClass:[GCDWebServerDataRequest class]
-                          processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
-                              return [GCDWebServerDataResponse responseWithText:@"ok"];
+                          requestClass:[SRVDataRequest class]
+                          processBlock:^SRVResponse*(SRVRequest* request) {
+                              return [SRVDataResponse responseWithText:@"ok"];
                           }];
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     // Warm up first: the first requests populate caches and date formatters, so a baseline
@@ -1914,7 +1914,7 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     }
 
     NSUInteger const baselineFDs = OpenFileDescriptorCount();
-    XCTAssertEqual(GCDWebServerReservedMemoryLength(), (NSUInteger)0, @"budget should be idle at the baseline");
+    XCTAssertEqual(SRVReservedMemoryLength(), (NSUInteger)0, @"budget should be idle at the baseline");
 
     NSString* const body = [@"" stringByPaddingToLength:4096 withString:@"x" startingAtIndex:0];
     NSString* const post = [NSString stringWithFormat:@"POST /submit HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/plain\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)body.length, body];
@@ -1938,7 +1938,7 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     // counting; otherwise this measures timing rather than leakage.
     [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:1.0]];
 
-    XCTAssertEqual(GCDWebServerReservedMemoryLength(), (NSUInteger)0, @"the shared memory budget did not return to zero after 150 rounds");
+    XCTAssertEqual(SRVReservedMemoryLength(), (NSUInteger)0, @"the shared memory budget did not return to zero after 150 rounds");
 
     NSUInteger const finalFDs = OpenFileDescriptorCount();
     XCTAssertLessThanOrEqual(finalFDs, baselineFDs + 5, @"descriptors accumulated: %lu at baseline, %lu after 450 requests", (unsigned long)baselineFDs, (unsigned long)finalFDs);
@@ -1955,16 +1955,16 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 - (void)testNATPortMappingStartStopCyclesDoNotDeadlock {
     for (int i = 0; i < 5; i++) {
         @autoreleasepool {
-            GCDWebServer* server = [[GCDWebServer alloc] init];
+            SRVServer* server = [[SRVServer alloc] init];
             [server addDefaultHandlerForMethod:@"GET"
-                                  requestClass:[GCDWebServerRequest class]
-                                  processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
-                                      return [GCDWebServerDataResponse responseWithText:@"ok"];
+                                  requestClass:[SRVRequest class]
+                                  processBlock:^SRVResponse*(SRVRequest* request) {
+                                      return [SRVDataResponse responseWithText:@"ok"];
                                   }];
             NSDictionary* options = @{
-                GCDWebServerOption_Port : @0,
-                GCDWebServerOption_BindToLocalhost : @YES,
-                GCDWebServerOption_RequestNATPortMapping : @YES
+                SRVOption_Port : @0,
+                SRVOption_BindToLocalhost : @YES,
+                SRVOption_RequestNATPortMapping : @YES
             };
             XCTAssertTrue([server startWithOptions:options error:NULL], @"cycle %i failed to start", i);
 
@@ -1984,17 +1984,17 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 // Identity framing is safe here because every response carries "Connection: Close" and the
 // connection serves one request, so end-of-body by close is well defined.
 - (void)testStreamedResponseIsNotChunkedForHTTP10Clients {
-    GCDWebServer* server = [[GCDWebServer alloc] init];
+    SRVServer* server = [[SRVServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
-                          requestClass:[GCDWebServerRequest class]
-                          processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
+                          requestClass:[SRVRequest class]
+                          processBlock:^SRVResponse*(SRVRequest* request) {
                               __block int remaining = 3;
-                              return [GCDWebServerStreamedResponse responseWithContentType:@"text/plain"
-                                                                               asyncStreamBlock:^(GCDWebServerBodyReaderCompletionBlock completionBlock) {
+                              return [SRVStreamedResponse responseWithContentType:@"text/plain"
+                                                                               asyncStreamBlock:^(SRVBodyReaderCompletionBlock completionBlock) {
                                                                                    completionBlock(remaining-- > 0 ? SSEData(@"PIECE|") : [NSData data], nil);
                                                                                }];
                           }];
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     NSString* reply10 = SendRawRequest(server.port, @"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n");
@@ -2022,9 +2022,9 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     XCTAssertTrue([@"TOP-SECRET" writeToFile:[outside stringByAppendingPathComponent:@"secret.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
     XCTAssertTrue([fm createSymbolicLinkAtPath:[root stringByAppendingPathComponent:@"linkdir"] withDestinationPath:outside error:NULL]);
 
-    GCDWebServer* server = [[GCDWebServer alloc] init];
+    SRVServer* server = [[SRVServer alloc] init];
     [server addGETHandlerForBasePath:@"/" directoryPath:root indexFilename:nil cacheAge:0 allowRangeRequests:YES];
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     NSString* escape = SendRawRequest(server.port, @"GET /linkdir/secret.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
@@ -2045,8 +2045,8 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 // the target file. Anything that cannot be framed or decoded must be refused instead.
 - (void)testTransferEncodingIsParsedNotStringCompared {
     NSURL* url = [NSURL URLWithString:@"http://localhost/"];
-    GCDWebServerRequest* (^make)(NSString*) = ^(NSString* transferEncoding) {
-        return [[GCDWebServerRequest alloc] initWithMethod:@"PUT"
+    SRVRequest* (^make)(NSString*) = ^(NSString* transferEncoding) {
+        return [[SRVRequest alloc] initWithMethod:@"PUT"
                                                       url:url
                                                   headers:@{@"Content-Type" : @"text/plain", @"Transfer-Encoding" : transferEncoding}
                                                      path:@"/"
@@ -2066,7 +2066,7 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     XCTAssertNil(make(@""));
 
     // "identity" means no chunked framing; length framing still applies.
-    GCDWebServerRequest* identity = make(@"identity");
+    SRVRequest* identity = make(@"identity");
     XCTAssertNotNil(identity);
     XCTAssertFalse(identity.usesChunkedTransferEncoding);
 }
@@ -2076,7 +2076,7 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 - (void)testByteRangeIsParsedStrictly {
     NSURL* url = [NSURL URLWithString:@"http://localhost/"];
     NSRange (^rangeFor)(NSString*) = ^(NSString* value) {
-        return [[[GCDWebServerRequest alloc] initWithMethod:@"GET" url:url headers:@{@"Range" : value} path:@"/" query:@{}] byteRange];
+        return [[[SRVRequest alloc] initWithMethod:@"GET" url:url headers:@{@"Range" : value} path:@"/" query:@{}] byteRange];
     };
 
     NSRange valid = rangeFor(@"bytes=500-999");
@@ -2094,7 +2094,7 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     // Malformed values must be ignored (the sentinel), not silently coerced to a number.
     for (NSString* bad in @[ @"bytes=0x10-20", @"bytes=+5-20", @"bytes=5abc-20", @"bytes= 5-20", @"bytes=abc-def" ]) {
         NSRange r = rangeFor(bad);
-        XCTAssertFalse(GCDWebServerIsValidByteRange(r), @"expected \"%@\" to be rejected, got {%lu,%lu}", bad, (unsigned long)r.location, (unsigned long)r.length);
+        XCTAssertFalse(SRVIsValidByteRange(r), @"expected \"%@\" to be rejected, got {%lu,%lu}", bad, (unsigned long)r.location, (unsigned long)r.length);
     }
 }
 
@@ -2104,7 +2104,7 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 - (void)testMD5DigestHashesPastEmbeddedNUL {
     unichar nul = 0;
     NSString* withNUL = [NSString stringWithFormat:@"abc%@def", [NSString stringWithCharacters:&nul length:1]];
-    XCTAssertNotEqualObjects(GCDWebServerComputeMD5Digest(@"%@", withNUL), GCDWebServerComputeMD5Digest(@"%@", @"abc"),
+    XCTAssertNotEqualObjects(SRVComputeMD5Digest(@"%@", withNUL), SRVComputeMD5Digest(@"%@", @"abc"),
                              @"input must not be truncated at the first NUL");
 }
 
@@ -2115,11 +2115,11 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 // survives. A process-wide budget bounds the sum, and a reservation returns its bytes when
 // it is deallocated so a connection dying mid-body cannot permanently shrink the budget.
 - (void)testTotalInMemoryBudgetIsBoundedAndReturned {
-    GCDWebServerSetMemoryLimitsForTesting(64 * 1024, 64 * 1024, 256 * 1024);
+    SRVSetMemoryLimitsForTesting(64 * 1024, 64 * 1024, 256 * 1024);
     [self addTeardownBlock:^{
-        GCDWebServerSetMemoryLimitsForTesting(0, 0, 0);
+        SRVSetMemoryLimitsForTesting(0, 0, 0);
     }];
-    XCTAssertEqual(GCDWebServerReservedMemoryLength(), (NSUInteger)0, @"budget should start empty");
+    XCTAssertEqual(SRVReservedMemoryLength(), (NSUInteger)0, @"budget should start empty");
 
     // The pool matters: the requests are autoreleased, so they are only deallocated — and
     // their reservations only returned — once it drains.
@@ -2127,11 +2127,11 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 
     @autoreleasepool {
         // More concurrent bodies than the total budget can hold at once.
-        NSMutableArray<GCDWebServerDataRequest*>* requests = [NSMutableArray array];
+        NSMutableArray<SRVDataRequest*>* requests = [NSMutableArray array];
         NSMutableData* payload = [NSMutableData dataWithLength:(32 * 1024)];
 
         for (int i = 0; i < 16; i++) {
-            GCDWebServerDataRequest* request = OpenBodyRequest([GCDWebServerDataRequest class], @{});
+            SRVDataRequest* request = OpenBodyRequest([SRVDataRequest class], @{});
             [requests addObject:request];
             NSError* error = nil;
 
@@ -2142,11 +2142,11 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 
         XCTAssertGreaterThan(accepted, (NSUInteger)0, @"the budget refused everything; it is too tight to be usable");
         XCTAssertLessThan(accepted, (NSUInteger)16, @"the budget accepted every body; the aggregate ceiling is not enforced");
-        XCTAssertLessThanOrEqual(GCDWebServerReservedMemoryLength(), (NSUInteger)(256 * 1024), @"reserved memory exceeded the ceiling");
+        XCTAssertLessThanOrEqual(SRVReservedMemoryLength(), (NSUInteger)(256 * 1024), @"reserved memory exceeded the ceiling");
     }
 
     // Every holder is gone, so every byte must have come back.
-    XCTAssertEqual(GCDWebServerReservedMemoryLength(), (NSUInteger)0, @"reservations leaked after their holders were released");
+    XCTAssertEqual(SRVReservedMemoryLength(), (NSUInteger)0, @"reservations leaked after their holders were released");
 }
 
 #pragma mark - Host validation (DNS rebinding)
@@ -2156,13 +2156,13 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 // still differs is the name the browser puts in Host, which is why this check exists and why
 // nothing else substitutes for it.
 - (void)testHostValidationRefusesRebindingButAllowsRealNames {
-    GCDWebServer* server = [[GCDWebServer alloc] init];
+    SRVServer* server = [[SRVServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
-                          requestClass:[GCDWebServerRequest class]
-                          processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
-                              return [GCDWebServerDataResponse responseWithText:@"served"];
+                          requestClass:[SRVRequest class]
+                          processBlock:^SRVResponse*(SRVRequest* request) {
+                              return [SRVDataResponse responseWithText:@"served"];
                           }];
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     NSString* (^get)(NSString*) = ^(NSString* host) {
@@ -2195,8 +2195,8 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     NSString* dir = MakeTempDirectory();
     XCTAssertTrue([@"secret" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    GCDWebDAVServer* server = [[GCDWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    SRVDAVServer* server = [[SRVDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     NSString* rebound = SendRawRequest(server.port, @"GET /a.txt HTTP/1.1\r\nHost: evil.example\r\n\r\n");
@@ -2213,16 +2213,16 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 // The escape hatch for anyone reached under another name — a reverse proxy, a custom DNS
 // entry. Entries may pin their own port.
 - (void)testHostValidationHonoursConfiguredNames {
-    GCDWebServer* server = [[GCDWebServer alloc] init];
+    SRVServer* server = [[SRVServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
-                          requestClass:[GCDWebServerRequest class]
-                          processBlock:^GCDWebServerResponse*(GCDWebServerRequest* request) {
-                              return [GCDWebServerDataResponse responseWithText:@"served"];
+                          requestClass:[SRVRequest class]
+                          processBlock:^SRVResponse*(SRVRequest* request) {
+                              return [SRVDataResponse responseWithText:@"served"];
                           }];
     NSDictionary* options = @{
-        GCDWebServerOption_Port : @0,
-        GCDWebServerOption_BindToLocalhost : @YES,
-        GCDWebServerOption_AllowedHostNames : @[ @"files.example", @"pinned.example:8080" ]
+        SRVOption_Port : @0,
+        SRVOption_BindToLocalhost : @YES,
+        SRVOption_AllowedHostNames : @[ @"files.example", @"pinned.example:8080" ]
     };
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
@@ -2260,8 +2260,8 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     NSString* name = [NSString stringWithFormat:@"a%Cb.txt", (unichar)0x01];
     XCTAssertTrue([@"data" writeToFile:[dir stringByAppendingPathComponent:name] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    GCDWebDAVServer* server = [[GCDWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    SRVDAVServer* server = [[SRVDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     // LOCK is the case that reaches the wire raw: PROPFIND percent-encodes its href, but
@@ -2292,8 +2292,8 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 - (void)testSSEEndpointRefusesCrossOriginNoCorsFetch {
     NSFileManager* fm = [NSFileManager defaultManager];
     NSString* dir = MakeTempDirectory();
-    GCDWebUploader* server = [[GCDWebUploader alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{GCDWebServerOption_Port : @0, GCDWebServerOption_BindToLocalhost : @YES};
+    SRVUploader* server = [[SRVUploader alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{SRVOption_Port : @0, SRVOption_BindToLocalhost : @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     NSString* noCors = SendRawRequest(server.port, @"GET /events HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\nSec-Fetch-Mode: no-cors\r\nSec-Fetch-Site: cross-site\r\nSec-Fetch-Dest: empty\r\n\r\n");
@@ -2311,7 +2311,7 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 // A gzip-encoded response body must decompress back to exactly what the handler produced.
 - (void)testGZipEncodedDataResponseRoundTrips {
     NSString* text = @"the quick brown fox jumps over the lazy dog";
-    GCDWebServerDataResponse* response = [GCDWebServerDataResponse responseWithText:text];
+    SRVDataResponse* response = [SRVDataResponse responseWithText:text];
     response.gzipContentEncodingEnabled = YES;
 
     NSData* encoded = DrainResponseBody(response);
@@ -2322,14 +2322,14 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 }
 
 // The encoder pulled its source through the synchronous -readData: only, so a response
-// that implements just the async reader — every GCDWebServerStreamedResponse — silently
+// that implements just the async reader — every SRVStreamedResponse — silently
 // encoded an empty body and never ran its stream block at all.
 - (void)testGZipEncodedStreamedResponseRoundTrips {
     NSArray<NSString*>* chunks = @[ @"first-", @"second-", @"third" ];
     __block NSUInteger index = 0;
-    GCDWebServerStreamedResponse* response =
-        [GCDWebServerStreamedResponse responseWithContentType:@"text/plain"
-                                             asyncStreamBlock:^(GCDWebServerBodyReaderCompletionBlock completionBlock) {
+    SRVStreamedResponse* response =
+        [SRVStreamedResponse responseWithContentType:@"text/plain"
+                                             asyncStreamBlock:^(SRVBodyReaderCompletionBlock completionBlock) {
                                                  NSData* data = (index < chunks.count) ? SSEData(chunks[index]) : [NSData data];
                                                  index += 1;
                                                  completionBlock(data, nil);
@@ -2346,9 +2346,9 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 // The same streamed response without gzip must be unaffected.
 - (void)testStreamedResponseWithoutGZipRoundTrips {
     __block NSUInteger index = 0;
-    GCDWebServerStreamedResponse* response =
-        [GCDWebServerStreamedResponse responseWithContentType:@"text/plain"
-                                             asyncStreamBlock:^(GCDWebServerBodyReaderCompletionBlock completionBlock) {
+    SRVStreamedResponse* response =
+        [SRVStreamedResponse responseWithContentType:@"text/plain"
+                                             asyncStreamBlock:^(SRVBodyReaderCompletionBlock completionBlock) {
                                                  NSData* data = (index < 3) ? SSEData(@"chunk") : [NSData data];
                                                  index += 1;
                                                  completionBlock(data, nil);

@@ -25,32 +25,32 @@
  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-import GCDWebServers
+import Serve
 import UIKit
 
 class ViewController: UIViewController {
   @IBOutlet var label: UILabel?
-  var webServer: GCDWebUploader!
+  var webServer: SRVUploader!
 
   override func viewWillAppear(_ animated: Bool) {
     super.viewWillAppear(animated)
 
     let documentsPath = NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true).first!
-    webServer = GCDWebUploader(uploadDirectory: documentsPath)
+    webServer = SRVUploader(uploadDirectory: documentsPath)
     webServer.delegate = self
 
     // The server is reachable by anything on the same network. To require a password,
     // and/or to accept connections from this device only, start it with options instead:
     //
     // try? webServer.start(options: [
-    //   GCDWebServerOption_AuthenticationMethod: GCDWebServerAuthenticationMethod_Basic,
-    //   GCDWebServerOption_AuthenticationAccounts: ["user": "password"],
-    //   GCDWebServerOption_BindToLocalhost: true,
+    //   SRVOption_AuthenticationMethod: SRVAuthenticationMethod_Basic,
+    //   SRVOption_AuthenticationAccounts: ["user": "password"],
+    //   SRVOption_BindToLocalhost: true,
     // ])
     if webServer.start() {
-      label?.text = "GCDWebServer running locally on port \(webServer.port)"
+      label?.text = "SRVServer running locally on port \(webServer.port)"
     } else {
-      label?.text = "GCDWebServer not running!"
+      label?.text = "SRVServer not running!"
     }
   }
 
@@ -62,24 +62,24 @@ class ViewController: UIViewController {
   }
 }
 
-extension ViewController: GCDWebUploaderDelegate {
-  func webUploader(_: GCDWebUploader, didUploadFileAtPath path: String) {
+extension ViewController: SRVUploaderDelegate {
+  func webUploader(_: SRVUploader, didUploadFileAtPath path: String) {
     print("[UPLOAD] \(path)")
   }
 
-  func webUploader(_: GCDWebUploader, didDownloadFileAtPath path: String) {
+  func webUploader(_: SRVUploader, didDownloadFileAtPath path: String) {
     print("[DOWNLOAD] \(path)")
   }
 
-  func webUploader(_: GCDWebUploader, didMoveItemFromPath fromPath: String, toPath: String) {
+  func webUploader(_: SRVUploader, didMoveItemFromPath fromPath: String, toPath: String) {
     print("[MOVE] \(fromPath) -> \(toPath)")
   }
 
-  func webUploader(_: GCDWebUploader, didCreateDirectoryAtPath path: String) {
+  func webUploader(_: SRVUploader, didCreateDirectoryAtPath path: String) {
     print("[CREATE] \(path)")
   }
 
-  func webUploader(_: GCDWebUploader, didDeleteItemAtPath path: String) {
+  func webUploader(_: SRVUploader, didDeleteItemAtPath path: String) {
     print("[DELETE] \(path)")
   }
 }

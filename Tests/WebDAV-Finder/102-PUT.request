@@ -4,6 +4,6 @@ Accept: */*
 Content-Length: 0
 Connection: keep-alive
 User-Agent: WebDAVFS/3.0.1 (03018000) Darwin/13.1.0 (x86_64)
-X-GCDWebServer-CreationDate: 2014-04-12T05:11:26+00:00
-X-GCDWebServer-ModifiedDate: Sat, 12 Apr 2014 05:11:26 GMT
+X-Serve-CreationDate: 2014-04-12T05:11:26+00:00
+X-Serve-ModifiedDate: Sat, 12 Apr 2014 05:11:26 GMT
 

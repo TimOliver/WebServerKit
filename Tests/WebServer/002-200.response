@@ -1,6 +1,6 @@
 HTTP/1.1 200 OK
 Connection: Close
-Server: GCDWebServer
+Server: Serve
 Content-Type: text/plain
 Last-Modified: Thu, 10 Apr 2014 11:10:14 GMT
 Date: Fri, 11 Apr 2014 02:42:24 GMT
