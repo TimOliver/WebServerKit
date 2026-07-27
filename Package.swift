@@ -4,10 +4,10 @@ import PackageDescription
 
 // The public headers are spread across Core/, Requests/ and Responses/, and they import
 // each other by bare filename as the fallback arm of
-// `#if __has_include(<GCDWebServers/…>)`. Naming the core module GCDWebServers — the same
+// `#if __has_include(<WebServerKit/…>)`. Naming the core module WebServerKit — the same
 // name the framework uses — makes the angle-bracket arm win instead, which resolves through
-// Sources/GCDWebServer/include/GCDWebServers (a directory of symlinks to the real headers,
-// deliberately excluding GCDWebServerPrivate.h). Without that the module cannot be built by
+// Sources/WebServerKit/include/WebServerKit (a directory of symlinks to the real headers,
+// deliberately excluding WSKPrivate.h). Without that the module cannot be built by
 // a Swift consumer at all: the umbrella would drag in the private header, which imports a
 // dozen others it cannot find.
 //
@@ -23,7 +23,7 @@ let coreSources: [CSetting] = [
 // Core/Requests/Responses on purpose: reaching the same header by two different paths makes
 // clang treat it as two files and fail with "duplicate interface definition".
 let coreFromSibling: [CSetting] = [
-    .headerSearchPath("../GCDWebServer/include/GCDWebServers")
+    .headerSearchPath("../WebServerKit/include/WebServerKit")
 ]
 
 let package = Package(
@@ -34,18 +34,18 @@ let package = Package(
         .tvOS(.v15)
     ],
     products: [
-        // Everything, matching the GCDWebServers framework.
-        .library(name: "GCDWebServers", targets: ["GCDWebServers", "GCDWebDAVServer", "GCDWebUploader"]),
+        // Everything, matching the WebServerKit framework.
+        .library(name: "WebServerKit", targets: ["WebServerKit", "WebServerKitDAV", "WebServerKitUploader"]),
         // The individual pieces, matching the CocoaPods subspecs, for anyone who does not
         // want to link libxml2 or ship the uploader's web assets.
-        .library(name: "GCDWebServerCore", targets: ["GCDWebServers"]),
-        .library(name: "GCDWebDAVServer", targets: ["GCDWebDAVServer"]),
-        .library(name: "GCDWebUploader", targets: ["GCDWebUploader"])
+        .library(name: "WebServerKitCore", targets: ["WebServerKit"]),
+        .library(name: "WebServerKitDAV", targets: ["WebServerKitDAV"]),
+        .library(name: "WebServerKitUploader", targets: ["WebServerKitUploader"])
     ],
     targets: [
         .target(
-            name: "GCDWebServers",
-            path: "Sources/GCDWebServer",
+            name: "WebServerKit",
+            path: "Sources/WebServerKit",
             publicHeadersPath: "include",
             cSettings: coreSources,
             linkerSettings: [
@@ -56,9 +56,9 @@ let package = Package(
             ]
         ),
         .target(
-            name: "GCDWebDAVServer",
-            dependencies: ["GCDWebServers"],
-            path: "Sources/GCDWebDAVServer",
+            name: "WebServerKitDAV",
+            dependencies: ["WebServerKit"],
+            path: "Sources/WebServerKitDAV",
             publicHeadersPath: ".",
             cSettings: coreFromSibling,
             linkerSettings: [
@@ -70,18 +70,27 @@ let package = Package(
             ]
         ),
         .target(
-            name: "GCDWebUploader",
-            dependencies: ["GCDWebServers"],
-            path: "Sources/GCDWebUploader",
+            name: "WebServerKitUploader",
+            dependencies: ["WebServerKit"],
+            path: "Sources/WebServerKitUploader",
             resources: [
-                .copy("GCDWebUploader.bundle")
+                .copy("WSKWebUploader.bundle")
             ],
             // A hand-written module.modulemap lives here because the public headers sit next
-            // to GCDWebUploader.bundle, and SwiftPM rejects an umbrella header that has
+            // to WSKWebUploader.bundle, and SwiftPM rejects an umbrella header that has
             // sibling directories. Mapping them from include/ keeps the bundle where the
             // Xcode project and the podspec already expect it.
             publicHeadersPath: "include",
             cSettings: coreFromSibling
+        ),
+        // Not a product — a link check. `swift build` on a library target compiles but never
+        // links, so an undefined symbol survives it: the SwiftPM resource accessor is named
+        // after the *target* (WebServerKitUploader_SWIFTPM_MODULE_BUNDLE), so a rename of the
+        // classes can silently break it while every build stays green. Linking catches it.
+        .executableTarget(
+            name: "WebServerKitLinkCheck",
+            dependencies: ["WebServerKit", "WebServerKitDAV", "WebServerKitUploader"],
+            path: "Sources/WebServerKitLinkCheck"
         )
     ]
 )

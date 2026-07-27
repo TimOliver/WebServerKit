@@ -39,7 +39,7 @@ jobs:
         continue-on-error: true
         run: |
           set -o pipefail
-          xcodebuild build -project GCDWebServer.xcodeproj -scheme "GCDWebServers (Mac)" -configuration Debug \
+          xcodebuild build -project WebServerKit.xcodeproj -scheme "WebServerKit (Mac)" -configuration Debug \
             CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER= 2>&1 \
             | grep -E "^/.*warning:" | sort -u | tee warnings.txt
           if [ -s warnings.txt ]; then

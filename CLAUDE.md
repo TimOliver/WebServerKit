@@ -6,20 +6,20 @@ A fork of GCDWebServer with additional features for iOS/macOS web serving.
 
 ```bash
 # Build Mac framework
-xcodebuild -project GCDWebServer.xcodeproj -scheme "GCDWebServers (Mac)" -configuration Debug build
+xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (Mac)" -configuration Debug build
 
 # Build iOS framework
-xcodebuild -project GCDWebServer.xcodeproj -scheme "GCDWebServers (iOS)" -configuration Debug -destination 'generic/platform=iOS Simulator' build
+xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (iOS)" -configuration Debug -destination 'generic/platform=iOS Simulator' build
 
 # Build tvOS framework
-xcodebuild -project GCDWebServer.xcodeproj -scheme "GCDWebServers (tvOS)" -configuration Debug -destination 'generic/platform=tvOS Simulator' build
+xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -configuration Debug -destination 'generic/platform=tvOS Simulator' build
 ```
 
 ## Project Structure
 
-- `Sources/GCDWebServer/` - Core web server implementation
-- `Sources/GCDWebUploader/` - File upload/download web interface
-- `Sources/GCDWebDAVServer/` - WebDAV server implementation
+- `Sources/WebServerKit/` - Core web server implementation
+- `Sources/WebServerKitUploader/` - File upload/download web interface
+- `Sources/WebServerKitDAV/` - WebDAV server implementation
 - `Examples/iOS/` - iOS example app
 - `Examples/macOS/` - macOS example app
 - `Framework/` - Framework configuration files
@@ -44,14 +44,14 @@ What each shape depends on:
   leaked once per request is invisible in a four-minute session and fatal in a four-week one.
   The aggregate in-memory budget is the sharpest edge here: it is process-wide static state
   with **no reset**, so one reservation that outlives its request permanently disables every
-  in-memory endpoint until the process is relaunched. `+[GCDWebServer reservedInMemoryByteCount]`
+  in-memory endpoint until the process is relaunched. `+[WSKWebServer reservedInMemoryByteCount]`
   exists to be monitored for exactly this, and `testSustainedServingDoesNotAccumulateResources`
   guards it (verified sensitive by injecting a leak and watching it fail).
 - **Shape A also depends on large-file correctness.** Multi-hundred-megabyte builds pulled
   over WiFi mean interrupted transfers are routine, so `Range`/`If-Range` handling is a main
   path, not an edge case: serving a range against a *changed* representation would splice two
   builds together into an IPA that installs and then crashes. Note also that Puck rewrites
-  builds while they may be downloading — `GCDWebServerFileResponse` opening once and deriving
+  builds while they may be downloading — `WSKFileResponse` opening once and deriving
   everything from `fstat` on that descriptor is what keeps an in-flight download consistent.
 - **Shape B depends on start/stop correctness**, because it happens constantly. Lifecycle
   races a daemon meets once in its life, this meets every time it wakes.
@@ -74,7 +74,7 @@ internet-facing lens: there is no rate limiting, no auth backoff, and the 128-co
 is trivially saturated. Plaintext transport remains a settled choice because TLS is
 terminated upstream; do not re-flag it.
 
-**Tailscale deployments must set `GCDWebServerOption_AllowedHostNames`** to the node's
+**Tailscale deployments must set `WSKOption_AllowedHostNames`** to the node's
 MagicDNS name (`<node>.<tailnet>.ts.net`). The Host allow-list admits localhost, IP literals
 and the Bonjour/`.local` name only, so without it every request is refused with 421.
 
@@ -90,8 +90,8 @@ to fail. Two findings were defects in code added by the host-validation and
 aggregate-budget branches.
 
 **A truncated gzip request body was accepted as a complete one.**
-`-[GCDWebServerGZipDecoder close:]` asserted `Z_STREAM_END` and then reported success
-regardless; `GWS_DCHECK` is a no-op in Release. A `PUT` of a 20-byte gzip prefix over an
+`-[WSKGZipDecoder close:]` asserted `Z_STREAM_END` and then reported success
+regardless; `WSK_DCHECK` is a no-op in Release. A `PUT` of a 20-byte gzip prefix over an
 existing file answered `204 No Content` and left the file **zero bytes** — stage-and-swap
 does not help, because the handler runs. The same request aborted a Debug build. Trailing
 bytes *after* `Z_STREAM_END` were a second DCHECK, silently discarding a concatenated
@@ -163,7 +163,7 @@ replacement's mtime was not strictly newer — and per RFC 9111 §4.3.4 the clie
 the old body under the *new* ETag, pinning the stale copy indefinitely. `If-Range` was
 ignored entirely, so a resumed download spliced bytes of a changed file onto the prefix the
 client already held and returned 206 asserting they belonged together (this added
-`-[GCDWebServerRequest ifRange]` and an initializer taking it). `filename*` was
+`-[WSKRequest ifRange]` and an initializer taking it). `filename*` was
 percent-encoded with a URL *query* escaper, which leaves `;` — the parameter delimiter — so
 `evil.command;ok.txt` was delivered as `evil.command`, defeating `allowedFileExtensions` at
 the point that matters. And gzip is no longer applied to a partial response, whose
@@ -180,8 +180,8 @@ asynchronously, or a delegate reading `publicServerURL` would deadlock); and chu
 framing and interim `100 Continue` are no longer sent to HTTP/1.0 clients, which read them
 as body.
 
-**The recorded-trace corpus builds again.** The third pass's `__GCDWEBSERVER_ENABLE_TESTING__`
-change also took the definition from the `GCDWebServer (Mac)` command-line target, which
+**The recorded-trace corpus builds again.** The third pass's `__WEBSERVERKIT_ENABLE_TESTING__`
+change also took the definition from the `WSKWebServer (Mac)` command-line target, which
 `Run-Tests.sh` builds in Release — so all eight suites had been unrunnable for three passes.
 It is restored on that one example target, not at project level (verified: the framework's
 Release compile line still does not carry it). Four suites now pass; the other four differ
@@ -207,7 +207,7 @@ boundary, so `boundary=ab,cd` truncated to `ab` and broke every upload from such
 `,` now delimits only *before* a parameter name. Both have regression tests covering the
 exact case the original tests missed.
 
-**`addGETHandlerForBasePath:` had no containment check** (`GCDWebServer.m`) — the only
+**`addGETHandlerForBasePath:` had no containment check** (`WSKWebServer.m`) — the only
 file-serving path in the library without one. Textual `..` stripping is not containment:
 `lstat` and `O_NOFOLLOW` refuse a symlink solely as the *final* component, so any symlinked
 directory under the served root served whatever it pointed at. Verified by removing the new
@@ -215,7 +215,7 @@ guard and watching a file outside the root come back. Covered by
 `testBasePathHandlerRefusesSymlinkEscape`.
 
 **WebDAV never got the hidden-item fix.** The third pass added `-_isHiddenPath:` to
-`GCDWebUploader` and this file recorded the bug class as fixed; WebDAV's nine sites still
+`WSKWebUploader` and this file recorded the bug class as fixed; WebDAV's nine sites still
 tested `lastPathComponent`, so `GET /.git/config` returned contents and `PUT /.git/hooks`
 wrote. WebDAV now walks every component too.
 
@@ -227,13 +227,13 @@ properly (list split, parameters stripped, chunked must be the sole coding; anyt
 cannot frame or decode is refused rather than silently treated as empty), and PUT/COPY/MOVE
 build the replacement under a staging name and swap it in with `rename(2)`.
 
-**Digest nonce integrity tags were forgeable.** `GCDWebServerComputeMD5Digest` hashed via
+**Digest nonce integrity tags were forgeable.** `WSKComputeMD5Digest` hashed via
 `-UTF8String`+`strlen`, so an embedded NUL — which survives from the wire into
 `request.headers` — ended the hashed input before the per-process secret. Not an auth bypass
 (the response digest still needs HA1) but it defeated the "we minted this nonce" property.
 Both the digest helper and the constant-time credential comparison now work over full bytes.
 
-**`GCDWebServerFileResponse` stat'd and opened as two separate path walks**, so a file
+**`WSKFileResponse` stat'd and opened as two separate path walks**, so a file
 replaced between them was served with the previous file's `Content-Length` and ETag — a
 truncated body that looks complete and gets cached under a stale validator. It now opens
 once with `O_NOFOLLOW` and derives everything from `fstat` on that descriptor.
@@ -265,13 +265,13 @@ never read) — verified live by pipelining.
 ### Aggregate in-memory budget
 
 Every in-memory limit was per-request, and per-request limits do not compose: with
-`kGCDWebServerMaxConnections` concurrent requests the real ceiling was their product — about
+`kWSKMaxConnections` concurrent requests the real ceiling was their product — about
 2 GB of chunked framing buffers, or 8 GB of inflated gzip output — many times what a phone
 survives. This was the same bug class fixed twice already (multipart bodies, then multipart
 part-headers); rather than wait for a third instance, the general case is now closed.
 
-`kGCDWebServerMaxTotalInMemoryLength` (64 MB) bounds the sum across all live connections.
-Every place that holds request data in memory takes a `GCDWebServerMemoryReservation` and
+`kWSKMaxTotalInMemoryLength` (64 MB) bounds the sum across all live connections.
+Every place that holds request data in memory takes a `WSKMemoryReservation` and
 resizes it as its buffer grows: data-request bodies, inflated gzip output, multipart argument
 parts, each multipart parser's working buffer, and the chunked framing buffer. Per-request
 limits still apply on top.
@@ -284,13 +284,13 @@ permanently shrink what the server can serve afterwards. Reservations that rise 
 under load: 24 concurrent chunked bodies peaked at exactly the ceiling and never above it,
 and the reserved total returned to zero once they finished.
 
-`GCDWebServerSetMemoryLimitsForTesting` shrinks the limits so a bound can be proven without
+`WSKSetMemoryLimitsForTesting` shrinks the limits so a bound can be proven without
 moving tens of megabytes. That fixed the long-standing flake in
 `testChunkedTransferRejectsUnterminatedSizeLine`, which used to push 16 MB through the server
 and lose the test runner in roughly half of full-suite runs; it now proves the same property
 against a 64 KB bound. Ten consecutive full-suite runs pass. Consult
-`GCDWebServerMaxInMemoryBodyLength()` / `GCDWebServerMaxDecompressedBodyLength()` rather than
-the `kGCDWebServer...` constants, so the overrides are honoured.
+`WSKMaxInMemoryBodyLength()` / `WSKMaxDecompressedBodyLength()` rather than
+the `kWSK...` constants, so the overrides are honoured.
 
 Known imprecision: exhausting the budget surfaces as a 500, because the body-writer protocol
 reports failure as a plain BOOL and the connection maps any body-write failure to 500. A 503
@@ -300,9 +300,9 @@ destabilising the body-read path for.
 ### Host validation (DNS rebinding)
 
 Every request's `Host` is checked against an allow-list in
-`-[GCDWebServerConnection _rejectIfHostNotAllowed]`; anything else gets 421. Accepted with
+`-[WSKConnection _rejectIfHostNotAllowed]`; anything else gets 421. Accepted with
 no configuration: any IP address literal, `localhost`, this machine's own host name, and the
-Bonjour name being advertised. `GCDWebServerOption_AllowedHostNames` adds more, and an entry
+Bonjour name being advertised. `WSKOption_AllowedHostNames` adds more, and an entry
 may pin its own port.
 
 **Why nothing else would do.** Once a page on `evil.example` repoints its DNS here, the
@@ -331,14 +331,14 @@ just doesn't work". Covered by `testHostValidationRefusesRebindingButAllowsRealN
 
 ### Third audit pass: remote DoS, lifecycle, and parsing fixes
 
-**Multipart argument accumulation (remote OOM).** `kGCDWebServerMaxInMemoryBodyLength`
+**Multipart argument accumulation (remote OOM).** `kWSKMaxInMemoryBodyLength`
 bounded only the parser's *working buffer*; every completed non-file part was retained
 in `_arguments` for the life of the request with no aggregate limit, so a body of many
 individually-legal parts grew without bound (200 MB of parts took the process to 626 MB
-before rejecting nothing). `GCDWebServerMIMEStreamParser` now carries a
-`GCDWebServerMIMEStreamBudget` — shared with every sub-parser, since nested
+before rejecting nothing). `WSKMIMEStreamParser` now carries a
+`WSKMIMEStreamBudget` — shared with every sub-parser, since nested
 `multipart/mixed` appends into the same arrays — capping total retained argument bytes at
-`kGCDWebServerMaxInMemoryBodyLength` and total parts at `kMultiPartMaxParts` (1024, which
+`kWSKMaxInMemoryBodyLength` and total parts at `kMultiPartMaxParts` (1024, which
 also bounds temp-file/inode use by file parts). Covered by
 `testMultiPartRejectsUnboundedArgumentAccumulation`.
 
@@ -358,12 +358,12 @@ channels, each pinning a connection that the 15s heartbeats kept alive forever; 
 concurrent `GET /events` permanently denied service. Capped at `kMaxSSEChannels` (16),
 over-limit channels are `close`d so the connection ends cleanly and `EventSource` retries.
 
-**`__GCDWEBSERVER_ENABLE_TESTING__` shipped in Release.**
+**`__WEBSERVERKIT_ENABLE_TESTING__` shipped in Release.**
 `GCC_PREPROCESSOR_DEFINITIONS_NOT_USED_IN_PRECOMPS` was set at project level in *both*
 configurations, and that setting is excluded only from PCH generation — the `-D` was on
 the Release compile line. That shipped client-settable file timestamps
-(`X-GCDWebServer-CreationDate`/`-ModifiedDate` on PUT and MKCOL), a client-chosen
-`X-GCDWebServer-LockToken`, and the request/response recording machinery. Now Debug-only.
+(`X-WSKWebServer-CreationDate`/`-ModifiedDate` on PUT and MKCOL), a client-chosen
+`X-WSKWebServer-LockToken`, and the request/response recording machinery. Now Debug-only.
 The LOCK token is also `_XMLEscape`d, which it alone among the LOCK response values was not.
 
 **Hidden items were protected only at the leaf.** Every `allowHiddenItems` check used
@@ -371,14 +371,14 @@ The LOCK token is also `_XMLEscape`d, which it alone among the LOCK response val
 `/delete`, `/upload` and `/move` all reached inside one (`/.git/config`). `-_isHiddenPath:`
 now tests every component of the normalized path.
 
-**Malformed input aborted Debug builds.** `GWS_DNOT_REACHED()` is `abort()` under `#if
+**Malformed input aborted Debug builds.** `WSK_DNOT_REACHED()` is `abort()` under `#if
 DEBUG`, and several call sites sat on ordinary remote-input paths: `GET /%FF` (undecodable
 percent-escapes → nil path, now 400 rather than 500), `?a=%FF` in a query string, a
 multipart part header without a colon or without `name=`, a `Content-Length` alongside a
 chunked `Transfer-Encoding`, and a file vanishing mid directory-listing. These now log and
 fail the request. Genuine host-app API-misuse assertions were deliberately left alone.
 
-**Header parameters matched on substrings.** `GCDWebServerExtractHeaderValueParameter`
+**Header parameters matched on substrings.** `WSKExtractHeaderValueParameter`
 used `scanUpToString:`, which finds `name=` inside `filename=` and `nonce=` inside
 `cnonce=` — so a client chose which value the server read just by reordering parameters,
 and Digest auth was unusable for any RFC 2617 client sending `cnonce` before `nonce`
@@ -395,10 +395,10 @@ lifecycle mutation and the `isRunning`/`serverURL` accessors now funnel through 
 queue, the accept handler touches only `_syncQueue`, and the cancel handlers that
 `dispatch_group_wait` waits on run on a global queue doing only `close()` + `leave`.
 
-**gzip on an async-only response sent an empty body.** `GCDWebServerGZipEncoder` pulled its
-source through the synchronous `readData:` only, so any `GCDWebServerStreamedResponse` with
+**gzip on an async-only response sent an empty body.** `WSKGZipEncoder` pulled its
+source through the synchronous `readData:` only, so any `WSKStreamedResponse` with
 `gzipContentEncodingEnabled` produced a valid gzip stream of zero bytes and never ran its
-stream block. `GCDWebServerBodyEncoder` now implements `asyncReadDataWithCompletion:`.
+stream block. `WSKBodyEncoder` now implements `asyncReadDataWithCompletion:`.
 This path had no test coverage at all; `testGZipEncoded{Data,Streamed}ResponseRoundTrips`
 now assert a full round-trip through both reader kinds.
 
@@ -408,7 +408,7 @@ connection no longer `close()`s its socket in both `-initWithServer:` and `-deal
 double close that could kill a recycled descriptor); `setValue:forAdditionalHeader:`
 rejects header *names* containing CR/LF/colon (CFHTTPMessage sanitizes values but not
 names); unsatisfiable Ranges return 416 with `Content-Range: bytes */N` instead of 500/404;
-and `GCDWebServerStreamedResponse` releases its block on `-close` to break handler retain
+and `WSKStreamedResponse` releases its block on `-close` to break handler retain
 cycles.
 
 ### WebDAV MOVE/COPY safety (self-move data loss)
@@ -427,16 +427,16 @@ A case-only rename is now rejected (safe) rather than performed. Covered by
 
 ### Error-page HTML escaping (reflected XSS fix)
 
-`GCDWebServerErrorResponse`'s `_EscapeHTMLString` escaped only `"`, so
+`WSKErrorResponse`'s `_EscapeHTMLString` escaped only `"`, so
 request-controlled text reflected into the `text/html` error body (e.g.
 `"<path>" does not exist`) passed `<`/`>`/`&` through unescaped — a reflected XSS
 in the server's own origin, which via the uploader/DAV can list, move, and delete
 files. It now escapes `& < > " '` (with `&` first), matching the directory-listing
-escaper in `GCDWebServer.m`. Covered by `testErrorResponseEscapesReflectedMarkup`.
+escaper in `WSKWebServer.m`. Covered by `testErrorResponseEscapesReflectedMarkup`.
 
 ### Per-connection config snapshot (auth/serverName race fix)
 
-Each `GCDWebServerConnection` now **snapshots** the server's mutable configuration —
+Each `WSKConnection` now **snapshots** the server's mutable configuration —
 `serverName`, the authentication realm and account dictionaries, and the
 HEAD→GET mapping flag — into its own ivars in `initWithServer:`, and reads those
 copies for its whole life instead of `_server.*`.
@@ -460,13 +460,13 @@ Bounds a malicious/broken client's ability to exhaust memory on a transient
 device. (Connection slot exhaustion by silent clients is handled separately —
 see "Connection Idle Timeout" below.)
 
-**In-memory body caps** (`kGCDWebServerMaxInMemoryBodyLength` = 16 MB,
-`kGCDWebServerMaxDecompressedBodyLength` = 64 MB, in `GCDWebServerPrivate.h`).
+**In-memory body caps** (`kWSKMaxInMemoryBodyLength` = 16 MB,
+`kWSKMaxDecompressedBodyLength` = 64 MB, in `WSKPrivate.h`).
 Fixed safety constants like `kHeadersMaxLength`, not options. They cap only data
 held **in memory**; bodies streamed to disk (uploaded files, WebDAV `PUT`) are not
 limited, so large uploads keep working. Enforced at four points:
-- `GCDWebServerDataRequest` body (DAV PROPFIND/LOCK/MKCOL, forms, data requests)
-- `GCDWebServerGZipDecoder` total inflated output — bails inside the inflate loop, so a zip bomb can't balloon the buffer first
+- `WSKDataRequest` body (DAV PROPFIND/LOCK/MKCOL, forms, data requests)
+- `WSKGZipDecoder` total inflated output — bails inside the inflate loop, so a zip bomb can't balloon the buffer first
 - multipart parser working buffer (`appendBytes:`) — also resolves a stall where content containing the boundary token without a trailing CRLF wedged the parser and grew the buffer without bound
 - a single chunked-transfer chunk (`readNextBodyChunk:`)
 
@@ -478,31 +478,31 @@ Covered by unit tests in `Framework/Tests.m` (`testDataRequest*`, `testGZip*`,
 `testMultiPart*`); the chunk/partial-body paths are verified by build and review
 (they need socket-level integration to unit-test).
 
-### Server-Sent Events (SSE) for GCDWebUploader
+### Server-Sent Events (SSE) for WSKWebUploader
 
 Added live browser updates when files change on the device.
 
 **Files modified:**
-- `Sources/GCDWebUploader/GCDWebUploader.h` - Added `serverSentEventsEnabled` property
-- `Sources/GCDWebUploader/GCDWebUploader.m` - SSE infrastructure implementation
-- `Sources/GCDWebUploader/GCDWebUploaderSSEChannel.h` - Per-connection SSE buffer (state machine)
-- `Sources/GCDWebUploader/GCDWebUploader.bundle/Contents/Resources/js/index.js` - EventSource client
+- `Sources/WebServerKitUploader/WSKWebUploader.h` - Added `serverSentEventsEnabled` property
+- `Sources/WebServerKitUploader/WSKWebUploader.m` - SSE infrastructure implementation
+- `Sources/WebServerKitUploader/WSKWebUploaderSSEChannel.h` - Per-connection SSE buffer (state machine)
+- `Sources/WebServerKitUploader/WSKWebUploader.bundle/Contents/Resources/js/index.js` - EventSource client
 
 **Reliability model (per-connection buffering):**
-GCDWebServer's async streaming API is a strict ping-pong — it hands the response
+WSKWebServer's async streaming API is a strict ping-pong — it hands the response
 one completion block ("reader"), waits for it to be called once with a chunk,
 writes it, then asks for the next. Between those calls the connection has no
 reader waiting. The original shared-array-of-blocks approach dropped any event
 broadcast in that window (bursts collapsed to a single delivered event). Each
-connection now owns a `GCDWebUploaderSSEChannel` that buffers events in FIFO
+connection now owns a `WSKWebUploaderSSEChannel` that buffers events in FIFO
 order (bounded, oldest dropped) until a reader parks, so no event is lost.
 Dead connections are reaped on the heartbeat tick (no parked reader + buffered
 data ⇒ gone). Covered by unit tests in `Framework/Tests.m` (`testSSEChannel*`).
 
 **Channel close semantics:** whenever the uploader stops servicing a channel
 (heartbeat reap, `-stop`, disabling SSE, or losing the registration race) it
-must call `-[GCDWebUploaderSSEChannel close]`, which completes any parked
-reader with empty data — GCDWebServer's end-of-stream sentinel — and makes
+must call `-[WSKWebUploaderSSEChannel close]`, which completes any parked
+reader with empty data — WSKWebServer's end-of-stream sentinel — and makes
 future `parkReader:` calls complete immediately the same way. Merely dropping
 the channel from `_sseChannels` strands the connection parked forever and leaks
 it (retain cycle: connection → response → stream block → channel → parked
@@ -549,7 +549,7 @@ data: {"type":"external","path":"/Documents/"}
 
 ### Connection Idle Timeout
 
-`GCDWebServerOption_ConnectionIdleTimeout` (NSNumber / double, default 30.0
+`WSKOption_ConnectionIdleTimeout` (NSNumber / double, default 30.0
 seconds, 0 disables): a connection whose pending socket read/write moves no
 bytes in either direction across two consecutive timer ticks is shut down
 (`shutdown(2)`, so the pending I/O unwinds through the normal error paths and
@@ -576,5 +576,5 @@ System frameworks are linked via `OTHER_LDFLAGS` in project build settings:
 ### Background Mode
 
 `Examples/iOS/ViewController.swift` starts the server with:
-- `GCDWebServerOption_AutomaticallySuspendInBackground: false`
+- `WSKOption_AutomaticallySuspendInBackground: false`
 - This gives ~30 seconds of background execution time before iOS suspends the app

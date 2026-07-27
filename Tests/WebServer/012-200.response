@@ -3,6 +3,6 @@ Cache-Control: no-cache
 Content-Length: 221
 Content-Type: text/html; charset=utf-8
 Connection: Close
-Server: GCDWebServer
+Server: WebServerKit
 Date: Fri, 11 Apr 2014 02:43:00 GMT
 
