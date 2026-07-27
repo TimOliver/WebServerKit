@@ -1,4 +1,4 @@
-___In January 2023, [WSKWebServer](https://github.com/swisspol/GCDWebServer) was archived by its author. Since I was planning to eventually use this library in my own side projects, I've decided to fork WSKWebServer and continue development of it under a new name. I plan to slowly add updates to this repo as I get the time. -Tim___
+___In January 2023, [GCDWebServer](https://github.com/swisspol/GCDWebServer) was archived by its author. Since I was planning to eventually use this library in my own side projects, I've decided to fork WSKWebServer and continue development of it under a new name. I plan to slowly add updates to this repo as I get the time. -Tim___
 
 Overview
 ========
