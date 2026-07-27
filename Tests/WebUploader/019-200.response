@@ -1,6 +1,6 @@
 HTTP/1.1 200 OK
 Connection: Close
-Server: GCDWebUploader
+Server: WebServerKit
 Content-Type: text/plain
 Last-Modified: Thu, 10 Apr 2014 11:10:14 GMT
 X-Content-Type-Options: nosniff

@@ -3,7 +3,7 @@ Cache-Control: no-cache
 Content-Length: 138
 Content-Type: application/json
 Connection: Close
-Server: GCDWebUploader
+Server: WebServerKit
 Date: Sat, 12 Apr 2014 05:36:13 GMT
 
 [{"path":"\/Copy.txt","name":"Copy.txt","size":271},{"path":"\/images\/","name":"images"},{"path":"\/PDF Reports\/","name":"PDF Reports"}]

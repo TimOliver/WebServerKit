@@ -1,0 +1,9 @@
+// A hand-written map because the target's public headers sit next to
+// WSKWebUploader.bundle, and SwiftPM refuses an umbrella header with sibling
+// directories. Pointing at the headers from here keeps the bundle where the Xcode
+// project and the podspec already expect it.
+module WebServerKitUploader {
+    header "../WSKWebUploader.h"
+    header "../WSKWebUploaderSSEChannel.h"
+    export *
+}

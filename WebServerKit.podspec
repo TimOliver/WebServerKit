@@ -1,10 +1,10 @@
 Pod::Spec.new do |s|
   s.name     = 'WebServerKit'
-  s.version  = '3.5.5'
+  s.version  = '4.0.0'
   s.author   = [ 'Pierre-Olivier Latour', 'Tim Oliver' ]
   s.license  = { :type => 'BSD', :file => 'LICENSE' }
   s.homepage = 'https://github.com/TimOliver/WebServerKit'
-  s.summary  = 'Lightweight GCD based HTTP server for OS X & iOS. A fork of GCDWebServer.'
+  s.summary  = 'Embedded HTTP, WebDAV and file-upload server for macOS, iOS and tvOS. A hardened fork of GCDWebServer.'
 
   s.source   = { :git => 'https://github.com/TimOliver/WebServerKit.git', :tag => s.version.to_s }
   s.ios.deployment_target = '15.0'
@@ -16,15 +16,15 @@ Pod::Spec.new do |s|
 
   # Paths are relative to the repository root, where the sources live under "Sources/".
   # The framework links the same set of system libraries on every platform (see
-  # OTHER_LDFLAGS in GCDWebServer.xcodeproj), so the declarations below are not
+  # OTHER_LDFLAGS in WebServerKit.xcodeproj), so the declarations below are not
   # per-platform either.
   s.subspec 'Core' do |cs|
-    cs.source_files = 'Sources/GCDWebServer/**/*.{h,m}'
+    cs.source_files = 'Sources/WebServerKit/**/*.{h,m}'
     # include/ holds symlinks to the public headers so SwiftPM can expose them as the
-    # GCDWebServers module (see Package.swift). CocoaPods reads the real files directly and
+    # WebServerKit module (see Package.swift). CocoaPods reads the real files directly and
     # would otherwise see each header twice.
-    cs.exclude_files = 'Sources/GCDWebServer/include/**/*'
-    cs.private_header_files = 'Sources/GCDWebServer/Core/GCDWebServerPrivate.h'
+    cs.exclude_files = 'Sources/WebServerKit/include/**/*'
+    cs.private_header_files = 'Sources/WebServerKit/Core/WSKPrivate.h'
     cs.requires_arc = true
     cs.library = 'z'
     # UniformTypeIdentifiers is present on every OS this ships against, so it is a hard
@@ -34,7 +34,7 @@ Pod::Spec.new do |s|
 
   s.subspec 'WebDAV' do |cs|
     cs.dependency 'WebServerKit/Core'
-    cs.source_files = 'Sources/GCDWebDAVServer/*.{h,m}'
+    cs.source_files = 'Sources/WebServerKitDAV/*.{h,m}'
     cs.requires_arc = true
     cs.library = 'xml2'
     cs.compiler_flags = '-I$(SDKROOT)/usr/include/libxml2'
@@ -42,10 +42,10 @@ Pod::Spec.new do |s|
 
   s.subspec 'WebUploader' do |cs|
     cs.dependency 'WebServerKit/Core'
-    cs.source_files = 'Sources/GCDWebUploader/*.{h,m}'
+    cs.source_files = 'Sources/WebServerKitUploader/*.{h,m}'
     # Implementation detail of the SSE endpoint, not part of the public API.
-    cs.private_header_files = 'Sources/GCDWebUploader/GCDWebUploaderSSEChannel.h'
+    cs.private_header_files = 'Sources/WebServerKitUploader/WSKWebUploaderSSEChannel.h'
     cs.requires_arc = true
-    cs.resources = 'Sources/GCDWebUploader/GCDWebUploader.bundle'
+    cs.resources = 'Sources/WebServerKitUploader/WSKWebUploader.bundle'
   end
 end
