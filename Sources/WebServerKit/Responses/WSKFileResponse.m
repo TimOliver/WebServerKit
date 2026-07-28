@@ -210,10 +210,27 @@ static NSString *_EscapeExtValue(NSString *string) {
         if ([trimmedIfRange hasPrefix:@"\""]) {
             matches = [trimmedIfRange isEqualToString:entityTag];
         } else if (![trimmedIfRange hasPrefix:@"W/"]) {
+            // A date is only usable here if it is a *strong* validator, which If-Range requires
+            // (RFC 9110 §13.1.5). st_mtime has one-second resolution, so a file modified within
+            // the current second could be modified again inside that same second without the
+            // timestamp changing — exactly the case where a build is rewritten under a client
+            // that is downloading it, and the server would then splice the tail of one
+            // representation onto the prefix of another and assert with a 206 that they belong
+            // together. §8.8.2.2 gives the deduction that makes it strong: the origin may treat
+            // the timestamp as strong once it is at least one second in the past, because no
+            // further change can land in that second any more.
+            //
+            // Not simply refused, because real clients resume this way: macOS Finder's WebDAV
+            // client sends "If-Range: <HTTP-date>" and nothing else (see
+            // Tests/WebDAV-Finder/059), so ignoring dates outright turns every Finder resume
+            // into a full re-download. What remains unclosed is a replacement that *preserves*
+            // mtime (rsync -a, cp -p, tar -x): no date-based scheme can detect that, here or in
+            // any other server. A client that has this server's strong ETag — which this
+            // initializer always sets — is unaffected either way, since the branch above
+            // decides it.
             NSDate *const ifRangeDate = WSKParseRFC822(trimmedIfRange);
-            // RFC822 has one-second resolution, so compare at that granularity rather than
-            // against the nanosecond mtime, which would never be equal.
-            matches = ifRangeDate && ((long)ifRangeDate.timeIntervalSince1970 == (long)info.st_mtimespec.tv_sec);
+            BOOL const timestampIsStrong = (time(NULL) - info.st_mtimespec.tv_sec) >= 1;
+            matches = ifRangeDate && timestampIsStrong && ((long)ifRangeDate.timeIntervalSince1970 == (long)info.st_mtimespec.tv_sec);
         }
 
         if (!matches) {
