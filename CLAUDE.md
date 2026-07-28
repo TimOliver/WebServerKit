@@ -80,6 +80,61 @@ and the Bonjour/`.local` name only, so without it every request is refused with 
 
 ## Recent Changes
 
+### Seventh audit pass: the sixth pass's own diff, and the first real concurrency soak
+
+Aimed deliberately at what the sixth pass changed (~154 lines of production code) rather than
+at the tree, on the observation that **every pass has planted defects the next one found** —
+pass four found two regressions from pass three, pass six found two in pass five's
+conditional-request work. Seven agents investigating, each finding then put to a skeptic
+required to reproduce it independently and to build the *pre-change* commit before calling
+anything a regression.
+
+**The sixth pass's `If-Range` fix did not work, and this file said it did.** Three lenses found
+it independently and it reproduces 5/5. The deduction that a timestamp is strong once it is a
+second old was evaluated in the *resume* path — where it is worthless, because a resume always
+arrives after the second has shut, so it reports "strong" for exactly the representation that
+is not. Two builds written inside one wall-clock second still spliced under a 206.
+
+It belongs where the validator is **minted**: a `Last-Modified` is now simply not issued while
+mtime is inside the current second, so every date a client can present was sealed before it was
+handed out and does identify one representation. The ETag carries `tv_nsec` and was never
+affected — which is why the ETag control restarted correctly 4/4 while the date form spliced,
+the observation that ruled out a harness artefact. Costs a date-only client one second of
+caching; a future mtime is unsealed by the same test, which also stops the server advertising a
+`Last-Modified` newer than its own `Date`. Pinned by
+`testIfRangeRefusesADateMintedInsideItsOwnSecond`, which asserts both that no such date is
+issued and that one presented anyway is refused; it fails 2/2 against the sixth pass's code.
+
+Not a regression — the pre-fix commit was built and measured and behaves identically. The
+defect was in the claim, not the code, which is the more dangerous kind in a file whose purpose
+is to be trusted.
+
+**The uploader's asset restructure turned unmatched paths from 404 into 501.** Removing the
+catch-all base-path handler left nothing matching `/favicon.ico`, which every browser requests,
+so the server answered `501 Not Implemented` — "I do not implement this method", about a method
+it implements fine. Inside the scoped asset directories a miss is still correctly 404. This one
+*is* a regression from the sixth pass.
+
+**Nothing accumulates under sustained concurrent load — the first time that has been measured.**
+The existing soak is ~450 *sequential* requests; Shape A is weeks of concurrency. A harness ran
+**146,364 requests moving 896 GB** with concurrent range requests, resumes, revalidation,
+clients dying mid-transfer, and the served file rewritten underneath: zero descriptor growth,
+zero reservation growth, and `+[WSKWebServer reservedInMemoryByteCount]` back to zero at rest —
+the process-wide static with no reset that is the sharpest edge in this library. Separately, 600
+start/stop cycles, 1,900 aborted transactions and an idle-timeout evasion matrix produced no
+hang, no deadlock and no unreclaimed slot. **Record this as a negative result and do not re-run
+it speculatively**; re-run it when the connection or response layer changes.
+
+Also verified clean, having been suspected: the `SO_NOSIGPIPE` guard leaks nothing and drops no
+connection it could have served; the directory-listing href escaping is correctly ordered and
+closes the direct `javascript:` route as well as the entity route; and the `If-Modified-Since`
+exact-equality change holds end to end with `If-None-Match` precedence per RFC 9110 §13.1.3.
+
+**Three findings were refuted, all on the same ground** — the behaviour was byte-identical
+before the change set, established by building the earlier commit rather than by reading. Worth
+noting as the pattern it is: an agent auditing a diff will attribute anything it finds nearby to
+that diff unless it is made to check.
+
 ### Sixth audit pass: a process-killing socket option, two dishonest validators, and the uploader's channels
 
 Run after the WebServerKit rename, on the premise that a mechanical sweep across 514 files is
@@ -124,11 +179,18 @@ Silent: `Content-Length` agrees with `Content-Range`, so nothing downstream noti
 **⚠️ The first fix for that refused dates outright and broke macOS Finder.** The recorded
 Finder session in `Tests/WebDAV-Finder/059` resumes with `If-Range: <HTTP-date>` and no entity
 tag, so honouring only the ETag form turned every Finder resume into a full re-download. The
-trace suite caught it — the corpus earning its keep one pass after being revived. What ships
-is the deduction RFC 9110 §8.8.2.2 provides for exactly this: the origin may treat the
-timestamp as strong once it is **at least one second in the past**, because no further change
-can land in that second any more. Dates older than a second still resume; a date inside the
-current second does not. A replacement that *preserves* mtime (`rsync -a`, `cp -p`, `tar -x`)
+trace suite caught it — the corpus earning its keep one pass after being revived. The second
+attempt applied the deduction RFC 9110 §8.8.2.2 provides for exactly this: the origin may
+treat the timestamp as strong once it is **at least one second in the past**, because no
+further change can land in that second any more.
+
+**⚠️⚠️ That second attempt did not work either, and this entry claimed it did — see the
+seventh pass below, which corrects it.** The deduction was applied when the resume was
+*redeemed* rather than when the validator was *issued*, and at redemption the second has
+always closed, so the guard reported "strong" for precisely the representation that was not.
+The splice described above stayed reproducible 5/5. It was not a regression — the code was no
+worse than before the pass — but the claim was wrong, which is worse than the bug in a file
+that exists to be trusted. A replacement that *preserves* mtime (`rsync -a`, `cp -p`, `tar -x`)
 stays undetectable by any date-based scheme, here or anywhere else.
 
 **`If-Modified-Since` answered 304 for a representation older than the client's.** The

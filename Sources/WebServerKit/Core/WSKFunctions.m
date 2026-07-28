@@ -550,15 +550,27 @@ static NSString *_RealPath(NSString *path) {
     return nil;
 }
 
-BOOL WSKResolvedPathIsWithinDirectory(NSString *path, NSString *directory) {
+NSString *WSKResolvedPathRelativeToDirectory(NSString *path, NSString *directory) {
     NSString *const resolvedPath = _RealPath(path);
     // Resolve the directory too: /var is itself a symlink to /private/var on Apple
     // platforms, so a resolved path compared against an unresolved root never matches.
     NSString *const resolvedDirectory = _RealPath(directory);
 
     if ((resolvedPath == nil) || (resolvedDirectory == nil)) {
-        return NO;  // Fail closed rather than serving a path we could not verify.
+        return nil;  // Fail closed rather than serving a path we could not verify.
     }
 
-    return [resolvedPath isEqualToString:resolvedDirectory] || WSKPathIsInsideDirectory(resolvedPath, resolvedDirectory);
+    if ([resolvedPath isEqualToString:resolvedDirectory]) {
+        return @"";
+    }
+
+    if (!WSKPathIsInsideDirectory(resolvedPath, resolvedDirectory)) {
+        return nil;
+    }
+
+    return [resolvedPath substringFromIndex:(resolvedDirectory.length + ([resolvedDirectory hasSuffix:@"/"] ? 0 : 1))];
+}
+
+BOOL WSKResolvedPathIsWithinDirectory(NSString *path, NSString *directory) {
+    return (WSKResolvedPathRelativeToDirectory(path, directory) != nil);
 }

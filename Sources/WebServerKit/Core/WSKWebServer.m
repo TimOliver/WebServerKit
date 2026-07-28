@@ -1585,13 +1585,6 @@ static NSString *_EscapeHTMLString(NSString *string) {
                 // that vend files already refuse hidden items; this was the one file-serving
                 // path in the library with no such concept. Every component is tested, not
                 // just the leaf, because the interesting secrets live *inside* a dot-directory.
-                for (NSString *component in [relativePath componentsSeparatedByString:@"/"]) {
-                    if ([component hasPrefix:@"."]) {
-                        WSK_LOG_WARNING(@"Refusing to serve \"%@\": \"%@\" is a hidden item", relativePath, component);
-                        return [WSKResponse responseWithStatusCode:kWSKHTTPStatusCode_NotFound];
-                    }
-                }
-
                 NSString *filePath = [directoryPath stringByAppendingPathComponent:relativePath];
                 // Stripping ".." textually is not containment: -attributesOfItemAtPath: uses
                 // lstat, which only refuses a symlink as the *final* component, and O_NOFOLLOW
@@ -1599,9 +1592,18 @@ static NSString *_EscapeHTMLString(NSString *string) {
                 // under directoryPath (a git checkout, an unpacked archive) would serve files
                 // from wherever it points. Resolve the whole path and require it to stay
                 // inside, the way every other file-serving handler in this library does.
-                if (!WSKResolvedPathIsWithinDirectory(filePath, directoryPath)) {
+                NSString *const resolvedRelativePath = WSKResolvedPathRelativeToDirectory(filePath, directoryPath);
+
+                if (resolvedRelativePath == nil) {
                     WSK_LOG_WARNING(@"Refusing to serve \"%@\": it resolves outside \"%@\"", filePath, directoryPath);
                     return [WSKResponse responseWithStatusCode:kWSKHTTPStatusCode_NotFound];
+                }
+
+                for (NSString *component in [resolvedRelativePath componentsSeparatedByString:@"/"]) {
+                    if ([component hasPrefix:@"."]) {
+                        WSK_LOG_WARNING(@"Refusing to serve \"%@\": \"%@\" is a hidden item", relativePath, component);
+                        return [WSKResponse responseWithStatusCode:kWSKHTTPStatusCode_NotFound];
+                    }
                 }
 
                 NSString *fileType = [[[NSFileManager defaultManager] attributesOfItemAtPath:filePath error:NULL] fileType];

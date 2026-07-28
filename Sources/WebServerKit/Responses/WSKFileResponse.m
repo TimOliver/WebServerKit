@@ -195,6 +195,28 @@ static NSString *_EscapeExtValue(NSString *string) {
     NSDate *const lastModified = _NSDateFromTimeSpec(&info.st_mtimespec);
     NSString *const entityTag = [NSString stringWithFormat:@"\"%llu/%li/%li\"", info.st_ino, info.st_mtimespec.tv_sec, info.st_mtimespec.tv_nsec];
 
+    // A date validator may only be *issued* once the second it names has closed. While mtime
+    // is still inside the current second the file can be written again without the timestamp
+    // moving, so two different representations would go out under the same "Last-Modified" and
+    // nothing downstream could tell them apart.
+    //
+    // This deduction (RFC 9110 §8.8.2.2 — an origin may treat a timestamp as strong once it is
+    // at least one second in the past) has to be made HERE, when the validator is minted. Made
+    // at redemption time instead it is worthless, because by the time any resume arrives the
+    // second has always closed: it reports "strong" for precisely the representation that is
+    // not. That was the shape of an earlier fix, and it left the splice it was written to close
+    // fully reproducible — 5/5 — which is what `testIfRangeRefusesADateMintedInsideItsOwnSecond`
+    // now pins. Withholding the date is what actually closes it: every date a client can later
+    // present was therefore minted after its own second was sealed, so it does identify one
+    // representation.
+    //
+    // The ETag carries tv_nsec, so it separates same-second writes and is unaffected. It is
+    // also what a conformant client resumes with, so this costs a date-only client one second's
+    // worth of caching and costs everything else nothing. A future mtime (clock skew, an archive
+    // restored with tomorrow's timestamp) is unsealed by the same test, which is the safe
+    // direction and stops the server advertising a Last-Modified newer than its own Date.
+    BOOL const lastModifiedIsSealed = (time(NULL) - info.st_mtimespec.tv_sec) >= 1;
+
     BOOL hasByteRange = WSKIsValidByteRange(range);
 
     // "Send me this range only if the representation is unchanged" (RFC 9110 §13.1.5).
@@ -210,27 +232,26 @@ static NSString *_EscapeExtValue(NSString *string) {
         if ([trimmedIfRange hasPrefix:@"\""]) {
             matches = [trimmedIfRange isEqualToString:entityTag];
         } else if (![trimmedIfRange hasPrefix:@"W/"]) {
-            // A date is only usable here if it is a *strong* validator, which If-Range requires
-            // (RFC 9110 §13.1.5). st_mtime has one-second resolution, so a file modified within
-            // the current second could be modified again inside that same second without the
-            // timestamp changing — exactly the case where a build is rewritten under a client
-            // that is downloading it, and the server would then splice the tail of one
-            // representation onto the prefix of another and assert with a 206 that they belong
-            // together. §8.8.2.2 gives the deduction that makes it strong: the origin may treat
-            // the timestamp as strong once it is at least one second in the past, because no
-            // further change can land in that second any more.
+            // If-Range requires a *strong* validator (RFC 9110 §13.1.5). What makes the date
+            // form strong here is that one is only ever issued after its second has sealed —
+            // see `lastModifiedIsSealed` above, which is where that decision belongs. So a date
+            // presented for an already-sealed second identifies exactly one representation and
+            // may be honoured.
             //
-            // Not simply refused, because real clients resume this way: macOS Finder's WebDAV
-            // client sends "If-Range: <HTTP-date>" and nothing else (see
-            // Tests/WebDAV-Finder/059), so ignoring dates outright turns every Finder resume
-            // into a full re-download. What remains unclosed is a replacement that *preserves*
-            // mtime (rsync -a, cp -p, tar -x): no date-based scheme can detect that, here or in
-            // any other server. A client that has this server's strong ETag — which this
-            // initializer always sets — is unaffected either way, since the branch above
-            // decides it.
+            // The seal is re-tested here as well, which is not redundant: a client can present
+            // any date it likes, including one this server never issued, and a date naming the
+            // still-open current second must not be honoured just because it happens to equal
+            // mtime. It is a second line, though — on its own it closes nothing, because a
+            // resume always arrives after its second has shut.
+            //
+            // Dates are honoured rather than refused outright because real clients resume this
+            // way: macOS Finder's WebDAV client sends "If-Range: <HTTP-date>" and nothing else
+            // (Tests/WebDAV-Finder/059), so ignoring them turns every Finder resume into a full
+            // re-download. What no date-based scheme can detect, here or anywhere, is a
+            // replacement that *preserves* mtime (rsync -a, cp -p, tar -x). A client holding
+            // this server's ETag is unaffected either way — the branch above decides it.
             NSDate *const ifRangeDate = WSKParseRFC822(trimmedIfRange);
-            BOOL const timestampIsStrong = (time(NULL) - info.st_mtimespec.tv_sec) >= 1;
-            matches = ifRangeDate && timestampIsStrong && ((long)ifRangeDate.timeIntervalSince1970 == (long)info.st_mtimespec.tv_sec);
+            matches = ifRangeDate && lastModifiedIsSealed && ((long)ifRangeDate.timeIntervalSince1970 == (long)info.st_mtimespec.tv_sec);
         }
 
         if (!matches) {
@@ -307,7 +328,7 @@ static NSString *_EscapeExtValue(NSString *string) {
 
     self.contentType = WSKGetMimeTypeForExtension([_path pathExtension], overrides);
     self.contentLength = _size;
-    self.lastModifiedDate = lastModified;
+    self.lastModifiedDate = lastModifiedIsSealed ? lastModified : nil;
     // Quoted, as RFC 7232 requires of an entity-tag: an unquoted value is not a valid
     // opaque-tag and clients are free to reject it. The comparison in
     // -_CompareResources is literal and clients echo the value back verbatim, so the
