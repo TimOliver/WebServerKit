@@ -952,27 +952,52 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
 // ("/.git/config" listed, downloaded, deleted and overwritten happily). Test every
 // component instead. The path is normalized first so that a benign "." or ".."
 // component is resolved away rather than mistaken for a hidden name.
-- (BOOL)_isHiddenPath:(NSString *)relativePath {
-    if (_allowHiddenItems) {
-        return NO;
+// Resolve the client's path ONCE, so containment and hiddenness are judged on the same
+// observation of the filesystem — and so the caller can act on what was actually vetted.
+//
+// Checking containment with one realpath(3) and hiddenness with another meant two observations
+// that need not agree, and then operating on a *third* path: the one the client sent, symlinks
+// intact. A symlink retargeted between those steps served content from outside the share, and
+// landed a WebDAV PUT outside it. Callers must use the returned path for the filesystem
+// operation that follows: a resolved path contains no symlinks, so retargeting one cannot
+// redirect it. Paths that do not exist yet resolve through their parent, so this works for
+// upload and rename destinations too.
+//
+// Returns nil when the path does not resolve inside the share. Sets *outHidden when the
+// resolved location — or the path the client typed — lies inside a hidden item.
+- (nullable NSString *)_resolvedPathForRelativePath:(NSString *)relativePath hidden:(BOOL *)outHidden {
+    NSString *const normalizedPath = WSKNormalizePath(relativePath);
+    NSString *resolvedRelativePath = nil;
+    NSString *const resolvedPath = WSKResolveWithinDirectory([_uploadDirectory stringByAppendingPathComponent:normalizedPath], _uploadDirectory, &resolvedRelativePath);
+
+    if (outHidden) {
+        *outHidden = NO;
     }
 
-    NSString *const normalizedPath = WSKNormalizePath(relativePath);
+    if (resolvedPath == nil) {
+        return nil;
+    }
 
-    for (NSString *component in [normalizedPath pathComponents]) {
-        if ([component hasPrefix:@"."]) {  // The leading "/" component never matches.
-            return YES;
+    if (outHidden && !_allowHiddenItems) {
+        // Both spellings: what the client typed, and where the bytes actually live. The first
+        // catches "/.git/config"; the second catches a symlink named "pub" pointing at ".git",
+        // which carries no dot at all in the path the client sent.
+        for (NSString *component in [normalizedPath pathComponents]) {
+            if ([component hasPrefix:@"."]) {
+                *outHidden = YES;
+                return resolvedPath;
+            }
+        }
+
+        for (NSString *component in [resolvedRelativePath pathComponents]) {
+            if ([component hasPrefix:@"."]) {
+                *outHidden = YES;
+                return resolvedPath;
+            }
         }
     }
 
-    // The walk above sees only what the client typed, and that is not where the bytes live: a
-    // symlink named "pub" pointing at ".git" makes "/pub/config" carry no dot at all, while
-    // containment passes because the target is inside the share. Both rules were satisfied by a
-    // path inside a dot-directory — readable here, enumerable through /list, and writable
-    // through DAV PUT, which refuses the same write spelled "/.git/hooks/x". Resolving is the
-    // only way to see it. The cheap textual walk stays in front so the realpath is only paid
-    // when it can change the answer.
-    return WSKResolvedPathHasHiddenComponent([_uploadDirectory stringByAppendingPathComponent:normalizedPath], _uploadDirectory);
+    return resolvedPath;
 }
 
 // Map an absolute path inside the share back to the client-facing relative path used in
@@ -1033,7 +1058,7 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
     // catches it, so a bare "GET /list" terminated the whole app.
     NSString *const requestedPath = [request query][@"path"];
     NSString *const relativePath = requestedPath ? requestedPath : @"/";
-    NSString *const absolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)];
+    NSString *absolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)];
     BOOL isDirectory = NO;
 
     if (!absolutePath || ![[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory]) {
@@ -1046,13 +1071,20 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
 
     // Verify the resolved location, not just the path text: a symlink somewhere inside
     // the share can point out of it, and normalize/prefix checks cannot see that.
-    if (!WSKResolvedPathIsWithinDirectory(absolutePath, _uploadDirectory)) {
+    BOOL isHidden = NO;
+    NSString *const resolvedPath = [self _resolvedPathForRelativePath:relativePath hidden:&isHidden];
+
+    if (resolvedPath == nil) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Listing \"%@\" is not allowed", relativePath];
     }
 
-    if ([self _isHiddenPath:relativePath]) {
+    if (isHidden) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Listing hidden path \"%@\" is not allowed", relativePath];
     }
+
+    // Everything below enumerates the location that was just vetted, not the one the client
+    // sent: a resolved path holds no symlinks, so retargeting one cannot redirect it.
+    absolutePath = resolvedPath;
 
     NSError *error = nil;
     NSArray *const contents = [[[NSFileManager defaultManager] contentsOfDirectoryAtPath:absolutePath error:&error] sortedArrayUsingSelector:@selector(localizedStandardCompare:)];
@@ -1091,7 +1123,7 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
     // Never nil, so error bodies name a path instead of "(null)" — and match -listDirectory:.
     NSString *const requestedPath = [request query][@"path"];
     NSString *const relativePath = requestedPath ? requestedPath : @"/";
-    NSString *const absolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)];
+    NSString *absolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)];
     BOOL isDirectory = NO;
 
     if (![[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory]) {
@@ -1102,14 +1134,19 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"\"%@\" is a directory", relativePath];
     }
 
-    // As in -listDirectory:, confirm the resolved location is still inside the share.
-    if (!WSKResolvedPathIsWithinDirectory(absolutePath, _uploadDirectory)) {
+    // As in -listDirectory:, resolved once and served from that resolution.
+    BOOL isHidden = NO;
+    NSString *const resolvedPath = [self _resolvedPathForRelativePath:relativePath hidden:&isHidden];
+
+    if (resolvedPath == nil) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Downloading \"%@\" is not allowed", relativePath];
     }
 
-    if ([self _isHiddenPath:relativePath]) {
+    if (isHidden) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Downloading hidden path \"%@\" is not allowed", relativePath];
     }
+
+    absolutePath = resolvedPath;
 
     NSString *const fileName = [absolutePath lastPathComponent];
 
@@ -1205,19 +1242,22 @@ static NSString *_OriginAuthority(NSString *value) {
     }
 
     NSString *const relativePath = [[request firstArgumentForControlName:@"path"] string];
-    NSString *const desiredPath = [[_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)] stringByAppendingPathComponent:fileName];
+    // Vet the destination DIRECTORY once — the leaf is already reduced to a single validated
+    // component above — and compose onto the resolved directory. The client-supplied "path" may
+    // traverse a symlink out of the share, and a non-hidden file name is not enough on its own:
+    // an upload could otherwise drop files into ".git" and friends.
+    BOOL isHidden = NO;
+    NSString *const resolvedDirectory = [self _resolvedPathForRelativePath:relativePath hidden:&isHidden];
 
-    // A non-hidden file name is not enough: the destination directory must not be hidden
-    // either, at any depth, or an upload could drop files into ".git" and friends.
-    if ([self _isHiddenPath:relativePath]) {
+    if (isHidden) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Uploading to hidden path \"%@\" is not allowed", relativePath];
     }
 
-    // The leaf is already reduced to a single component above, but the client-supplied
-    // "path" it is appended to may traverse a symlink out of the share.
-    if (!WSKResolvedPathIsWithinDirectory(desiredPath, _uploadDirectory)) {
+    if (resolvedDirectory == nil) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Uploading to \"%@\" is not allowed", relativePath];
     }
+
+    NSString *const desiredPath = [resolvedDirectory stringByAppendingPathComponent:fileName];
 
     // Resolving a unique name and moving the uploaded file into place must be
     // atomic against concurrent requests, otherwise two uploads of the same
@@ -1258,31 +1298,39 @@ static NSString *_OriginAuthority(NSString *value) {
     }
 
     NSString *const oldRelativePath = request.arguments[@"oldPath"];
-    NSString *const oldAbsolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(oldRelativePath)];
+    NSString * oldAbsolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(oldRelativePath)];
     BOOL isDirectory = NO;
 
     // Neither endpoint may be the upload directory itself (a missing/empty path
     // collapses to it), which would let a move destroy or displace the root.
     NSString *const newRelativePath = request.arguments[@"newPath"];
-    NSString *const desiredNewPath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(newRelativePath)];
+    NSString * desiredNewPath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(newRelativePath)];
     if (!WSKPathIsInsideDirectory(oldAbsolutePath, _uploadDirectory) || !WSKPathIsInsideDirectory(desiredNewPath, _uploadDirectory)) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Operating on the root directory is not allowed"];
     }
 
-    // Both endpoints must also resolve inside the share, so neither can reach out of it
-    // through a symlink (which the textual check above cannot detect).
-    if (!WSKResolvedPathIsWithinDirectory(oldAbsolutePath, _uploadDirectory) || !WSKResolvedPathIsWithinDirectory(desiredNewPath, _uploadDirectory)) {
+    // Both endpoints resolved ONCE each, so neither can reach out of the share through a symlink
+    // (which the textual check above cannot detect) and neither can be redirected between the
+    // check and the rename by a link retargeted underneath us. Hidden components are refused at
+    // any depth, not just the leaf: a move out of a dot-directory would exfiltrate its contents
+    // into plain view, and a move into one would smuggle files past the same guard.
+    BOOL oldIsHidden = NO;
+    BOOL newIsHidden = NO;
+    NSString *const resolvedOldPath = [self _resolvedPathForRelativePath:oldRelativePath hidden:&oldIsHidden];
+    NSString *const resolvedNewPath = [self _resolvedPathForRelativePath:newRelativePath hidden:&newIsHidden];
+
+    if ((resolvedOldPath == nil) || (resolvedNewPath == nil)) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Moving \"%@\" to \"%@\" is not allowed", oldRelativePath, newRelativePath];
     }
+
+    oldAbsolutePath = resolvedOldPath;
+    desiredNewPath = resolvedNewPath;
 
     if (![[NSFileManager defaultManager] fileExistsAtPath:oldAbsolutePath isDirectory:&isDirectory]) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", oldRelativePath];
     }
 
-    // Check both endpoints for a hidden component at any depth, not just the leaf: a move
-    // out of a dot-directory would otherwise exfiltrate its contents into plain view, and
-    // a move into one would smuggle files past the same guard.
-    if ([self _isHiddenPath:oldRelativePath] || [self _isHiddenPath:newRelativePath]) {
+    if (oldIsHidden || newIsHidden) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Moving \"%@\" to \"%@\" is not allowed: a hidden path is involved", oldRelativePath, newRelativePath];
     }
 
@@ -1350,7 +1398,7 @@ static NSString *_OriginAuthority(NSString *value) {
     }
 
     NSString *const relativePath = request.arguments[@"path"];
-    NSString *const absolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)];
+    NSString *absolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)];
     BOOL isDirectory = NO;
 
     // A missing/empty path collapses to the upload directory itself; refuse to
@@ -1359,17 +1407,22 @@ static NSString *_OriginAuthority(NSString *value) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Operating on the root directory is not allowed"];
     }
 
-    // Deleting is destructive, so also confirm the resolved target is inside the share
-    // rather than something a symlink points to outside it.
-    if (!WSKResolvedPathIsWithinDirectory(absolutePath, _uploadDirectory)) {
+    // Deleting is destructive, so resolve once and destroy exactly what was vetted: a symlink
+    // retargeted between the check and the unlink would otherwise decide what gets removed.
+    BOOL isHidden = NO;
+    NSString *const resolvedPath = [self _resolvedPathForRelativePath:relativePath hidden:&isHidden];
+
+    if (resolvedPath == nil) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not allowed", relativePath];
     }
+
+    absolutePath = resolvedPath;
 
     if (![[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory]) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
     }
 
-    if ([self _isHiddenPath:relativePath]) {
+    if (isHidden) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting hidden path \"%@\" is not allowed", relativePath];
     }
 
@@ -1398,7 +1451,7 @@ static NSString *_OriginAuthority(NSString *value) {
                 // says. They are incidental metadata rather than content the allow-list is
                 // meant to protect (a ".DS_Store" sits in every macOS folder, and its empty
                 // pathExtension is in no allow-list), so vetting them would make ordinary
-                // directories permanently undeletable. Note this cannot use -_isHiddenPath:,
+                // directories permanently undeletable. Note this cannot use the shared rule,
                 // which reports NO for everything once hidden items are allowed.
                 if ([[subpath lastPathComponent] hasPrefix:@"."]) {
                     [enumerator skipDescendants];
@@ -1451,23 +1504,26 @@ static NSString *_OriginAuthority(NSString *value) {
     }
 
     NSString *const relativePath = request.arguments[@"path"];
-    NSString *const desiredPath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)];
+    NSString *const requestedPath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)];
 
     // An empty path collapses to the upload directory itself; refuse it (uniquing
     // the root would otherwise create a sibling directory outside the share).
-    if (!WSKPathIsInsideDirectory(desiredPath, _uploadDirectory)) {
+    if (!WSKPathIsInsideDirectory(requestedPath, _uploadDirectory)) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Operating on the root directory is not allowed"];
     }
 
-    // The parent of the new directory must resolve inside the share, so a symlinked
-    // intermediate component cannot place it outside.
-    if (!WSKResolvedPathIsWithinDirectory(desiredPath, _uploadDirectory)) {
+    // Resolved once — the parent must resolve inside the share, so a symlinked intermediate
+    // component cannot place the new directory outside it — and a hidden component is refused
+    // anywhere in the chain, not just in the new directory's own name, or /create becomes a way
+    // to populate a dot-directory. The mkdir below then targets the resolved location.
+    BOOL isHidden = NO;
+    NSString *const desiredPath = [self _resolvedPathForRelativePath:relativePath hidden:&isHidden];
+
+    if (desiredPath == nil) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Creating \"%@\" is not allowed", relativePath];
     }
 
-    // Refuse a hidden component anywhere, not just in the new directory's own name: the
-    // parent chain must be visible too, or /create becomes a way to populate a dot-directory.
-    if ([self _isHiddenPath:relativePath]) {
+    if (isHidden) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Creating hidden path \"%@\" is not allowed", relativePath];
     }
 
