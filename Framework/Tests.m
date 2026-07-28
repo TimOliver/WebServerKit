@@ -212,6 +212,43 @@ static NSString* SendRawDataRequest(NSUInteger port, NSData* request) {
     return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
 }
 
+// As SendRawRequest, but for an endpoint whose response is not meant to end: an accepted SSE
+// stream is held open deliberately, so reading to EOF costs the socket's whole timeout on
+// every *successful* assertion. Returns as soon as `marker` arrives (the fast path), when the
+// server closes, or at the deadline — so only a genuine failure waits.
+static NSString* SendRawRequestUntilMarker(NSUInteger port, NSString* request, NSString* marker, NSTimeInterval seconds) {
+    int fd = ConnectToLocalhostPort(port);
+    if (fd < 0) {
+        return nil;
+    }
+    const char* bytes = [request UTF8String];
+    send(fd, bytes, strlen(bytes), 0);
+
+    struct timeval tv = {0, 200000};  // Poll; the deadline below is what actually bounds this.
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    NSMutableData* data = [NSMutableData data];
+    NSDate* deadline = [NSDate dateWithTimeIntervalSinceNow:seconds];
+    char buffer[4096];
+
+    while ([deadline timeIntervalSinceNow] > 0) {
+        ssize_t result = recv(fd, buffer, sizeof(buffer), 0);
+        if (result > 0) {
+            [data appendBytes:buffer length:(NSUInteger)result];
+            NSString* soFar = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            if ((marker == nil) || [soFar containsString:marker]) {
+                break;
+            }
+        } else if (result == 0) {
+            break;  // Server closed: what we have is the whole reply.
+        } else if ((errno != EAGAIN) && (errno != EWOULDBLOCK)) {
+            break;
+        }
+    }
+    close(fd);
+    return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+}
+
 // Descriptors currently open by this process. Used to prove that sustained serving does not
 // leak them: on a server that lives for weeks, a descriptor leaked once per request is the
 // difference between working and hitting the process limit.
@@ -1365,6 +1402,110 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     NSString* allowed = deleteFolder(@"Ordinary");
     XCTAssertFalse([allowed containsString:@"403"], @"a .DS_Store must not make an ordinary folder undeletable, got: %@", allowed);
     XCTAssertFalse([fm fileExistsAtPath:ordinary], @"the deletable folder was not removed: %@", allowed);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// An SSE stream is only ever released when the client that is reading it goes away. A HEAD
+// mapped to GET has no reader at all — the connection layer discards the body unsent — so the
+// channel the handler registered was held by nobody and freed only by the heartbeat reaper,
+// two ticks (~30s) later. That made sixteen HEADs a complete denial of live updates for every
+// real client, and unusually cheap to sustain: each request *completes*, so the sender holds
+// no connection slot and can repeat the burst every 30s from anywhere on the network.
+// Measured before the fix: 16 HEADs, then a genuine EventSource is refused for 30s.
+- (void)testHEADOnEventsDoesNotConsumeSSEChannels {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+
+    WSKWebUploader* server = [[WSKWebUploader alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    NSString* host = [NSString stringWithFormat:@"localhost:%lu", (unsigned long)server.port];
+    NSString* sseHeaders = @"Accept: text/event-stream\r\nSec-Fetch-Dest: empty\r\nSec-Fetch-Mode: cors\r\nSec-Fetch-Site: same-origin\r\n";
+
+    // "retry: 30000" (refused, backing the client off) has "retry: 3000" (accepted) as a
+    // prefix, so the accepted marker is matched including its terminator.
+    NSString* const acceptedMarker = @"retry: 3000\n\n";
+    NSString* const refusedMarker = @"retry: 30000";
+
+    // kMaxSSEChannels is 16: enough HEADs to have exhausted every slot.
+    for (NSUInteger i = 0; i < 16; i++) {
+        SendRawRequest(server.port, [NSString stringWithFormat:@"HEAD /events HTTP/1.1\r\nHost: %@\r\n%@\r\n", host, sseHeaders]);
+    }
+
+    NSString* granted = SendRawRequestUntilMarker(server.port, [NSString stringWithFormat:@"GET /events HTTP/1.1\r\nHost: %@\r\n%@\r\n", host, sseHeaders], acceptedMarker, 5.0);
+    XCTAssertFalse([granted containsString:refusedMarker], @"16 HEADs exhausted the SSE channels, denying a real client: %@", granted);
+    XCTAssertTrue([granted containsString:acceptedMarker], @"a genuine EventSource must still be given a stream: %@", granted);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// The uploader's bundle contains index.html, and the base-path handler serves that bundle at
+// "/", so "/index.html" returned the raw template — the same UI, with none of the framing
+// headers the "/" handler sets. Framing that path instead of "/" therefore defeated the
+// clickjacking defence outright, on a UI whose one-click buttons delete and move files.
+- (void)testUploaderTemplatePathCannotBypassFramingHeaders {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+
+    WSKWebUploader* server = [[WSKWebUploader alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    NSString* host = [NSString stringWithFormat:@"localhost:%lu", (unsigned long)server.port];
+
+    NSString* (^get)(NSString*) = ^(NSString* path) {
+        return SendRawRequest(server.port, [NSString stringWithFormat:@"GET %@ HTTP/1.1\r\nHost: %@\r\n\r\n", path, host]);
+    };
+
+    for (NSString* path in @[ @"/", @"/index.html" ]) {
+        NSString* reply = get(path);
+        XCTAssertTrue([reply containsString:@"X-Frame-Options: DENY"], @"\"%@\" is framable: %@", path, reply);
+        XCTAssertTrue([reply containsString:@"frame-ancestors 'none'"], @"\"%@\" has no frame-ancestors: %@", path, reply);
+        XCTAssertTrue([reply containsString:@"X-Content-Type-Options: nosniff"], @"\"%@\" may be sniffed: %@", path, reply);
+    }
+
+    // No spelling may reach the template. Excluding it by path is not enough — the base path
+    // handler normalizes, so the last two here still reached the raw file when the fix was an
+    // exact-path alias sitting in front of it. The unsubstituted placeholder is what identifies
+    // the template, independently of which headers happen to be on the reply.
+    for (NSString* path in @[ @"/", @"/index.html", @"/INDEX.HTML", @"/./index.html", @"/x/../index.html" ]) {
+        XCTAssertFalse([get(path) containsString:@"%device%"], @"\"%@\" served the raw template", path);
+    }
+
+    // ...and the page's own assets must still be served, or this has merely broken the UI.
+    // Asked for with HEAD: a font body is not UTF-8, so a GET would come back as a nil string
+    // here and read as a failure whether or not the asset was served.
+    for (NSString* asset in @[ @"/css/index.css", @"/js/index.js", @"/fonts/glyphicons-halflings-regular.ttf" ]) {
+        NSString* reply = SendRawRequest(server.port, [NSString stringWithFormat:@"HEAD %@ HTTP/1.1\r\nHost: %@\r\n\r\n", asset, host]);
+        XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 200"], @"asset \"%@\" is no longer served: %@", asset, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+    }
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// The Sec-Fetch-* checks that keep a cross-origin page from pinning every SSE channel fail
+// *open* when those headers are absent — and they are absent on every browser predating them
+// (Safari < 16.4, Firefox < 90), which is exactly the browser an attacker would choose. The
+// Origin check the mutating endpoints already use closes that, without affecting non-browser
+// clients, which send no Origin at all.
+- (void)testEventsRefusesCrossOriginRequestWithoutSecFetchHeaders {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+
+    WSKWebUploader* server = [[WSKWebUploader alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    NSString* host = [NSString stringWithFormat:@"localhost:%lu", (unsigned long)server.port];
+
+    NSString* hostile = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /events HTTP/1.1\r\nHost: %@\r\nOrigin: http://evil.example\r\nAccept: text/event-stream\r\n\r\n", host]);
+    XCTAssertTrue([hostile hasPrefix:@"HTTP/1.1 403"], @"a cross-origin page holding a channel: %@", [hostile substringToIndex:MIN((NSUInteger)40, hostile.length)]);
+
+    // The page's own EventSource must be unaffected: it sends a matching Origin.
+    NSString* sameOrigin = SendRawRequestUntilMarker(server.port, [NSString stringWithFormat:@"GET /events HTTP/1.1\r\nHost: %@\r\nOrigin: http://%@\r\nAccept: text/event-stream\r\nSec-Fetch-Dest: empty\r\nSec-Fetch-Mode: cors\r\nSec-Fetch-Site: same-origin\r\n\r\n", host, host], @"retry: 3000\n\n", 5.0);
+    XCTAssertTrue([sameOrigin containsString:@"retry: 3000\n\n"], @"the served page's own EventSource was refused: %@", sameOrigin);
 
     [server stop];
     [fm removeItemAtPath:dir error:NULL];

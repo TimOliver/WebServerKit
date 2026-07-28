@@ -95,6 +95,20 @@ extern NSString *const WSKRequestAttribute_RegexCaptures;
 @property (nonatomic, readonly) NSString *method;
 
 /**
+ *  Returns YES if the client actually sent HEAD and the server rewrote the method to GET
+ *  because -shouldAutomaticallyMapHEADToGET is enabled. In that case `method` reads "GET",
+ *  the handler runs as if for a GET, and the response body is then discarded unsent.
+ *
+ *  Handlers that merely return bytes can ignore this. It matters to a handler whose response
+ *  *is* a long-lived resource — a stream that registers a channel, holds a slot, or otherwise
+ *  costs something for as long as the client reads it — because for a mapped HEAD nothing
+ *  will ever read it: the body block is never invoked, so whatever the handler allocated is
+ *  left to be cleaned up by a timeout instead of by the client going away. Such a handler
+ *  should return a bodiless response (correct for HEAD anyway) rather than allocate.
+ */
+@property (nonatomic, readonly, getter=isVirtualHEAD) BOOL virtualHEAD;
+
+/**
  *  Returns the URL for the request.
  */
 @property (nonatomic, readonly) NSURL *URL;
