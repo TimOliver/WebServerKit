@@ -144,6 +144,32 @@ NS_ASSUME_NONNULL_BEGIN
 
 NS_ASSUME_NONNULL_END
 
+// WSKConnection calls -performClose on the response the moment its body write chain ends,
+// including the write that fails because the client has gone. Nothing listened for that, so a
+// channel outlived its own connection by a full 30 seconds: the server only learned of the
+// departure when a heartbeat write failed (15-30s), and only then did the reaper begin counting
+// its two idle ticks. Sixteen abandoned streams therefore denied live updates to a real client
+// for roughly 45-60s — a browser tab navigating away is enough, no hostility required.
+@interface WSKWebUploaderSSEResponse : WSKStreamedResponse
+@property (nonatomic, copy, nullable) dispatch_block_t onClose;
+@end
+
+@implementation WSKWebUploaderSSEResponse
+
+- (void)close {
+    // Taken once: -close is reachable more than once, and the block drops the channel.
+    dispatch_block_t const block = _onClose;
+
+    _onClose = nil;
+    [super close];
+
+    if (block) {
+        block();
+    }
+}
+
+@end
+
 @interface WSKWebUploader () <NSFilePresenter>
 @end
 
@@ -551,8 +577,8 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
                              // back-off above for a client that was refused on an earlier attempt.
                              [channel enqueueData:(NSData *)[kSSEAcceptedStreamPreamble dataUsingEncoding:NSUTF8StringEncoding]];
 
-                             WSKStreamedResponse *response =
-                                 [WSKStreamedResponse responseWithContentType:@"text/event-stream"
+                             WSKWebUploaderSSEResponse *response =
+                                 [WSKWebUploaderSSEResponse responseWithContentType:@"text/event-stream"
                                                                       asyncStreamBlock:^(WSKBodyReaderCompletionBlock dataBlock) {
                                      dispatch_async(server->_sseQueue, ^{
                                          [channel parkReader:^(NSData *data) {
@@ -560,6 +586,25 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
                                          }];
                                      });
                                  }];
+                             // Let the channel die with the connection rather than waiting for
+                             // the reaper to notice. The reaper stays as the backstop for a
+                             // client that is merely silent — this only fires when the body
+                             // write chain has actually ended. Weak, because the response
+                             // outlives nothing but must not keep the uploader alive; the
+                             // handler's own capture is __unsafe_unretained.
+                             __weak WSKWebUploader *const weakServer = server;
+                             response.onClose = ^{
+                                 WSKWebUploader *const strongServer = weakServer;
+
+                                 if (strongServer == nil) {
+                                     return;
+                                 }
+
+                                 dispatch_async(strongServer->_sseQueue, ^{
+                                     [strongServer->_sseChannels removeObject:channel];
+                                     [channel close];  // Completes any parked reader; harmless if already closed.
+                                 });
+                             };
                              response.cacheControlMaxAge = 0;
                              [response setValue:@"no-cache" forAdditionalHeader:@"Cache-Control"];
                              // No "Connection: keep-alive" here: it would overwrite the connection
