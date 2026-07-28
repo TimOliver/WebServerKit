@@ -483,6 +483,37 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not allowed", relativePath];
     }
 
+    // Deleting a collection removes its whole subtree, which must not become a way to destroy
+    // files a direct DELETE would refuse — the extension check above applies only to files, so a
+    // folder was a spelling that bypassed it entirely. Measured before this: with an allow-list
+    // of "txt", DELETE /Folder answered 204 and destroyed both "id_rsa" and ".env", each of
+    // which this same server refuses with 403 when addressed directly.
+    //
+    // This mirrors -[WSKWebUploader deleteItem:], deliberately including its two judgement
+    // calls. Dot-names and everything under them are skipped whatever -allowHiddenItems says:
+    // they are incidental metadata rather than content the allow-list protects, and a
+    // ".DS_Store" sits in every macOS folder with an empty pathExtension that is in no
+    // allow-list, so vetting them would make ordinary folders permanently undeletable. And an
+    // extensionless file ("README") is vetted like any other, because a direct DELETE of it is
+    // already refused and letting the recursive form through would make one request mean two
+    // different things.
+    if (isDirectory && _allowedFileExtensions) {
+        NSDirectoryEnumerator<NSString *> *const enumerator = [[NSFileManager defaultManager] enumeratorAtPath:absolutePath];
+
+        for (NSString *subpath in enumerator) {
+            if ([[subpath lastPathComponent] hasPrefix:@"."]) {
+                [enumerator skipDescendants];
+                continue;
+            }
+
+            NSString *const subpathType = [enumerator fileAttributes][NSFileType];
+
+            if ([subpathType isEqualToString:NSFileTypeRegular] && ![self _checkFileExtension:subpath]) {
+                return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not allowed: it contains \"%@\"", relativePath, subpath];
+            }
+        }
+    }
+
     if (![self shouldDeleteItemAtPath:absolutePath]) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not permitted", relativePath];
     }

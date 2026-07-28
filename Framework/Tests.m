@@ -1434,6 +1434,78 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     [fm removeItemAtPath:dir error:NULL];
 }
 
+// The uploader vets a subtree before destroying it; WebDAV did not, so a folder was a spelling
+// that bypassed the allow-list entirely. Measured: with allowedFileExtensions=[txt],
+// DELETE /Folder answered 204 and destroyed both "id_rsa" and ".env" — each of which the same
+// server refuses with 403 when addressed directly.
+- (void)testDAVRecursiveDeleteRespectsExtensionAllowList {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    server.allowedFileExtensions = @[ @"txt" ];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* guarded = [dir stringByAppendingPathComponent:@"Guarded"];
+    XCTAssertTrue([fm createDirectoryAtPath:guarded withIntermediateDirectories:YES attributes:nil error:NULL]);
+    XCTAssertTrue([@"ok" writeToFile:[guarded stringByAppendingPathComponent:@"note.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([@"KEYDATA" writeToFile:[guarded stringByAppendingPathComponent:@"id_rsa"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    // The same file, addressed directly, is refused — so the recursive form must be too, or one
+    // request means two different things.
+    XCTAssertTrue([SendRawRequest(server.port, @"DELETE /Guarded/id_rsa HTTP/1.1\r\nHost: localhost\r\n\r\n") hasPrefix:@"HTTP/1.1 403"], @"a direct delete of a disallowed file should be refused");
+
+    NSString* refused = SendRawRequest(server.port, @"DELETE /Guarded HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([refused hasPrefix:@"HTTP/1.1 403"], @"expected 403 for a collection holding a disallowed file: %@", [refused substringToIndex:MIN((NSUInteger)40, refused.length)]);
+    XCTAssertTrue([fm fileExistsAtPath:[guarded stringByAppendingPathComponent:@"id_rsa"]], @"the recursive delete destroyed a file a direct delete refuses");
+
+    // A folder whose only extra entry is filesystem noise must still be deletable, or every
+    // macOS folder becomes permanently undeletable by its own .DS_Store.
+    NSString* ordinary = [dir stringByAppendingPathComponent:@"Ordinary"];
+    XCTAssertTrue([fm createDirectoryAtPath:ordinary withIntermediateDirectories:YES attributes:nil error:NULL]);
+    XCTAssertTrue([@"ok" writeToFile:[ordinary stringByAppendingPathComponent:@"note.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([@"junk" writeToFile:[ordinary stringByAppendingPathComponent:@".DS_Store"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    NSString* allowed = SendRawRequest(server.port, @"DELETE /Ordinary HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertFalse([allowed hasPrefix:@"HTTP/1.1 403"], @"a .DS_Store must not make an ordinary folder undeletable: %@", [allowed substringToIndex:MIN((NSUInteger)40, allowed.length)]);
+    XCTAssertFalse([fm fileExistsAtPath:ordinary], @"the deletable folder was not removed: %@", allowed);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// The browsable index has to describe the tree that is actually being vended. With
+// allowHiddenItems:YES the handler served a dot-file while the listing omitted it — the same
+// disagreement the sixth pass fixed in the opposite direction, when the listing hid items the
+// handler would happily serve.
+- (void)testDirectoryIndexAgreesWithWhatIsServed {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* root = MakeTempDirectory();
+    XCTAssertTrue([fm createDirectoryAtPath:[root stringByAppendingPathComponent:@".hidden"] withIntermediateDirectories:YES attributes:nil error:NULL]);
+    XCTAssertTrue([@"HIDDENDATA" writeToFile:[root stringByAppendingPathComponent:@".hidden/secret.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([@"PUBLIC" writeToFile:[root stringByAppendingPathComponent:@"plain.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+
+    WSKWebServer* refusing = [[WSKWebServer alloc] init];
+    [refusing addGETHandlerForBasePath:@"/f/" directoryPath:root indexFilename:nil cacheAge:0 allowRangeRequests:NO];
+    XCTAssertTrue([refusing startWithOptions:options error:NULL]);
+    XCTAssertFalse([SendRawRequest(refusing.port, @"GET /f/ HTTP/1.1\r\nHost: localhost\r\n\r\n") containsString:@".hidden"], @"the default listing must not advertise a hidden item");
+    XCTAssertFalse([SendRawRequest(refusing.port, @"GET /f/.hidden/secret.txt HTTP/1.1\r\nHost: localhost\r\n\r\n") containsString:@"HIDDENDATA"], @"the default handler must not serve a hidden item");
+    XCTAssertTrue([SendRawRequest(refusing.port, @"GET /f/ HTTP/1.1\r\nHost: localhost\r\n\r\n") containsString:@"plain.txt"], @"ordinary entries must still be listed");
+    [refusing stop];
+
+    WSKWebServer* permissive = [[WSKWebServer alloc] init];
+    [permissive addGETHandlerForBasePath:@"/f/" directoryPath:root indexFilename:nil cacheAge:0 allowRangeRequests:NO allowHiddenItems:YES];
+    XCTAssertTrue([permissive startWithOptions:options error:NULL]);
+    XCTAssertTrue([SendRawRequest(permissive.port, @"GET /f/.hidden/secret.txt HTTP/1.1\r\nHost: localhost\r\n\r\n") containsString:@"HIDDENDATA"], @"allowHiddenItems:YES must serve a hidden item");
+    XCTAssertTrue([SendRawRequest(permissive.port, @"GET /f/ HTTP/1.1\r\nHost: localhost\r\n\r\n") containsString:@".hidden"], @"the listing must advertise what the handler will serve");
+    [permissive stop];
+
+    [fm removeItemAtPath:root error:NULL];
+}
+
 - (void)testUploaderRecursiveDeleteRespectsExtensionAllowList {
     NSFileManager* fm = [NSFileManager defaultManager];
     NSString* dir = MakeTempDirectory();

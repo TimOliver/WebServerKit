@@ -1511,7 +1511,7 @@ static NSString *_EscapeHTMLString(NSString *string) {
     return escaped;
 }
 
-- (WSKResponse *)_responseWithContentsOfDirectory:(NSString *)path {
+- (WSKResponse *)_responseWithContentsOfDirectory:(NSString *)path includingHiddenItems:(BOOL)includeHiddenItems {
     NSArray *const contents = [[[NSFileManager defaultManager] contentsOfDirectoryAtPath:path error:NULL] sortedArrayUsingSelector:@selector(localizedStandardCompare:)];
 
     if (contents == nil) {
@@ -1524,7 +1524,12 @@ static NSString *_EscapeHTMLString(NSString *string) {
     [html appendString:@"<ul>\n"];
 
     for (NSString *entry in contents) {
-        if (![entry hasPrefix:@"."]) {
+        // The index must agree with what the handler will actually serve. With
+        // allowHiddenItems:YES it served a dot-file happily while omitting it here, so the
+        // browsable listing described a *smaller* tree than the one being vended — the same
+        // disagreement, in the opposite direction, that the sixth pass fixed by refusing to
+        // serve what this listing hid.
+        if (includeHiddenItems || ![entry hasPrefix:@"."]) {
             NSString *const type = [[NSFileManager defaultManager] attributesOfItemAtPath:[path stringByAppendingPathComponent:entry] error:NULL][NSFileType];
 
             // Any process can delete the entry between the directory read above and this
@@ -1649,7 +1654,7 @@ static NSString *_EscapeHTMLString(NSString *string) {
                             }
                         }
 
-                        response = [server _responseWithContentsOfDirectory:filePath];
+                        response = [server _responseWithContentsOfDirectory:filePath includingHiddenItems:allowHiddenItems];
                     } else if ([fileType isEqualToString:NSFileTypeRegular]) {
                         if (allowRangeRequests) {
                             response = [WSKFileResponse responseWithFile:filePath byteRange:request.byteRange isAttachment:NO ifRange:request.ifRange];
