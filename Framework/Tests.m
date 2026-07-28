@@ -262,6 +262,29 @@ static NSString* MakeTempDirectory(void) {
     return dir;
 }
 
+// A request matching no handler still reaches -abortRequest:withStatusCode:, which
+// WSKOption_ConnectionClass makes a host-app subclassing point. That branch populated none of
+// the request's address data, so reading -remoteAddressString there dereferenced a NULL
+// sockaddr — WSKStringFromSockAddr evaluates addr->sa_len before getnameinfo, so there is
+// nothing to fail closed on. NOTE: against the unfixed source this does not fail, it SEGVs and
+// takes the whole test process with it, which xctest reports as "0 failures". Read the executed
+// count.
+static NSString* gAbortRequestPeer = nil;
+static BOOL gAbortRequestSawVirtualHEAD = NO;
+
+@interface AbortProbeConnection : WSKConnection
+@end
+
+@implementation AbortProbeConnection
+
+- (void)abortRequest:(WSKRequest*)request withStatusCode:(NSInteger)statusCode {
+    gAbortRequestPeer = request.remoteAddressString;
+    gAbortRequestSawVirtualHEAD = request.isVirtualHEAD;
+    [super abortRequest:request withStatusCode:statusCode];
+}
+
+@end
+
 @interface Tests : XCTestCase
 @end
 
@@ -1414,6 +1437,32 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 // real client, and unusually cheap to sustain: each request *completes*, so the sender holds
 // no connection slot and can repeat the burst every 30s from anywhere on the network.
 // Measured before the fix: 16 HEADs, then a genuine EventSource is refused for 30s.
+- (void)testAbortedRequestCarriesItsAddressesAndHEADFlag {
+    gAbortRequestPeer = nil;
+    gAbortRequestSawVirtualHEAD = NO;
+
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addHandlerForMethod:@"GET"
+                           path:@"/ok"
+                   requestClass:[WSKRequest class]
+                   processBlock:^WSKResponse*(WSKRequest* request) {
+                       return [WSKDataResponse responseWithText:@"ok"];
+                   }];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES, WSKOption_ConnectionClass : [AbortProbeConnection class]};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    // HEAD, so the method has been rewritten to GET before matching; no handler claims
+    // "/nope", so this takes the 501 branch that builds its own request.
+    NSString* reply = SendRawRequest(server.port, @"HEAD /nope HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 501"], @"expected 501 for an unclaimed path: %@", reply);
+
+    XCTAssertNotNil(gAbortRequestPeer, @"the aborted request carried no peer address");
+    XCTAssertTrue([gAbortRequestPeer hasPrefix:@"127.0.0.1"], @"peer address is wrong: %@", gAbortRequestPeer);
+    XCTAssertTrue(gAbortRequestSawVirtualHEAD, @"a mapped HEAD must be distinguishable from a real GET on this path");
+
+    [server stop];
+}
+
 - (void)testHEADOnEventsDoesNotConsumeSSEChannels {
     NSFileManager* fm = [NSFileManager defaultManager];
     NSString* dir = MakeTempDirectory();

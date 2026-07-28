@@ -699,6 +699,20 @@ static NSString *_WithoutRootLabel(NSString *host) {
                         self->_request = [[WSKRequest alloc] initWithMethod:requestMethod url:requestURL headers:requestHeaders path:requestPath query:requestQuery];
 
                         if (self->_request) {
+                            // The matched path populates these three; this branch populated
+                            // none of them, and the request still reaches
+                            // -abortRequest:withStatusCode:, which is a subclassing point a
+                            // host app reaches through WSKOption_ConnectionClass. Reading
+                            // -remoteAddressString on it dereferenced a NULL sockaddr and took
+                            // the process down — WSKStringFromSockAddr evaluates addr->sa_len
+                            // before calling getnameinfo, so there is nothing to fail closed on
+                            // — from a single unauthenticated request to any path no handler
+                            // claims. virtualHEAD belongs here for the related reason: the
+                            // method was rewritten to GET before matching, so without it a
+                            // subclass cannot tell a mapped HEAD from a real GET on this path.
+                            self->_request.localAddressData = self.localAddressData;
+                            self->_request.remoteAddressData = self.remoteAddressData;
+                            self->_request.virtualHEAD = self->_virtualHEAD;
                             [self abortRequest:self->_request withStatusCode:kWSKHTTPStatusCode_NotImplemented];
                         } else {
                             // The base request rejected these headers too — a framing conflict
