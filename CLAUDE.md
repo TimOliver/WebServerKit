@@ -160,11 +160,52 @@ a *pre-rebase* SHA, and `Run-Tests.sh` builds into `./build` while ad-hoc probes
 DerivedData, so a probe after a swap-build-restore reports the previous build. In all three a
 green signal was about something other than the thing being asked about.
 
-**Still open:** nothing from this pass's findings. Ten lower-severity property-test violations
-were reported but not verified, several looking like genuine cross-server disagreements — WebDAV
-`DELETE` has no subtree vetting where the uploader's does, and the three servers give three
-different answers for a benign symlink. Worth a pass of their own; they are consistency defects
-rather than containment ones.
+**The ten unverified violations were then re-measured rather than fixed from the report, and
+eight of them evaporated.** This is the most transferable thing the pass produced, so it is
+recorded in full:
+
+- **Five were already fixed** — by the resolve-once change, as a side effect nobody predicted. A
+  benign symlink as the final path component had been unservable, answering 500 with an empty
+  body from two servers and three different statuses across the three. All of that came from
+  vetting one path and *serving another*; once the resolved path is what gets opened, a
+  final-component symlink resolves to the real file and all three now answer consistently
+  (200/200/207). The security fix cured an over-refusal class as well.
+- **One** was the containment race that same change closed.
+- **One is cosmetic and deliberately left**: a target beginning `//` gives 501 from the base-path
+  handler and 404 from WebDAV. Both refuse; only the status differs.
+- **Two were real**, below.
+
+Acting on the report as written would have meant "fixing" five non-problems in the most
+security-critical code in the library. **Re-measure before acting on an audit report** — findings
+age against a moving tree, and this one had moved three PRs since the run.
+
+**WebDAV's recursive DELETE bypassed the extension allow-list.** A collection was a spelling that
+skipped the check entirely: with `allowedFileExtensions = ["txt"]`, `DELETE /Folder` answered 204
+and destroyed both `id_rsa` and `.env` — each of which the same server refuses with 403 when
+addressed directly. The uploader had vetted its subtree since the fifth pass, and **the design
+priorities at the top of this file already claimed the property** ("a recursive delete refuses
+when it would destroy a file a direct delete would have refused") while only one of the two
+servers had it. That is the third time in two passes that this file asserted behaviour the code
+did not have; the others were the sixth pass's `If-Range` claim and the hidden-item rule that
+covered the uploader and WebDAV but not the base-path handler.
+
+The vetting mirrors `-[WSKWebUploader deleteItem:]` including both of its judgement calls, which
+are what separate a working rule from an unusable one: dot-names and their descendants are
+skipped whatever `allowHiddenItems` says, because a `.DS_Store` sits in every macOS folder with
+an empty `pathExtension` that is in no allow-list; and an extensionless file *is* vetted, because
+a direct DELETE of it is already refused.
+
+**The directory index disagreed with the handler.** `allowHiddenItems:YES` served a dot-file
+while the listing still omitted it, so the browsable index described a smaller tree than the one
+being vended — the same disagreement the sixth pass fixed in the opposite direction, arriving
+with the opt-out this pass's symlink work added. `testDirectoryIndexAgreesWithWhatIsServed` pins
+both directions, and `testDAVRecursiveDeleteRespectsExtensionAllowList` pins the delete; both
+fail against the code before them, and both also assert what must keep working — a folder whose
+only extra entry is a `.DS_Store` stays deletable, and the default configuration still hides
+*and* refuses hidden items.
+
+**Still open:** the `//` status disagreement above, deliberately. Everything else from this pass
+is closed.
 
 ### Seventh audit pass: a fix that did not fix, a crash, and the first real concurrency soak
 
