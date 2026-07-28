@@ -517,6 +517,51 @@ static NSString* MakeTempDirectory(void) {
 // A client that connects and then goes silent while the server is waiting on
 // socket I/O must be disconnected once the idle timeout elapses, instead of
 // holding a connection slot (and file descriptor) forever.
+// A peer that resets the connection in the window between accept(2) and the server's
+// setsockopt() makes SO_NOSIGPIPE fail with EINVAL, leaving that descriptor able to raise
+// SIGPIPE — whose default disposition terminates the host application. An unauthenticated
+// client can hit the window in a handful of attempts by connecting and closing abortively,
+// without sending a single byte.
+//
+// Note the failure mode: without the fix this does not report an assertion failure, it kills
+// the test runner outright. xcodebuild surfaces that as a failed suite with a truncated
+// "Executed N tests" count rather than a named failing test, so read the count, not the
+// failure number.
+- (void)testAbortiveClientResetsDoNotKillTheProcess {
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[WSKRequest class]
+                          processBlock:^WSKResponse*(WSKRequest* request) {
+                              return [WSKDataResponse responseWithText:@"alive"];
+                          }];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    // Two shapes, because the option can fail either with a request already sent or with
+    // nothing sent at all — the reset only has to land in the accept window.
+    for (int round = 0; round < 2; round++) {
+        for (int i = 0; i < 150; i++) {
+            int fd = ConnectToLocalhostPort(server.port);
+            if (fd < 0) {
+                continue;
+            }
+            if (round == 0) {
+                const char* request = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+                send(fd, request, strlen(request), 0);
+            }
+            struct linger abortive = {1, 0};  // RST rather than FIN on close
+            setsockopt(fd, SOL_SOCKET, SO_LINGER, &abortive, sizeof(abortive));
+            close(fd);
+        }
+    }
+
+    // Reaching here at all is most of the assertion; this proves the listener also still works.
+    NSString* reply = SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([reply containsString:@"alive"], @"server stopped serving after abortive resets: %@", reply);
+
+    [server stop];
+}
+
 - (void)testConnectionIdleTimeoutClosesSilentConnection {
     WSKWebServer* server = [[WSKWebServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
