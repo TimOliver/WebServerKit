@@ -1442,6 +1442,39 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     [fm removeItemAtPath:dir error:NULL];
 }
 
+// Scoping the asset handlers removed the catch-all that used to serve the bundle root, and with
+// it the incidental 404 every unmatched GET fell through to — so "/favicon.ico", which browsers
+// request unprompted, started answering 501 Not Implemented. 501 is a statement about the
+// method, which the server implements perfectly well.
+- (void)testUploaderAnswersNotFoundRatherThanNotImplemented {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+
+    WSKWebUploader* server = [[WSKWebUploader alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    NSString* host = [NSString stringWithFormat:@"localhost:%lu", (unsigned long)server.port];
+
+    for (NSString* path in @[ @"/favicon.ico", @"/apple-touch-icon.png", @"/nope.txt", @"/css/missing.css" ]) {
+        NSString* reply = SendRawRequest(server.port, [NSString stringWithFormat:@"GET %@ HTTP/1.1\r\nHost: %@\r\n\r\n", path, host]);
+        XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 404"], @"\"%@\" should be Not Found: %@", path, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+    }
+
+    // The catch-all matches GET only, exactly as the base path handler it replaces did, so no
+    // other method's status is affected by it.
+    NSString* posted = SendRawRequest(server.port, [NSString stringWithFormat:@"POST /nope.txt HTTP/1.1\r\nHost: %@\r\nContent-Length: 0\r\n\r\n", host]);
+    XCTAssertFalse([posted hasPrefix:@"HTTP/1.1 404"], @"the catch-all must not claim non-GET methods: %@", [posted substringToIndex:MIN((NSUInteger)40, posted.length)]);
+
+    // And it must sit behind every real handler, not in front of them.
+    NSString* page = SendRawRequest(server.port, [NSString stringWithFormat:@"GET / HTTP/1.1\r\nHost: %@\r\n\r\n", host]);
+    XCTAssertTrue([page hasPrefix:@"HTTP/1.1 200"], @"the catch-all shadowed the page handler: %@", [page substringToIndex:MIN((NSUInteger)40, page.length)]);
+    NSString* asset = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /css/index.css HTTP/1.1\r\nHost: %@\r\n\r\n", host]);
+    XCTAssertTrue([asset hasPrefix:@"HTTP/1.1 200"], @"the catch-all shadowed the asset handlers: %@", [asset substringToIndex:MIN((NSUInteger)40, asset.length)]);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 // The uploader's bundle contains index.html, and the base-path handler serves that bundle at
 // "/", so "/index.html" returned the raw template — the same UI, with none of the framing
 // headers the "/" handler sets. Framing that path instead of "/" therefore defeated the
