@@ -1605,22 +1605,36 @@ static NSString *_EscapeHTMLString(NSString *string) {
                 // under directoryPath (a git checkout, an unpacked archive) would serve files
                 // from wherever it points. Resolve the whole path and require it to stay
                 // inside, the way every other file-serving handler in this library does.
-                NSString *const resolvedRelativePath = WSKResolvedPathRelativeToDirectory(filePath, directoryPath);
+                // Resolved ONCE, and everything below acts on the result. Checking containment
+                // with one realpath and hiddenness with another meant two observations of a
+                // filesystem that need not agree, and then serving a *third* path — the one the
+                // client typed, symlinks and all. A symlink retargeted between those steps served
+                // content from outside the served root in 24% of requests, with no concurrency on
+                // the client side at all. Serving the resolved path instead means a retargeted
+                // link cannot redirect the open: a resolved path contains no symlinks.
+                NSString *resolvedRelativePath = nil;
+                NSString *const resolvedPath = WSKResolveWithinDirectory(filePath, directoryPath, &resolvedRelativePath);
 
-                if (resolvedRelativePath == nil) {
+                if (resolvedPath == nil) {
                     WSK_LOG_WARNING(@"Refusing to serve \"%@\": it resolves outside \"%@\"", filePath, directoryPath);
                     return [WSKResponse responseWithStatusCode:kWSKHTTPStatusCode_NotFound];
                 }
 
-                // Containment and hiddenness are independent, and the textual walk above only
-                // sees the path the *client* typed. A symlink named "pub" pointing at ".git"
-                // carries no dot in "/pub/config" and resolves inside the root, so both checks
-                // passed and the file was served. Tested after containment so an escape is still
-                // reported as an escape rather than mislabelled a hidden item.
-                if (!allowHiddenItems && WSKResolvedPathHasHiddenComponent(filePath, directoryPath)) {
-                    WSK_LOG_WARNING(@"Refusing to serve \"%@\": it resolves inside a hidden item", relativePath);
-                    return [WSKResponse responseWithStatusCode:kWSKHTTPStatusCode_NotFound];
+                // Hiddenness is judged on that same observation. The textual walk above sees only
+                // the path the client typed, and a symlink named "pub" pointing at ".git" carries
+                // no dot in "/pub/config" while resolving inside the root — so both rules passed
+                // and the file was served. Tested after containment so an escape is still reported
+                // as an escape rather than mislabelled a hidden item.
+                if (!allowHiddenItems) {
+                    for (NSString *component in [resolvedRelativePath pathComponents]) {
+                        if ([component hasPrefix:@"."]) {
+                            WSK_LOG_WARNING(@"Refusing to serve \"%@\": it resolves inside a hidden item", relativePath);
+                            return [WSKResponse responseWithStatusCode:kWSKHTTPStatusCode_NotFound];
+                        }
+                    }
                 }
+
+                filePath = resolvedPath;
 
                 NSString *fileType = [[[NSFileManager defaultManager] attributesOfItemAtPath:filePath error:NULL] fileType];
 

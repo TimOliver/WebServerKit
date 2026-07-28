@@ -2643,6 +2643,71 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     [fm removeItemAtPath:root error:NULL];
 }
 
+// Containment was decided on one realpath, hiddenness on a second, and the file was then opened
+// by a THIRD path — the one the client typed, symlinks and all. Those are three observations of a
+// filesystem that need not agree. Retargeting a symlink between them served content from outside
+// the served root in 24% of requests measured, with no concurrency on the client side at all.
+// Serving the resolved path closes that: a resolved path contains no symlinks, so retargeting one
+// cannot redirect the open.
+//
+// This asserts the property, not a timing: the request is issued while a helper flips the link,
+// and the invariant is that NO response ever carries content from outside the root. Against the
+// unfixed source it fails within a few hundred iterations.
+- (void)testRetargetedSymlinkCannotEscapeTheServedRoot {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* base = MakeTempDirectory();
+    NSString* root = [base stringByAppendingPathComponent:@"root"];
+    NSString* outside = [base stringByAppendingPathComponent:@"outside"];
+    XCTAssertTrue([fm createDirectoryAtPath:[root stringByAppendingPathComponent:@"good"] withIntermediateDirectories:YES attributes:nil error:NULL]);
+    XCTAssertTrue([fm createDirectoryAtPath:outside withIntermediateDirectories:YES attributes:nil error:NULL]);
+    XCTAssertTrue([@"PUBLIC_MARKER" writeToFile:[root stringByAppendingPathComponent:@"good/target.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([@"SECRET_OUTSIDE_MARKER" writeToFile:[outside stringByAppendingPathComponent:@"target.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    NSString* link = [root stringByAppendingPathComponent:@"link"];
+    NSString* staging = [root stringByAppendingPathComponent:@".flip"];
+    XCTAssertEqual(symlink("good", link.fileSystemRepresentation), 0);
+
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addGETHandlerForBasePath:@"/files/" directoryPath:root indexFilename:nil cacheAge:0 allowRangeRequests:NO];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    // Retarget atomically via rename(2), so the link is never absent — an unlink/symlink pair
+    // would leave ENOENT windows and make the run look cleaner than it is.
+    __block BOOL stop = NO;
+    dispatch_queue_t flipper = dispatch_queue_create("flip", DISPATCH_QUEUE_SERIAL);
+    dispatch_async(flipper, ^{
+        NSUInteger i = 0;
+        while (!stop) {
+            unlink(staging.fileSystemRepresentation);
+            if (symlink((i++ & 1) ? "good" : "../outside", staging.fileSystemRepresentation) == 0) {
+                rename(staging.fileSystemRepresentation, link.fileSystemRepresentation);
+            }
+        }
+    });
+
+    NSUInteger escapes = 0;
+    for (NSUInteger i = 0; i < 600; i++) {
+        NSString* reply = SendRawRequest(server.port, @"GET /files/link/target.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        if ([reply containsString:@"SECRET_OUTSIDE_MARKER"]) {
+            escapes++;
+        }
+    }
+    stop = YES;
+    dispatch_sync(flipper, ^{
+    });
+
+    XCTAssertEqual(escapes, (NSUInteger)0, @"%lu of 600 responses served content from outside the served root", (unsigned long)escapes);
+
+    // And the honest case must still work, or this has just broken symlinks entirely.
+    unlink(link.fileSystemRepresentation);
+    XCTAssertEqual(symlink("good", link.fileSystemRepresentation), 0);
+    XCTAssertTrue([SendRawRequest(server.port, @"GET /files/link/target.txt HTTP/1.1\r\nHost: localhost\r\n\r\n") containsString:@"PUBLIC_MARKER"], @"a stable in-root symlink stopped being served");
+
+    [server stop];
+    [fm removeItemAtPath:base error:NULL];
+}
+
 - (void)testBasePathHandlerRefusesSymlinkEscape {
     NSFileManager* fm = [NSFileManager defaultManager];
     NSString* root = MakeTempDirectory();
