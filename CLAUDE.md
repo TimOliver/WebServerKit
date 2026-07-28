@@ -80,6 +80,122 @@ and the Bonjour/`.local` name only, so without it every request is refused with 
 
 ## Recent Changes
 
+### Sixth audit pass: a process-killing socket option, two dishonest validators, and the uploader's channels
+
+Run after the WebServerKit rename, on the premise that a mechanical sweep across 514 files is
+exactly when a check quietly stops being enforced. Eight findings, fixed across four branches
+(PRs #29–#32). Every regression test here was run against the *unfixed* source first and
+confirmed to fail on the intended assertion — twice that caught a test that passed for the
+wrong reason. **Two of the fixes below were wrong on the first attempt**; both are recorded as
+such, because both mistakes are easy to repeat.
+
+**A client reset could kill the entire process.** The accept handler set `SO_NOSIGPIPE` on the
+accepted socket and never checked the result. If the peer's RST has already reached the kernel
+by the time that runs, Darwin fails the option with `EINVAL` and leaves it **off** — so the
+next write raises SIGPIPE, whose default disposition terminates the process. Measured with a
+client doing an abortive close (`SO_LINGER {1,0}`): the server died at reset #13, exit 141 —
+roughly one per 15–25 connections. This needs no malice at all, just a cancelled download, and
+for a build server meant to run for weeks it is the worst finding of any pass so far. The
+socket is now dropped when the option cannot be set; `testAbortiveClientResetsDoNotKillTheProcess`
+sees the guard fire 72–94 times per 400 resets.
+
+**`addGETHandlerForBasePath:` was the one file-vending path with no hidden-item check.** The
+uploader and WebDAV both walk every path component (third and fourth passes); the base class
+never got it, so `GET /.git/config` returned the file — with its embedded token — while the
+directory listing dutifully hid it. The fourth pass had already given this handler a
+*containment* check, which is what made the omission easy to miss: it looked audited. Covered
+by `testBasePathHandlerRefusesHiddenItems`, which asserts on a file inside a dot-*directory*,
+not just a leaf dotfile.
+
+**Directory-listing hrefs were percent-encoded but never HTML-escaped.** The two escapers are
+not interchangeable: the URL escaper leaves `&` alone, so a filename containing `&colon;`
+reached the `href` attribute intact and the browser's entity decoder turned it back into a
+`:` — reconstituting `javascript:` inside a link in the server's own origin. Now escaped as
+markup after being escaped as a URL, in that order (`testDirectoryListingEscapesHrefEntities`).
+
+**`If-Range` honoured a date that could not tell two builds apart.** `st_mtime` has
+one-second resolution, so a file modified within the current second can be modified *again*
+inside that same second without the timestamp moving — which is precisely what `If-Range`
+requires a strong validator (RFC 9110 §13.1.5) to exclude. A build rewritten inside one
+wall-clock second read as "unchanged", so a resumed download spliced the tail of one
+representation onto the prefix of another and returned 206 asserting they belonged together.
+Silent: `Content-Length` agrees with `Content-Range`, so nothing downstream notices.
+
+**⚠️ The first fix for that refused dates outright and broke macOS Finder.** The recorded
+Finder session in `Tests/WebDAV-Finder/059` resumes with `If-Range: <HTTP-date>` and no entity
+tag, so honouring only the ETag form turned every Finder resume into a full re-download. The
+trace suite caught it — the corpus earning its keep one pass after being revived. What ships
+is the deduction RFC 9110 §8.8.2.2 provides for exactly this: the origin may treat the
+timestamp as strong once it is **at least one second in the past**, because no further change
+can land in that second any more. Dates older than a second still resume; a date inside the
+current second does not. A replacement that *preserves* mtime (`rsync -a`, `cp -p`, `tar -x`)
+stays undetectable by any date-based scheme, here or anywhere else.
+
+**`If-Modified-Since` answered 304 for a representation older than the client's.** The
+comparison was "not strictly newer", so rolling a build back pinned a date-only client
+permanently: told 304, it keeps the stale body and — per RFC 9111 §4.3.4 — adopts the
+*current* `ETag` and `Last-Modified` from that 304, so its next revalidation matches on the
+ETag too and no request ever dislodges it. A *future* `If-Modified-Since` validated
+everything. Now exact equality, which is safe because `_NSDateFromTimeSpec` truncates the
+served `Last-Modified` to whole seconds and `WSKParseRFC822` parses at the same precision, so
+echoing back the served value still revalidates. This is nginx's default too
+(`if_modified_since exact`).
+
+**A `HEAD` request took an SSE channel and gave nothing back.** `HEAD` is mapped to `GET`
+*before* handler matching, so `/events` ran and registered a channel — but the connection
+layer discards a mapped HEAD's body unsent, so the stream block never ran and no client ever
+held the channel. Nothing released it either; only the heartbeat reaper did, two ticks later.
+Sixteen HEADs therefore denied live updates to every real client for ~30 seconds, and they are
+unusually cheap: each request *completes*, so the sender holds no connection slot and can
+repeat the burst indefinitely. The `Sec-Fetch-*` checks are no help — they decide which origin
+may ask, and this costs nothing to ask from anywhere on the network. A mapped HEAD now gets a
+bodiless response, which is the right answer to HEAD anyway. **Correction to the finding as
+first reported:** the denial is ~30s and self-healing, not permanent — the first measurement
+waited 20s and missed that the reaper needs *two* consecutive idle heartbeats.
+
+Handlers had no way to see this, so `WSKRequest` gained `-isVirtualHEAD`, set by the connection
+where it rewrites the method. It matters to any handler whose response *is* a long-lived
+resource rather than just bytes.
+
+**The uploader's own page could be framed by asking for it a different way.** The bundle root
+was served by a base-path handler and `index.html` is a file in that bundle, so `/index.html`
+returned the template raw — placeholders unsubstituted and, the point, without the
+`X-Frame-Options`/`frame-ancestors`/`nosniff` headers the `/` handler sets. Framing that path
+instead of `/` defeated the clickjacking defence completely, on a UI whose one-click buttons
+delete and move files and whose `#/path` fragment aims it at a chosen folder.
+
+**⚠️ The first fix for that was an exact-path alias for `/index.html`, and it does not hold.**
+The base-path handler normalizes, so `/./index.html` and `/x/../index.html` both still reached
+the raw file — verified, and the test covers both. **An exact path is not a containment
+boundary.** What ships serves only the three asset directories the page actually loads (`css`,
+`js`, `fonts`), which takes the template — and `en.lproj/Localizable.strings`, which no browser
+needs — out of the URL space altogether, so there is no spelling left to find. `/index.html`
+remains as a convenience alias and is explicitly *not* the control. The test asserts the assets
+still load, so this cannot silently become "the UI is broken".
+
+**`/events` failed open when `Sec-Fetch-*` was absent**, and those headers are exactly what
+stops a cross-origin page pinning every channel. They are absent on every browser predating
+them (Safari < 16.4, Firefox < 90) — precisely the browser an attacker would choose. It now
+runs the same `-_rejectIfCrossOrigin:` the mutating endpoints use, which reads `Origin`.
+Non-browser clients send no `Origin` and are unaffected; the served page's own `EventSource`
+sends a matching one. Both are asserted, because refusing the real UI would be the easy
+mistake.
+
+**Test-suite traps worth remembering.** `Run-Tests.sh` builds into `./build`, while an ad-hoc
+probe linked against the framework loads it from *DerivedData* — so after a
+swap-build-restore experiment a probe reports the previous build's behaviour. This produced a
+phantom test failure (blamed on the test for half an hour) and later a phantom "the fixes are
+not on main". Always rebuild explicitly before believing a probe. Separately, `retry: 30000`
+(the SSE refusal) has `retry: 3000` (the acceptance preamble) as a *prefix*, which is the
+fourth substring-assertion misfire in two passes; match the longer marker first, or include
+its terminator.
+
+**Still open:** nothing from this pass's findings. Noted but deliberately untouched, both
+pre-existing: `bootstrap.css` requests `.woff`/`.woff2` glyphicons that are not in the bundle
+(a 404 on every page load; browsers fall back to the `.ttf` that ships), and
+`WSKFormatRFC822`/`WSKParseRFC822` are public but `dispatch_sync` on a queue only created by
+`+[WSKWebServer initialize]`, so calling either before any server exists crashes.
+
 ### Fifth audit pass: response-side amplification, refusal ordering, and a regression from the budget branch
 
 Run with eight deliberately disjoint lenses and every finding put through two independent
