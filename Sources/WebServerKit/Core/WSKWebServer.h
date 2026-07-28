@@ -584,6 +584,20 @@ extern NSString *const WSKAuthenticationMethod_DigestAccess;
  */
 - (void)addGETHandlerForBasePath:(NSString *)basePath directoryPath:(NSString *)directoryPath indexFilename:(nullable NSString *)indexFilename cacheAge:(NSUInteger)cacheAge allowRangeRequests:(BOOL)allowRangeRequests;
 
+/**
+ *  As above, but able to serve hidden items.
+ *
+ *  Hidden items are refused by default, and "hidden" means where the bytes actually live, not
+ *  what the client typed: a symlink whose own name carries no dot but which resolves inside a
+ *  dot-directory is refused too. That is what makes this opt-out necessary — a deliberate
+ *  convenience link such as "latest" pointing at ".builds/2026-07-25" is otherwise
+ *  unreachable, with no way to permit it.
+ *
+ *  Passing YES serves dot-files and dot-directories like any other content. Containment is
+ *  unaffected either way: a path resolving outside `directoryPath` is always refused.
+ */
+- (void)addGETHandlerForBasePath:(NSString *)basePath directoryPath:(NSString *)directoryPath indexFilename:(nullable NSString *)indexFilename cacheAge:(NSUInteger)cacheAge allowRangeRequests:(BOOL)allowRangeRequests allowHiddenItems:(BOOL)allowHiddenItems;
+
 @end
 
 /**

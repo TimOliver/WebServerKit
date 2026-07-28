@@ -182,13 +182,22 @@ NS_ASSUME_NONNULL_END
         return NO;
     }
 
-    for (NSString *component in [WSKNormalizePath(relativePath) pathComponents]) {
+    NSString *const normalizedPath = WSKNormalizePath(relativePath);
+
+    for (NSString *component in [normalizedPath pathComponents]) {
         if ([component hasPrefix:@"."]) {  // The leading "/" component never matches.
             return YES;
         }
     }
 
-    return NO;
+    // The walk above sees only what the client typed, and that is not where the bytes live: a
+    // symlink named "pub" pointing at ".git" makes "/pub/config" carry no dot at all, while
+    // containment passes because the target is inside the share. Both rules were satisfied by a
+    // path inside a dot-directory — readable here, enumerable through /list, and writable
+    // through DAV PUT, which refuses the same write spelled "/.git/hooks/x". Resolving is the
+    // only way to see it. The cheap textual walk stays in front so the realpath is only paid
+    // when it can change the answer.
+    return WSKResolvedPathHasHiddenComponent([_uploadDirectory stringByAppendingPathComponent:normalizedPath], _uploadDirectory);
 }
 
 // A unique, hidden sibling of `path`. Building a replacement here — rather than removing

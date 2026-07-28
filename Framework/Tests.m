@@ -1430,13 +1430,6 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     [fm removeItemAtPath:dir error:NULL];
 }
 
-// An SSE stream is only ever released when the client that is reading it goes away. A HEAD
-// mapped to GET has no reader at all — the connection layer discards the body unsent — so the
-// channel the handler registered was held by nobody and freed only by the heartbeat reaper,
-// two ticks (~30s) later. That made sixteen HEADs a complete denial of live updates for every
-// real client, and unusually cheap to sustain: each request *completes*, so the sender holds
-// no connection slot and can repeat the burst every 30s from anywhere on the network.
-// Measured before the fix: 16 HEADs, then a genuine EventSource is refused for 30s.
 - (void)testAbortedRequestCarriesItsAddressesAndHEADFlag {
     gAbortRequestPeer = nil;
     gAbortRequestSawVirtualHEAD = NO;
@@ -1460,9 +1453,74 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     XCTAssertTrue([gAbortRequestPeer hasPrefix:@"127.0.0.1"], @"peer address is wrong: %@", gAbortRequestPeer);
     XCTAssertTrue(gAbortRequestSawVirtualHEAD, @"a mapped HEAD must be distinguishable from a real GET on this path");
 
-    [server stop];
-}
+    [server stop];}
 
+// Hiddenness and containment are independent rules, and the hidden-item walk saw only the path
+// the client typed. A symlink named "pub" pointing at ".git" makes "/pub/config" carry no dot,
+// while containment passes because the target is inside the served root — so both rules were
+// satisfied by a path whose bytes live inside a dot-directory. Read through the base-path
+// handler, read AND enumerated through the uploader, and written through DAV PUT, which refuses
+// the same write spelled "/.git/hooks/x".
+- (void)testHiddenItemsAreRefusedThroughSymlinksToo {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* root = MakeTempDirectory();
+    XCTAssertTrue([fm createDirectoryAtPath:[root stringByAppendingPathComponent:@".git/hooks"] withIntermediateDirectories:YES attributes:nil error:NULL]);
+    XCTAssertTrue([fm createDirectoryAtPath:[root stringByAppendingPathComponent:@"data/sub"] withIntermediateDirectories:YES attributes:nil error:NULL]);
+    XCTAssertTrue([@"SECRETGITCONFIG" writeToFile:[root stringByAppendingPathComponent:@".git/config"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([@"PUBLICOK" writeToFile:[root stringByAppendingPathComponent:@"data/normal.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([@"NESTEDOK" writeToFile:[root stringByAppendingPathComponent:@"data/sub/deep.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    // The hostile link, a chain of them, and a benign one that must keep working.
+    XCTAssertTrue([fm createSymbolicLinkAtPath:[root stringByAppendingPathComponent:@"pub"] withDestinationPath:@".git" error:NULL]);
+    XCTAssertTrue([fm createSymbolicLinkAtPath:[root stringByAppendingPathComponent:@"hop"] withDestinationPath:@"pub" error:NULL]);
+    XCTAssertTrue([fm createSymbolicLinkAtPath:[root stringByAppendingPathComponent:@"latest"] withDestinationPath:@"data/sub" error:NULL]);
+
+    WSKWebServer* basePath = [[WSKWebServer alloc] init];
+    [basePath addGETHandlerForBasePath:@"/files/" directoryPath:root indexFilename:nil cacheAge:0 allowRangeRequests:YES];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([basePath startWithOptions:options error:NULL]);
+
+    for (NSString* path in @[ @"/files/pub/config", @"/files/hop/config", @"/files/.git/config" ]) {
+        NSString* reply = SendRawRequest(basePath.port, [NSString stringWithFormat:@"GET %@ HTTP/1.1\r\nHost: localhost\r\n\r\n", path]);
+        XCTAssertFalse([reply containsString:@"SECRETGITCONFIG"], @"\"%@\" served a file inside a dot-directory", path);
+    }
+    // Neither over-refusal: an ordinary file, and a benign symlink staying inside the root.
+    XCTAssertTrue([SendRawRequest(basePath.port, @"GET /files/data/normal.txt HTTP/1.1\r\nHost: localhost\r\n\r\n") containsString:@"PUBLICOK"], @"an ordinary file stopped being served");
+    XCTAssertTrue([SendRawRequest(basePath.port, @"GET /files/latest/deep.txt HTTP/1.1\r\nHost: localhost\r\n\r\n") containsString:@"NESTEDOK"], @"a benign in-root symlink stopped being served");
+    [basePath stop];
+
+    // The opt-out has to actually opt in, or it is not an escape hatch.
+    WSKWebServer* permissive = [[WSKWebServer alloc] init];
+    [permissive addGETHandlerForBasePath:@"/files/" directoryPath:root indexFilename:nil cacheAge:0 allowRangeRequests:YES allowHiddenItems:YES];
+    XCTAssertTrue([permissive startWithOptions:options error:NULL]);
+    XCTAssertTrue([SendRawRequest(permissive.port, @"GET /files/pub/config HTTP/1.1\r\nHost: localhost\r\n\r\n") containsString:@"SECRETGITCONFIG"], @"allowHiddenItems:YES did not permit a hidden item");
+    [permissive stop];
+
+    WSKWebUploader* uploader = [[WSKWebUploader alloc] initWithUploadDirectory:root];
+    XCTAssertTrue([uploader startWithOptions:options error:NULL]);
+    XCTAssertFalse([SendRawRequest(uploader.port, @"GET /download?path=/pub/config HTTP/1.1\r\nHost: localhost\r\n\r\n") containsString:@"SECRETGITCONFIG"], @"the uploader downloaded through the symlink");
+    XCTAssertFalse([SendRawRequest(uploader.port, @"GET /list?path=/pub HTTP/1.1\r\nHost: localhost\r\n\r\n") containsString:@"config"], @"the uploader enumerated a dot-directory through the symlink");
+    XCTAssertTrue([SendRawRequest(uploader.port, @"GET /download?path=/data/normal.txt HTTP/1.1\r\nHost: localhost\r\n\r\n") containsString:@"PUBLICOK"], @"the uploader stopped serving an ordinary file");
+    [uploader stop];
+
+    WSKWebDAVServer* dav = [[WSKWebDAVServer alloc] initWithUploadDirectory:root];
+    XCTAssertTrue([dav startWithOptions:options error:NULL]);
+    XCTAssertFalse([SendRawRequest(dav.port, @"GET /pub/config HTTP/1.1\r\nHost: localhost\r\n\r\n") containsString:@"SECRETGITCONFIG"], @"WebDAV read through the symlink");
+    // The write is the sharpest one: the same PUT spelled "/.git/hooks/x" is refused.
+    SendRawRequest(dav.port, @"PUT /pub/hooks/x HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\nevil");
+    XCTAssertFalse([fm fileExistsAtPath:[root stringByAppendingPathComponent:@".git/hooks/x"]], @"WebDAV wrote inside a dot-directory through the symlink");
+    NSString* legitimate = SendRawRequest(dav.port, @"PUT /data/ok.txt HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\ngood");
+    XCTAssertTrue([legitimate hasPrefix:@"HTTP/1.1 201"], @"WebDAV stopped accepting an ordinary PUT: %@", [legitimate substringToIndex:MIN((NSUInteger)40, legitimate.length)]);
+    [dav stop];
+
+    [fm removeItemAtPath:root error:NULL];}
+
+// An SSE stream is only ever released when the client that is reading it goes away. A HEAD
+// mapped to GET has no reader at all — the connection layer discards the body unsent — so the
+// channel the handler registered was held by nobody and freed only by the heartbeat reaper,
+// two ticks (~30s) later. That made sixteen HEADs a complete denial of live updates for every
+// real client, and unusually cheap to sustain: each request *completes*, so the sender holds
+// no connection slot and can repeat the burst every 30s from anywhere on the network.
+// Measured before the fix: 16 HEADs, then a genuine EventSource is refused for 30s.
 - (void)testHEADOnEventsDoesNotConsumeSSEChannels {
     NSFileManager* fm = [NSFileManager defaultManager];
     NSString* dir = MakeTempDirectory();
