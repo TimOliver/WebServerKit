@@ -689,8 +689,25 @@ static inline NSString *_EncodeBase64(NSString *string) {
                 NSData *localAddress = [NSData dataWithBytes:&localSockAddr length:localAddrLen];
                 WSK_DCHECK((!isIPv6 && localSockAddr.ss_family == AF_INET) || (isIPv6 && localSockAddr.ss_family == AF_INET6));
 
+                // This must be checked rather than assumed. If the peer's RST has already
+                // reached the kernel by the time this runs, Darwin fails the option with
+                // EINVAL and leaves SO_NOSIGPIPE *off* — and the first write to that
+                // descriptor then raises SIGPIPE, whose default disposition terminates the
+                // whole host application. Neither this library nor Foundation changes that
+                // disposition, so an unauthenticated peer that connects and resets in a loop
+                // kills the process within seconds. A peer that has already reset has nothing
+                // to be served, so drop it here, before a connection slot is reserved.
+                //
+                // Deliberately not solved with signal(SIGPIPE, SIG_IGN): that mutates
+                // process-wide state belonging to the host app, and would still leave this
+                // descriptor without the option actually set.
                 int noSigPipe = 1;
-                setsockopt(socket, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, sizeof(noSigPipe));  // Make sure this socket cannot generate SIG_PIPE
+
+                if (setsockopt(socket, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, sizeof(noSigPipe)) != 0) {
+                    WSK_LOG_ERROR(@"Dropping accepted %s socket: SO_NOSIGPIPE could not be set (%s (%i)); the peer is already gone", isIPv6 ? "IPv6" : "IPv4", strerror(errno), errno);
+                    close(socket);
+                    return;
+                }
 
                 // Cap the number of simultaneous connections so a flood of (e.g. idle)
                 // connections cannot exhaust file descriptors — especially important on
