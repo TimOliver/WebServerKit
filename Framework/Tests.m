@@ -2061,6 +2061,62 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     [fm removeItemAtPath:root error:NULL];
 }
 
+// The sixth pass tested the strength deduction at *redemption* time, which closes nothing: by
+// the time any resume arrives the second has always shut, so the guard reported "strong" for
+// precisely the representation that was not. Reproduced 5/5 before this fix. The deduction now
+// happens where it means something — when the validator is issued — so a date naming a second
+// that is still open is never handed out, and the splice has no date to travel on.
+- (void)testIfRangeRefusesADateMintedInsideItsOwnSecond {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* root = MakeTempDirectory();
+    NSString* path = [root stringByAppendingPathComponent:@"build.ipa"];
+
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addGETHandlerForBasePath:@"/" directoryPath:root indexFilename:nil cacheAge:0 allowRangeRequests:YES];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    // Publish build A, let a client take a prefix, then republish inside the SAME wall-clock
+    // second — the case a build server hits when it rewrites a file in place. Retried rather
+    // than asserted on if the sequence straddles a boundary, so this measures the intended
+    // regime instead of racing the clock.
+    NSString* resumed = nil;
+    NSString* lastModified = nil;
+    for (NSUInteger attempt = 0; attempt < 5; attempt++) {
+        XCTAssertTrue([[@"" stringByPaddingToLength:4096 withString:@"A" startingAtIndex:0] writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+        time_t const before = time(NULL);
+        NSString* prefix = SendRawRequest(server.port, @"GET /build.ipa HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-1023\r\n\r\n");
+
+        lastModified = nil;
+        for (NSString* line in [prefix componentsSeparatedByString:@"\r\n"]) {
+            if ([line hasPrefix:@"Last-Modified: "]) {
+                lastModified = [line substringFromIndex:15];
+            }
+        }
+        XCTAssertTrue([[[prefix componentsSeparatedByString:@"\r\n"] firstObject] hasPrefix:@"HTTP/1.1 206"], @"the prefix fetch itself must succeed: %@", prefix);
+
+        XCTAssertTrue([[@"" stringByPaddingToLength:4096 withString:@"B" startingAtIndex:0] writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+        if (time(NULL) != before) {
+            continue;  // Straddled a second: not the regime under test.
+        }
+
+        // No date may have been issued for a second that was still open when it was served.
+        XCTAssertNil(lastModified, @"a date validator was issued for the still-open current second, so a client can present it later");
+
+        // And a client presenting that date anyway — fabricated, or held from elsewhere — must
+        // not be given a range against the *replacement*.
+        resumed = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /build.ipa HTTP/1.1\r\nHost: localhost\r\nRange: bytes=1024-2047\r\nIf-Range: %@\r\n\r\n", WSKFormatRFC822([NSDate dateWithTimeIntervalSince1970:(NSTimeInterval)before])]);
+        break;
+    }
+
+    XCTAssertNotNil(resumed, @"could not land two writes inside one second in five attempts");
+    NSString* status = [[resumed componentsSeparatedByString:@"\r\n"] firstObject];
+    XCTAssertTrue([status hasPrefix:@"HTTP/1.1 200"], @"a 206 spliced build B onto build A's prefix: %@", status);
+
+    [server stop];
+    [fm removeItemAtPath:root error:NULL];
+}
+
 // If-Modified-Since answered 304 whenever mtime was equal *or older*. Restoring a previous
 // build then pins a date-only client on stale bytes forever: it is told 304, keeps the old
 // body, and adopts the current ETag from that 304 — so every later revalidation matches too.

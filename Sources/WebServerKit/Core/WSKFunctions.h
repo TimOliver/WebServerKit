@@ -136,6 +136,15 @@ BOOL WSKPathIsInsideDirectory(NSString *path, NSString *directory);
  */
 BOOL WSKResolvedPathIsWithinDirectory(NSString *path, NSString *directory);
 
+/**
+ *  As above, but returns the fully resolved location expressed relative to the
+ *  resolved `directory` (empty string when it *is* the directory), or nil when it
+ *  is outside or cannot be resolved. Test hidden components against this rather
+ *  than against the request path: a non-hidden symlink to a dot-directory has no
+ *  dot in the path the client sent.
+ */
+NSString *_Nullable WSKResolvedPathRelativeToDirectory(NSString *path, NSString *directory);
+
 #ifdef __cplusplus
 }
 #endif
