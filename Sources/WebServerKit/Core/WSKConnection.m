@@ -639,6 +639,10 @@ static NSString *_WithoutRootLabel(NSString *host) {
                     if (self->_request) {
                         self->_request.localAddressData = self.localAddressData;
                         self->_request.remoteAddressData = self.remoteAddressData;
+                        // The method was rewritten to GET above so a GET handler would match,
+                        // which leaves the handler unable to see that nothing will ever read
+                        // the body it is about to produce. Tell it.
+                        self->_request.virtualHEAD = self->_virtualHEAD;
 
                         if ([self->_request hasBody]) {
                             // Decide the header-only refusals before a single body byte is

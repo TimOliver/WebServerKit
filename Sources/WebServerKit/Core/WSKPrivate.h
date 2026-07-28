@@ -288,6 +288,7 @@ extern NSString *WSKStringFromSockAddr(const struct sockaddr *addr, BOOL include
 
 @interface WSKRequest ()
 @property (nonatomic, readonly) BOOL usesChunkedTransferEncoding;
+@property (nonatomic, getter=isVirtualHEAD) BOOL virtualHEAD;
 @property (nonatomic) NSData *localAddressData;
 @property (nonatomic) NSData *remoteAddressData;
 - (void)prepareForWriting;

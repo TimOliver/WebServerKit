@@ -137,6 +137,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (nullable WSKResponse *)moveItem:(WSKURLEncodedFormRequest *)request;
 - (nullable WSKResponse *)deleteItem:(WSKURLEncodedFormRequest *)request;
 - (nullable WSKResponse *)createDirectory:(WSKURLEncodedFormRequest *)request;
+// Declared here, with the rest of this category's methods, because the handler blocks in
+// -initWithUploadDirectory: call it before its definition appears further down the file.
+- (nullable WSKResponse *)_rejectIfCrossOrigin:(WSKRequest *)request;
 @end
 
 NS_ASSUME_NONNULL_END
@@ -257,13 +260,28 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
         // an hour. Unchanged files still return a cheap 304, but after an app
         // update the rebuilt bundle changes each file's ETag, so the new assets
         // (e.g. index.js) are picked up immediately rather than served stale.
-        [self addGETHandlerForBasePath:@"/" directoryPath:(NSString *)[siteBundle resourcePath] indexFilename:nil cacheAge:0 allowRangeRequests:NO];
+        //
+        // Only the three asset directories the page actually loads are served. Serving the
+        // bundle's *root* also exposed index.html — which is the template, and which the base
+        // path handler returns raw: placeholders unsubstituted and, the point, without the
+        // framing headers the page handler below sets. Framing "/index.html" instead of "/"
+        // therefore defeated the clickjacking defence completely.
+        //
+        // Excluding it by path does not hold: the base path handler normalizes, so with an
+        // exact-path alias in front of it "/./index.html" and "/x/../index.html" still reach
+        // the raw file (both verified). Serving only what the page asks for takes the template
+        // — and en.lproj/Localizable.strings, which no browser ever needs — out of the URL
+        // space altogether, so there is no spelling left to find.
+        for (NSString *const assetDirectory in @[ @"css", @"js", @"fonts" ]) {
+            [self addGETHandlerForBasePath:[NSString stringWithFormat:@"/%@/", assetDirectory]
+                             directoryPath:[(NSString *)[siteBundle resourcePath] stringByAppendingPathComponent:assetDirectory]
+                             indexFilename:nil
+                                  cacheAge:0
+                        allowRangeRequests:NO];
+        }
 
         // Web page
-        [self addHandlerForMethod:@"GET"
-                             path:@"/"
-                     requestClass:[WSKRequest class]
-                     processBlock:^WSKResponse *(WSKRequest *request) {
+        WSKProcessBlock const servePage = ^WSKResponse *(WSKRequest *request) {
 #if TARGET_OS_IPHONE
                          NSString *device = [[UIDevice currentDevice] name];
 #else
@@ -352,7 +370,14 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
                          [response setValue:@"frame-ancestors 'none'" forAdditionalHeader:@"Content-Security-Policy"];
                          [response setValue:@"nosniff" forAdditionalHeader:@"X-Content-Type-Options"];
                          return response;
-                     }];
+        };
+
+        [self addHandlerForMethod:@"GET" path:@"/" requestClass:[WSKRequest class] processBlock:servePage];
+        // Convenience only — "/index.html" is the obvious thing to type, and it used to work
+        // when the bundle root was served. It is *not* what keeps the raw template unreachable:
+        // that is the scoped asset handlers above, because an exact path like this one is not a
+        // containment boundary ("/./index.html" does not match it).
+        [self addHandlerForMethod:@"GET" path:@"/index.html" requestClass:[WSKRequest class] processBlock:servePage];
 
         // File listing
         [self addHandlerForMethod:@"GET"
@@ -409,6 +434,32 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
              asyncProcessBlock:^(WSKRequest *request, WSKCompletionBlock completionBlock) {
                          if (!server.serverSentEventsEnabled) {
                              completionBlock([WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"SSE not enabled"]);
+                             return;
+                         }
+
+                         // A mapped HEAD never reads the body, so registering a channel for one
+                         // hands out a slot that no client will ever hold or release: it is only
+                         // recovered by the heartbeat reaper, two ticks later. Sixteen HEADs — which
+                         // cost the sender nothing, since each request *completes* and frees its
+                         // connection slot immediately — therefore deny live updates to every real
+                         // client for ~30s, and repeating them sustains that indefinitely. The
+                         // Sec-Fetch-* checks below do not help: they are about which origin is
+                         // asking, and this costs nothing to ask from anywhere on the network.
+                         // A bodiless reply is the right answer to HEAD regardless.
+                         if (request.isVirtualHEAD) {
+                             completionBlock([WSKDataResponse responseWithData:[NSData data] contentType:@"text/event-stream"]);
+                             return;
+                         }
+
+                         // The same rule the mutating endpoints use. Without it this endpoint is
+                         // the one place a cross-origin page can still reach: the Sec-Fetch-*
+                         // checks below fail *open* when the headers are absent, and they are
+                         // absent on every browser predating them (Safari < 16.4, Firefox < 90).
+                         // Such a browser can hold every channel from any origin.
+                         WSKResponse *const crossOrigin = [server _rejectIfCrossOrigin:request];
+
+                         if (crossOrigin) {
+                             completionBlock(crossOrigin);
                              return;
                          }
 
