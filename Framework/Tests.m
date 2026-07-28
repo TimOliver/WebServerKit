@@ -1869,6 +1869,96 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 // "Send me this range only if the representation is unchanged". Ignoring If-Range meant a
 // resumed download spliced bytes from two versions of a file together under a 206 that
 // asserted they belonged to the same one.
+// If-Range requires a strong validator. st_mtime has one-second resolution, so a file
+// modified within the current second could change again without the timestamp moving — the
+// case where a build is rewritten under a client that is downloading it. RFC 9110 8.8.2.2
+// lets the origin treat the timestamp as strong only once it is at least a second old.
+//
+// Both directions are asserted here, because the obvious "just never honour a date" is a real
+// compatibility regression: macOS Finder's WebDAV client resumes with a date and nothing else
+// (Tests/WebDAV-Finder/059), so refusing outright turns every Finder resume into a full
+// re-download.
+- (void)testIfRangeDateIsHonouredOnlyWhenTheTimestampIsStrong {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* root = MakeTempDirectory();
+    NSString* path = [root stringByAppendingPathComponent:@"build.bin"];
+
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addGETHandlerForBasePath:@"/" directoryPath:root indexFilename:nil cacheAge:0 allowRangeRequests:YES];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    // (a) Settled file: the timestamp is at least a second old, so it is strong and a resume
+    // must still work. This is the Finder case.
+    XCTAssertTrue([@"AAAAAAAAAAAAAAAAAAAA" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    NSDate* settled = [NSDate dateWithTimeIntervalSince1970:1400000000];
+    XCTAssertTrue([fm setAttributes:@{NSFileModificationDate : settled} ofItemAtPath:path error:NULL]);
+    NSString* settledRequest = [NSString stringWithFormat:@"GET /build.bin HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-4\r\nIf-Range: %@\r\n\r\n", WSKFormatRFC822(settled)];
+    XCTAssertTrue([SendRawRequest(server.port, settledRequest) hasPrefix:@"HTTP/1.1 206"], @"a settled timestamp must still allow a resume");
+
+    // (b) Just-written file: the timestamp is inside the current second, so it is weak and a
+    // range must NOT be served from it — the file could be rewritten again without the
+    // timestamp moving, which splices two builds together under a 206 that claims otherwise.
+    // The write and the request have to land in the same wall-clock second for that to be the
+    // regime under test, so a run that straddles a second boundary is retried rather than
+    // asserted on — otherwise this flakes roughly once in a few hundred runs.
+    NSString* fresh = nil;
+    for (NSUInteger attempt = 0; attempt < 5; attempt++) {
+        time_t const before = time(NULL);
+        XCTAssertTrue([@"BBBBBBBBBBBBBBBBBBBB" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+        NSDate* justNow = [[fm attributesOfItemAtPath:path error:NULL] fileModificationDate];
+        NSString* freshRequest = [NSString stringWithFormat:@"GET /build.bin HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-4\r\nIf-Range: %@\r\n\r\n", WSKFormatRFC822(justNow)];
+        fresh = SendRawRequest(server.port, freshRequest);
+        if (time(NULL) == before) {
+            break;
+        }
+    }
+    XCTAssertTrue([fresh hasPrefix:@"HTTP/1.1 200"], @"a timestamp inside the current second is weak and must not yield a partial response: %@", [fresh substringToIndex:MIN((NSUInteger)40, fresh.length)]);
+    XCTAssertTrue([fresh containsString:@"BBBBBBBBBBBBBBBBBBBB"], @"the whole current representation must be served");
+
+    [server stop];
+    [fm removeItemAtPath:root error:NULL];
+}
+
+// If-Modified-Since answered 304 whenever mtime was equal *or older*. Restoring a previous
+// build then pins a date-only client on stale bytes forever: it is told 304, keeps the old
+// body, and adopts the current ETag from that 304 — so every later revalidation matches too.
+- (void)testStaleDateDoesNotPinAClientOnAnOlderRepresentation {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* root = MakeTempDirectory();
+    NSString* path = [root stringByAppendingPathComponent:@"build.bin"];
+
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addGETHandlerForBasePath:@"/" directoryPath:root indexFilename:nil cacheAge:0 allowRangeRequests:NO];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    // The client holds build B, dated later. The server is rolled back to build A, dated earlier.
+    NSDate* clientHolds = [NSDate dateWithTimeIntervalSince1970:1500000000];
+    XCTAssertTrue([@"ROLLED-BACK-BUILD-A" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([fm setAttributes:@{NSFileModificationDate : [NSDate dateWithTimeIntervalSince1970:1400000000]} ofItemAtPath:path error:NULL]);
+
+    NSString* stale = [NSString stringWithFormat:@"GET /build.bin HTTP/1.1\r\nHost: localhost\r\nIf-Modified-Since: %@\r\n\r\n", WSKFormatRFC822(clientHolds)];
+    NSString* reply = SendRawRequest(server.port, stale);
+    XCTAssertFalse([reply containsString:@"304"], @"an older representation must not be reported unchanged: %@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+    XCTAssertTrue([reply containsString:@"ROLLED-BACK-BUILD-A"], @"the current bytes must be served: %@", reply);
+
+    // A future date must not validate anything either.
+    NSString* future = [NSString stringWithFormat:@"GET /build.bin HTTP/1.1\r\nHost: localhost\r\nIf-Modified-Since: %@\r\n\r\n", WSKFormatRFC822([NSDate dateWithTimeIntervalSince1970:4000000000])];
+    XCTAssertFalse([SendRawRequest(server.port, future) containsString:@"304"], @"a future If-Modified-Since must not validate");
+
+    // The ordinary unchanged-file revalidation must still work, or this is a cache regression.
+    NSString* first = SendRawRequest(server.port, @"GET /build.bin HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSRange r = [first rangeOfString:@"last-modified: " options:NSCaseInsensitiveSearch];
+    XCTAssertNotEqual(r.location, (NSUInteger)NSNotFound, @"%@", first);
+    NSString* echoed = [[[first substringFromIndex:(r.location + r.length)] componentsSeparatedByString:@"\r\n"] firstObject];
+    NSString* same = [NSString stringWithFormat:@"GET /build.bin HTTP/1.1\r\nHost: localhost\r\nIf-Modified-Since: %@\r\n\r\n", echoed];
+    XCTAssertTrue([SendRawRequest(server.port, same) containsString:@"304"], @"echoing back the served Last-Modified must still revalidate");
+
+    [server stop];
+    [fm removeItemAtPath:root error:NULL];
+}
+
 - (void)testIfRangeMismatchServesTheWholeRepresentation {
     NSFileManager* fm = [NSFileManager defaultManager];
     NSString* root = MakeTempDirectory();
@@ -1891,14 +1981,16 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     NSString* tail = [full substringFromIndex:(etagRange.location + etagRange.length)];
     NSString* etag = [[tail componentsSeparatedByString:@"\r\n"] firstObject];
 
+    // Assert on the status line, not containsString:@"206" — the ETag embeds the inode, whose
+    // digits contain "206" often enough to make that assertion flaky in both directions.
     NSString* matching = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /f.txt HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-4\r\nIf-Range: %@\r\n\r\n", etag]);
-    XCTAssertTrue([matching containsString:@"206"], @"a matching If-Range must still serve the range: %@", matching);
+    XCTAssertTrue([matching hasPrefix:@"HTTP/1.1 206"], @"a matching If-Range must still serve the range: %@", matching);
 
     // ...but a stale one must serve the entire representation, not a slice of a file the
     // client has never seen.
     NSString* stale = SendRawRequest(server.port, @"GET /f.txt HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-4\r\nIf-Range: \"0/0/0\"\r\n\r\n");
     XCTAssertNotNil(stale);
-    XCTAssertFalse([stale containsString:@"206"], @"a stale If-Range must not produce a partial response: %@", [stale substringToIndex:MIN((NSUInteger)40, stale.length)]);
+    XCTAssertTrue([stale hasPrefix:@"HTTP/1.1 200"], @"a stale If-Range must not produce a partial response: %@", [stale substringToIndex:MIN((NSUInteger)40, stale.length)]);
     XCTAssertTrue([stale containsString:@"AAAAAAAAAAAAAAAAAAAA"], @"the whole representation must be served: %@", stale);
 
     [server stop];

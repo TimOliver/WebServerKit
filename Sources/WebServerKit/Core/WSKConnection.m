@@ -1632,8 +1632,22 @@ static inline BOOL _CompareResources(NSString *responseETag, NSString *requestET
         return [requestETag isEqualToString:@"*"] || _ETagMatchesIfNoneMatch(responseETag, requestETag);
     }
 
+    // Exact equality, not "not newer". The old comparison answered 304 whenever the file's
+    // mtime was equal *or older*, which pins a date-only client on stale bytes permanently:
+    // restore a previous build (or rsync -a / cp -p / touch -t from an older source) and the
+    // client revalidating with the newer representation's Last-Modified is told 304, keeps the
+    // body it has, and — per RFC 9111 §4.3.4 — adopts the *current* ETag and Last-Modified from
+    // that 304. Its next revalidation therefore matches on the ETag too, so no request will
+    // ever dislodge it. It also answered 304 for an If-Modified-Since in the future, i.e. for a
+    // resource the client demonstrably does not hold.
+    //
+    // Safe to tighten here specifically because _NSDateFromTimeSpec truncates the response's
+    // Last-Modified to whole seconds (see the comment on it), and WSKParseRFC822 parses at the
+    // same precision, so a client echoing back the value it was given still compares equal and
+    // ordinary unchanged-file revalidation keeps working. This is also nginx's default
+    // ("if_modified_since exact"), so it is not an unusual reading.
     if (requestLastModified && responseLastModified) {
-        return [responseLastModified compare:requestLastModified] != NSOrderedDescending;
+        return [responseLastModified compare:requestLastModified] == NSOrderedSame;
     }
 
     return NO;
