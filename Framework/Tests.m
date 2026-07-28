@@ -2653,6 +2653,82 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 // This asserts the property, not a timing: the request is issued while a helper flips the link,
 // and the invariant is that NO response ever carries content from outside the root. Against the
 // unfixed source it fails within a few hundred iterations.
+// The same single-resolution property for the two servers that write. WebDAV was the sharpest:
+// with a symlink retargeted underneath it, 228 of 600 PUTs landed files OUTSIDE the share, and
+// 25.7% of GETs served content from outside it. The uploader's /download leaked 18.4%.
+- (void)testRetargetedSymlinkCannotEscapeTheUploaderOrWebDAV {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* base = MakeTempDirectory();
+    NSString* root = [base stringByAppendingPathComponent:@"root"];
+    NSString* outside = [base stringByAppendingPathComponent:@"outside"];
+    XCTAssertTrue([fm createDirectoryAtPath:[root stringByAppendingPathComponent:@"good"] withIntermediateDirectories:YES attributes:nil error:NULL]);
+    XCTAssertTrue([fm createDirectoryAtPath:outside withIntermediateDirectories:YES attributes:nil error:NULL]);
+    XCTAssertTrue([@"PUBLIC_MARKER" writeToFile:[root stringByAppendingPathComponent:@"good/target.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([@"SECRET_OUTSIDE_MARKER" writeToFile:[outside stringByAppendingPathComponent:@"target.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    NSString* link = [root stringByAppendingPathComponent:@"link"];
+    NSString* staging = [root stringByAppendingPathComponent:@".flip"];
+    XCTAssertEqual(symlink("good", link.fileSystemRepresentation), 0);
+
+    __block BOOL stop = NO;
+    dispatch_queue_t flipper = dispatch_queue_create("flip", DISPATCH_QUEUE_SERIAL);
+    dispatch_async(flipper, ^{
+        NSUInteger i = 0;
+        while (!stop) {
+            unlink(staging.fileSystemRepresentation);
+            if (symlink((i++ & 1) ? "good" : "../outside", staging.fileSystemRepresentation) == 0) {
+                rename(staging.fileSystemRepresentation, link.fileSystemRepresentation);
+            }
+        }
+    });
+
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+
+    WSKWebUploader* uploader = [[WSKWebUploader alloc] initWithUploadDirectory:root];
+    XCTAssertTrue([uploader startWithOptions:options error:NULL]);
+    NSUInteger uploaderLeaks = 0;
+    for (NSUInteger i = 0; i < 400; i++) {
+        if ([SendRawRequest(uploader.port, @"GET /download?path=/link/target.txt HTTP/1.1\r\nHost: localhost\r\n\r\n") containsString:@"SECRET_OUTSIDE_MARKER"]) {
+            uploaderLeaks++;
+        }
+    }
+    [uploader stop];
+
+    WSKWebDAVServer* dav = [[WSKWebDAVServer alloc] initWithUploadDirectory:root];
+    XCTAssertTrue([dav startWithOptions:options error:NULL]);
+    NSUInteger davLeaks = 0;
+    NSUInteger escapedWrites = 0;
+    for (NSUInteger i = 0; i < 400; i++) {
+        if ([SendRawRequest(dav.port, @"GET /link/target.txt HTTP/1.1\r\nHost: localhost\r\n\r\n") containsString:@"SECRET_OUTSIDE_MARKER"]) {
+            davLeaks++;
+        }
+        NSString* name = [NSString stringWithFormat:@"pwn%lu.txt", (unsigned long)i];
+        SendRawRequest(dav.port, [NSString stringWithFormat:@"PUT /link/%@ HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nPWNED", name]);
+        if ([fm fileExistsAtPath:[outside stringByAppendingPathComponent:name]]) {
+            escapedWrites++;
+        }
+    }
+    [dav stop];
+
+    stop = YES;
+    dispatch_sync(flipper, ^{
+    });
+
+    XCTAssertEqual(uploaderLeaks, (NSUInteger)0, @"%lu uploader downloads served content from outside the share", (unsigned long)uploaderLeaks);
+    XCTAssertEqual(davLeaks, (NSUInteger)0, @"%lu WebDAV GETs served content from outside the share", (unsigned long)davLeaks);
+    XCTAssertEqual(escapedWrites, (NSUInteger)0, @"%lu WebDAV PUTs wrote files outside the share", (unsigned long)escapedWrites);
+
+    // The honest cases must still work through both servers.
+    unlink(link.fileSystemRepresentation);
+    XCTAssertEqual(symlink("good", link.fileSystemRepresentation), 0);
+    WSKWebUploader* settled = [[WSKWebUploader alloc] initWithUploadDirectory:root];
+    XCTAssertTrue([settled startWithOptions:options error:NULL]);
+    XCTAssertTrue([SendRawRequest(settled.port, @"GET /download?path=/link/target.txt HTTP/1.1\r\nHost: localhost\r\n\r\n") containsString:@"PUBLIC_MARKER"], @"a stable in-root symlink stopped being served");
+    [settled stop];
+
+    [fm removeItemAtPath:base error:NULL];
+}
+
 - (void)testRetargetedSymlinkCannotEscapeTheServedRoot {
     NSFileManager* fm = [NSFileManager defaultManager];
     NSString* base = MakeTempDirectory();
