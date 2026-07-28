@@ -80,6 +80,92 @@ and the Bonjour/`.local` name only, so without it every request is refused with 
 
 ## Recent Changes
 
+### Eighth audit pass: property-testing the path rules, and a merged PR that never landed
+
+Narrow by design — aimed only at the path containment and hidden-item rules the seventh pass had
+just rewritten, on the reasoning that the reading-based lenses are mined out and the newest
+security-load-bearing code is where the risk is. The technique was new: **property-based testing**
+rather than hand-picked cases. Four generators composing percent-encodings, Unicode normalization
+and homoglyphs, case variance, symlink topologies and boundary lengths, asserting four invariants
+(containment, hiddenness, no over-refusal, cross-server agreement) over thousands of generated
+paths.
+
+It earned its place immediately, and the reason is worth keeping: every finding below came from
+*generating* inputs rather than from someone imagining the case. The NUL crash alone triggered on
+188 of 2,356 generated enumeration paths. **The invariants did not hold** — the hoped-for clean
+result did not materialise.
+
+**One unauthenticated GET killed the process.** `WSKNormalizePath` truncates at an embedded NUL,
+deliberately and correctly, because the filesystem's C-string APIs do and the mismatch is
+otherwise exploitable (`secret.dat\0.png` passes an extension allow-list and opens
+`secret.dat`). But truncating does not make the request mean what the client wrote, and the
+server went on to honour the prefix. `GET /list?path=%00` passed every guard — normalized to the
+upload root, which exists, is contained and is not hidden — and the per-entry JSON was then built
+from the **raw** value, where `-stringByAppendingPathComponent:` returns nil for a NUL-bearing
+receiver. Nil into a dictionary literal, `NSInvalidArgumentException`, nothing catches it,
+process gone. 5/5 in Debug and 5/5 in Release.
+
+This is the crash shape this file already names as recurring here — *a nil value reaching a
+dictionary literal* — resurfacing at a site the earlier fix for it did not cover. The note
+predicted the class; nobody had swept for it.
+
+**The worse half of the same defect: a destructive request honoured against the prefix.**
+`POST /delete path=/Keep%00/nonexistent` named nothing that exists and deleted `/Keep`. That is
+exactly what the design priorities above call the worst outcome — silently doing an approximation
+instead of refusing. So all six uploader endpoints taking a client path now refuse a NUL-bearing
+one with 400 (`WSKPathContainsNULByte`); normalization keeps truncating as a second line, so the
+extension-allow-list bypass stays closed.
+
+**A retargeted symlink escaped the share, in all three servers.** Every path-taking endpoint
+checked containment with one `realpath(3)`, hiddenness with a *second, independent* one, and then
+operated on a **third** path — the one the client sent, symlinks intact. Three observations of a
+filesystem that need not agree. Measured, with a helper thread retargeting a link via `rename(2)`
+so it is never absent:
+
+| surface | before | after |
+|---|---|---|
+| base-path handler `GET` | 977/4000 served content from outside the root (24.4%) | 0/4000 |
+| uploader `/download` | 551/3000 (18.4%) | 0/3000 |
+| WebDAV `GET` | 772/3000 (25.7%) | 0/3000 |
+| WebDAV `PUT` | **228/600 files written OUTSIDE the share** | 0/600 |
+| control, link held fixed | 0/1000 | 0/1000 |
+
+The write is the sharpest finding of any pass: a remote client causing files to land outside the
+shared directory, 38% of attempts. It needs no concurrency on the client side — the window is
+between the server's own steps inside one request — and for a build server rewriting a
+`latest ->` link while serving, the precondition is ordinary operation rather than an attack.
+
+`WSKResolveWithinDirectory()` resolves once and reports both the absolute location and its path
+relative to the resolved root, so both rules judge the same observation; each server's
+`-_resolvedPathForRelativePath:hidden:` wraps it, and callers **bind the result to the variable
+the rest of the method already used** — chosen over rewriting each downstream use because it
+makes "I missed one" structurally impossible, which is the failure mode that would matter most
+here. `-_isHiddenPath:` was deleted from both servers once every caller was converted: an unused
+second implementation of a security rule sitting beside the live one is a trap for whoever needs
+that check next.
+
+**Not closed, deliberately:** a real *directory* renamed between resolution and use. Closing it
+needs an `openat(2)` component walk or `O_NOFOLLOW_ANY`, which would also refuse the benign
+intermediate symlinks that work today and are covered by
+`testBasePathHandlerRefusesSymlinkEscape`.
+
+**⚠️ A merged PR is not a landed change.** The uploader/WebDAV fix was stacked on the base-path
+one. The base PR merged into `main` first; the stacked PR then merged into *its base branch*,
+which by then was detached from main's history. GitHub reported it MERGED. It was — into a dead
+branch, and the WebDAV write escape stayed live on `main`. It was caught by grepping `main` for
+the code rather than by reading the PR list, and confirmed with
+`git merge-base --is-ancestor`. **Do not stack PRs here**, or if you must, verify the landing by
+looking for the code. The same shape bit twice more in one session: a CI run reported success for
+a *pre-rebase* SHA, and `Run-Tests.sh` builds into `./build` while ad-hoc probes load from
+DerivedData, so a probe after a swap-build-restore reports the previous build. In all three a
+green signal was about something other than the thing being asked about.
+
+**Still open:** nothing from this pass's findings. Ten lower-severity property-test violations
+were reported but not verified, several looking like genuine cross-server disagreements — WebDAV
+`DELETE` has no subtree vetting where the uploader's does, and the three servers give three
+different answers for a benign symlink. Worth a pass of their own; they are consistency defects
+rather than containment ones.
+
 ### Seventh audit pass: a fix that did not fix, a crash, and the first real concurrency soak
 
 Aimed deliberately at what the sixth pass changed (~154 lines of production code) rather than
