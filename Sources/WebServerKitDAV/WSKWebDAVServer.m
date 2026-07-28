@@ -177,27 +177,40 @@ NS_ASSUME_NONNULL_END
 // Hidden-item protection has to cover every component of the path, not only the leaf:
 // refusing "/.git" while serving "/.git/config" protects nothing. Normalizing first means
 // a benign "." or ".." is resolved away rather than read as a name starting with a period.
-- (BOOL)_isHiddenPath:(NSString *)relativePath {
-    if (_allowHiddenItems) {
-        return NO;
+// See the identical helper in WSKWebUploader: resolve once, judge both rules on that single
+// observation, and act on the returned path rather than the one the client sent. A symlink
+// retargeted between two independent resolutions served content from outside the share and
+// landed a PUT outside it.
+- (nullable NSString *)_resolvedPathForRelativePath:(NSString *)relativePath hidden:(BOOL *)outHidden {
+    NSString *const normalizedPath = WSKNormalizePath(relativePath);
+    NSString *resolvedRelativePath = nil;
+    NSString *const resolvedPath = WSKResolveWithinDirectory([_uploadDirectory stringByAppendingPathComponent:normalizedPath], _uploadDirectory, &resolvedRelativePath);
+
+    if (outHidden) {
+        *outHidden = NO;
     }
 
-    NSString *const normalizedPath = WSKNormalizePath(relativePath);
+    if (resolvedPath == nil) {
+        return nil;
+    }
 
-    for (NSString *component in [normalizedPath pathComponents]) {
-        if ([component hasPrefix:@"."]) {  // The leading "/" component never matches.
-            return YES;
+    if (outHidden && !_allowHiddenItems) {
+        for (NSString *component in [normalizedPath pathComponents]) {
+            if ([component hasPrefix:@"."]) {
+                *outHidden = YES;
+                return resolvedPath;
+            }
+        }
+
+        for (NSString *component in [resolvedRelativePath pathComponents]) {
+            if ([component hasPrefix:@"."]) {
+                *outHidden = YES;
+                return resolvedPath;
+            }
         }
     }
 
-    // The walk above sees only what the client typed, and that is not where the bytes live: a
-    // symlink named "pub" pointing at ".git" makes "/pub/config" carry no dot at all, while
-    // containment passes because the target is inside the share. Both rules were satisfied by a
-    // path inside a dot-directory — readable here, enumerable through /list, and writable
-    // through DAV PUT, which refuses the same write spelled "/.git/hooks/x". Resolving is the
-    // only way to see it. The cheap textual walk stays in front so the realpath is only paid
-    // when it can change the answer.
-    return WSKResolvedPathHasHiddenComponent([_uploadDirectory stringByAppendingPathComponent:normalizedPath], _uploadDirectory);
+    return resolvedPath;
 }
 
 // A unique, hidden sibling of `path`. Building a replacement here — rather than removing
@@ -303,16 +316,21 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
 
 - (WSKResponse *)performGET:(WSKRequest *)request {
     NSString *const relativePath = request.path;
-    NSString *const absolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)];
+    NSString *absolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)];
     BOOL isDirectory = NO;
 
     // Containment comes before the item is stat'ed: answering 404-vs-403 from a path that
     // has not been checked yet is an existence oracle for the whole filesystem. Verify the
     // resolved location, not just the path text — a symlink inside the share can point out
     // of it, and the textual normalize/prefix checks cannot see that.
-    if (!WSKResolvedPathIsWithinDirectory(absolutePath, _uploadDirectory)) {
+    BOOL isHidden = NO;
+    NSString *const resolvedPath = [self _resolvedPathForRelativePath:relativePath hidden:&isHidden];
+
+    if (resolvedPath == nil) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Downloading \"%@\" is not allowed", relativePath];
     }
+
+    absolutePath = resolvedPath;
 
     if (![[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory]) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
@@ -320,7 +338,7 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
 
     NSString *const itemName = [absolutePath lastPathComponent];
 
-    if ([self _isHiddenPath:relativePath] || (!isDirectory && ![self _checkFileExtension:itemName])) {
+    if (isHidden || (!isDirectory && ![self _checkFileExtension:itemName])) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Downloading \"%@\" is not allowed", relativePath];
     }
 
@@ -361,7 +379,7 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
     }
 
     NSString *const relativePath = request.path;
-    NSString *const absolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)];
+    NSString *absolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)];
     BOOL isDirectory;
 
     if (!WSKPathIsInsideDirectory(absolutePath, _uploadDirectory)) {
@@ -375,9 +393,14 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
     // Checked after the parent-exists test above so a genuinely missing collection still
     // reports 409 rather than 403. The destination itself need not exist: the resolver
     // falls back to resolving the parent, so intermediate symlinks are still caught.
-    if (!WSKResolvedPathIsWithinDirectory(absolutePath, _uploadDirectory)) {
+    BOOL isHidden = NO;
+    NSString *const resolvedPath = [self _resolvedPathForRelativePath:relativePath hidden:&isHidden];
+
+    if (resolvedPath == nil) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Uploading to \"%@\" is not allowed", relativePath];
     }
+
+    absolutePath = resolvedPath;
 
     BOOL existing = [[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory];
 
@@ -387,7 +410,7 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
 
     NSString *const fileName = [absolutePath lastPathComponent];
 
-    if ([self _isHiddenPath:relativePath] || ![self _checkFileExtension:fileName]) {
+    if (isHidden || ![self _checkFileExtension:fileName]) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Uploading to \"%@\" is not allowed", relativePath];
     }
 
@@ -430,7 +453,7 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
     }
 
     NSString *const relativePath = request.path;
-    NSString *const absolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)];
+    NSString *absolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)];
     BOOL isDirectory = NO;
 
     // Refuse to operate on the upload directory itself: "DELETE /" collapses to it
@@ -441,9 +464,14 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
 
     // Deleting is destructive, so also confirm the resolved target is inside the share
     // rather than whatever a symlink points to outside it.
-    if (!WSKResolvedPathIsWithinDirectory(absolutePath, _uploadDirectory)) {
+    BOOL isHidden = NO;
+    NSString *const resolvedPath = [self _resolvedPathForRelativePath:relativePath hidden:&isHidden];
+
+    if (resolvedPath == nil) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not allowed", relativePath];
     }
+
+    absolutePath = resolvedPath;
 
     if (![[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory]) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
@@ -451,7 +479,7 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
 
     NSString *const itemName = [absolutePath lastPathComponent];
 
-    if ([self _isHiddenPath:relativePath] || (!isDirectory && ![self _checkFileExtension:itemName])) {
+    if (isHidden || (!isDirectory && ![self _checkFileExtension:itemName])) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not allowed", relativePath];
     }
 
@@ -480,7 +508,7 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
     }
 
     NSString *const relativePath = request.path;
-    NSString *const absolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)];
+    NSString *absolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)];
     BOOL isDirectory;
 
     if (!WSKPathIsInsideDirectory(absolutePath, _uploadDirectory)) {
@@ -492,11 +520,16 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
     }
 
     // After the parent-exists test, so a missing collection still reports 409 not 403.
-    if (!WSKResolvedPathIsWithinDirectory(absolutePath, _uploadDirectory)) {
+    BOOL isHidden = NO;
+    NSString *const resolvedPath = [self _resolvedPathForRelativePath:relativePath hidden:&isHidden];
+
+    if (resolvedPath == nil) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Creating \"%@\" is not allowed", relativePath];
     }
 
-    if ([self _isHiddenPath:relativePath]) {
+    absolutePath = resolvedPath;
+
+    if (isHidden) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Creating \"%@\" is not allowed", relativePath];
     }
 
@@ -556,7 +589,7 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
     }
 
     NSString *const srcRelativePath = request.path;
-    NSString *const srcAbsolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(srcRelativePath)];
+    NSString * srcAbsolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(srcRelativePath)];
 
     NSString *const destinationHeader = request.headers[@"Destination"];
     NSString *const hostHeader = request.headers[@"Host"];
@@ -588,7 +621,7 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"Malformed 'Destination' header: %@", destinationHeader];
     }
 
-    NSString *const dstAbsolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(dstRelativePath)];
+    NSString * dstAbsolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(dstRelativePath)];
 
     // Neither source nor destination may be the upload directory itself: a Destination
     // that collapses to the root (e.g. "/" or "/..") would otherwise let a MOVE with
@@ -617,19 +650,27 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
     // parent and the source's existence are established above, so those errors keep
     // their own status codes; the destination itself need not exist, since the resolver
     // falls back to its parent.
-    if (!WSKResolvedPathIsWithinDirectory(srcAbsolutePath, _uploadDirectory) || !WSKResolvedPathIsWithinDirectory(dstAbsolutePath, _uploadDirectory)) {
+    BOOL srcIsHidden = NO;
+    BOOL dstIsHidden = NO;
+    NSString *const resolvedSrcPath = [self _resolvedPathForRelativePath:srcRelativePath hidden:&srcIsHidden];
+    NSString *const resolvedDstPath = [self _resolvedPathForRelativePath:dstRelativePath hidden:&dstIsHidden];
+
+    if ((resolvedSrcPath == nil) || (resolvedDstPath == nil)) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"%@ \"%@\" to \"%@\" is not allowed", isMove ? @"Moving" : @"Copying", srcRelativePath, dstRelativePath];
     }
 
+    srcAbsolutePath = resolvedSrcPath;
+    dstAbsolutePath = resolvedDstPath;
+
     NSString *const srcName = [srcAbsolutePath lastPathComponent];
 
-    if ([self _isHiddenPath:srcRelativePath] || (!srcIsDirectory && ![self _checkFileExtension:srcName])) {
+    if (srcIsHidden || (!srcIsDirectory && ![self _checkFileExtension:srcName])) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"%@ from \"%@\" is not allowed", isMove ? @"Moving" : @"Copying", srcRelativePath];
     }
 
     NSString *const dstName = [dstAbsolutePath lastPathComponent];
 
-    if ([self _isHiddenPath:dstRelativePath] || (!srcIsDirectory && ![self _checkFileExtension:dstName])) {
+    if (dstIsHidden || (!srcIsDirectory && ![self _checkFileExtension:dstName])) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"%@ to \"%@\" is not allowed", isMove ? @"Moving" : @"Copying", dstRelativePath];
     }
 
@@ -848,14 +889,19 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
     }
 
     NSString *relativePath = request.path;
-    NSString *const absolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)];
+    NSString *absolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)];
     BOOL isDirectory = NO;
 
     // As in -performGET:, containment is confirmed before the item is stat'ed so that the
     // 404-vs-403 answer is not an existence oracle for paths outside the share.
-    if (!WSKResolvedPathIsWithinDirectory(absolutePath, _uploadDirectory)) {
+    BOOL isHidden = NO;
+    NSString *const resolvedPath = [self _resolvedPathForRelativePath:relativePath hidden:&isHidden];
+
+    if (resolvedPath == nil) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Retrieving properties for \"%@\" is not allowed", relativePath];
     }
+
+    absolutePath = resolvedPath;
 
     if (![[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory]) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
@@ -863,7 +909,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
 
     NSString *const itemName = [absolutePath lastPathComponent];
 
-    if ([self _isHiddenPath:relativePath] || (!isDirectory && ![self _checkFileExtension:itemName])) {
+    if (isHidden || (!isDirectory && ![self _checkFileExtension:itemName])) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Retrieving properties for \"%@\" is not allowed", relativePath];
     }
 
@@ -924,15 +970,20 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
     }
 
     NSString *const relativePath = request.path;
-    NSString *const absolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)];
+    NSString *absolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)];
     BOOL isDirectory = NO;
 
     // Locking neither reads nor writes content, but the resolved location is checked here
     // — before the item is stat'ed — so that no path-handling entry point is left without
     // one, and so the 404-vs-403 answer is not an existence oracle outside the share.
-    if (!WSKResolvedPathIsWithinDirectory(absolutePath, _uploadDirectory)) {
+    BOOL isHidden = NO;
+    NSString *const resolvedPath = [self _resolvedPathForRelativePath:relativePath hidden:&isHidden];
+
+    if (resolvedPath == nil) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Locking \"%@\" is not allowed", relativePath];
     }
+
+    absolutePath = resolvedPath;
 
     if (![[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory]) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
@@ -998,7 +1049,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
 
     NSString *const itemName = [absolutePath lastPathComponent];
 
-    if ([self _isHiddenPath:relativePath] || (!isDirectory && ![self _checkFileExtension:itemName])) {
+    if (isHidden || (!isDirectory && ![self _checkFileExtension:itemName])) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Locking \"%@\" is not allowed", relativePath];
     }
 
@@ -1056,14 +1107,19 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
     }
 
     NSString *const relativePath = request.path;
-    NSString *const absolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)];
+    NSString *absolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)];
     BOOL isDirectory = NO;
 
     // As in -performLOCK:, checked so that no path-handling entry point lacks one, and
     // ahead of the stat so the 404-vs-403 answer reveals nothing outside the share.
-    if (!WSKResolvedPathIsWithinDirectory(absolutePath, _uploadDirectory)) {
+    BOOL isHidden = NO;
+    NSString *const resolvedPath = [self _resolvedPathForRelativePath:relativePath hidden:&isHidden];
+
+    if (resolvedPath == nil) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Unlocking \"%@\" is not allowed", relativePath];
     }
+
+    absolutePath = resolvedPath;
 
     if (![[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory]) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
@@ -1077,7 +1133,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
 
     NSString *const itemName = [absolutePath lastPathComponent];
 
-    if ([self _isHiddenPath:relativePath] || (!isDirectory && ![self _checkFileExtension:itemName])) {
+    if (isHidden || (!isDirectory && ![self _checkFileExtension:itemName])) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Unlocking \"%@\" is not allowed", relativePath];
     }
 
