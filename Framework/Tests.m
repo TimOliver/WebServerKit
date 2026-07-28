@@ -1391,6 +1391,49 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 // files a direct DELETE would refuse — otherwise the same allow-list means two different
 // things depending on how the request is phrased. Dot-files are the one exception: the
 // client cannot see or address them, and every macOS folder carries a ".DS_Store".
+// WSKNormalizePath truncates at an embedded NUL, because the filesystem's C-string APIs do and
+// the mismatch is otherwise exploitable ("secret.dat\0.png" passes an extension allow-list and
+// opens "secret.dat"). But truncating meant the server then honoured a request the client never
+// made. Two consequences, both measured: "/list?path=\0" passed every guard on the truncated
+// path and built a per-entry dictionary literal from the RAW one, where
+// -stringByAppendingPathComponent: returns nil for a NUL-bearing receiver — NSInvalidArgumentException,
+// uncaught, process gone, from one unauthenticated GET in Debug and Release alike. And
+// "/delete?path=/Keep\0/nonexistent" named nothing that exists, yet deleted "/Keep".
+//
+// NOTE: against the unfixed source the first half does not fail, it ABORTS the test process,
+// which xctest reports as "0 failures". Read the executed count.
+- (void)testUploaderRefusesPathsContainingNULRatherThanTruncating {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    NSString* keep = [dir stringByAppendingPathComponent:@"Keep"];
+    XCTAssertTrue([fm createDirectoryAtPath:keep withIntermediateDirectories:YES attributes:nil error:NULL]);
+    XCTAssertTrue([@"precious" writeToFile:[keep stringByAppendingPathComponent:@"data.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    WSKWebUploader* server = [[WSKWebUploader alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    NSString* host = [NSString stringWithFormat:@"localhost:%lu", (unsigned long)server.port];
+
+    // The listing endpoint, which is where the nil reached the dictionary literal.
+    for (NSString* encoded in @[ @"%00", @"/Keep%00", @"%00/Keep", @"/%00" ]) {
+        NSString* reply = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /list?path=%@ HTTP/1.1\r\nHost: %@\r\n\r\n", encoded, host]);
+        XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 400"], @"\"%@\" should be refused: %@", encoded, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+    }
+
+    // A destructive request must never be honoured against a truncated prefix.
+    NSString* body = @"path=%2FKeep%00%2Fnonexistent";
+    NSString* deleted = SendRawRequest(server.port, [NSString stringWithFormat:@"POST /delete HTTP/1.1\r\nHost: %@\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %lu\r\n\r\n%@", host, (unsigned long)body.length, body]);
+    XCTAssertTrue([deleted hasPrefix:@"HTTP/1.1 400"], @"a NUL-bearing delete should be refused: %@", [deleted substringToIndex:MIN((NSUInteger)40, deleted.length)]);
+    XCTAssertTrue([fm fileExistsAtPath:keep], @"the truncated prefix was deleted instead of the path the client sent");
+
+    // And the ordinary paths must be untouched by all of this.
+    XCTAssertTrue([SendRawRequest(server.port, [NSString stringWithFormat:@"GET /list?path=/ HTTP/1.1\r\nHost: %@\r\n\r\n", host]) hasPrefix:@"HTTP/1.1 200"], @"an ordinary listing stopped working");
+    XCTAssertTrue([SendRawRequest(server.port, [NSString stringWithFormat:@"GET /list?path=/Keep HTTP/1.1\r\nHost: %@\r\n\r\n", host]) containsString:@"data.txt"], @"listing a subdirectory stopped working");
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 - (void)testUploaderRecursiveDeleteRespectsExtensionAllowList {
     NSFileManager* fm = [NSFileManager defaultManager];
     NSString* dir = MakeTempDirectory();

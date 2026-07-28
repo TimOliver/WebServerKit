@@ -103,6 +103,20 @@ NSString *WSKFormatISO8601(NSDate *date);
 NSDate *_Nullable WSKParseISO8601(NSString *string);
 
 /**
+ *  Returns YES if `path` contains an embedded NUL.
+ *
+ *  WSKNormalizePath() truncates at a NUL, because the filesystem's C-string APIs do and the
+ *  mismatch is exploitable — "secret.dat\0.png" otherwise passes an extension allow-list and
+ *  then opens "secret.dat". But truncating means the server goes on to honour a request the
+ *  client did not make: "/Keep\0/nonexistent" named nothing, and deleted "/Keep".
+ *
+ *  So a client-supplied path carrying a NUL should be REFUSED at the point it arrives, not
+ *  quietly rewritten. Normalization keeps truncating as a second line for any path that reaches
+ *  it by another route.
+ */
+BOOL WSKPathContainsNULByte(NSString *_Nullable path);
+
+/**
  *  Removes "//", "/./" and "/../" components from path as well as any trailing slash.
  */
 NSString *WSKNormalizePath(NSString *path);
