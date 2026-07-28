@@ -561,16 +561,43 @@ NSString *WSKResolvedPathRelativeToDirectory(NSString *path, NSString *directory
     }
 
     if ([resolvedPath isEqualToString:resolvedDirectory]) {
-        return @"";
+        return @"";  // The root itself, which is inside itself but has no relative part.
     }
 
     if (!WSKPathIsInsideDirectory(resolvedPath, resolvedDirectory)) {
         return nil;
     }
 
+    // Relative to the *resolved* root, which is the whole point: the root itself may sit under
+    // a dot-directory — NSTemporaryDirectory() under a sandboxed app routinely does — and
+    // testing the absolute resolved path for hidden components would then refuse every file
+    // it serves.
     return [resolvedPath substringFromIndex:(resolvedDirectory.length + ([resolvedDirectory hasSuffix:@"/"] ? 0 : 1))];
 }
 
 BOOL WSKResolvedPathIsWithinDirectory(NSString *path, NSString *directory) {
     return (WSKResolvedPathRelativeToDirectory(path, directory) != nil);
+}
+
+BOOL WSKResolvedPathHasHiddenComponent(NSString *path, NSString *directory) {
+    NSString *const relativePath = WSKResolvedPathRelativeToDirectory(path, directory);
+
+    if (relativePath == nil) {
+        // Outside the root, or unresolvable. Containment is a separate check and reports that
+        // separately; answering YES here would mislabel an escape as a hidden item, so say no
+        // and let containment refuse it.
+        return NO;
+    }
+
+    // Resolved, so this catches what a textual test on the request path cannot: a symlink whose
+    // own name carries no dot but whose target lives inside a dot-directory. Both tests are
+    // needed — this one alone would miss nothing here, but it costs a realpath, so callers keep
+    // their cheap textual walk in front of it.
+    for (NSString *component in [relativePath pathComponents]) {
+        if ([component hasPrefix:@"."]) {
+            return YES;
+        }
+    }
+
+    return NO;
 }

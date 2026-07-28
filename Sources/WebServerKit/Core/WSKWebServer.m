@@ -1560,6 +1560,10 @@ static NSString *_EscapeHTMLString(NSString *string) {
 }
 
 - (void)addGETHandlerForBasePath:(NSString *)basePath directoryPath:(NSString *)directoryPath indexFilename:(NSString *)indexFilename cacheAge:(NSUInteger)cacheAge allowRangeRequests:(BOOL)allowRangeRequests {
+    [self addGETHandlerForBasePath:basePath directoryPath:directoryPath indexFilename:indexFilename cacheAge:cacheAge allowRangeRequests:allowRangeRequests allowHiddenItems:NO];
+}
+
+- (void)addGETHandlerForBasePath:(NSString *)basePath directoryPath:(NSString *)directoryPath indexFilename:(NSString *)indexFilename cacheAge:(NSUInteger)cacheAge allowRangeRequests:(BOOL)allowRangeRequests allowHiddenItems:(BOOL)allowHiddenItems {
     if ([basePath hasPrefix:@"/"] && [basePath hasSuffix:@"/"]) {
         WSKWebServer *__unsafe_unretained server = self;
         [self
@@ -1585,6 +1589,15 @@ static NSString *_EscapeHTMLString(NSString *string) {
                 // that vend files already refuse hidden items; this was the one file-serving
                 // path in the library with no such concept. Every component is tested, not
                 // just the leaf, because the interesting secrets live *inside* a dot-directory.
+                if (!allowHiddenItems) {
+                    for (NSString *component in [relativePath componentsSeparatedByString:@"/"]) {
+                        if ([component hasPrefix:@"."]) {
+                            WSK_LOG_WARNING(@"Refusing to serve \"%@\": \"%@\" is a hidden item", relativePath, component);
+                            return [WSKResponse responseWithStatusCode:kWSKHTTPStatusCode_NotFound];
+                        }
+                    }
+                }
+
                 NSString *filePath = [directoryPath stringByAppendingPathComponent:relativePath];
                 // Stripping ".." textually is not containment: -attributesOfItemAtPath: uses
                 // lstat, which only refuses a symlink as the *final* component, and O_NOFOLLOW
@@ -1599,11 +1612,14 @@ static NSString *_EscapeHTMLString(NSString *string) {
                     return [WSKResponse responseWithStatusCode:kWSKHTTPStatusCode_NotFound];
                 }
 
-                for (NSString *component in [resolvedRelativePath componentsSeparatedByString:@"/"]) {
-                    if ([component hasPrefix:@"."]) {
-                        WSK_LOG_WARNING(@"Refusing to serve \"%@\": \"%@\" is a hidden item", relativePath, component);
-                        return [WSKResponse responseWithStatusCode:kWSKHTTPStatusCode_NotFound];
-                    }
+                // Containment and hiddenness are independent, and the textual walk above only
+                // sees the path the *client* typed. A symlink named "pub" pointing at ".git"
+                // carries no dot in "/pub/config" and resolves inside the root, so both checks
+                // passed and the file was served. Tested after containment so an escape is still
+                // reported as an escape rather than mislabelled a hidden item.
+                if (!allowHiddenItems && WSKResolvedPathHasHiddenComponent(filePath, directoryPath)) {
+                    WSK_LOG_WARNING(@"Refusing to serve \"%@\": it resolves inside a hidden item", relativePath);
+                    return [WSKResponse responseWithStatusCode:kWSKHTTPStatusCode_NotFound];
                 }
 
                 NSString *fileType = [[[NSFileManager defaultManager] attributesOfItemAtPath:filePath error:NULL] fileType];
