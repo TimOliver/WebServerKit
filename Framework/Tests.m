@@ -2014,6 +2014,63 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 // only stripped ".." textually, and lstat/O_NOFOLLOW refuse a symlink solely as the *final*
 // component. Any symlinked directory under the served root therefore served whatever it
 // pointed at.
+// -addGETHandlerForBasePath: was the one file-vending path with no hidden-item concept,
+// while its own directory listing skips every dot-entry — so the browsable index advertised
+// a smaller tree than the one actually served, and an operator checking in a browser would
+// never notice. Both subclasses already refuse hidden items.
+- (void)testBasePathHandlerRefusesHiddenItems {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* root = MakeTempDirectory();
+    XCTAssertTrue([fm createDirectoryAtPath:[root stringByAppendingPathComponent:@".git"] withIntermediateDirectories:YES attributes:nil error:NULL]);
+    XCTAssertTrue([@"url = https://user:TOKEN@example.com/x.git" writeToFile:[root stringByAppendingPathComponent:@".git/config"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([@"SECRET=1" writeToFile:[root stringByAppendingPathComponent:@".env"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([@"public" writeToFile:[root stringByAppendingPathComponent:@"build.ipa"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addGETHandlerForBasePath:@"/" directoryPath:root indexFilename:nil cacheAge:0 allowRangeRequests:YES];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    XCTAssertTrue([SendRawRequest(server.port, @"GET /build.ipa HTTP/1.1\r\nHost: localhost\r\n\r\n") containsString:@"200"], @"ordinary files must still be served");
+
+    // A dotfile at the root, and a file *inside* a dot-directory — the latter is where the
+    // interesting secrets live, so the check has to walk every component, not just the leaf.
+    NSString* env = SendRawRequest(server.port, @"GET /.env HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([env containsString:@"404"], @"a dotfile must not be served: %@", [env substringToIndex:MIN((NSUInteger)40, env.length)]);
+    XCTAssertFalse([env containsString:@"SECRET"], @"the dotfile's contents leaked");
+
+    NSString* git = SendRawRequest(server.port, @"GET /.git/config HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([git containsString:@"404"], @"a file inside a dot-directory must not be served: %@", [git substringToIndex:MIN((NSUInteger)40, git.length)]);
+    XCTAssertFalse([git containsString:@"TOKEN"], @"the credential leaked");
+
+    [server stop];
+    [fm removeItemAtPath:root error:NULL];
+}
+
+// The listing HTML-escapes each entry's link *text* but built the href from percent-encoding
+// alone. URLPathAllowedCharacterSet leaves "&" and ";" intact and an HTML parser decodes named
+// character references inside attribute values, so "javascript&colon;alert(1)" became a live
+// javascript: URL in the server's own origin.
+- (void)testDirectoryListingEscapesHrefEntities {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* root = MakeTempDirectory();
+    NSString* hostile = @"javascript&colon;alert(1)";
+    XCTAssertTrue([@"x" writeToFile:[root stringByAppendingPathComponent:hostile] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addGETHandlerForBasePath:@"/" directoryPath:root indexFilename:nil cacheAge:0 allowRangeRequests:NO];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* listing = SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertNotNil(listing);
+    XCTAssertTrue([listing containsString:@"&amp;colon;"], @"href entity not escaped: %@", listing);
+    XCTAssertFalse([listing containsString:@"\"javascript&colon;"], @"a raw entity survived into the href attribute: %@", listing);
+
+    [server stop];
+    [fm removeItemAtPath:root error:NULL];
+}
+
 - (void)testBasePathHandlerRefusesSymlinkEscape {
     NSFileManager* fm = [NSFileManager defaultManager];
     NSString* root = MakeTempDirectory();

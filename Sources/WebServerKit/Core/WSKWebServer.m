@@ -1516,7 +1516,15 @@ static NSString *_EscapeHTMLString(NSString *string) {
                 continue;
             }
 
-            NSString *const escapedFile = [entry stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLPathAllowedCharacterSet]];
+            // Percent-encoding alone is not enough for an attribute value. URLPathAllowedCharacterSet
+            // leaves "&" and ";" intact, and an HTML parser decodes named character references
+            // inside attributes — so a file named "javascript&colon;alert(1)" was emitted
+            // verbatim and the browser read the href as "javascript:alert(1)". The link *text*
+            // has been HTML-escaped since the fourth pass; the attribute never was, and the two
+            // halves disagreed about whether filenames are hostile. Percent-encoding has already
+            // removed <, >, " and ', so this only turns "&" into "&amp;" — which is exactly what
+            // defeats the entity.
+            NSString *const escapedFile = _EscapeHTMLString([entry stringByAddingPercentEncodingWithAllowedCharacters:[NSCharacterSet URLPathAllowedCharacterSet]]);
             WSK_DCHECK(escapedFile);
 
             NSString *const escapedEntry = _EscapeHTMLString(entry);  // The filename is reflected into HTML text; escape it to prevent stored XSS via crafted names.
@@ -1551,7 +1559,23 @@ static NSString *_EscapeHTMLString(NSString *string) {
             }
             processBlock:^WSKResponse *(WSKRequest *request) {
                 WSKResponse *response = nil;
-                NSString *filePath = [directoryPath stringByAppendingPathComponent:WSKNormalizePath([request.path substringFromIndex:basePath.length])];
+                NSString *const relativePath = WSKNormalizePath([request.path substringFromIndex:basePath.length]);
+
+                // The directory listing below deliberately omits every dot-entry, so without
+                // this the browsable index actively advertises a *smaller* tree than the one
+                // being served: ".git/config", ".env" and friends stayed directly fetchable
+                // and an operator checking in a browser would never see them. Both subclasses
+                // that vend files already refuse hidden items; this was the one file-serving
+                // path in the library with no such concept. Every component is tested, not
+                // just the leaf, because the interesting secrets live *inside* a dot-directory.
+                for (NSString *component in [relativePath componentsSeparatedByString:@"/"]) {
+                    if ([component hasPrefix:@"."]) {
+                        WSK_LOG_WARNING(@"Refusing to serve \"%@\": \"%@\" is a hidden item", relativePath, component);
+                        return [WSKResponse responseWithStatusCode:kWSKHTTPStatusCode_NotFound];
+                    }
+                }
+
+                NSString *filePath = [directoryPath stringByAppendingPathComponent:relativePath];
                 // Stripping ".." textually is not containment: -attributesOfItemAtPath: uses
                 // lstat, which only refuses a symlink as the *final* component, and O_NOFOLLOW
                 // in the file response does the same — so any symlinked directory anywhere
