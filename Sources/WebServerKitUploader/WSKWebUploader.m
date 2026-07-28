@@ -260,6 +260,25 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
         // an hour. Unchanged files still return a cheap 304, but after an app
         // update the rebuilt bundle changes each file's ETag, so the new assets
         // (e.g. index.js) are picked up immediately rather than served stale.
+        // Registered FIRST so that it is matched LAST — handlers are inserted at index 0, so
+        // registration order is reverse match order. A GET that nothing else claims answers 404
+        // rather than the 501 the server returns when no handler matches at all, which is a
+        // statement about the *method* and wrong here. Serving the bundle root used to supply
+        // this incidentally: every unmatched GET fell through to a missing-file 404. Scoping the
+        // asset handlers below took that away, so "/favicon.ico" — which browsers request
+        // unprompted — began answering "Not Implemented". Matches GET only, which is exactly
+        // what the base path handler did, so no other method's status changes.
+        [self addHandlerWithMatchBlock:^WSKRequest *(NSString *requestMethod, NSURL *requestURL, NSDictionary<NSString *, NSString *> *requestHeaders, NSString *urlPath, NSDictionary<NSString *, NSString *> *urlQuery) {
+            if (![requestMethod isEqualToString:@"GET"]) {
+                return nil;
+            }
+
+            return [[WSKRequest alloc] initWithMethod:requestMethod url:requestURL headers:requestHeaders path:urlPath query:urlQuery];
+        }
+            processBlock:^WSKResponse *(WSKRequest *request) {
+                return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", request.path];
+            }];
+
         //
         // Only the three asset directories the page actually loads are served. Serving the
         // bundle's *root* also exposed index.html — which is the template, and which the base
