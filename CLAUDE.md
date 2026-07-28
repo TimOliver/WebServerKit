@@ -80,7 +80,7 @@ and the Bonjour/`.local` name only, so without it every request is refused with 
 
 ## Recent Changes
 
-### Seventh audit pass: the sixth pass's own diff, and the first real concurrency soak
+### Seventh audit pass: a fix that did not fix, a crash, and the first real concurrency soak
 
 Aimed deliberately at what the sixth pass changed (~154 lines of production code) rather than
 at the tree, on the observation that **every pass has planted defects the next one found** —
@@ -109,11 +109,14 @@ Not a regression — the pre-fix commit was built and measured and behaves ident
 defect was in the claim, not the code, which is the more dangerous kind in a file whose purpose
 is to be trusted.
 
-**The uploader's asset restructure turned unmatched paths from 404 into 501.** Removing the
-catch-all base-path handler left nothing matching `/favicon.ico`, which every browser requests,
-so the server answered `501 Not Implemented` — "I do not implement this method", about a method
-it implements fine. Inside the scoped asset directories a miss is still correctly 404. This one
-*is* a regression from the sixth pass.
+**The uploader's asset restructure turned unmatched paths from 404 into 501** — a regression from
+the sixth pass. Removing the catch-all base-path handler left nothing matching `/favicon.ico`,
+which browsers request unprompted, so the server answered `501 Not Implemented` — a statement
+about the *method*, which it implements fine. Inside the scoped asset directories a miss was
+still correctly 404. A catch-all GET handler restores it, registered *first* so it matches
+*last*: handlers are inserted at index 0, so registration order is reverse match order, and
+getting that backwards would shadow the page and every asset while still passing a naive 404
+check. The test asserts `/` and `/css/index.css` still return 200.
 
 **Nothing accumulates under sustained concurrent load — the first time that has been measured.**
 The existing soak is ~450 *sequential* requests; Shape A is weeks of concurrency. A harness ran
@@ -134,6 +137,85 @@ exact-equality change holds end to end with `If-None-Match` precedence per RFC 9
 before the change set, established by building the earlier commit rather than by reading. Worth
 noting as the pattern it is: an agent auditing a diff will attribute anything it finds nearby to
 that diff unless it is made to check.
+
+**A single unauthenticated request could kill the process.** A request matching no handler is
+built in its own branch of `-_readRequestHeaders` and handed to `-abortRequest:withStatusCode:`,
+which is a subclassing point a host app reaches through the public `WSKOption_ConnectionClass`.
+That branch set *none* of the three fields the matched path sets — so a subclass doing the
+obvious thing in that hook, logging who the refused request came from, read `-remoteAddressString`
+on a request whose address data was nil. `WSKStringFromSockAddr` evaluates `addr->sa_len` before
+calling `getnameinfo`, so there is nothing to fail closed on: SEGV, observed under ASan, from
+`GET` or `HEAD` to any path no handler claims. The address half is old; the third field,
+`virtualHEAD`, was the sixth pass's own omission — it added the flag to the matched path only.
+`testAbortedRequestCarriesItsAddressesAndHEADFlag` covers it, and **against the unfixed source it
+does not fail, it SEGVs and takes the whole test process with it** — reported as "0 failures".
+Read the executed count.
+
+**A symlink defeated hidden-item protection in all three servers.** Hiddenness and containment
+are independent rules, and every hidden-item check tested the path the *client typed*. A symlink
+named `pub` pointing at `.git` makes `/pub/config` carry no dot at all, while containment passes
+because the target is inside the served root — so both rules were satisfied by a path whose bytes
+live inside a dot-directory. Measured: the base-path handler served it, the uploader both
+downloaded and *enumerated* through it (discoverable in the UI, not guessed), and WebDAV wrote
+through it — `PUT /pub/hooks/x` answered 201 and landed in `.git/hooks/x`, a write the same
+server refuses spelled `/.git/hooks/x`. `WSKResolvedPathHasHiddenComponent()` now tests the
+resolved path expressed relative to the *resolved root*; relative to the root deliberately,
+because the root itself may live under a dot-directory (`NSTemporaryDirectory()` under a
+sandboxed app routinely does) and testing the absolute path would refuse every file the server
+vends. That case is in the test, because it is the trap the naive version of this springs.
+
+Pre-existing, and it needs a symlink already present in the served content — nothing in this
+library creates one, so it arrives with a git checkout, an unpacked archive or an operator's own
+link. Because "hidden" now means where the bytes live, a deliberate convenience link such as
+`latest -> .builds/2026-07-25` stops resolving, and `addGETHandlerForBasePath:` had no
+`allowHiddenItems` concept at all — so it gained an `allowHiddenItems:` variant. The existing
+five-argument form delegates with `NO`, so no caller changes behaviour.
+
+**An SSE channel outlived its own connection by 30 seconds.** `WSKConnection` calls
+`-performClose` the moment the body write chain ends, including the write that fails because the
+client has gone; nothing in the uploader listened, so the reaper's two idle ticks started only
+*after* the server already knew. Sixteen abandoned streams — browser tabs navigating away, no
+hostility required — denied live updates for about a minute. The channel now dies with the
+connection. **This is a halving, not a cure, and the entry should not be read as more:** measured
+62s → 32s with graceful closes. It removes the reaper's 30s tail only; the 15–30s the server
+takes to *discover* the departure is untouched, because nothing tells it until a write fails.
+The reaper remains the backstop for a client that is merely silent. (`retry: 30000` in the
+refusal body is a one-constant lever on the client-visible half, if it ever matters.)
+
+**⚠️ Unreviewed agent code reached `main` under an unrelated commit message.** While the triage
+agents were running, `git add -A` on the If-Range branch swept an agent's edits to
+`WSKFunctions.h/.m` and `WSKWebServer.m` into commit `aa1969a`, whose message describes only the
+If-Range change. Those edits implemented the base-path half of the symlink fix above. They were
+correct, and they passed CI and the full harness — but that is luck, not process, and the history
+now attributes them to a commit that never mentions them. Recorded here because an unattributed
+edit on `main` is exactly the kind of thing that becomes invisible in a month. Two things were
+changed back afterwards: the cheap textual walk was put in front of the resolved one, so a
+`realpath` is only paid when it can change the answer, and the resolved test was moved after
+containment, so an escape is still reported as an escape rather than as a hidden item.
+
+**Orchestration lessons, all three the same shape.** Agents were told not to edit the tree and one
+did anyway, leaving a half-applied fix that broke the build. Concurrent agent builds clobbered
+shared DerivedData twice, producing a phantom link failure and a phantom "the fixes are not on
+main". And `args` passed as a JSON string arrived as `undefined`, so the first workflow's prompts
+read `SCOPE: the change set undefined..undefined` — the agents recovered because the changed-file
+list was spelled out, but the scope instruction was degraded. Any agent that might write needs
+worktree isolation; anything building concurrently needs its own `-derivedDataPath`; and staging
+should name paths rather than `-A` while background work is live.
+
+**Still open — one finding, deliberately not taken.** With `WSKOption_AutomaticallyMapHEADToGET`
+set to `NO` *and* a handler registered for `HEAD`, a response body is written to a HEAD request,
+which RFC 9110 §9.3.2 forbids. Nothing in the tree does either half — the option defaults to YES
+and no in-tree handler registers HEAD — so it takes a host app opting into both. Recorded rather
+than fixed because the obvious one-line fix is wrong: keying on `_request.method` uses whatever
+the match block stamped, not what arrived on the wire, so a handler registered through the public
+`addHandlerWithMatchBlock:` with `initWithMethod:@"HEAD"` would have a genuine GET's body
+suppressed. Fix it off the wire method if it ever becomes reachable.
+
+Carried forward from the sixth pass, both still true and both pre-existing: `bootstrap.css`
+requests `.woff`/`.woff2` glyphicons that are not in the bundle (a 404 on every page load;
+browsers fall back to the `.ttf` that ships), and `WSKFormatRFC822`/`WSKParseRFC822` are public
+but `dispatch_sync` on a queue only created by `+[WSKWebServer initialize]`, so calling either
+before any server exists crashes.
 
 ### Sixth audit pass: a process-killing socket option, two dishonest validators, and the uploader's channels
 
