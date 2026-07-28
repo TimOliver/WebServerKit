@@ -1453,7 +1453,8 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     XCTAssertTrue([gAbortRequestPeer hasPrefix:@"127.0.0.1"], @"peer address is wrong: %@", gAbortRequestPeer);
     XCTAssertTrue(gAbortRequestSawVirtualHEAD, @"a mapped HEAD must be distinguishable from a real GET on this path");
 
-    [server stop];}
+    [server stop];
+}
 
 // Hiddenness and containment are independent rules, and the hidden-item walk saw only the path
 // the client typed. A symlink named "pub" pointing at ".git" makes "/pub/config" carry no dot,
@@ -1512,7 +1513,61 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     XCTAssertTrue([legitimate hasPrefix:@"HTTP/1.1 201"], @"WebDAV stopped accepting an ordinary PUT: %@", [legitimate substringToIndex:MIN((NSUInteger)40, legitimate.length)]);
     [dav stop];
 
-    [fm removeItemAtPath:root error:NULL];}
+    [fm removeItemAtPath:root error:NULL];
+}
+
+// A channel used to outlive its own connection by a full 30s: the server learned of the client's
+// departure only when a write failed, and only *then* did the reaper start counting its two idle
+// ticks. So 16 abandoned streams — browser tabs navigating away, no hostility required — denied
+// live updates to a real client long after the server knew every one of them was gone. The
+// channel now dies with the connection, and the reaper remains the backstop for a client that is
+// merely silent.
+//
+// The clients here reset rather than closing gracefully, and a broadcast is issued to force the
+// write that discovers them. Both are for speed: they collapse the discovery delay that this fix
+// does NOT address, isolating the 30s reaper tail that it does. A graceful close is slower on
+// both sides of the fix (measured: 62s before, 32s after).
+- (void)testSSEChannelIsReleasedWhenItsConnectionEnds {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+
+    WSKWebUploader* server = [[WSKWebUploader alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    NSString* host = [NSString stringWithFormat:@"localhost:%lu", (unsigned long)server.port];
+    NSString* sseRequest = [NSString stringWithFormat:@"GET /events HTTP/1.1\r\nHost: %@\r\nAccept: text/event-stream\r\nSec-Fetch-Dest: empty\r\nSec-Fetch-Mode: cors\r\nSec-Fetch-Site: same-origin\r\n\r\n", host];
+
+    // Fill every one of the kMaxSSEChannels slots, then abandon them.
+    for (NSUInteger i = 0; i < 16; i++) {
+        int fd = ConnectToLocalhostPort(server.port);
+        XCTAssertTrue(fd >= 0, @"could not open stream %lu", (unsigned long)i);
+        const char* bytes = [sseRequest UTF8String];
+        send(fd, bytes, strlen(bytes), 0);
+        char buffer[2048];
+        recv(fd, buffer, sizeof(buffer), 0);  // Let the stream actually start.
+        struct linger abortive = {1, 0};      // RST, so the server's next write fails at once.
+        setsockopt(fd, SOL_SOCKET, SO_LINGER, &abortive, sizeof(abortive));
+        close(fd);
+    }
+
+    // Provoke a write to every channel, which is what discovers the dead ones.
+    NSString* createBody = @"path=/probe-folder";
+    SendRawRequest(server.port, [NSString stringWithFormat:@"POST /create HTTP/1.1\r\nHost: %@\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %lu\r\n\r\n%@", host, (unsigned long)createBody.length, createBody]);
+
+    // Recovery is ~2s with the fix and ~31s without it, so this bound separates them widely
+    // while staying well inside a suite that otherwise runs in about eight seconds.
+    BOOL granted = NO;
+    for (NSUInteger attempt = 0; (attempt < 12) && !granted; attempt++) {
+        [NSThread sleepForTimeInterval:1.0];
+        NSString* reply = SendRawRequestUntilMarker(server.port, sseRequest, @"retry: 3000\n\n", 2.0);
+        // "retry: 30000" (refused) contains "retry: 3000" (accepted), so test the longer first.
+        granted = ![reply containsString:@"retry: 30000"] && [reply containsString:@"retry: 3000\n\n"];
+    }
+    XCTAssertTrue(granted, @"channels were still held long after the server knew every client had gone");
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
 
 // An SSE stream is only ever released when the client that is reading it goes away. A HEAD
 // mapped to GET has no reader at all — the connection layer discards the body unsent — so the
