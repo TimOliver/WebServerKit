@@ -146,6 +146,26 @@ BOOL WSKResolvedPathIsWithinDirectory(NSString *path, NSString *directory);
  *  directory (NSTemporaryDirectory() under a sandboxed app commonly does), and a caller
  *  examining the absolute resolved path would then judge every file it serves to be hidden.
  */
+/**
+ *  Resolves `path` ONCE and reports everything a caller needs from that single observation:
+ *  returns the fully resolved absolute location if it is inside `directory` (or is `directory`
+ *  itself), nil otherwise, and writes the same location expressed relative to the resolved
+ *  `directory` into `outRelativePath` when that is non-NULL.
+ *
+ *  Prefer this to calling the two predicates below in sequence. Each of those performs its own
+ *  realpath(3), so a caller that checks containment with one and hiddenness with the other is
+ *  acting on two observations of a filesystem that need not agree — and then usually operates on
+ *  a *third*, the unresolved path the client sent. A symlink retargeted between those steps was
+ *  measured serving content from outside the served root in 24% of requests.
+ *
+ *  Act on the returned path, not on the caller's own: a resolved path contains no symlinks, so
+ *  retargeting one cannot redirect the operation that follows. This narrows the window rather
+ *  than closing it — a real directory renamed between resolution and use would still slip
+ *  through, and closing that needs an openat(2) component walk or O_NOFOLLOW_ANY, which would
+ *  also refuse the benign intermediate symlinks that work today.
+ */
+NSString *_Nullable WSKResolveWithinDirectory(NSString *path, NSString *directory, NSString *_Nullable __autoreleasing *_Nullable outRelativePath);
+
 NSString *_Nullable WSKResolvedPathRelativeToDirectory(NSString *path, NSString *directory);
 
 /**

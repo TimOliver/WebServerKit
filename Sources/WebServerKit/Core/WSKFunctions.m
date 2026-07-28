@@ -550,6 +550,31 @@ static NSString *_RealPath(NSString *path) {
     return nil;
 }
 
+NSString *WSKResolveWithinDirectory(NSString *path, NSString *directory, NSString *__autoreleasing *outRelativePath) {
+    NSString *const resolvedPath = _RealPath(path);
+    NSString *const resolvedDirectory = _RealPath(directory);
+
+    if (outRelativePath) {
+        *outRelativePath = nil;
+    }
+
+    if ((resolvedPath == nil) || (resolvedDirectory == nil)) {
+        return nil;  // Fail closed rather than acting on a path we could not verify.
+    }
+
+    if (![resolvedPath isEqualToString:resolvedDirectory] && !WSKPathIsInsideDirectory(resolvedPath, resolvedDirectory)) {
+        return nil;
+    }
+
+    if (outRelativePath) {
+        *outRelativePath = [resolvedPath isEqualToString:resolvedDirectory]
+                               ? @""
+                               : [resolvedPath substringFromIndex:(resolvedDirectory.length + ([resolvedDirectory hasSuffix:@"/"] ? 0 : 1))];
+    }
+
+    return resolvedPath;
+}
+
 NSString *WSKResolvedPathRelativeToDirectory(NSString *path, NSString *directory) {
     NSString *const resolvedPath = _RealPath(path);
     // Resolve the directory too: /var is itself a symlink to /private/var on Apple
