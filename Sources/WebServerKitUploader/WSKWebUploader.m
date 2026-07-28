@@ -1032,8 +1032,18 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
     // into a dictionary literal raises NSInvalidArgumentException, and nothing here
     // catches it, so a bare "GET /list" terminated the whole app.
     NSString *const requestedPath = [request query][@"path"];
+
+    if (WSKPathContainsNULByte(requestedPath)) {
+        // Refuse rather than let WSKNormalizePath truncate and act on the prefix: the request
+        // would then be honoured as something the client did not ask for. "/Keep\0/nonexistent"
+        // named nothing and deleted "/Keep"; "/list?path=\0" reached a per-entry dictionary
+        // literal with a nil value and terminated the process.
+        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"Path contains a NUL byte"];
+    }
+
     NSString *const relativePath = requestedPath ? requestedPath : @"/";
-    NSString *const absolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)];
+    NSString *const normalizedPath = WSKNormalizePath(relativePath);
+    NSString *const absolutePath = [_uploadDirectory stringByAppendingPathComponent:normalizedPath];
     BOOL isDirectory = NO;
 
     if (!absolutePath || ![[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory]) {
@@ -1071,13 +1081,13 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
 
             if ([type isEqualToString:NSFileTypeRegular] && size && [self _checkFileExtension:item]) {
                 [array addObject:@{
-                    @"path": [relativePath stringByAppendingPathComponent:item],
+                    @"path": [normalizedPath stringByAppendingPathComponent:item],
                     @"name": item,
                     @"size": size
                 }];
             } else if ([type isEqualToString:NSFileTypeDirectory]) {
                 [array addObject:@{
-                    @"path": [[relativePath stringByAppendingPathComponent:item] stringByAppendingString:@"/"],
+                    @"path": [[normalizedPath stringByAppendingPathComponent:item] stringByAppendingString:@"/"],
                     @"name": item
                 }];
             }
@@ -1090,6 +1100,15 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
 - (WSKResponse *)downloadFile:(WSKRequest *)request {
     // Never nil, so error bodies name a path instead of "(null)" — and match -listDirectory:.
     NSString *const requestedPath = [request query][@"path"];
+
+    if (WSKPathContainsNULByte(requestedPath)) {
+        // Refuse rather than let WSKNormalizePath truncate and act on the prefix: the request
+        // would then be honoured as something the client did not ask for. "/Keep\0/nonexistent"
+        // named nothing and deleted "/Keep"; "/list?path=\0" reached a per-entry dictionary
+        // literal with a nil value and terminated the process.
+        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"Path contains a NUL byte"];
+    }
+
     NSString *const relativePath = requestedPath ? requestedPath : @"/";
     NSString *const absolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)];
     BOOL isDirectory = NO;
@@ -1258,12 +1277,30 @@ static NSString *_OriginAuthority(NSString *value) {
     }
 
     NSString *const oldRelativePath = request.arguments[@"oldPath"];
+
+    if (WSKPathContainsNULByte(oldRelativePath)) {
+        // Refuse rather than let WSKNormalizePath truncate and act on the prefix: the request
+        // would then be honoured as something the client did not ask for. "/Keep\0/nonexistent"
+        // named nothing and deleted "/Keep"; "/list?path=\0" reached a per-entry dictionary
+        // literal with a nil value and terminated the process.
+        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"Path contains a NUL byte"];
+    }
+
     NSString *const oldAbsolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(oldRelativePath)];
     BOOL isDirectory = NO;
 
     // Neither endpoint may be the upload directory itself (a missing/empty path
     // collapses to it), which would let a move destroy or displace the root.
     NSString *const newRelativePath = request.arguments[@"newPath"];
+
+    if (WSKPathContainsNULByte(newRelativePath)) {
+        // Refuse rather than let WSKNormalizePath truncate and act on the prefix: the request
+        // would then be honoured as something the client did not ask for. "/Keep\0/nonexistent"
+        // named nothing and deleted "/Keep"; "/list?path=\0" reached a per-entry dictionary
+        // literal with a nil value and terminated the process.
+        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"Path contains a NUL byte"];
+    }
+
     NSString *const desiredNewPath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(newRelativePath)];
     if (!WSKPathIsInsideDirectory(oldAbsolutePath, _uploadDirectory) || !WSKPathIsInsideDirectory(desiredNewPath, _uploadDirectory)) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Operating on the root directory is not allowed"];
@@ -1350,6 +1387,15 @@ static NSString *_OriginAuthority(NSString *value) {
     }
 
     NSString *const relativePath = request.arguments[@"path"];
+
+    if (WSKPathContainsNULByte(relativePath)) {
+        // Refuse rather than let WSKNormalizePath truncate and act on the prefix: the request
+        // would then be honoured as something the client did not ask for. "/Keep\0/nonexistent"
+        // named nothing and deleted "/Keep"; "/list?path=\0" reached a per-entry dictionary
+        // literal with a nil value and terminated the process.
+        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"Path contains a NUL byte"];
+    }
+
     NSString *const absolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)];
     BOOL isDirectory = NO;
 
@@ -1451,6 +1497,15 @@ static NSString *_OriginAuthority(NSString *value) {
     }
 
     NSString *const relativePath = request.arguments[@"path"];
+
+    if (WSKPathContainsNULByte(relativePath)) {
+        // Refuse rather than let WSKNormalizePath truncate and act on the prefix: the request
+        // would then be honoured as something the client did not ask for. "/Keep\0/nonexistent"
+        // named nothing and deleted "/Keep"; "/list?path=\0" reached a per-entry dictionary
+        // literal with a nil value and terminated the process.
+        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"Path contains a NUL byte"];
+    }
+
     NSString *const desiredPath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)];
 
     // An empty path collapses to the upload directory itself; refuse it (uniquing

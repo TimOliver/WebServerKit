@@ -480,6 +480,11 @@ NSString *WSKComputeMD5Digest(NSString *format, ...) {
     return (NSString *)[NSString stringWithUTF8String:buffer];
 }
 
+BOOL WSKPathContainsNULByte(NSString *path) {
+    unichar nul = 0;
+    return (path != nil) && ([path rangeOfString:[NSString stringWithCharacters:&nul length:1]].location != NSNotFound);
+}
+
 NSString *WSKNormalizePath(NSString *path) {
     // Treat an embedded NUL as a path terminator, the way the filesystem's C-string APIs do.
     // Otherwise -pathExtension reads past the NUL while -fileSystemRepresentation truncates at
