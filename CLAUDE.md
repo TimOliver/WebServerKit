@@ -80,6 +80,83 @@ and the Bonjour/`.local` name only, so without it every request is refused with 
 
 ## Recent Changes
 
+### Ninth audit pass: fuzzing, differential testing, and a fix of mine that destroyed the share
+
+Run overnight, unattended, with three techniques this project had never applied: mutational and
+grammar-aware fuzzing straight at the body parsers, differential testing against an independent
+HTTP implementation, and allocation-failure injection. Plus randomized lifecycle churn. Agents
+ran in their own git worktrees with instructions to change nothing, and every finding was
+reproduced independently before being acted on.
+
+**⚠️ The eighth pass's own resolve-once fix turned a symlink into "destroy the whole share".**
+The `"not the root directory"` guards are correct, but they are evaluated on the path the client
+*typed*; the resolve-once work then substituted the resolved path — which is the root — with no
+re-check. One unauthenticated request emptied a five-entry share to zero through DAV `DELETE`,
+DAV `MOVE` and the uploader's `/delete` alike, answering 204, 409 and 200.
+
+The general form will recur and is the thing to remember: **resolving once and acting on the
+resolved path is right, but every rule stated about the unresolved path has to be restated about
+the resolved one.** It is refused in the resolver rather than at each destructive call site, so a
+site added later cannot forget it; naming the root *directly* is still allowed, because listing it
+and uploading into it are ordinary operations.
+
+**A malformed multipart boundary closed descriptor 0.** `-[WSKMIMEStreamParser
+initWithBoundary:...]` returned nil before `[super init]` and before `_tmpFile = -1`. Under ARC a
+nil-returning initializer still deallocates its receiver, so `-dealloc` ran on a zeroed object and
+its `close(_tmpFile)` became `close(0)` — a descriptor it never owned. Once freed, that slot goes
+to the next `accept()`, so a later malformed request tears down a live connection mid-serve;
+measured as a process crash under concurrent load. The sentinel's own comment showed the hazard
+was understood — it was established too late. Establish `[super init]` and any fd sentinel before
+the first failure return.
+
+**A NUL in the multipart filename killed the process** — it reached
+`-stringByAppendingPathComponent:`, which returns nil for a NUL-bearing receiver, and the nil
+reached `-[NSFileManager moveItemAtPath:toPath:error:]` as its destination. Fourth appearance of
+this codebase's recurring shape, and the second time a fix for it did not reach every site the
+value can arrive by: the eighth pass guarded the query and form fields and missed the two that
+arrive through the multipart parser.
+
+**A gzip body's verdict depended on TCP segmentation.** A concatenated second member sent in one
+write was silently dropped and answered 200 — handing the handler less data than the client
+sent — while the identical bytes split at the member boundary answered 500. The client chose
+which. The fifth pass fixed the later-read half and this file recorded the case as closed; the
+same-read half was still open, because `Z_STREAM_END` was accepted without checking whether
+`avail_in` still held bytes. **A split-invariance oracle found this automatically** — same
+request, different segmentation, different answer — a cheap property worth reusing.
+
+**The entity tag did not identify the bytes.** It was inode + mtime only, so a rewrite in place
+that restores the timestamp — `utimes(2)`, and what `rsync -a`, `cp -p` and `tar -x` all do —
+produced a byte-identical tag for different content. A 900-byte build replaced by a 916-byte one
+answered **304** to a revalidation (the client keeps the stale copy indefinitely) and **206** to a
+resume (the new build's bytes spliced onto the old one's prefix). That is precisely the failure
+the `If-Range` work exists to prevent, arriving through the *strong* validator rather than the
+weak one — and this file's own note that a preserved-mtime replacement is "undetectable by any
+date-based scheme" quietly implied the ETag handled it. Size is now part of the tag, as Apache
+does. Equal-length-and-equal-mtime remains undetectable, and nothing derived from `stat(2)` can
+close it.
+
+**Nothing accumulates over hours, and this is now measured rather than extrapolated.** A five-hour
+soak — 12 concurrent workers doing ranges, revalidation and abortive mid-transfer deaths while a
+writer rewrote the served file every 750 ms — ran **19,723,889 requests and 15.6 TB**. Descriptors
+ended *below* baseline; `+[WSKWebServer reservedInMemoryByteCount]` was **0 at every one-minute
+sample and at rest**. The previous evidence for Shape A's central assumption was 450 sequential
+requests. **Do not re-run this speculatively**; re-run it when the connection or response layer
+changes.
+
+Also genuinely clean, and worth not re-testing: allocation-failure injection found nothing across
+9,366 injected failures with zero descriptor leaks; randomized lifecycle churn found no hang,
+leak or unreclaimed port; and the differential comparison found this library *more* correct than
+the reference on Range arithmetic across 1,200 generated headers.
+
+**The record has now overstated the code four times**, and the pattern is worth naming: the sixth
+pass's `If-Range` claim, the hidden-item rule that covered two servers of three, the recursive
+delete that only the uploader vetted, and the gzip trailing-data case above. Every one was a
+sentence in this file describing a property the code held only partly. When a pass closes a class,
+check every site the class can occur at before writing that it is closed.
+
+**Still open:** nothing from this pass. The `//` status disagreement from the eighth pass remains
+deliberately unfixed.
+
 ### Eighth audit pass: property-testing the path rules, and a merged PR that never landed
 
 Narrow by design — aimed only at the path containment and hidden-item rules the seventh pass had

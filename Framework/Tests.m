@@ -1466,6 +1466,113 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     [fm removeItemAtPath:dir error:NULL];
 }
 
+// Whether a gzip body with a concatenated second member was accepted or refused depended only on
+// how the client split its writes: sent in one write the trailing member was silently dropped and
+// the request answered 200, handing the handler less data than was sent; split at the member
+// boundary the same bytes answered 500. The client chose which. The fifth pass fixed the
+// later-read half and this file recorded the case as closed; the same-read half was still open.
+- (void)testGZipTrailingDataIsRefusedRegardlessOfHowItIsSplit {
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    __block NSString* received = nil;
+    [server addHandlerForMethod:@"POST"
+                           path:@"/data"
+                   requestClass:[WSKDataRequest class]
+                   processBlock:^WSKResponse*(WSKDataRequest* request) {
+                       received = [[NSString alloc] initWithData:request.data encoding:NSUTF8StringEncoding];
+                       return [WSKDataResponse responseWithText:@"ok"];
+                   }];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSData* first = GZipCompress([@"AAAAAAAAAAAAAAAA" dataUsingEncoding:NSUTF8StringEncoding]);
+    NSData* second = GZipCompress([@"BBBBBBBBBBBBBBBB" dataUsingEncoding:NSUTF8StringEncoding]);
+    NSMutableData* twoMembers = [first mutableCopy];
+    [twoMembers appendData:second];
+
+    NSData* (^request)(NSData*) = ^(NSData* body) {
+        NSString* head = [NSString stringWithFormat:@"POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Encoding: gzip\r\nContent-Type: text/plain\r\nContent-Length: %lu\r\n\r\n", (unsigned long)body.length];
+        NSMutableData* full = [[head dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+        [full appendData:body];
+        return (NSData*)full;
+    };
+
+    // A single well-formed member is the control: it must still be accepted and delivered whole.
+    received = nil;
+    XCTAssertTrue([SendRawDataRequest(server.port, request(first)) hasPrefix:@"HTTP/1.1 200"], @"a single gzip member stopped being accepted");
+    XCTAssertEqualObjects(received, @"AAAAAAAAAAAAAAAA", @"the handler did not receive the whole body");
+
+    // Two members in one write: previously 200 with the second silently dropped.
+    received = nil;
+    NSString* whole = SendRawDataRequest(server.port, request(twoMembers));
+    XCTAssertFalse([whole hasPrefix:@"HTTP/1.1 200"], @"a concatenated second member was accepted and silently dropped: handler got %@", received);
+
+    // And with trailing bytes that are not a member at all.
+    NSMutableData* withGarbage = [first mutableCopy];
+    [withGarbage appendBytes:"GARBAGE!" length:8];
+    received = nil;
+    XCTAssertFalse([SendRawDataRequest(server.port, request(withGarbage)) hasPrefix:@"HTTP/1.1 200"], @"trailing garbage after a gzip member was accepted");
+
+    [server stop];
+}
+
+// The entity tag was inode + mtime only, so a rewrite in place that restores the timestamp —
+// utimes(2), and what rsync -a, cp -p and tar -x all do — produced a byte-identical tag for
+// different bytes. Measured: a 900-byte build replaced by a 916-byte one answered 304 to a
+// revalidation (the client keeps the stale copy indefinitely) and 206 to a resume (the new
+// build's bytes spliced onto the old one's prefix), which is the exact failure the If-Range work
+// exists to prevent, arriving through the strong validator rather than the weak one.
+- (void)testETagChangesWhenContentChangesUnderAPreservedTimestamp {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* root = MakeTempDirectory();
+    NSString* path = [root stringByAppendingPathComponent:@"build.bin"];
+
+    XCTAssertTrue([[@"" stringByPaddingToLength:900 withString:@"A" startingAtIndex:0] writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    struct timeval times[2];
+    times[0].tv_sec = 1600000000;
+    times[0].tv_usec = 123456;
+    times[1] = times[0];
+    XCTAssertEqual(utimes(path.fileSystemRepresentation, times), 0);
+
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addGETHandlerForBasePath:@"/f/" directoryPath:root indexFilename:nil cacheAge:0 allowRangeRequests:YES];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* (^etagOf)(NSString*) = ^(NSString* reply) {
+        for (NSString* line in [reply componentsSeparatedByString:@"\r\n"]) {
+            if ([line hasPrefix:@"Etag: "]) {
+                return [line substringFromIndex:6];
+            }
+        }
+        return (NSString*)nil;
+    };
+
+    NSString* oldETag = etagOf(SendRawRequest(server.port, @"HEAD /f/build.bin HTTP/1.1\r\nHost: localhost\r\n\r\n"));
+    XCTAssertNotNil(oldETag);
+
+    // Same inode, different content and length, timestamp restored to the nanosecond.
+    XCTAssertTrue([[@"" stringByPaddingToLength:916 withString:@"B" startingAtIndex:0] writeToFile:path atomically:NO encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertEqual(utimes(path.fileSystemRepresentation, times), 0);
+
+    NSString* newETag = etagOf(SendRawRequest(server.port, @"HEAD /f/build.bin HTTP/1.1\r\nHost: localhost\r\n\r\n"));
+    XCTAssertNotNil(newETag);
+    XCTAssertNotEqualObjects(oldETag, newETag, @"the entity tag did not move when the content did");
+
+    NSString* revalidated = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /f/build.bin HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: %@\r\n\r\n", oldETag]);
+    XCTAssertFalse([revalidated hasPrefix:@"HTTP/1.1 304"], @"a stale validator was told Not Modified: %@", [revalidated substringToIndex:MIN((NSUInteger)40, revalidated.length)]);
+
+    NSString* resumed = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /f/build.bin HTTP/1.1\r\nHost: localhost\r\nRange: bytes=100-199\r\nIf-Range: %@\r\n\r\n", oldETag]);
+    XCTAssertFalse([resumed hasPrefix:@"HTTP/1.1 206"], @"a range was served against a changed representation: %@", [resumed substringToIndex:MIN((NSUInteger)40, resumed.length)]);
+
+    // Revalidating with the CURRENT tag must still produce a cheap 304, or this has simply
+    // disabled caching.
+    NSString* fresh = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /f/build.bin HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: %@\r\n\r\n", newETag]);
+    XCTAssertTrue([fresh hasPrefix:@"HTTP/1.1 304"], @"an up-to-date validator no longer revalidates: %@", [fresh substringToIndex:MIN((NSUInteger)40, fresh.length)]);
+
+    [server stop];
+    [fm removeItemAtPath:root error:NULL];
+}
+
 - (void)testSymlinkResolvingToTheShareRootCannotDestroyIt {
     NSFileManager* fm = [NSFileManager defaultManager];
     NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
