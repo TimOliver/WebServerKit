@@ -193,7 +193,19 @@ static NSString *_EscapeExtValue(NSString *string) {
     // Derive the validators here, from the same fstat the range decision uses, so If-Range
     // can be answered against the representation we are actually about to serve.
     NSDate *const lastModified = _NSDateFromTimeSpec(&info.st_mtimespec);
-    NSString *const entityTag = [NSString stringWithFormat:@"\"%llu/%li/%li\"", info.st_ino, info.st_mtimespec.tv_sec, info.st_mtimespec.tv_nsec];
+    // Size is part of the tag because inode and mtime alone do not identify the bytes: a rewrite
+    // in place that restores the timestamp — utimes(2), and what rsync -a, cp -p and tar -x all
+    // do — keeps the same inode and the same mtime down to the nanosecond, so the tag did not
+    // move. Measured: a 900-byte build replaced by a 916-byte one under the same validator
+    // answered 304 to a revalidation (the client keeps the stale copy indefinitely) and 206 to a
+    // resume (the new build's bytes spliced onto the old one's prefix). That is the failure the
+    // If-Range work exists to prevent, arriving through the strong validator instead of the weak
+    // one. Apache includes size for the same reason.
+    //
+    // It does not close a replacement of exactly equal length with a restored mtime, and nothing
+    // derived from stat(2) can. Changing the format costs every existing client one revalidation
+    // miss, once.
+    NSString *const entityTag = [NSString stringWithFormat:@"\"%llu/%lld/%li/%li\"", info.st_ino, (long long)info.st_size, info.st_mtimespec.tv_sec, info.st_mtimespec.tv_nsec];
 
     // A date validator may only be *issued* once the second it names has closed. While mtime
     // is still inside the current second the file can be written again without the timestamp

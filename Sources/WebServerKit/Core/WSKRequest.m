@@ -175,6 +175,23 @@ NSString *const WSKRequestAttribute_RegexCaptures = @"WSKRequestAttribute_RegexC
 
         if (_stream.avail_out > 0) {
             if (result == Z_STREAM_END) {
+                // Trailing bytes that arrive in the SAME read as the end of the member are the
+                // same error as trailing bytes in a later one, which the `_finished` guard above
+                // already refuses. Without this the verdict depends on how the client happened to
+                // split its writes: an identical two-member body answered 200 with the second
+                // member silently dropped when sent in one write, and 500 when split at the
+                // member boundary. The client chose which, and the handler was handed less data
+                // than was sent while the status said success.
+                if (_stream.avail_in > 0) {
+                    WSK_LOG_ERROR(@"Trailing data after the end of the gzip request body");
+
+                    if (error) {
+                        *error = [NSError errorWithDomain:kWSKErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: @"Trailing data after end of gzip request body"}];
+                    }
+
+                    return NO;
+                }
+
                 _finished = YES;
             }
 
