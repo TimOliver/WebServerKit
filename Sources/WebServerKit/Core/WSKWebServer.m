@@ -1585,7 +1585,19 @@ static NSString *_EscapeHTMLString(NSString *string) {
             }
             processBlock:^WSKResponse *(WSKRequest *request) {
                 WSKResponse *response = nil;
-                NSString *const relativePath = WSKNormalizePath([request.path substringFromIndex:basePath.length]);
+                NSString *const requestedRelativePath = [request.path substringFromIndex:basePath.length];
+
+                // Truncating at a NUL and then serving the prefix means answering a request the
+                // client did not make: "/build.ipa\0.txt" served build.ipa, which is the very
+                // extension confusion the truncation exists to prevent. Read-only here, so
+                // nothing is destroyed — but the uploader and WebDAV both refuse this shape, and
+                // one server quietly disagreeing is how this class has survived four sweeps.
+                if (WSKPathContainsNULByte(requestedRelativePath)) {
+                    WSK_LOG_WARNING(@"Refusing to serve a path containing a NUL byte");
+                    return [WSKResponse responseWithStatusCode:kWSKHTTPStatusCode_BadRequest];
+                }
+
+                NSString *const relativePath = WSKNormalizePath(requestedRelativePath);
 
                 // The directory listing below deliberately omits every dot-entry, so without
                 // this the browsable index actively advertises a *smaller* tree than the one
