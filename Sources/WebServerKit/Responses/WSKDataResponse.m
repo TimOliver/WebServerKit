@@ -145,10 +145,22 @@
 }
 
 - (instancetype)initWithJSONObject:(id)object contentType:(NSString *)type {
+    // +dataWithJSONObject: RAISES NSInvalidArgumentException for an object it cannot serialise
+    // rather than returning nil, so the nil check below could never fire and the exception
+    // escaped instead — and nothing in Sources/ catches one, so a host-app handler returning
+    // -responseWithJSONObject: for a dictionary holding an NSDate, an NSURL or a NAN terminated
+    // the process. That factory is declared `nullable`, so a caller writing `resp ?: fallback`
+    // reasonably believes it has handled the failure. Ask first, exactly as -initWithText: does
+    // for a string it cannot encode.
+    if (![NSJSONSerialization isValidJSONObject:object]) {
+        WSK_LOG_ERROR(@"Failed encoding JSON response: not a valid JSON object");
+        return nil;
+    }
+
     NSData *const data = [NSJSONSerialization dataWithJSONObject:object options:0 error:NULL];
 
     if (data == nil) {
-        WSK_DNOT_REACHED();
+        WSK_LOG_ERROR(@"Failed encoding JSON response");
         return nil;
     }
 

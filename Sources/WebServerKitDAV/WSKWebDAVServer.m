@@ -402,9 +402,44 @@ static NSString *_StagingPathForPath(NSString *path) {
 // that atomically, which -moveItemAtPath: cannot (it refuses an existing destination); it
 // will not replace a *non-empty directory*, so that one case still needs an explicit
 // removal first — safe here, because by then the replacement is already complete on disk.
-- (BOOL)_replaceItemAtPath:(NSString *)path withStagedItemAtPath:(NSString *)stagingPath error:(NSError **)error {
+// `expected` is the identity the caller vetted, or NULL when the caller established that nothing
+// was there. The fallback removal below is recursive and used to run against whatever occupied the
+// path at that instant rather than against the item any check had looked at — so a PUT that
+// -performPUT: had already cleared (405 if the destination is a collection) destroyed a collection
+// that arrived in the ~30 lines between, and answered 204 No Content. Comparing dev+ino makes the
+// removal refuse anything the caller did not authorise.
+- (BOOL)_replaceItemAtPath:(NSString *)path withStagedItemAtPath:(NSString *)stagingPath expecting:(nullable const struct stat *)expected error:(NSError **)error {
+    // With nothing vetted at the destination the swap must not replace anything: an item that
+    // appeared during the window belongs to whoever created it. RENAME_EXCL fails rather than
+    // clobbering, which is what lets the caller refuse and leave the newcomer alone.
+    if (expected == NULL) {
+        if (renamex_np([stagingPath fileSystemRepresentation], [path fileSystemRepresentation], RENAME_EXCL) == 0) {
+            return YES;
+        }
+
+        if (error) {
+            *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil];
+        }
+
+        return NO;
+    }
+
     if (rename([stagingPath fileSystemRepresentation], [path fileSystemRepresentation]) == 0) {
         return YES;
+    }
+
+    // rename(2) refuses here only when the destination is a non-empty directory, which means the
+    // path is no longer the item that was vetted — a plain file cannot become one in place. Verify
+    // before destroying anything.
+    struct stat current;
+
+    if ((lstat([path fileSystemRepresentation], &current) != 0) ||
+        (current.st_dev != expected->st_dev) || (current.st_ino != expected->st_ino)) {
+        if (error) {
+            *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOTEMPTY userInfo:@{NSLocalizedDescriptionKey: @"The destination changed while the replacement was being built"}];
+        }
+
+        return NO;
     }
 
     if (![[NSFileManager defaultManager] removeItemAtPath:path error:error]) {
@@ -589,11 +624,17 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
     NSString *const writePath = stagingPath ? stagingPath : absolutePath;
     NSError *error = nil;
 
+    // The identity the 405 check above cleared, so the swap can refuse to destroy anything else.
+    // Without it a collection created in the window between that check and the swap was removed
+    // recursively by the fallback inside -_replaceItemAtPath:, and the client was told 204.
+    struct stat vetted;
+    BOOL const haveVetted = existing && (lstat([absolutePath fileSystemRepresentation], &vetted) == 0);
+
     if (![fileManager moveItemAtPath:request.temporaryPath toPath:writePath error:&error]) {
         return [WSKErrorResponse responseWithServerError:kWSKHTTPStatusCode_InternalServerError underlyingError:error message:@"Failed moving uploaded file to \"%@\"", relativePath];
     }
 
-    if (stagingPath && ![self _replaceItemAtPath:absolutePath withStagedItemAtPath:stagingPath error:&error]) {
+    if (stagingPath && ![self _replaceItemAtPath:absolutePath withStagedItemAtPath:stagingPath expecting:(haveVetted ? &vetted : NULL) error:&error]) {
         [fileManager removeItemAtPath:stagingPath error:NULL];
         return [WSKErrorResponse responseWithServerError:kWSKHTTPStatusCode_InternalServerError underlyingError:error message:@"Failed moving uploaded file to \"%@\"", relativePath];
     }
@@ -916,8 +957,25 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
     // name rather than removing the destination first: copying a tree takes as long as the
     // tree is big, and a failure part way through the old destroy-then-create left the
     // client with neither the old item nor a whole new one.
-    NSString *const stagingPath = existing ? _StagingPathForPath(dstAbsolutePath) : nil;
-    NSString *const writePath = stagingPath ? stagingPath : dstAbsolutePath;
+    // Staged unconditionally, which the `existing ? ... : nil` form was not. When the destination
+    // looked absent, writePath WAS the destination — so the cleanup below, written for "a failed
+    // tree copy leaves a partial tree behind", recursively removed whatever occupied that name by
+    // the time the copy failed. Measured: a COPY racing a MKCOL destroyed 209 of 483 collections
+    // the other client had just created, answering 403 to one and 201 to the other, in the default
+    // configuration. The same line unlinked a pre-existing dangling symlink at the destination,
+    // which -fileExistsAtPath: reports as absent because it follows links.
+    //
+    // Staging always means writePath is never a path this request did not create, so the cleanup
+    // is safe by construction rather than by the caller remembering which branch it is in. The
+    // swap then decides whether replacing is allowed: `expecting` is NULL when nothing was vetted,
+    // which makes it exclusive, so an item that appeared in the window survives and the request
+    // refuses. Simply staging unconditionally WITHOUT that — the fix originally proposed — is
+    // worse than the defect: it moves the destruction into the swap's fallback and answers 201
+    // Created, measured at 83/144 against 25/95 unfixed.
+    struct stat vettedDst;
+    BOOL const haveVettedDst = existing && (lstat([dstAbsolutePath fileSystemRepresentation], &vettedDst) == 0);
+    NSString *const stagingPath = _StagingPathForPath(dstAbsolutePath);
+    NSString *const writePath = stagingPath;
 
     if (isMove) {
         if (![fileManager moveItemAtPath:srcAbsolutePath toPath:writePath error:&error]) {
@@ -930,7 +988,7 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
         }
     }
 
-    if (stagingPath && ![self _replaceItemAtPath:dstAbsolutePath withStagedItemAtPath:stagingPath error:&error]) {
+    if (![self _replaceItemAtPath:dstAbsolutePath withStagedItemAtPath:stagingPath expecting:(haveVettedDst ? &vettedDst : NULL) error:&error]) {
         // The swap is the only step that can fail with the replacement already built, so
         // unwind it: put a MOVE's source back rather than stranding it under the staging
         // name, and drop a COPY's staged duplicate. Either way the destination is intact.

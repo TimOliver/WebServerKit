@@ -1968,6 +1968,223 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     [fm removeItemAtPath:dir error:NULL];
 }
 
+// CLAUDE.md's design priorities say "Puck rewrites builds while they may be downloading —
+// WSKFileResponse opening once and deriving everything from fstat on that descriptor is what keeps
+// an in-flight download consistent". That is true for a REPLACEMENT and false for a rewrite in
+// place: rename(2) gives the new content a new inode and the held descriptor keeps reading the old
+// bytes, but cp(1) and `cat >` open the destination O_TRUNC and write through the SAME inode, so
+// the descriptor starts yielding the new build's bytes mid-body. Measured before this: one 200 OK,
+// one ETag naming the old build, a Content-Length that matched exactly, and a body that was half
+// one build and half another — undetectable by any client.
+//
+// The byte at offset i is (i & 0x7f) | (rep ? 0x80 : 0), so the low seven bits pin the absolute
+// offset and the top bit names which representation each byte came from.
+- (void)testFileResponseRefusesToSpliceAFileRewrittenInPlace {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    NSString* path = [dir stringByAppendingPathComponent:@"build.bin"];
+    const NSUInteger kSize = 48 * 1024 * 1024;  // Must exceed the socket buffer, or the whole body is sent before the client can stall
+
+    NSMutableData* (^representation)(BOOL) = ^(BOOL second) {
+        NSMutableData* d = [NSMutableData dataWithLength:kSize];
+        uint8_t* b = d.mutableBytes;
+        for (NSUInteger i = 0; i < kSize; i++) {
+            b[i] = (uint8_t)((i & 0x7f) | (second ? 0x80 : 0x00));
+        }
+        return d;
+    };
+
+    XCTAssertTrue([representation(NO) writeToFile:path atomically:YES]);
+
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addGETHandlerForBasePath:@"/f/" directoryPath:dir indexFilename:nil cacheAge:0 allowRangeRequests:YES];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    int socket = ConnectToLocalhostPort(server.port);
+    XCTAssertGreaterThan(socket, 0);
+    NSString* request = @"GET /f/build.bin HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    XCTAssertGreaterThan(write(socket, request.UTF8String, strlen(request.UTF8String)), 0);
+
+    // Drain a little, then stall — an ordinary slow client — and rewrite the file IN PLACE,
+    // keeping the inode, exactly as cp(1) does.
+    NSMutableData* received = [NSMutableData data];
+    uint8_t buffer[64 * 1024];
+    while (received.length < 128 * 1024) {
+        ssize_t n = read(socket, buffer, sizeof(buffer));
+        if (n <= 0) {
+            break;
+        }
+        [received appendBytes:buffer length:(NSUInteger)n];
+    }
+    XCTAssertGreaterThan(received.length, (NSUInteger)0, @"the server sent nothing at all");
+
+    usleep(300 * 1000);  // Let the server park with the body unfinished.
+
+    int rewrite = open(path.fileSystemRepresentation, O_WRONLY | O_TRUNC);
+    XCTAssertGreaterThanOrEqual(rewrite, 0, @"could not reopen the file for an in-place rewrite");
+    NSData* second = representation(YES);
+    XCTAssertEqual(write(rewrite, second.bytes, second.length), (ssize_t)second.length);
+    close(rewrite);
+
+    ssize_t n;
+    while ((n = read(socket, buffer, sizeof(buffer))) > 0) {
+        [received appendBytes:buffer length:(NSUInteger)n];
+    }
+    close(socket);
+
+    // Find the body and check every byte came from ONE representation.
+    NSData* marker = [@"\r\n\r\n" dataUsingEncoding:NSASCIIStringEncoding];
+    NSRange headerEnd = [received rangeOfData:marker options:0 range:NSMakeRange(0, received.length)];
+    XCTAssertNotEqual(headerEnd.location, (NSUInteger)NSNotFound, @"no header terminator in the reply");
+
+    const uint8_t* body = (const uint8_t*)received.bytes + NSMaxRange(headerEnd);
+    NSUInteger bodyLength = received.length - NSMaxRange(headerEnd);
+    NSUInteger spliced = 0;
+    for (NSUInteger i = 0; i < bodyLength; i++) {
+        if ((body[i] & 0x80) != 0) {
+            spliced++;
+        }
+    }
+
+    // Either the whole body is the representation that was promised, or the response was cut
+    // short — both are honest. What must never happen is delivering the new build's bytes under
+    // the old build's ETag and Content-Length.
+    XCTAssertEqual(spliced, (NSUInteger)0, @"%lu of %lu body bytes came from the replacement representation — two builds were spliced into one response", (unsigned long)spliced, (unsigned long)bodyLength);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// performCOPY: derived its staging path only when the destination already existed, so when the
+// destination looked absent `writePath` WAS the destination — and the cleanup written for "a
+// failed tree copy leaves a partial tree behind" then recursively removed whatever occupied that
+// name by the time the copy failed, i.e. an item this request never created.
+//
+// The deterministic form: -fileExistsAtPath: FOLLOWS symlinks, so a dangling link at the
+// destination reads as absent while -copyItemAtPath: (which lstats) refuses because the name is
+// taken. The cleanup then unlinked the client's link and the request answered 403 — a refusal
+// that mutates the tree, which the design priorities forbid outright.
+- (void)testDAVCopyOntoADanglingSymlinkRefusesWithoutRemovingIt {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    XCTAssertTrue([@"PAYLOAD" writeToFile:[dir stringByAppendingPathComponent:@"src.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    NSString* link = [dir stringByAppendingPathComponent:@"latest"];
+    XCTAssertTrue([fm createSymbolicLinkAtPath:link withDestinationPath:@"builds/current" error:NULL], @"could not create the dangling link");
+
+    NSString* reply = SendRawRequest(server.port, @"COPY /src.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /latest\r\n\r\n");
+    XCTAssertFalse([reply hasPrefix:@"HTTP/1.1 2"], @"a COPY onto an occupied name should refuse: %@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+
+    // The assertion that matters: the refusal left the tree exactly as it was. -fileExistsAtPath:
+    // follows the link and would report NO for a link that is still there, so ask lstat.
+    struct stat info;
+    XCTAssertEqual(lstat(link.fileSystemRepresentation, &info), 0, @"the refused COPY unlinked a pre-existing symlink it was never asked to remove");
+
+    // A COPY onto a genuinely free name must still work, or the assertion above is satisfied by a
+    // server that refuses everything.
+    NSString* ok = SendRawRequest(server.port, @"COPY /src.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /copy.txt\r\n\r\n");
+    XCTAssertTrue([ok hasPrefix:@"HTTP/1.1 201"], @"an ordinary COPY stopped working: %@", [ok substringToIndex:MIN((NSUInteger)40, ok.length)]);
+    XCTAssertEqualObjects([NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:@"copy.txt"] encoding:NSUTF8StringEncoding error:NULL], @"PAYLOAD");
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// The racing form of the same defect: a COPY whose destination is created by someone else between
+// the existence check and the copy destroyed the newcomer and answered 403, while the creating
+// client was told 201. Measured before the fix at 209 of 483 collections destroyed.
+//
+// This asserts a SAFETY property — nothing that was created is ever destroyed — so a machine too
+// slow to produce the interleaving yields a false negative, never a false failure. That matters
+// because two wall-clock-sensitive tests in this suite already fail under parallel load.
+- (void)testDAVCopyRacingACreationNeverDestroysTheWinner {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    XCTAssertTrue([@"PAYLOAD" writeToFile:[dir stringByAppendingPathComponent:@"src.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    NSUInteger port = server.port;
+    dispatch_queue_t queue = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
+    NSUInteger destroyed = 0;
+    NSUInteger created = 0;
+
+    for (NSUInteger round = 0; round < 60; round++) {
+        NSString* name = [NSString stringWithFormat:@"Target-%lu", (unsigned long)round];
+        __block NSString* copyReply = nil;
+        __block NSString* mkcolReply = nil;
+
+        dispatch_group_t group = dispatch_group_create();
+        dispatch_group_async(group, queue, ^{
+            copyReply = SendRawRequest(port, [NSString stringWithFormat:@"COPY /src.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /%@\r\n\r\n", name]);
+        });
+        dispatch_group_async(group, queue, ^{
+            mkcolReply = SendRawRequest(port, [NSString stringWithFormat:@"MKCOL /%@ HTTP/1.1\r\nHost: localhost\r\n\r\n", name]);
+        });
+        dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
+
+        // Whichever of the two was told it succeeded must still be there afterwards. Only the
+        // MKCOL is checked, because a 201 from it names a collection nobody asked to remove.
+        if ([mkcolReply hasPrefix:@"HTTP/1.1 201"]) {
+            created++;
+            if (![fm fileExistsAtPath:[dir stringByAppendingPathComponent:name]]) {
+                destroyed++;
+            }
+        }
+    }
+
+    XCTAssertGreaterThan(created, (NSUInteger)0, @"no MKCOL ever succeeded — the probe proved nothing");
+    XCTAssertEqual(destroyed, (NSUInteger)0, @"%lu of %lu collections created with 201 were destroyed by a racing COPY", (unsigned long)destroyed, (unsigned long)created);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// +responseWithJSONObject: is declared `nullable`, and -initWithJSONObject:contentType: even had a
+// `data == nil` guard for the failure — but +[NSJSONSerialization dataWithJSONObject:] RAISES
+// NSInvalidArgumentException for an object that is not JSON-serialisable rather than returning
+// nil, so the guard was dead code and the exception escaped. There is no @try/@catch anywhere in
+// Sources/, so a host-app handler doing the obvious `return [WSKDataResponse responseWithJSONObject:
+// dict]` with an NSDate in the dictionary terminated the process — Debug and Release alike, and
+// `resp ?: fallback` did not save it because the raise happens first.
+//
+// NOTE: against the unfixed source this does not fail, it TERMINATES the test process. Read the
+// executed count.
+- (void)testJSONResponseRefusesAnInvalidObjectInsteadOfRaising {
+    // The shapes a host app actually hits: dates and URLs out of a model object, a NAN from a
+    // division, a non-string key, and raw bytes.
+    NSArray* invalid = @[
+        @{@"created" : [NSDate date]},
+        @{@"url" : [NSURL URLWithString:@"http://example.com"]},
+        @{@"n" : @(NAN)},
+        @{@"n" : @(INFINITY)},
+        @{@42 : @"v"},
+        @{@"data" : [NSData data]},
+        @{@"nested" : @{@"when" : [NSDate date]}},
+    ];
+
+    for (id object in invalid) {
+        XCTAssertNil([WSKDataResponse responseWithJSONObject:object], @"an unserialisable object must return nil, not raise: %@", object);
+    }
+
+    // What must keep working, or the assertions above are satisfied by a method that always fails.
+    WSKDataResponse* valid = [WSKDataResponse responseWithJSONObject:@{@"a" : @1, @"b" : @[ @"x" ]}];
+    XCTAssertNotNil(valid, @"a valid JSON object stopped working");
+    XCTAssertEqualObjects(valid.contentType, @"application/json");
+
+    WSKDataResponse* custom = [WSKDataResponse responseWithJSONObject:@[ @1, @2 ] contentType:@"application/vnd.x+json"];
+    XCTAssertNotNil(custom, @"a valid top-level array stopped working");
+    XCTAssertEqualObjects(custom.contentType, @"application/vnd.x+json");
+}
+
 // Preconditions were evaluated in exactly one place, -overrideResponse:forRequest:, which runs
 // AFTER the handler has produced its response — so for a write the file was already on disk. It
 // also compares against response.eTag, which a 201/204 does not carry, so _CompareResources

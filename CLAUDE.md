@@ -53,6 +53,13 @@ What each shape depends on:
   builds together into an IPA that installs and then crashes. Note also that Puck rewrites
   builds while they may be downloading — `WSKFileResponse` opening once and deriving
   everything from `fstat` on that descriptor is what keeps an in-flight download consistent.
+  **That is true only for an ATOMIC replacement** (`rename(2)`, `ditto`, `mv`), which gives the new
+  content a new inode the held descriptor never sees. A rewrite *in place* — `cp` and `cat >`, both
+  of which open `O_TRUNC` — reuses the inode, so the descriptor starts yielding the new build's
+  bytes mid-body; the eleventh pass measured a 48 MB response of which 49.5 MB of body bytes came
+  from the replacement, under one 200 OK with a matching `Content-Length`. Each chunk is now
+  verified against the size and mtime the response promised. **Publish atomically anyway** — the
+  check refuses the transfer, it cannot make a torn read whole.
 - **Shape B depends on start/stop correctness**, because it happens constantly. Lifecycle
   races a daemon meets once in its life, this meets every time it wakes.
 - **Both depend on refusing clearly rather than half-succeeding.** A request the server cannot
@@ -79,6 +86,96 @@ MagicDNS name (`<node>.<tailnet>.ts.net`). The Host allow-list admits localhost,
 and the Bonjour/`.local` name only, so without it every request is refused with 421.
 
 ## Recent Changes
+
+### Eleventh audit pass: four techniques never used here, and a proposed fix that was worse than the bug
+
+The tenth pass exhausted the technique list, so this one used four lenses the project had never
+applied: **stateful model-based sequence testing**, **concurrent mutating operations**,
+**metamorphic relations on the served bytes**, and **the host-app API surface**. Every one of them
+found something the request-at-a-time lenses could not, which is the argument for changing
+technique rather than repeating a sweep.
+
+**A refused COPY destroyed what another client had just created.** `performCOPY:isMove:` derived a
+staging path *only when the destination already existed*; when it looked absent, `writePath` WAS
+the destination, so the cleanup written for "a failed tree copy leaves a partial tree behind"
+recursively removed whatever occupied that name by the time the copy failed. A `COPY` racing a
+`MKCOL` destroyed **209 of 483** collections the other client had just been told it created (201),
+while the destroying client got 403. Default configuration, no allow-list, no external actor. It
+also defeated the tenth pass's own overwrite vetting, which is gated behind `if (existing)` and so
+never ran on this path. Pre-existing since the fourth pass; measured identically on the parent
+commit.
+
+**⚠️ The proposed fix made it worse, and the suite stayed green through it — fourth time a proposed
+fix has been the dangerous part.** "Stage unconditionally and always swap" moves the destruction
+from the copy-failure cleanup into `-_replaceItemAtPath:`'s `rename` fallback, which is a recursive
+delete — measured at **83/144 destroyed, answered 201 Created** against 25/95 unfixed, i.e. more
+destruction reported as success. The one-line variant (only remove the staging path) closes the
+destruction but strands a partial tree, trading a rare race for a routine residue class. What
+shipped does both: stage unconditionally *and* make the swap **exclusive** (`renamex_np` with
+`RENAME_EXCL`) when nothing was vetted, so an item that appears in the window survives and the
+request refuses. `existing` is unchanged, so a dangling symlink at the destination — which
+`-fileExistsAtPath:` reports as absent because it follows links, and which the old cleanup
+unlinked while answering 403 — now simply makes the swap fail and the link survives.
+
+**The swap removed whatever was at the path, not what had been vetted.** `-_replaceItemAtPath:`
+falls back to `removeItemAtPath:` when `rename(2)` refuses, and `rename(2)` refuses here only when
+the destination has become a directory. `performPUT:` clears the destination at line 561 (405 if it
+is a collection) and then, thirty lines later, destroyed a collection that arrived in between —
+answering **204 No Content**. The swap now carries the `dev`+`ino` the caller vetted and refuses to
+remove anything else. Note the tenth-pass sentence this falsifies: *"Every other destructive site
+was then checked rather than assumed: `performPUT` refuses an existing collection with 405."* True
+at check time, false at swap time — **the seventh time this file has claimed a property the code
+held only partly**, and the sweep that was meant to close the class stopped at the check.
+
+**A build rewritten in place spliced two representations into one 200 OK.** See the corrected
+design-priorities note above. The fix verifies size and mtime **on every chunk, before that chunk
+is handed over** — verifying only at end-of-body, which is what was proposed, detects the change
+*after* the bytes are on the wire under a satisfied `Content-Length`, so the client still receives
+a complete, well-formed, wrong response. That distinction was caught by the regression test failing
+against the first attempt at the fix.
+
+**`+responseWithJSONObject:` killed the process.** It is declared `nullable` and even had a
+`data == nil` guard — but `+[NSJSONSerialization dataWithJSONObject:]` *raises* for an
+unserialisable object rather than returning nil, so the guard was dead code. A host-app handler
+returning `[WSKDataResponse responseWithJSONObject:dict]` with an `NSDate`, `NSURL` or `NAN` in the
+dictionary terminated the process, Debug and Release alike, and `resp ?: fallback` did not help
+because the raise happens first. It asks `+isValidJSONObject:` first now, exactly as
+`-initWithText:` does for a string it cannot encode.
+
+**Still open — one finding, deliberately not taken, and it needs a decision.** `DELETE /latest`
+where `latest -> build-2026-07-30` answers **204** and removes the whole *target directory*, leaving
+the link behind as a dangling entry; `rm latest` behaves the opposite way. MOVE does the same. It
+follows from the eighth pass's resolve-once design handing every verb a `realpath`'d path. It was
+**not** fixed because the obvious fix is dangerous in three separate ways, all measured: it relaxes
+the extension allow-list (a link whose own name is allow-listed but whose target's is not goes from
+403 to 204); it resolves *twice*, which re-opens exactly the two-observations class the eighth pass
+closed and this file names as the general form that will recur; and it is incomplete, because the
+destination side (`MOVE /new.txt` with `Destination: /latest`) is untouched and still replaces the
+whole build directory with a 3-byte file. A green suite is not evidence here — the dangerous
+version passed all 112 tests and the full trace corpus. Source and destination semantics have to be
+decided together, and that is a judgement call about what the library should mean, not a defect fix.
+
+**Verified clean, and worth not re-testing.** The "a refused operation changes nothing" invariant
+held across **22,820 operations in 120 sequences**, firing only on the COPY case above, with the
+checker proved sensitive by injection first. The three listings (DAV `PROPFIND`, uploader `/list`,
+base-path index) never disagreed across 431,151 requests. Range arithmetic is exact across 1,008
+header spellings and ~5,000 generated partitions on files from 0 B to 128 MiB; 40 interrupted-and-
+resumed 128 MiB transfers reassembled byte-perfectly. **Torn writes do not happen** — 240 concurrent
+128 KiB PUTs and 90 concurrent 4 MiB PUTs produced zero mixed files, because the body always lands
+in a temp file first. Atomic replacement under load is genuinely safe (915 `rename(2)` replacements,
+47.7 GB, zero splices — and the oracle is provably sensitive, since the same harness reported 1,584
+splices the moment the writer switched to `O_TRUNC`). All 11 delegate methods arrive on the main
+thread with no null-contract violations, all 21 wrong-typed option values are refused with a named
+diagnostic, and 21 lifecycle sequences (including 8 threads × 60 concurrent start/stop) produced no
+hang or deadlock.
+
+**Known and still open, from the host-app sweep, all low:** creating a server off the main thread
+aborts a Debug build inside `WSKInitializeFunctions` (and `+initialize` is inherited, so warming up
+`WSKWebServer` first does not protect a subclass); `-stop` after a *failed* start aborts a Debug
+build, with no public way to tell that state from a stoppable one; and
+`-startWithOptions:error:` returns NO without setting `*error` when the server is already running.
+Also carried forward and re-confirmed 10/10: `WSKFormatRFC822` before any server exists still
+crashes.
 
 ### Tenth audit pass: the scan that was meant to end the programme, and did not
 
