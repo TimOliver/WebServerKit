@@ -173,7 +173,15 @@ NSString *const WSKRequestAttribute_RegexCaptures = @"WSKRequestAttribute_RegexC
             return NO;
         }
 
-        if (_stream.avail_out > 0) {
+        // End the pass when zlib has finished the member, when it left output room (so it had
+        // nothing more to write), OR when it has consumed all the input it was given. That last
+        // clause matters: when the inflated output exactly fills the buffer, avail_out is 0 even
+        // though zlib is done with this input, so the loop grew the buffer and called inflate()
+        // again with avail_in == 0 — which can make no progress and returns Z_BUF_ERROR, refusing
+        // a perfectly valid body. It bit only at exact multiples of the initial buffer size
+        // (256 KiB * 2^k) and only when the trailer arrived in a later read, so a streaming client
+        // chunking at 256 KiB, 512 KiB or 1 MiB was refused while 64 KiB and 128 KiB worked.
+        if ((result == Z_STREAM_END) || (_stream.avail_out > 0) || (_stream.avail_in == 0)) {
             if (result == Z_STREAM_END) {
                 // Trailing bytes that arrive in the SAME read as the end of the member are the
                 // same error as trailing bytes in a later one, which the `_finished` guard above

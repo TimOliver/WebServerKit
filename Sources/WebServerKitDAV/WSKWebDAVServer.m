@@ -182,6 +182,20 @@ NS_ASSUME_NONNULL_END
 // retargeted between two independent resolutions served content from outside the share and
 // landed a PUT outside it.
 - (nullable NSString *)_resolvedPathForRelativePath:(NSString *)relativePath hidden:(BOOL *)outHidden {
+    // WSKNormalizePath truncates at an embedded NUL — deliberately, because the filesystem's
+    // C-string APIs do and the mismatch is otherwise exploitable. But truncating does not make
+    // the request mean what the client wrote, and acting on the prefix is how
+    // "DELETE /Victim\0/does-not-exist" answered 204 and destroyed /Victim, and how a MOVE with a
+    // NUL-bearing Destination replaced a whole directory with the moved file. The uploader has
+    // refused this since the eighth pass; this server was never swept for it.
+    //
+    // Refused here, at the one point every path-taking verb goes through, so a verb added later
+    // cannot forget it. Normalization keeps truncating as the second line, so the
+    // "secret.dat\0.png" extension-allow-list bypass stays closed.
+    if (WSKPathContainsNULByte(relativePath)) {
+        return nil;
+    }
+
     NSString *const normalizedPath = WSKNormalizePath(relativePath);
     NSString *resolvedRelativePath = nil;
     NSString *const resolvedPath = WSKResolveWithinDirectory([_uploadDirectory stringByAppendingPathComponent:normalizedPath], _uploadDirectory, &resolvedRelativePath);

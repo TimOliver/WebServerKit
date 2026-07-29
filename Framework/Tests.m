@@ -199,6 +199,22 @@ static NSString* SendRawRequest(NSUInteger port, NSString* request) {
     return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
 }
 
+// As SendRawDataRequest, but split into two writes with a pause, so the tail arrives in a
+// separate socket read. Used to prove a verdict does not depend on how the client segmented.
+static NSString* SendRawDataRequestSplit(NSUInteger port, NSData* request, NSUInteger splitAt) {
+    int fd = ConnectToLocalhostPort(port);
+    if (fd < 0) {
+        return nil;
+    }
+    send(fd, request.bytes, splitAt, 0);
+    usleep(150000);
+    send(fd, (const char*)request.bytes + splitAt, request.length - splitAt, 0);
+    BOOL sawEOF = NO;
+    NSData* data = ReadToEOF(fd, &sawEOF);
+    close(fd);
+    return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+}
+
 // As SendRawRequest, but for a request whose body is not valid UTF-8 (e.g. gzip).
 static NSString* SendRawDataRequest(NSUInteger port, NSData* request) {
     int fd = ConnectToLocalhostPort(port);
@@ -1647,6 +1663,93 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 
     [server stop];
     [fm removeItemAtPath:dir error:NULL];
+}
+
+// The eighth pass closed this in the uploader and the record said the class was closed. It was
+// not: WebDAV had no NUL guard at all, and the base-path handler served through one. All three
+// servers must agree, because a client that gets a different answer per server is exactly how
+// this class survived four sweeps.
+- (void)testAllServersRefusePathsContainingNUL {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* root = MakeTempDirectory();
+    NSString* victim = [root stringByAppendingPathComponent:@"Victim"];
+    XCTAssertTrue([fm createDirectoryAtPath:victim withIntermediateDirectories:YES attributes:nil error:NULL]);
+    XCTAssertTrue([@"precious" writeToFile:[victim stringByAppendingPathComponent:@"data.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([@"SECRETBUILD" writeToFile:[root stringByAppendingPathComponent:@"build.ipa"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+
+    // WebDAV: a destructive request must never be honoured against the truncated prefix.
+    WSKWebDAVServer* dav = [[WSKWebDAVServer alloc] initWithUploadDirectory:root];
+    XCTAssertTrue([dav startWithOptions:options error:NULL]);
+    NSString* deleted = SendRawRequest(dav.port, @"DELETE /Victim%00/does-not-exist HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertFalse([deleted hasPrefix:@"HTTP/1.1 204"], @"a NUL-bearing DELETE was honoured: %@", [deleted substringToIndex:MIN((NSUInteger)40, deleted.length)]);
+    XCTAssertTrue([fm fileExistsAtPath:victim], @"WebDAV destroyed the truncated prefix instead of refusing");
+
+    NSString* put = SendRawRequest(dav.port, @"PUT /new%00.exe HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\ndata");
+    XCTAssertFalse([put hasPrefix:@"HTTP/1.1 201"], @"a NUL-bearing PUT created a file: %@", [put substringToIndex:MIN((NSUInteger)40, put.length)]);
+    XCTAssertFalse([fm fileExistsAtPath:[root stringByAppendingPathComponent:@"new"]], @"WebDAV wrote to the truncated prefix");
+
+    // ...and the ordinary requests must be untouched by all of this.
+    XCTAssertTrue([SendRawRequest(dav.port, @"GET /build.ipa HTTP/1.1\r\nHost: localhost\r\n\r\n") containsString:@"SECRETBUILD"], @"an ordinary WebDAV GET stopped working");
+    XCTAssertTrue([SendRawRequest(dav.port, @"PROPFIND / HTTP/1.1\r\nHost: localhost\r\nDepth: 1\r\nContent-Length: 0\r\n\r\n") hasPrefix:@"HTTP/1.1 207"], @"PROPFIND stopped working");
+    [dav stop];
+
+    // The base-path handler: read-only, but serving "build.ipa\0.txt" is the extension confusion
+    // the truncation exists to prevent.
+    WSKWebServer* basePath = [[WSKWebServer alloc] init];
+    [basePath addGETHandlerForBasePath:@"/f/" directoryPath:root indexFilename:nil cacheAge:0 allowRangeRequests:YES];
+    XCTAssertTrue([basePath startWithOptions:options error:NULL]);
+    XCTAssertFalse([SendRawRequest(basePath.port, @"GET /f/build.ipa%00.txt HTTP/1.1\r\nHost: localhost\r\n\r\n") containsString:@"SECRETBUILD"], @"the base-path handler served a file through a NUL");
+    XCTAssertTrue([SendRawRequest(basePath.port, @"GET /f/build.ipa HTTP/1.1\r\nHost: localhost\r\n\r\n") containsString:@"SECRETBUILD"], @"an ordinary base-path GET stopped working");
+    [basePath stop];
+
+    [fm removeItemAtPath:root error:NULL];
+}
+
+// A well-formed single-member gzip body whose inflated length exactly fills the decoder's buffer
+// (256 KiB * 2^k) was refused with 500 whenever the 8-byte trailer arrived in a later read: at
+// exact fill avail_out is 0, so the loop grew the buffer and called inflate() again with no input
+// left, which returns Z_BUF_ERROR. Reachable by any chunked streaming client using those block
+// sizes. The ninth pass's own commit claimed the gzip verdict no longer depends on segmentation;
+// for valid bodies at these sizes it still did.
+- (void)testValidGZipBodyIsAcceptedWhateverItsInflatedSize {
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    __block NSUInteger receivedLength = 0;
+    [server addHandlerForMethod:@"POST"
+                           path:@"/data"
+                   requestClass:[WSKDataRequest class]
+                   processBlock:^WSKResponse*(WSKDataRequest* request) {
+                       receivedLength = request.data.length;
+                       return [WSKDataResponse responseWithText:@"ok"];
+                   }];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    // Either side of the initial buffer size, and two doublings past it.
+    for (NSNumber* size in @[ @261120, @262144, @263168, @524288, @1048576 ]) {
+        NSUInteger const length = size.unsignedIntegerValue;
+        NSMutableData* payload = [NSMutableData dataWithLength:length];
+        memset(payload.mutableBytes, 'Z', length);
+        NSData* body = GZipCompress(payload);
+
+        NSString* head = [NSString stringWithFormat:@"POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Encoding: gzip\r\nContent-Type: application/octet-stream\r\nContent-Length: %lu\r\n\r\n", (unsigned long)body.length];
+        NSMutableData* whole = [[head dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+        [whole appendData:body];
+
+        receivedLength = 0;
+        XCTAssertTrue([SendRawDataRequest(server.port, whole) hasPrefix:@"HTTP/1.1 200"], @"a valid %lu-byte body was refused when sent whole", (unsigned long)length);
+        XCTAssertEqual(receivedLength, length, @"the handler received the wrong length for a %lu-byte body", (unsigned long)length);
+
+        // The same bytes with the trailer in a later read must give the same answer — that
+        // invariance is the whole point, and it has to hold for VALID bodies too.
+        receivedLength = 0;
+        NSString* split = SendRawDataRequestSplit(server.port, whole, whole.length - 4);
+        XCTAssertTrue([split hasPrefix:@"HTTP/1.1 200"], @"a valid %lu-byte body was refused when its trailer arrived in a later read: %@", (unsigned long)length, [split substringToIndex:MIN((NSUInteger)40, split.length)]);
+        XCTAssertEqual(receivedLength, length, @"the split send delivered the wrong length for %lu bytes", (unsigned long)length);
+    }
+
+    [server stop];
 }
 
 - (void)testUploaderRefusesPathsContainingNULRatherThanTruncating {
