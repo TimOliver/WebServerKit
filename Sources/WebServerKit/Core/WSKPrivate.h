@@ -291,7 +291,7 @@ extern NSString *WSKStringFromSockAddr(const struct sockaddr *addr, BOOL include
 @property (nonatomic, getter=isVirtualHEAD) BOOL virtualHEAD;
 @property (nonatomic) NSData *localAddressData;
 @property (nonatomic) NSData *remoteAddressData;
-- (void)prepareForWriting;
+- (BOOL)prepareForWriting;
 - (BOOL)performOpen:(NSError **)error;
 - (BOOL)performWriteData:(NSData *)data error:(NSError **)error;
 - (BOOL)performClose:(NSError **)error;

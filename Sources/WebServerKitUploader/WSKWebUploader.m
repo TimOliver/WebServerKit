@@ -1270,6 +1270,15 @@ static NSString *_OriginAuthority(NSString *value) {
     // separators or "..", which -stringByAppendingPathComponent: does NOT resolve,
     // so an unsanitized name lets a move escape the upload directory. Reduce it to
     // a single leaf component and reject the traversal specials.
+    //
+    // "/" is the one input for which -lastPathComponent does not return a leaf: it returns "/"
+    // unchanged (as does "//" and any run of slashes). That name passed every guard below, and
+    // -stringByAppendingPathComponent: then collapsed it straight back to the upload directory,
+    // so -_uniquePathForPath: found that directory already existing and renamed *its own leaf*
+    // in the PARENT — landing the body beside the share as "Share (1)", answered 200. So the
+    // separator is rejected outright afterwards: the requirement is that the name be a single
+    // path component, and testing for that directly is what makes it true, rather than trusting
+    // the reduction to have produced one.
     NSString *const fileName = [file.fileName lastPathComponent];
 
     // The NUL test belongs with the others: this value reaches -stringByAppendingPathComponent:,
@@ -1277,7 +1286,7 @@ static NSString *_OriginAuthority(NSString *value) {
     // one. The same shape that made "/list?path=%00" terminate the process — the query and form
     // fields were guarded then, this one was missed because it arrives through the multipart
     // parser rather than the request arguments.
-    if ((fileName.length == 0) || WSKPathContainsNULByte(fileName) || [fileName isEqualToString:@"."] || [fileName isEqualToString:@".."] ||
+    if ((fileName.length == 0) || [fileName containsString:@"/"] || WSKPathContainsNULByte(fileName) || [fileName isEqualToString:@"."] || [fileName isEqualToString:@".."] ||
         (!_allowHiddenItems && [fileName hasPrefix:@"."]) || ![self _checkFileExtension:fileName]) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Uploaded file name \"%@\" is not allowed", file.fileName];
     }
@@ -1306,6 +1315,20 @@ static NSString *_OriginAuthority(NSString *value) {
     }
 
     NSString *const desiredPath = [resolvedDirectory stringByAppendingPathComponent:fileName];
+
+    // /upload was the only one of the uploader's three write endpoints with no containment check
+    // on the *composed* path — /move, /delete and /create all have one — and that is what let a
+    // leaf of "/" collapse the composition back onto the directory itself. The leaf guard above
+    // closes that spelling; this judges the result, so a future way for the leaf to collapse is
+    // caught without anyone having to think of it first.
+    //
+    // Compared against resolvedDirectory, NOT _uploadDirectory: the latter is stored
+    // -stringByStandardizingPath'd (so a share under NSTemporaryDirectory() stays "/var/..."),
+    // while desiredPath is composed onto a realpath(3) result ("/private/var/..."). Comparing
+    // the two would refuse every legitimate upload for any share under /var or /tmp.
+    if (!WSKPathIsInsideDirectory(desiredPath, resolvedDirectory)) {
+        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Uploaded file name \"%@\" is not allowed", file.fileName];
+    }
 
     // Resolving a unique name and moving the uploaded file into place must be
     // atomic against concurrent requests, otherwise two uploads of the same

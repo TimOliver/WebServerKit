@@ -631,3 +631,7 @@ BOOL WSKResolvedPathHasHiddenComponent(NSString *path, NSString *directory) {
 
     return NO;
 }
+
+NSString *WSKEntityTagForFileInfo(const struct stat *info) {
+    return [NSString stringWithFormat:@"\"%llu/%lld/%li/%li\"", info->st_ino, (long long)info->st_size, info->st_mtimespec.tv_sec, info->st_mtimespec.tv_nsec];
+}

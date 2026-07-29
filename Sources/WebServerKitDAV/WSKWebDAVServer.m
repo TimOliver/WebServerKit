@@ -166,12 +166,137 @@ NS_ASSUME_NONNULL_END
 
 @implementation WSKWebDAVServer (Methods)
 
+// RFC 4918 §1.4 adopts the ABNF of RFC 2616 §2.1, in which a quoted literal is case-insensitive.
+// "T", "F" and "infinity" are all such literals, so "f" and "Infinity" are conformant spellings
+// and must mean what the client meant. Comparing them with -isEqualToString: made the exact byte
+// "F" the ONLY spelling that meant "do not overwrite", and every other one — "f", "False", "no",
+// an empty value — permission to destroy the destination, answered 204. That direction fails
+// OPEN, which is why it mattered; the Depth pair has the identical shape and fails closed.
+static inline BOOL _HeaderTokenIs(NSString *value, NSString *token) {
+    return (value != nil) && ([value caseInsensitiveCompare:token] == NSOrderedSame);
+}
+
+// "*" matches any existing representation. Otherwise the list is compared entry by entry.
+// If-Match requires the STRONG comparison (RFC 9110 §13.1.1), where a "W/" tag can never match;
+// If-None-Match uses the weak one, where the prefix is stripped from both sides. Tags this
+// server issues are always strong, so only the client's side can carry the prefix.
+static BOOL _EntityTagMatchesList(NSString *currentTag, NSString *list, BOOL strong) {
+    NSString *const trimmed = [list stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+
+    if ([trimmed isEqualToString:@"*"]) {
+        return (currentTag != nil);
+    }
+
+    if (currentTag == nil) {
+        return NO;
+    }
+
+    for (NSString *candidate in [trimmed componentsSeparatedByString:@","]) {
+        NSString *value = [candidate stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+
+        if ([value hasPrefix:@"W/"]) {
+            if (strong) {
+                continue;
+            }
+
+            value = [value substringFromIndex:2];
+        }
+
+        if ([value isEqualToString:currentTag]) {
+            return YES;
+        }
+    }
+
+    return NO;
+}
+
+// RFC 9110 §13.1.1 requires an origin server NOT to perform the method when If-Match evaluates
+// false. Nothing here did: preconditions were evaluated only in -overrideResponse:forRequest:,
+// which runs AFTER the handler has already written, and compares against a response ETag that a
+// 201/204 does not carry — so no 412 could ever be produced. If-Match was not parsed anywhere in
+// the tree at all. The lost-update protection a WebDAV client believes it has did not exist, so
+// two clients editing one file each silently overwrote the other.
+//
+// Called from every verb that replaces or destroys the resource it addresses — PUT, DELETE, MOVE
+// and COPY — rather than only from PUT where it was found. Evaluated against the resource as it
+// is on disk, before any destructive step, and against the same tag WSKFileResponse issues.
+- (nullable WSKResponse *)_preconditionFailureForRequest:(WSKRequest *)request atPath:(NSString *)absolutePath {
+    NSString *const ifMatch = request.headers[@"If-Match"];
+    NSString *const ifNoneMatch = request.headers[@"If-None-Match"];
+
+    if ((ifMatch == nil) && (ifNoneMatch == nil)) {
+        return nil;
+    }
+
+    struct stat info;
+    BOOL const exists = (stat([absolutePath fileSystemRepresentation], &info) == 0) && ((info.st_mode & S_IFMT) == S_IFREG);
+    NSString *const currentTag = exists ? WSKEntityTagForFileInfo(&info) : nil;
+
+    // If-Match takes precedence; If-None-Match is only consulted in its absence (§13.2.2).
+    if (ifMatch != nil) {
+        if (!_EntityTagMatchesList(currentTag, ifMatch, YES)) {
+            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_PreconditionFailed message:@"\"If-Match\" precondition failed for \"%@\"", request.path];
+        }
+    } else if (_EntityTagMatchesList(currentTag, ifNoneMatch, NO)) {
+        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_PreconditionFailed message:@"\"If-None-Match\" precondition failed for \"%@\"", request.path];
+    }
+
+    return nil;
+}
+
 - (BOOL)_checkFileExtension:(NSString *)fileName {
     if (_allowedFileExtensions && ![_allowedFileExtensions containsObject:[[fileName pathExtension] lowercaseString]]) {
         return NO;
     }
 
     return YES;
+}
+
+// Whatever an operation is about to destroy has to be something the client could have destroyed
+// by naming it directly, or one request means two different things. Returns the first item that
+// fails the allow-list — the item itself for a file, or the offending subpath for a collection —
+// and nil when the whole thing may go.
+//
+// Both destructive shapes go through here, because each has been a hole in turn. DELETE of a
+// collection removes its whole subtree, and a folder was a spelling that bypassed the allow-list
+// entirely (measured: with an allow-list of "txt", DELETE /Folder answered 204 and destroyed both
+// "id_rsa" and ".env"). MOVE and COPY destroy exactly as much through Overwrite, and their two
+// extension checks are both gated behind !srcIsDirectory, so a collection source skipped them
+// altogether — and a collection *destination* named "Backup.txt" satisfies the file-source form.
+// Measured before this, 5/5: all four spellings answered 204 and destroyed the target.
+//
+// This mirrors -[WSKWebUploader deleteItem:], deliberately including its two judgement calls.
+// Dot-names and everything under them are skipped whatever -allowHiddenItems says: they are
+// incidental metadata rather than content the allow-list protects, and a ".DS_Store" sits in
+// every macOS folder with an empty pathExtension that is in no allow-list, so vetting them would
+// make ordinary folders permanently undeletable. And an extensionless file ("README") is vetted
+// like any other, because addressing it directly is already refused.
+- (nullable NSString *)_firstUnvettableItemAtPath:(NSString *)absolutePath isDirectory:(BOOL)isDirectory {
+    if (_allowedFileExtensions == nil) {
+        return nil;
+    }
+
+    if (!isDirectory) {
+        NSString *const itemName = [absolutePath lastPathComponent];
+        return [self _checkFileExtension:itemName] ? nil : itemName;
+    }
+
+    NSDirectoryEnumerator<NSString *> *const enumerator = [[NSFileManager defaultManager] enumeratorAtPath:absolutePath];
+
+    for (NSString *subpath in enumerator) {
+        if ([[subpath lastPathComponent] hasPrefix:@"."]) {
+            [enumerator skipDescendants];
+            continue;
+        }
+
+        NSString *const subpathType = [enumerator fileAttributes][NSFileType];
+
+        if ([subpathType isEqualToString:NSFileTypeRegular] && ![self _checkFileExtension:subpath]) {
+            return subpath;
+        }
+    }
+
+    return nil;
 }
 
 // Hidden-item protection has to cover every component of the path, not only the leaf:
@@ -445,6 +570,12 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Uploading to \"%@\" is not allowed", relativePath];
     }
 
+    WSKResponse *const preconditionFailure = [self _preconditionFailureForRequest:request atPath:absolutePath];
+
+    if (preconditionFailure) {
+        return preconditionFailure;
+    }
+
     if (![self shouldUploadFileAtPath:absolutePath withTemporaryFile:request.temporaryPath]) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Uploading file to \"%@\" is not permitted", relativePath];
     }
@@ -479,7 +610,7 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
 - (WSKResponse *)performDELETE:(WSKRequest *)request {
     NSString *const depthHeader = request.headers[@"Depth"];
 
-    if (depthHeader && ![depthHeader isEqualToString:@"infinity"]) {
+    if (depthHeader && !_HeaderTokenIs(depthHeader, @"infinity")) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"Unsupported 'Depth' header: %@", depthHeader];
     }
 
@@ -508,41 +639,24 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
     }
 
-    NSString *const itemName = [absolutePath lastPathComponent];
-
-    if (isHidden || (!isDirectory && ![self _checkFileExtension:itemName])) {
+    if (isHidden) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not allowed", relativePath];
     }
 
-    // Deleting a collection removes its whole subtree, which must not become a way to destroy
-    // files a direct DELETE would refuse — the extension check above applies only to files, so a
-    // folder was a spelling that bypassed it entirely. Measured before this: with an allow-list
-    // of "txt", DELETE /Folder answered 204 and destroyed both "id_rsa" and ".env", each of
-    // which this same server refuses with 403 when addressed directly.
-    //
-    // This mirrors -[WSKWebUploader deleteItem:], deliberately including its two judgement
-    // calls. Dot-names and everything under them are skipped whatever -allowHiddenItems says:
-    // they are incidental metadata rather than content the allow-list protects, and a
-    // ".DS_Store" sits in every macOS folder with an empty pathExtension that is in no
-    // allow-list, so vetting them would make ordinary folders permanently undeletable. And an
-    // extensionless file ("README") is vetted like any other, because a direct DELETE of it is
-    // already refused and letting the recursive form through would make one request mean two
-    // different things.
-    if (isDirectory && _allowedFileExtensions) {
-        NSDirectoryEnumerator<NSString *> *const enumerator = [[NSFileManager defaultManager] enumeratorAtPath:absolutePath];
+    NSString *const undeletable = [self _firstUnvettableItemAtPath:absolutePath isDirectory:isDirectory];
 
-        for (NSString *subpath in enumerator) {
-            if ([[subpath lastPathComponent] hasPrefix:@"."]) {
-                [enumerator skipDescendants];
-                continue;
-            }
-
-            NSString *const subpathType = [enumerator fileAttributes][NSFileType];
-
-            if ([subpathType isEqualToString:NSFileTypeRegular] && ![self _checkFileExtension:subpath]) {
-                return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not allowed: it contains \"%@\"", relativePath, subpath];
-            }
+    if (undeletable) {
+        if (isDirectory) {
+            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not allowed: it contains \"%@\"", relativePath, undeletable];
         }
+
+        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not allowed", relativePath];
+    }
+
+    WSKResponse *const preconditionFailure = [self _preconditionFailureForRequest:request atPath:absolutePath];
+
+    if (preconditionFailure) {
+        return preconditionFailure;
     }
 
     if (![self shouldDeleteItemAtPath:absolutePath]) {
@@ -645,7 +759,7 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
     if (!isMove) {
         NSString *const depthHeader = request.headers[@"Depth"];  // TODO: Support "Depth: 0"
 
-        if (depthHeader && ![depthHeader isEqualToString:@"infinity"]) {
+        if (depthHeader && !_HeaderTokenIs(depthHeader, @"infinity")) {
             return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"Unsupported 'Depth' header: %@", depthHeader];
         }
     }
@@ -736,11 +850,32 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"%@ to \"%@\" is not allowed", isMove ? @"Moving" : @"Copying", dstRelativePath];
     }
 
-    NSString *const overwriteHeader = request.headers[@"Overwrite"];
-    BOOL existing = [[NSFileManager defaultManager] fileExistsAtPath:dstAbsolutePath];
+    // The precondition names the resource the Request-URI addresses, i.e. the SOURCE.
+    WSKResponse *const preconditionFailure = [self _preconditionFailureForRequest:request atPath:srcAbsolutePath];
 
-    if (existing && ((isMove && ![overwriteHeader isEqualToString:@"T"]) || (!isMove && [overwriteHeader isEqualToString:@"F"]))) {
+    if (preconditionFailure) {
+        return preconditionFailure;
+    }
+
+    NSString *const overwriteHeader = request.headers[@"Overwrite"];
+    BOOL dstIsDirectory = NO;
+    BOOL existing = [[NSFileManager defaultManager] fileExistsAtPath:dstAbsolutePath isDirectory:&dstIsDirectory];
+
+    if (existing && ((isMove && !_HeaderTokenIs(overwriteHeader, @"T")) || (!isMove && _HeaderTokenIs(overwriteHeader, @"F")))) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_PreconditionFailed message:@"Destination \"%@\" already exists", dstRelativePath];
+    }
+
+    // An overwrite destroys the destination just as a DELETE would, so it has to clear the same
+    // bar. The two extension checks above cannot stand in for this: both are skipped when the
+    // source is a collection, and the destination form only ever judges a *name*, which says
+    // nothing about what a collection named "Backup.txt" contains. Checked here, before any
+    // filesystem work, so a refusal leaves the destination exactly as it was.
+    if (existing) {
+        NSString *const undeletable = [self _firstUnvettableItemAtPath:dstAbsolutePath isDirectory:dstIsDirectory];
+
+        if (undeletable) {
+            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"%@ to \"%@\" is not allowed: it would destroy \"%@\"", isMove ? @"Moving" : @"Copying", dstRelativePath, undeletable];
+        }
     }
 
     if (isMove) {

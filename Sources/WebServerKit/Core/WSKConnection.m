@@ -660,7 +660,17 @@ static NSString *_WithoutRootLabel(NSString *host) {
                                 return;
                             }
 
-                            [self->_request prepareForWriting];
+                            // A content coding we cannot undo has to be refused here, before a
+                            // byte of it is accepted. Preparing the writer is what decides that:
+                            // an unknown coding used to leave the raw sink in place, so the
+                            // still-encoded octets were stored as the entity and answered with a
+                            // success status. Same rule, and same reason, as an unsupported
+                            // Transfer-Encoding.
+                            if (![self->_request prepareForWriting]) {
+                                self->_requestReceived = YES;  // Nothing further is read from this socket
+                                [self _finishProcessingRequest:[WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_UnsupportedMediaType message:@"Unsupported 'Content-Encoding' header: %@", requestHeaders[@"Content-Encoding"]]];
+                                return;
+                            }
 
                             if (self->_request.usesChunkedTransferEncoding || (extraData.length <= self->_request.contentLength)) {
                                 NSString *const expectHeader = requestHeaders[@"Expect"];
