@@ -356,6 +356,54 @@ static BOOL _ParseTransferEncoding(NSString *header, BOOL *outRejected) {
     return NO;
 }
 
+// Parse a "Content-Encoding" list (RFC 9110 §8.4). Returns NO when the coding cannot be undone,
+// in which case the caller MUST refuse the request.
+//
+// The installer above used to test for the exact token "gzip" and had no else branch, so every
+// other coding silently left the raw sink in place and the still-ENCODED octets were stored as
+// the entity — answered 201/204, with nothing to say the bytes on disk are not the bytes the
+// client sent. That is the same defect _ParseTransferEncoding exists to prevent, and its comment
+// already states the rule: storing the still-encoded bytes as if they were the body is worse
+// than refusing.
+//
+// "x-gzip" is decoded rather than refused: RFC 9110 §8.4.1 makes it equivalent to "gzip", so
+// treating it as unknown would trade a silent-corruption bug for an interop one. More than one
+// coding is refused because only a single gzip member can be undone here.
+static BOOL _ParseContentEncoding(NSString *header, BOOL *outGZip) {
+    *outGZip = NO;
+
+    if (header == nil) {
+        return YES;
+    }
+
+    NSMutableArray<NSString *> *const codings = [[NSMutableArray alloc] init];
+
+    for (NSString *coding in [header componentsSeparatedByString:@","]) {
+        NSString *const token = [[coding stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]] lowercaseString];
+
+        if (token.length) {
+            [codings addObject:token];
+        }
+    }
+
+    if (codings.count == 0) {
+        return YES;  // A present but empty value is no coding at all
+    }
+
+    if (codings.count > 1) {
+        return NO;
+    }
+
+    NSString *const coding = codings.firstObject;
+
+    if ([coding isEqualToString:@"gzip"] || [coding isEqualToString:@"x-gzip"]) {
+        *outGZip = YES;
+        return YES;
+    }
+
+    return [coding isEqualToString:@"identity"];
+}
+
 @implementation WSKRequest {
     BOOL _opened;
     NSMutableArray<WSKBodyDecoder *> *_decoders;
@@ -502,14 +550,22 @@ static BOOL _ParseTransferEncoding(NSString *header, BOOL *outRejected) {
     return YES;
 }
 
-- (void)prepareForWriting {
+- (BOOL)prepareForWriting {
     _writer = self;
 
-    if ([WSKNormalizeHeaderValue(self.headers[@"Content-Encoding"]) isEqualToString:@"gzip"]) {
+    BOOL gzip = NO;
+
+    if (!_ParseContentEncoding(self.headers[@"Content-Encoding"], &gzip)) {
+        return NO;
+    }
+
+    if (gzip) {
         WSKGZipDecoder *const decoder = [[WSKGZipDecoder alloc] initWithRequest:self writer:_writer];
         [_decoders addObject:decoder];
         _writer = decoder;
     }
+
+    return YES;
 }
 
 - (BOOL)performOpen:(NSError **)error {

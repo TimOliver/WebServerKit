@@ -80,6 +80,123 @@ and the Bonjour/`.local` name only, so without it every request is refused with 
 
 ## Recent Changes
 
+### Tenth audit pass: the scan that was meant to end the programme, and did not
+
+This pass existed to *stop* the audit: the rule agreed beforehand was that if a scan aimed at the
+recurring classes found nothing new, the programme ends. **It found five things, and the run had
+to be done twice** — the first attempt was killed mid-sweep by a machine reboot.
+
+**Recovering the dead run was worth more than re-running it.** The journal recorded four agents
+`started` and no results, which reads as a total loss; `resumeFromRunId` is same-session only, so
+it was not available either. But the per-agent transcripts survive on disk, and one of them
+contained `**S6c is a hit.**` with the probe table under it. That lead became the first finding
+below. The relaunch was then told what was already known so the agents hunted *siblings* rather
+than re-deriving it — and three of them independently landed on the same defect from different
+directions anyway, which is the strongest evidence any pass here has produced that a finding is
+real.
+
+**A collection was again a spelling that skipped the allow-list — this time through MOVE and
+COPY.** The eighth pass closed the recursive `DELETE` and the design priorities at the top of this
+file then claimed the general property. `MOVE` and `COPY` destroy exactly as much through
+`Overwrite`, and nothing vetted what they were about to destroy. Both of `performCOPY:isMove:`'s
+extension checks are gated behind `!srcIsDirectory`, which opens *two* doors:
+
+- a **collection source** skips both checks outright, so `MOVE /Src` over a folder holding `id_rsa`
+  answered 204 and destroyed it;
+- a **file source** does run the destination check — and a collection named `Puck.app` or
+  `Backup.txt` *passes* it, because the check only ever judges a name. `COPY /Puck-1.2.ipa` with
+  `Destination: /Puck.app` needs no `Overwrite` header at all and took out `id_rsa`,
+  `embedded.mobileprovision` and `Frameworks/secret`.
+
+Both measured 5/5, in Debug and Release. The vetting is now one method,
+`-_firstUnvettableItemAtPath:isDirectory:`, used by `performDELETE` *and* by the overwrite — a
+second implementation of a rule beside the live one is the trap this file already names. Every
+other destructive site was then checked rather than assumed: `performPUT` refuses an existing
+collection with 405, and the uploader's `/upload` and `/move` route through `-_uniquePathForPath:`
+and so have no overwrite path at all. That asymmetry is deliberate and not a parity gap — only
+WebDAV implements RFC 4918 `Overwrite`.
+
+**`Overwrite: f` destroyed the destination.** The header was compared with `-isEqualToString:@"F"`,
+so that exact byte was the only spelling that meant "do not overwrite" and **every other one was
+taken as permission**: `f`, `False`, `no`, `0` and an empty value all answered 204 and clobbered,
+while `F` answered 412. RFC 4918 §1.4 adopts RFC 2616 ABNF, in which quoted literals are
+case-insensitive, so `f` is *conformant* — a client that explicitly said "do not overwrite" lost
+its data and was told it succeeded. This one fails **open**, which is what separates it from the
+identical shape in the `Depth: infinity` comparison, which fails closed and was merely an interop
+bug; both are case-folded now through one `_HeaderTokenIs` helper.
+
+**Deliberately not changed:** a `MOVE` with no `Overwrite` header at all still answers 412. RFC
+4918 §9.9.3 says an absent header means `T`, but conforming would make MOVE destructive by default,
+against this file's own "refuse rather than half-succeed" priority. Recorded rather than fixed.
+
+**An upload escaped the share through its filename.** `POST /upload` with `filename="/"` — no
+`path` field needed, no allow-list set, i.e. the **default configuration** — answered 200 and wrote
+the body *beside* the served directory. `[@"/" lastPathComponent]` is `@"/"`, the one input for
+which that does not yield a leaf; it then passes every guard, and
+`-stringByAppendingPathComponent:@"/"` collapses straight back to the upload directory, so
+`-_uniquePathForPath:` finds it already exists and renames **its own leaf in the parent** —
+`Share (1)`, repeatable and unbounded. Same class the eighth pass called the sharpest finding of
+any pass, arriving through the filename rather than a symlink.
+
+**⚠️ The fix the agent proposed for it would have broken every upload under `/var` or `/tmp`,** and
+its own skeptic caught that. The suggestion was `WSKPathIsInsideDirectory(desiredPath,
+_uploadDirectory)`, but `_uploadDirectory` is stored `-stringByStandardizingPath`'d (a share under
+`NSTemporaryDirectory()` stays `/var/…`) while `desiredPath` is composed onto a `realpath(3)`
+result (`/private/var/…`), so the comparison is false for every legitimate upload there — and
+`MakeTempDirectory()` uses exactly that base, so the suite would have gone red. What shipped
+rejects a separator in the reduced leaf *and* judges the composed path against **`resolvedDirectory`**.
+This is the second time a proposed fix, not the finding, was the dangerous part.
+
+**A content coding the server could not decode was stored as the entity.** `-prepareForWriting`
+installed the gzip decoder for the exact token `gzip` and had **no else branch**, so every other
+coding left the raw sink in place: `PUT` with `Content-Encoding: deflate` wrote the *compressed*
+octets to disk and answered 201. `x-gzip` — which RFC 9110 §8.4.1 defines as a synonym for `gzip`
+— was silently stored undecoded too. The rule this violates was already written down one screen
+away, in `_ParseTransferEncoding`: *storing the still-encoded bytes as if they were the body is
+worse than refusing.* Unsupported codings are now 415; `x-gzip` decodes, because refusing it would
+trade silent corruption for an interop bug.
+
+**Preconditions were evaluated after the write.** `If-Match` was not parsed anywhere in the tree,
+and `-overrideResponse:forRequest:` — the only place any precondition was evaluated — runs *after*
+the handler has produced its response, comparing against a `response.eTag` that a 201/204 does not
+carry. So no 412 could ever be produced and the lost-update protection a WebDAV client believes it
+has did not exist: two clients editing one file each silently overwrote the other. Now enforced
+before any destructive step for **PUT, DELETE, MOVE and COPY** rather than only for PUT where it
+was found, since "closed at one of the sites the rule applies to" is this codebase's most reliable
+defect shape. The tag is `WSKEntityTagForFileInfo`, extracted so `WSKFileResponse` and this check
+cannot drift — a second formatter would make every precondition fail rather than protect anything.
+
+**Class C came back genuinely clean, and the instruments were proved before the zeros were
+believed.** 67 failure scenarios × 250 iterations ended at exactly baseline descriptors (12 → 12);
+a 676,970-request soak ended 33 descriptors *below* baseline; `reservedInMemoryByteCount` was 0 at
+rest in every run, including after being driven to its ceiling and abandoned there 150 times with
+`SO_LINGER {1,0}`. The staging-swap failure path was forced with an immutable child: 30 COPY + 30
+MOVE left zero staging siblings and restored the source 30/30. An RSS creep of ~15 B/request was
+chased rather than waved away and proved to be allocator behaviour — `leaks(1)` reported zero, live
+bytes went *down* between samples, and a legitimate-traffic-only control showed the same slope.
+**Do not re-run this speculatively.**
+
+Also clean and worth not re-testing: 1,143 same-bytes-different-segmentation pairs plus 2,700
+randomized splits produced zero verdict differences, including the 256 KiB×2^k band where the ninth
+pass's gzip defect lived — the split-invariance oracle found nothing this time. HEAD/GET parity was
+exact across 79 header-by-header comparisons. The NUL guard was confirmed present at all 10
+client-path entry points by *driving* each one, not by grepping.
+
+**The one disagreement that was adjudicated rather than fixed:** listing a symlink-to-root answers
+200 from the base-path handler and 403 from the uploader and WebDAV. Not a defect, and measured
+rather than argued — the body of `GET /selfroot/` is byte-identical to `GET /`, so the permissive
+answer discloses nothing, and every composite through it is still refused exactly as its direct
+spelling is. The refusal in the other two is the resolver-level guard protecting their destructive
+verbs; the base-path handler has none to protect.
+
+**Still open:** the `MOVE`-without-`Overwrite` default above, deliberately. The `//` status
+disagreement from the eighth pass remains deliberately unfixed.
+
+**A note on running this again.** Two timing tests — `testConnectionIdleTimeoutSparesSlowHandler`
+and `testConnectionClosesSlowlorisHeaderDribble` — fail when parallel agents saturate the machine
+(observed at load average 169; both passed 3/3 in isolation immediately after). Do not read a
+`Run-Tests.sh` verdict while a fleet is building, and re-run a failure alone before believing it.
+
 ### Ninth audit pass: fuzzing, differential testing, and a fix of mine that destroyed the share
 
 Run overnight, unattended, with three techniques this project had never applied: mutational and

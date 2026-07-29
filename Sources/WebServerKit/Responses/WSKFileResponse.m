@@ -205,7 +205,10 @@ static NSString *_EscapeExtValue(NSString *string) {
     // It does not close a replacement of exactly equal length with a restored mtime, and nothing
     // derived from stat(2) can. Changing the format costs every existing client one revalidation
     // miss, once.
-    NSString *const entityTag = [NSString stringWithFormat:@"\"%llu/%lld/%li/%li\"", info.st_ino, (long long)info.st_size, info.st_mtimespec.tv_sec, info.st_mtimespec.tv_nsec];
+    // Formatted by WSKEntityTagForFileInfo so this and the WebDAV precondition check cannot
+    // drift: the tag issued here is the one a client presents back in If-Match, and two
+    // formatters would make every precondition fail.
+    NSString *const entityTag = WSKEntityTagForFileInfo(&info);
 
     // A date validator may only be *issued* once the second it names has closed. While mtime
     // is still inside the current second the file can be written again without the timestamp

@@ -1482,6 +1482,52 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     [fm removeItemAtPath:dir error:NULL];
 }
 
+// The multipart filename is reduced to a leaf with -lastPathComponent, and "/" is the one input
+// for which that does not yield a leaf: it returns "/" unchanged. The name then passes every
+// guard (non-empty, no NUL, not "." or "..", no leading dot, and an empty pathExtension is
+// allowed when no allow-list is set — the default), and
+// -[NSString stringByAppendingPathComponent:@"/"] collapses straight back to the upload
+// directory. -_uniquePathForPath: then sees that directory already exists and renames *its own
+// leaf* in its PARENT, so the body lands beside the share as "Share (1)". Measured before this:
+// 200 OK, repeatable and unbounded. Same class as the eighth pass's symlink write — a file
+// landing outside the shared directory — arriving through the filename instead.
+- (void)testUploaderRefusesAFileNameThatIsNotASingleComponent {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* parent = MakeTempDirectory();
+    NSString* share = [parent stringByAppendingPathComponent:@"Share"];
+    XCTAssertTrue([fm createDirectoryAtPath:share withIntermediateDirectories:YES attributes:nil error:NULL]);
+
+    WSKWebUploader* server = [[WSKWebUploader alloc] initWithUploadDirectory:share];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSData* (^upload)(NSString*) = ^(NSString* fileName) {
+        NSString* body = [NSString stringWithFormat:@"--B\r\nContent-Disposition: form-data; name=\"files[]\"; filename=\"%@\"\r\nContent-Type: text/plain\r\n\r\nESCAPED\r\n--B--\r\n", fileName];
+        NSString* head = [NSString stringWithFormat:@"POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data; boundary=B\r\nContent-Length: %lu\r\n\r\n", (unsigned long)[body lengthOfBytesUsingEncoding:NSUTF8StringEncoding]];
+        NSMutableData* request = [[head dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+        [request appendData:[body dataUsingEncoding:NSUTF8StringEncoding]];
+        return (NSData*)request;
+    };
+
+    // An ordinary upload must still work, or the refusals below prove nothing.
+    XCTAssertTrue([SendRawDataRequest(server.port, upload(@"ok.txt")) hasPrefix:@"HTTP/1.1 200"], @"an ordinary upload stopped working");
+    XCTAssertTrue([fm fileExistsAtPath:[share stringByAppendingPathComponent:@"ok.txt"]], @"the ordinary upload did not land in the share");
+
+    for (NSString* name in @[ @"/", @"//", @"///" ]) {
+        NSString* reply = SendRawDataRequest(server.port, upload(name));
+        XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 403"], @"filename \"%@\" should be refused: %@", name, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+
+        // The assertion that matters is not the status but that nothing appeared outside the
+        // served directory.
+        NSMutableArray* strays = [[fm contentsOfDirectoryAtPath:parent error:NULL] mutableCopy];
+        [strays removeObject:@"Share"];
+        XCTAssertEqual(strays.count, (NSUInteger)0, @"filename \"%@\" wrote outside the share: %@", name, [strays componentsJoinedByString:@", "]);
+    }
+
+    [server stop];
+    [fm removeItemAtPath:parent error:NULL];
+}
+
 // Whether a gzip body with a concatenated second member was accepted or refused depended only on
 // how the client split its writes: sent in one write the trailing member was silently dropped and
 // the request answered 200, handing the handler less data than was sent; split at the member
@@ -1820,6 +1866,279 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     NSString* allowed = SendRawRequest(server.port, @"DELETE /Ordinary HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertFalse([allowed hasPrefix:@"HTTP/1.1 403"], @"a .DS_Store must not make an ordinary folder undeletable: %@", [allowed substringToIndex:MIN((NSUInteger)40, allowed.length)]);
     XCTAssertFalse([fm fileExistsAtPath:ordinary], @"the deletable folder was not removed: %@", allowed);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// The eighth pass closed the recursive DELETE and this file's design priorities then claimed the
+// whole property — "a recursive delete refuses when it would destroy a file a direct delete would
+// have refused". MOVE and COPY destroy just as much through Overwrite, and their two extension
+// checks are both gated behind !srcIsDirectory, so a directory source skipped them entirely and
+// nothing vetted the destination being replaced. Measured before this, with
+// allowedFileExtensions=[txt] and 5/5 reproductions: MOVE and COPY of a directory over "Dst"
+// (holding id_rsa) and over "secret.pem" all answered 204 and destroyed the target — each of
+// which this same server refuses with 403 when addressed directly.
+//
+// The uploader needs no equivalent: -moveItem: routes around a collision with
+// -_uniquePathForPath: and never overwrites, so it has no destructive-overwrite path at all.
+- (void)testDAVOverwriteRespectsExtensionAllowList {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    server.allowedFileExtensions = @[ @"txt" ];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* (^overwrite)(NSString*, NSString*, NSString*) = ^(NSString* method, NSString* source, NSString* destination) {
+        return SendRawRequest(server.port, [NSString stringWithFormat:@"%@ %@ HTTP/1.1\r\nHost: localhost\r\nDestination: %@\r\nOverwrite: T\r\n\r\n", method, source, destination]);
+    };
+
+    NSString* source = [dir stringByAppendingPathComponent:@"Src"];
+    NSString* guarded = [dir stringByAppendingPathComponent:@"Dst"];
+    NSString* key = [guarded stringByAppendingPathComponent:@"id_rsa"];
+    NSString* secret = [dir stringByAppendingPathComponent:@"secret.pem"];
+
+    void (^rebuild)(void) = ^{
+        [fm removeItemAtPath:source error:NULL];
+        [fm removeItemAtPath:guarded error:NULL];
+        [fm removeItemAtPath:secret error:NULL];
+        XCTAssertTrue([fm createDirectoryAtPath:source withIntermediateDirectories:YES attributes:nil error:NULL]);
+        XCTAssertTrue([@"payload" writeToFile:[source stringByAppendingPathComponent:@"ok.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+        XCTAssertTrue([fm createDirectoryAtPath:guarded withIntermediateDirectories:YES attributes:nil error:NULL]);
+        XCTAssertTrue([@"KEYDATA" writeToFile:key atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+        XCTAssertTrue([@"KEYDATA" writeToFile:secret atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    };
+
+    // The controls: both targets are refused when addressed directly, so the overwrite forms must
+    // be refused too, or one request means two different things.
+    rebuild();
+    XCTAssertTrue([SendRawRequest(server.port, @"DELETE /secret.pem HTTP/1.1\r\nHost: localhost\r\n\r\n") hasPrefix:@"HTTP/1.1 403"], @"a direct delete of a disallowed file should be refused");
+    XCTAssertTrue([SendRawRequest(server.port, @"DELETE /Dst HTTP/1.1\r\nHost: localhost\r\n\r\n") hasPrefix:@"HTTP/1.1 403"], @"a recursive delete of a collection holding a disallowed file should be refused");
+
+    for (NSString* method in @[ @"MOVE", @"COPY" ]) {
+        rebuild();
+        NSString* ontoCollection = overwrite(method, @"/Src", @"/Dst");
+        XCTAssertTrue([ontoCollection hasPrefix:@"HTTP/1.1 403"], @"%@ over a collection holding a disallowed file should be refused: %@", method, [ontoCollection substringToIndex:MIN((NSUInteger)40, ontoCollection.length)]);
+        XCTAssertEqualObjects([NSString stringWithContentsOfFile:key encoding:NSUTF8StringEncoding error:NULL], @"KEYDATA", @"%@ destroyed a file a direct delete refuses", method);
+
+        rebuild();
+        NSString* ontoFile = overwrite(method, @"/Src", @"/secret.pem");
+        XCTAssertTrue([ontoFile hasPrefix:@"HTTP/1.1 403"], @"%@ over a disallowed file should be refused: %@", method, [ontoFile substringToIndex:MIN((NSUInteger)40, ontoFile.length)]);
+        // The path survives a rename-over as a *directory*, so assert the type as well as the
+        // bytes — merely existing does not mean the file is still there.
+        BOOL secretIsDirectory = NO;
+        XCTAssertTrue([fm fileExistsAtPath:secret isDirectory:&secretIsDirectory] && !secretIsDirectory, @"%@ replaced a disallowed file with a directory", method);
+        XCTAssertEqualObjects([NSString stringWithContentsOfFile:secret encoding:NSUTF8StringEncoding error:NULL], @"KEYDATA", @"%@ destroyed a file a direct delete refuses", method);
+    }
+
+    // The same hole with the checks the other way round: a *file* source does run the
+    // destination-name check, but a destination *collection* named "Backup.txt" passes it — and
+    // the collection being destroyed holds a file the allow-list refuses.
+    for (NSString* method in @[ @"MOVE", @"COPY" ]) {
+        rebuild();
+        NSString* backup = [dir stringByAppendingPathComponent:@"Backup.txt"];
+        XCTAssertTrue([fm createDirectoryAtPath:backup withIntermediateDirectories:YES attributes:nil error:NULL]);
+        XCTAssertTrue([@"KEYDATA" writeToFile:[backup stringByAppendingPathComponent:@"id_rsa"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+        NSString* ontoNamedCollection = overwrite(method, @"/Src/ok.txt", @"/Backup.txt");
+        XCTAssertTrue([ontoNamedCollection hasPrefix:@"HTTP/1.1 403"], @"%@ over a collection whose name passes the allow-list should be refused: %@", method, [ontoNamedCollection substringToIndex:MIN((NSUInteger)40, ontoNamedCollection.length)]);
+        XCTAssertEqualObjects([NSString stringWithContentsOfFile:[backup stringByAppendingPathComponent:@"id_rsa"] encoding:NSUTF8StringEncoding error:NULL], @"KEYDATA", @"%@ destroyed a file a direct delete refuses", method);
+        [fm removeItemAtPath:backup error:NULL];
+    }
+
+    // What must keep working. Moving a collection to a fresh name overwrites nothing, and a
+    // destination whose only extra entry is filesystem noise stays replaceable — the same two
+    // judgement calls the recursive DELETE makes, for the same reasons.
+    rebuild();
+    NSString* renamed = overwrite(@"MOVE", @"/Src", @"/Fresh");
+    XCTAssertTrue([renamed hasPrefix:@"HTTP/1.1 201"], @"moving a collection to an unused name stopped working: %@", [renamed substringToIndex:MIN((NSUInteger)40, renamed.length)]);
+    XCTAssertTrue([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"Fresh/ok.txt"]], @"the moved collection did not arrive");
+    [fm removeItemAtPath:[dir stringByAppendingPathComponent:@"Fresh"] error:NULL];
+
+    rebuild();
+    XCTAssertTrue([@"junk" writeToFile:[guarded stringByAppendingPathComponent:@".DS_Store"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([fm removeItemAtPath:key error:NULL]);
+    NSString* ordinary = overwrite(@"MOVE", @"/Src", @"/Dst");
+    XCTAssertFalse([ordinary hasPrefix:@"HTTP/1.1 403"], @"a .DS_Store must not make an ordinary folder unreplaceable: %@", [ordinary substringToIndex:MIN((NSUInteger)40, ordinary.length)]);
+    XCTAssertTrue([fm fileExistsAtPath:[guarded stringByAppendingPathComponent:@"ok.txt"]], @"the permitted overwrite did not happen: %@", ordinary);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// Preconditions were evaluated in exactly one place, -overrideResponse:forRequest:, which runs
+// AFTER the handler has produced its response — so for a write the file was already on disk. It
+// also compares against response.eTag, which a 201/204 does not carry, so _CompareResources
+// returned NO and no 412 was ever produced. If-Match was not parsed anywhere in the tree at all.
+// RFC 9110 §13.1.1 requires the origin NOT to perform the method when If-Match evaluates false;
+// the lost-update protection a WebDAV client believes it has therefore did not exist, and two
+// clients editing one file each silently overwrote the other.
+//
+// Enforced for every DAV verb that destroys or replaces the resource it addresses — PUT, DELETE,
+// MOVE and COPY — rather than only for PUT where it was found, because "closed at one of the
+// sites the rule applies to" is this codebase's most reliable defect shape.
+- (void)testDAVPreconditionsAreEnforcedBeforeTheWrite {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* target = [dir stringByAppendingPathComponent:@"f.txt"];
+    XCTAssertTrue([@"ORIGINAL" writeToFile:target atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    // The tag the client legitimately holds, taken from the server's own GET.
+    NSString* get = SendRawRequest(server.port, @"GET /f.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    // CFHTTPMessage normalizes the field name, so it goes out as "Etag" — match it the way the
+    // wire defines it, case-insensitively, rather than the way the source spells it.
+    NSRange tagStart = [get rangeOfString:@"Etag: " options:NSCaseInsensitiveSearch];
+    XCTAssertNotEqual(tagStart.location, (NSUInteger)NSNotFound, @"the server did not send an ETag: %@", get);
+    NSString* rest = [get substringFromIndex:NSMaxRange(tagStart)];
+    NSString* eTag = [rest substringToIndex:[rest rangeOfString:@"\r\n"].location];
+    XCTAssertTrue(eTag.length > 2, @"unexpected ETag %@", eTag);
+
+    NSString* (^put)(NSString*, NSString*) = ^(NSString* name, NSString* precondition) {
+        NSString* body = @"REPLACEMENT";
+        NSString* head = [NSString stringWithFormat:@"PUT /%@ HTTP/1.1\r\nHost: localhost\r\n%@Content-Length: %lu\r\n\r\n%@", name, precondition, (unsigned long)body.length, body];
+        return SendRawRequest(server.port, head);
+    };
+    NSString* (^contents)(void) = ^{
+        return [NSString stringWithContentsOfFile:target encoding:NSUTF8StringEncoding error:NULL];
+    };
+
+    // A stale If-Match must refuse and must not write.
+    NSString* stale = put(@"f.txt", @"If-Match: \"0/0/0/0\"\r\n");
+    XCTAssertTrue([stale hasPrefix:@"HTTP/1.1 412"], @"a stale If-Match should be refused: %@", [stale substringToIndex:MIN((NSUInteger)40, stale.length)]);
+    XCTAssertEqualObjects(contents(), @"ORIGINAL", @"the write happened despite a failed If-Match");
+
+    // If-None-Match: * means "only if it does not exist".
+    NSString* exists = put(@"f.txt", @"If-None-Match: *\r\n");
+    XCTAssertTrue([exists hasPrefix:@"HTTP/1.1 412"], @"If-None-Match: * against an existing resource should be refused: %@", [exists substringToIndex:MIN((NSUInteger)40, exists.length)]);
+    XCTAssertEqualObjects(contents(), @"ORIGINAL", @"the write happened despite If-None-Match: *");
+
+    // DELETE, MOVE and COPY carry the same guarantee.
+    NSString* deleted = SendRawRequest(server.port, @"DELETE /f.txt HTTP/1.1\r\nHost: localhost\r\nIf-Match: \"0/0/0/0\"\r\n\r\n");
+    XCTAssertTrue([deleted hasPrefix:@"HTTP/1.1 412"], @"a stale If-Match should refuse a DELETE: %@", [deleted substringToIndex:MIN((NSUInteger)40, deleted.length)]);
+    XCTAssertTrue([fm fileExistsAtPath:target], @"the delete happened despite a failed If-Match");
+
+    NSString* moved = SendRawRequest(server.port, @"MOVE /f.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /moved.txt\r\nIf-Match: \"0/0/0/0\"\r\n\r\n");
+    XCTAssertTrue([moved hasPrefix:@"HTTP/1.1 412"], @"a stale If-Match should refuse a MOVE: %@", [moved substringToIndex:MIN((NSUInteger)40, moved.length)]);
+    XCTAssertTrue([fm fileExistsAtPath:target], @"the move happened despite a failed If-Match");
+
+    // What must keep working: the matching tag, and the absence of any precondition at all.
+    NSString* matching = put(@"f.txt", [NSString stringWithFormat:@"If-Match: %@\r\n", eTag]);
+    XCTAssertTrue([matching hasPrefix:@"HTTP/1.1 204"], @"a matching If-Match should be honoured: %@", [matching substringToIndex:MIN((NSUInteger)40, matching.length)]);
+    XCTAssertEqualObjects(contents(), @"REPLACEMENT", @"a matching If-Match did not write");
+
+    XCTAssertTrue([put(@"fresh.txt", @"If-None-Match: *\r\n") hasPrefix:@"HTTP/1.1 201"], @"If-None-Match: * should allow creating a new resource");
+    XCTAssertTrue([put(@"plain.txt", @"") hasPrefix:@"HTTP/1.1 201"], @"a PUT with no precondition stopped working");
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// -prepareForWriting installed the gzip decoder for the exact token "gzip" and had no else
+// branch, so every OTHER content coding left the raw sink in place and the still-ENCODED octets
+// were stored as the entity — with a success status. The file on disk is then not what the
+// client sent and nothing says so, which is the half-succeed outcome the design priorities call
+// the worst one. This project already applies the opposite rule one screen up, in
+// _ParseTransferEncoding: "storing the still-encoded bytes as if they were the body is worse
+// than refusing."
+//
+// "x-gzip" must be ACCEPTED and decoded rather than refused: RFC 9110 §8.4.1 makes it equivalent
+// to "gzip", so refusing it would swap a silent-corruption bug for an interop one.
+- (void)testUnsupportedContentEncodingIsRefusedRatherThanStored {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSData* const plain = [@"THE-REAL-PAYLOAD" dataUsingEncoding:NSUTF8StringEncoding];
+    NSData* const gzipped = GZipCompress(plain);
+    XCTAssertNotNil(gzipped);
+
+    NSString* (^put)(NSString*, NSString*, NSData*) = ^(NSString* name, NSString* encoding, NSData* body) {
+        NSString* head = [NSString stringWithFormat:@"PUT /%@ HTTP/1.1\r\nHost: localhost\r\n%@Content-Length: %lu\r\n\r\n", name, encoding.length ? [NSString stringWithFormat:@"Content-Encoding: %@\r\n", encoding] : @"", (unsigned long)body.length];
+        NSMutableData* request = [[head dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+        [request appendData:body];
+        return SendRawDataRequest(server.port, request);
+    };
+    NSData* (^stored)(NSString*) = ^(NSString* name) {
+        return [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:name]];
+    };
+
+    // The codings that ARE supported must keep working, or the refusals below prove nothing.
+    XCTAssertTrue([put(@"plain.txt", nil, plain) hasPrefix:@"HTTP/1.1 201"], @"an unencoded PUT stopped working");
+    XCTAssertEqualObjects(stored(@"plain.txt"), plain, @"an unencoded PUT stored the wrong bytes");
+
+    XCTAssertTrue([put(@"gz.txt", @"gzip", gzipped) hasPrefix:@"HTTP/1.1 201"], @"a gzip PUT stopped working");
+    XCTAssertEqualObjects(stored(@"gz.txt"), plain, @"a gzip PUT did not decode");
+
+    XCTAssertTrue([put(@"xgz.txt", @"x-gzip", gzipped) hasPrefix:@"HTTP/1.1 201"], @"x-gzip is a synonym for gzip and must be accepted");
+    XCTAssertEqualObjects(stored(@"xgz.txt"), plain, @"x-gzip was not decoded");
+
+    // Anything we cannot decode must be refused, and must leave nothing behind.
+    for (NSString* coding in @[ @"deflate", @"br", @"gzip, gzip", @"bogus" ]) {
+        NSString* reply = put(@"bad.txt", coding, plain);
+        XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 415"], @"Content-Encoding: %@ should be refused: %@", coding, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+        XCTAssertFalse([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"bad.txt"]], @"Content-Encoding: %@ stored the encoded octets as the entity", coding);
+    }
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// "Overwrite" was compared with -isEqualToString:@"F", so only that exact byte meant "do not
+// overwrite" and EVERY other spelling was taken as permission to destroy the destination —
+// including "f", which RFC 4918 §10.6 makes a conformant spelling (its ABNF is RFC 2616 §2.1,
+// where quoted literals are case-insensitive). Measured before this: "F" gave 412 and preserved
+// the file, while "f", "False", "no", "0" and an empty value all gave 204 and clobbered it. A
+// client that explicitly said "do not overwrite" lost its data and was told it succeeded.
+//
+// The Depth comparison two methods up has the identical shape but fails CLOSED (an unrecognised
+// spelling refuses the request), so it is an interop nuisance rather than data loss; it is
+// case-folded here too, in the same edit, because leaving one of a matched pair is how the next
+// pass finds it.
+- (void)testDAVOverwriteAndDepthAreCaseInsensitive {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* destination = [dir stringByAppendingPathComponent:@"dst.txt"];
+    void (^rebuild)(void) = ^{
+        XCTAssertTrue([@"SOURCE" writeToFile:[dir stringByAppendingPathComponent:@"src.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+        XCTAssertTrue([@"ORIGINAL" writeToFile:destination atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    };
+
+    // Both spellings of "do not overwrite" must refuse and leave the destination alone.
+    for (NSString* no in @[ @"F", @"f" ]) {
+        rebuild();
+        NSString* reply = SendRawRequest(server.port, [NSString stringWithFormat:@"COPY /src.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /dst.txt\r\nOverwrite: %@\r\n\r\n", no]);
+        XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 412"], @"Overwrite: %@ should refuse: %@", no, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+        XCTAssertEqualObjects([NSString stringWithContentsOfFile:destination encoding:NSUTF8StringEncoding error:NULL], @"ORIGINAL", @"Overwrite: %@ clobbered the destination", no);
+    }
+
+    // Both spellings of "overwrite" must still work, or this becomes an over-refusal.
+    for (NSString* yes in @[ @"T", @"t" ]) {
+        rebuild();
+        NSString* reply = SendRawRequest(server.port, [NSString stringWithFormat:@"MOVE /src.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /dst.txt\r\nOverwrite: %@\r\n\r\n", yes]);
+        XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 204"], @"Overwrite: %@ should replace: %@", yes, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+        XCTAssertEqualObjects([NSString stringWithContentsOfFile:destination encoding:NSUTF8StringEncoding error:NULL], @"SOURCE", @"Overwrite: %@ did not replace the destination", yes);
+    }
+
+    // Depth: the RFC's own spelling with a capital I must be accepted, not refused.
+    rebuild();
+    XCTAssertTrue([fm createDirectoryAtPath:[dir stringByAppendingPathComponent:@"Coll"] withIntermediateDirectories:YES attributes:nil error:NULL]);
+    NSString* deleted = SendRawRequest(server.port, @"DELETE /Coll HTTP/1.1\r\nHost: localhost\r\nDepth: Infinity\r\n\r\n");
+    XCTAssertTrue([deleted hasPrefix:@"HTTP/1.1 204"], @"Depth: Infinity should be accepted: %@", [deleted substringToIndex:MIN((NSUInteger)40, deleted.length)]);
 
     [server stop];
     [fm removeItemAtPath:dir error:NULL];

@@ -27,6 +27,8 @@
 
 #import <Foundation/Foundation.h>
 
+#include <sys/stat.h>
+
 NS_ASSUME_NONNULL_BEGIN
 
 #ifdef __cplusplus
@@ -195,6 +197,20 @@ NSString *_Nullable WSKResolvedPathRelativeToDirectory(NSString *path, NSString 
  *  business, and reporting it as "hidden" here would mislabel an escape attempt.
  */
 BOOL WSKResolvedPathHasHiddenComponent(NSString *path, NSString *directory);
+
+/**
+ *  Returns the strong entity tag this server issues for a file, derived from `stat(2)` fields.
+ *
+ *  There is exactly one of these because a validator only works if every path agrees on it: the
+ *  tag a client is handed by a GET is the tag it presents back in `If-Match`, so a second
+ *  implementation that formatted the same fields differently would make every precondition fail
+ *  and every revalidation miss.
+ *
+ *  Size is part of the tag deliberately — inode and mtime alone do not identify the bytes, since
+ *  a rewrite in place that restores the timestamp keeps both. See `WSKFileResponse` for the
+ *  measurement behind that.
+ */
+NSString *WSKEntityTagForFileInfo(const struct stat *info);
 
 #ifdef __cplusplus
 }
