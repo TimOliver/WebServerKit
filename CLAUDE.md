@@ -306,8 +306,21 @@ affected — which is why the ETag control restarted correctly 4/4 while the dat
 the observation that ruled out a harness artefact. Costs a date-only client one second of
 caching; a future mtime is unsealed by the same test, which also stops the server advertising a
 `Last-Modified` newer than its own `Date`. Pinned by
-`testIfRangeRefusesADateMintedInsideItsOwnSecond`, which asserts both that no such date is
-issued and that one presented anyway is refused; it fails 2/2 against the sixth pass's code.
+`testIfRangeRefusesADateMintedInsideItsOwnSecond`, which fails 2/2 against the sixth pass's code.
+
+**⚠️ Correction (tenth pass): the redemption-time check is NOT a second line of defence, and this
+entry and the commit both said it was.** Withholding the date at issue time is the whole of the
+protection. The check that survives in the resume path is still evaluated when the resume
+*arrives*, so a resume landing even one second later sees a sealed timestamp and honours the
+date — measured 200 in the same second, 206 one second later, 206 two seconds later. That is the
+identical flaw this pass diagnosed in the sixth pass's fix, left in place and then described as a
+defence. It cannot be fixed: once the second closes the server *would* issue that date for the
+current bytes, so a date a client legitimately holds and one it fabricated are byte-identical,
+exactly as for a replacement that preserves mtime. What protects a conformant client is that no
+such date is ever issued while the second is open. The test now verifies the whole sequence lands
+inside one second rather than only the write — checking only up to the write made it pass locally
+and fail on a slower CI runner — and pins the closed-second behaviour so a later pass does not
+re-find it and churn.
 
 Not a regression — the pre-fix commit was built and measured and behaves identically. The
 defect was in the claim, not the code, which is the more dangerous kind in a file whose purpose

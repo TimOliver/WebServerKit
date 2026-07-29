@@ -2741,6 +2741,7 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     // than asserted on if the sequence straddles a boundary, so this measures the intended
     // regime instead of racing the clock.
     NSString* resumed = nil;
+    time_t sealedSecond = 0;
     NSString* lastModified = nil;
     for (NSUInteger attempt = 0; attempt < 5; attempt++) {
         XCTAssertTrue([[@"" stringByPaddingToLength:4096 withString:@"A" startingAtIndex:0] writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
@@ -2765,13 +2766,36 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 
         // And a client presenting that date anyway — fabricated, or held from elsewhere — must
         // not be given a range against the *replacement*.
-        resumed = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /build.ipa HTTP/1.1\r\nHost: localhost\r\nRange: bytes=1024-2047\r\nIf-Range: %@\r\n\r\n", WSKFormatRFC822([NSDate dateWithTimeIntervalSince1970:(NSTimeInterval)before])]);
+        NSString* const attempted = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /build.ipa HTTP/1.1\r\nHost: localhost\r\nRange: bytes=1024-2047\r\nIf-Range: %@\r\n\r\n", WSKFormatRFC822([NSDate dateWithTimeIntervalSince1970:(NSTimeInterval)before])]);
+
+        // The clock has to be re-checked AFTER the resume, not only before it. The guard below is
+        // evaluated when the resume *arrives*, so a resume that lands in the next second sees a
+        // sealed timestamp and honours the date — which is correct behaviour (see the note at the
+        // end of this test) but is not the regime under test. Checking only up to the write made
+        // this test pass locally and fail on a slower CI runner.
+        if (time(NULL) != before) {
+            continue;
+        }
+
+        resumed = attempted;
+        sealedSecond = before;
         break;
     }
 
-    XCTAssertNotNil(resumed, @"could not land two writes inside one second in five attempts");
+    XCTAssertNotNil(resumed, @"could not land the whole sequence inside one second in five attempts");
     NSString* status = [[resumed componentsSeparatedByString:@"\r\n"] firstObject];
     XCTAssertTrue([status hasPrefix:@"HTTP/1.1 200"], @"a 206 spliced build B onto build A's prefix: %@", status);
+
+    // The inherent limit, pinned so a later pass does not re-find it and try to "fix" it. Once
+    // the second has closed, the server WOULD issue that date for the current bytes, so a date a
+    // client legitimately holds and one it fabricated are byte-identical — nothing derived from
+    // stat(2) can separate them, exactly as for a replacement that preserves mtime. What protects
+    // a conformant client is that no such date is ever issued while the second is open (asserted
+    // above); the redemption-time check is not a second line of defence and must not be described
+    // as one.
+    [NSThread sleepForTimeInterval:1.1];
+    NSString* afterTheSecondClosed = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /build.ipa HTTP/1.1\r\nHost: localhost\r\nRange: bytes=1024-2047\r\nIf-Range: %@\r\n\r\n", WSKFormatRFC822([NSDate dateWithTimeIntervalSince1970:(NSTimeInterval)sealedSecond])]);
+    XCTAssertTrue([[[afterTheSecondClosed componentsSeparatedByString:@"\r\n"] firstObject] hasPrefix:@"HTTP/1.1 206"], @"a date naming a closed second is honoured; if this ever changes, the change is deliberate and this comment is wrong");
 
     [server stop];
     [fm removeItemAtPath:root error:NULL];
