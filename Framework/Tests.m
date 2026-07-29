@@ -1402,6 +1402,146 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 //
 // NOTE: against the unfixed source the first half does not fail, it ABORTS the test process,
 // which xctest reports as "0 failures". Read the executed count.
+// A symlink whose target resolves to the share root turned every destructive endpoint into
+// "destroy everything". The "not the root directory" guards are correct, but they are evaluated
+// on the path the CLIENT typed; the resolve-once work then substituted the resolved path — which
+// is the root — with no re-check. Measured: one unauthenticated request emptied the share through
+// DAV DELETE, DAV MOVE and the uploader's /delete alike, each answering 204 or 200.
+//
+// The lesson generalises past this instance: resolving once and acting on the resolved path is
+// right, but every rule stated about the unresolved path has to be restated about the resolved
+// one. This is refused centrally, in the resolver, so a destructive site added later cannot
+// forget it.
+// The NUL guards added for the query and form fields missed the two values that arrive through
+// the multipart parser. A NUL in the multipart "filename" reached
+// -stringByAppendingPathComponent:, which returns nil for a NUL-bearing receiver, and the nil
+// then reached -[NSFileManager moveItemAtPath:toPath:error:] as its destination —
+// NSInvalidArgumentException, uncaught, process gone, from one unauthenticated POST /upload.
+//
+// NOTE: against the unfixed source this aborts the test process rather than failing. Read the
+// executed count.
+- (void)testMultipartFilenameAndPathRefuseNULRatherThanCrashing {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+
+    WSKWebUploader* server = [[WSKWebUploader alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    // The uploader takes its file part under the control name "files[]".
+    NSData* (^upload)(NSString*, BOOL, NSString*, BOOL) = ^(NSString* fileName, BOOL nulInName, NSString* pathField, BOOL nulInPath) {
+        NSMutableData* body = [NSMutableData data];
+        void (^add)(NSString*) = ^(NSString* text) {
+            [body appendData:[text dataUsingEncoding:NSUTF8StringEncoding]];
+        };
+        add(@"--B\r\nContent-Disposition: form-data; name=\"path\"\r\n\r\n");
+        add(pathField);
+        if (nulInPath) {
+            [body appendBytes:"\0" length:1];
+        }
+        add(@"\r\n--B\r\nContent-Disposition: form-data; name=\"files[]\"; filename=\"");
+        add(fileName);
+        if (nulInName) {
+            [body appendBytes:"\0" length:1];
+        }
+        add(@".txt\"\r\nContent-Type: text/plain\r\n\r\nPAYLOAD\r\n--B--\r\n");
+
+        NSString* head = [NSString stringWithFormat:@"POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data; boundary=B\r\nContent-Length: %lu\r\n\r\n", (unsigned long)body.length];
+        NSMutableData* request = [[head dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+        [request appendData:body];
+        return (NSData*)request;
+    };
+
+    // An ordinary upload must work, or the assertions below prove nothing — this is exactly the
+    // trap that made an earlier version of this probe report success against unfixed code.
+    XCTAssertTrue([SendRawDataRequest(server.port, upload(@"ok", NO, @"/", NO)) hasPrefix:@"HTTP/1.1 200"], @"an ordinary upload stopped working");
+
+    NSString* badName = SendRawDataRequest(server.port, upload(@"evil", YES, @"/", NO));
+    XCTAssertTrue([badName hasPrefix:@"HTTP/1.1 403"], @"a NUL in the multipart filename: %@", [badName substringToIndex:MIN((NSUInteger)40, badName.length)]);
+
+    NSString* badPath = SendRawDataRequest(server.port, upload(@"ok2", NO, @"/sub", YES));
+    XCTAssertTrue([badPath hasPrefix:@"HTTP/1.1 400"], @"a NUL in the multipart path field: %@", [badPath substringToIndex:MIN((NSUInteger)40, badPath.length)]);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+- (void)testSymlinkResolvingToTheShareRootCannotDestroyIt {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+
+    NSString* (^fixture)(NSString*) = ^(NSString* name) {
+        NSString* root = [MakeTempDirectory() stringByAppendingPathComponent:name];
+        [fm createDirectoryAtPath:root withIntermediateDirectories:YES attributes:nil error:NULL];
+        for (NSUInteger i = 0; i < 4; i++) {
+            [[NSString stringWithFormat:@"build %lu", (unsigned long)i] writeToFile:[root stringByAppendingPathComponent:[NSString stringWithFormat:@"build%lu.txt", (unsigned long)i]] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        }
+        symlink(".", [[root stringByAppendingPathComponent:@"self"] fileSystemRepresentation]);
+        return root;
+    };
+    NSUInteger (^count)(NSString*) = ^(NSString* dir) {
+        return [[fm contentsOfDirectoryAtPath:dir error:NULL] count];
+    };
+
+    NSString* davRoot = fixture(@"dav");
+    WSKWebDAVServer* dav = [[WSKWebDAVServer alloc] initWithUploadDirectory:davRoot];
+    XCTAssertTrue([dav startWithOptions:options error:NULL]);
+    NSString* deleted = SendRawRequest(dav.port, @"DELETE /self HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([deleted hasPrefix:@"HTTP/1.1 403"], @"DELETE through a self-referential link: %@", [deleted substringToIndex:MIN((NSUInteger)40, deleted.length)]);
+    XCTAssertEqual(count(davRoot), (NSUInteger)5, @"the share was emptied by a DELETE through a link resolving to its root");
+
+    NSString* moved = SendRawRequest(dav.port, [NSString stringWithFormat:@"MOVE /build0.txt HTTP/1.1\r\nHost: localhost:%lu\r\nDestination: http://localhost:%lu/self\r\nOverwrite: T\r\n\r\n", (unsigned long)dav.port, (unsigned long)dav.port]);
+    XCTAssertTrue([moved hasPrefix:@"HTTP/1.1 403"], @"MOVE onto a self-referential link: %@", [moved substringToIndex:MIN((NSUInteger)40, moved.length)]);
+    XCTAssertEqual(count(davRoot), (NSUInteger)5, @"the share was replaced by a MOVE onto a link resolving to its root");
+
+    // The ordinary destructive operation must still work, or this has just disabled the feature.
+    XCTAssertTrue([SendRawRequest(dav.port, @"DELETE /build1.txt HTTP/1.1\r\nHost: localhost\r\n\r\n") hasPrefix:@"HTTP/1.1 204"], @"an ordinary DELETE stopped working");
+    XCTAssertEqual(count(davRoot), (NSUInteger)4);
+    [dav stop];
+
+    NSString* upRoot = fixture(@"up");
+    WSKWebUploader* uploader = [[WSKWebUploader alloc] initWithUploadDirectory:upRoot];
+    XCTAssertTrue([uploader startWithOptions:options error:NULL]);
+    NSString* body = @"path=%2Fself";
+    NSString* reply = SendRawRequest(uploader.port, [NSString stringWithFormat:@"POST /delete HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)body.length, body]);
+    XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 403"], @"the uploader deleted through a self-referential link: %@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+    XCTAssertEqual(count(upRoot), (NSUInteger)5, @"the share was emptied by /delete through a link resolving to its root");
+
+    // Listing the root by name is still an ordinary operation and must not be caught by this.
+    XCTAssertTrue([SendRawRequest(uploader.port, @"GET /list?path=/ HTTP/1.1\r\nHost: localhost\r\n\r\n") hasPrefix:@"HTTP/1.1 200"], @"listing the share root stopped working");
+    [uploader stop];
+}
+
+// -[WSKMIMEStreamParser initWithBoundary:...] returned nil for malformed input BEFORE running
+// [super init] and setting the fd sentinel. Under ARC a nil-returning initializer still
+// deallocates its receiver, so -dealloc ran on a zeroed object where _tmpFile is 0 — making its
+// close(_tmpFile) a close(0) of a descriptor the parser never owned. Once freed, that slot goes
+// to the next accept(), so a later malformed request tears down a live connection mid-serve.
+//
+// NOTE: against the unfixed source this closes the test process's own stdin. Read the executed
+// count, not the failure count.
+- (void)testMalformedMultipartBoundaryDoesNotCloseDescriptorZero {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+
+    WSKWebUploader* server = [[WSKWebUploader alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    XCTAssertTrue(fcntl(0, F_GETFD) != -1, @"descriptor 0 should be open before the request");
+
+    NSString* body = @"--x\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\nv\r\n--x--\r\n";
+    for (NSString* contentType in @[ @"multipart/form-data",
+                                     @"multipart/form-data; boundary=",
+                                     @"multipart/form-data; boundary=\u00e9\u00e9\u00e9" ]) {
+        SendRawRequest(server.port, [NSString stringWithFormat:@"POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Type: %@\r\nContent-Length: %lu\r\n\r\n%@", contentType, (unsigned long)body.length, body]);
+        XCTAssertTrue(fcntl(0, F_GETFD) != -1, @"\"%@\" closed descriptor 0", contentType);
+    }
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 - (void)testUploaderRefusesPathsContainingNULRatherThanTruncating {
     NSFileManager* fm = [NSFileManager defaultManager];
     NSString* dir = MakeTempDirectory();

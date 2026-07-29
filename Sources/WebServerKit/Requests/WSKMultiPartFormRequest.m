@@ -187,6 +187,18 @@ static NSData *_dashNewlineData = nil;
 }
 
 - (instancetype)initWithBoundary:(NSString *_Nonnull)boundary defaultControlName:(NSString *_Nullable)name arguments:(NSMutableArray<WSKMultiPartArgument *> *_Nonnull)arguments files:(NSMutableArray<WSKMultiPartFile *> *_Nonnull)files depth:(NSUInteger)depth budget:(WSKMIMEStreamBudget *_Nonnull)budget {
+    // [super init] and the fd sentinel are established BEFORE any failure return. Under ARC a
+    // nil-returning initializer still deallocates its receiver, so -dealloc runs — and on a
+    // zeroed object `_tmpFile` is 0, making its `close(_tmpFile)` a close(0) of a descriptor
+    // this object never owned. Measured: one unauthenticated POST /upload with a non-ASCII
+    // boundary closed the process's descriptor 0, and once freed that slot is handed to the next
+    // accept(), so a later malformed request tears down a live connection mid-serve.
+    if (!(self = [super init])) {
+        return nil;
+    }
+
+    _tmpFile = -1;  // fd 0 is legal, so -1 (not 0) is the "no temporary file" sentinel
+
     NSData *data = boundary.length ? [[NSString stringWithFormat:@"--%@", boundary] dataUsingEncoding:NSASCIIStringEncoding] : nil;
 
     if (data == nil) {
@@ -205,18 +217,15 @@ static NSData *_dashNewlineData = nil;
         return nil;
     }
 
-    if ((self = [super init])) {
-        _boundary = data;
-        _defaultcontrolName = name;
-        _arguments = arguments;
-        _files = files;
-        _data = [[NSMutableData alloc] initWithCapacity:kMultiPartBufferSize];
-        _tmpFile = -1;  // fd 0 is legal, so -1 (not 0) is the "no temporary file" sentinel
-        _state = kParserState_Start;
-        _depth = depth;
-        _budget = budget;
-        _workingReservation = [[WSKMemoryReservation alloc] init];
-    }
+    _boundary = data;
+    _defaultcontrolName = name;
+    _arguments = arguments;
+    _files = files;
+    _data = [[NSMutableData alloc] initWithCapacity:kMultiPartBufferSize];
+    _state = kParserState_Start;
+    _depth = depth;
+    _budget = budget;
+    _workingReservation = [[WSKMemoryReservation alloc] init];
 
     return self;
 }

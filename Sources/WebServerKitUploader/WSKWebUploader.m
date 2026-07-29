@@ -978,6 +978,23 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
         return nil;
     }
 
+    // A symlink that resolves to the share root itself is never what the client meant, and
+    // acting on it is catastrophic: every "not the root directory" guard in this file is
+    // evaluated on the path the client *typed*, then this resolved path is substituted for it,
+    // so "DELETE /self" passed a guard about "/self" and then removed the whole share. Measured:
+    // one unauthenticated request destroyed every file served, through DAV DELETE, DAV
+    // COPY/MOVE and the uploader's /delete alike, each answering 204 or 200.
+    //
+    // Refused here rather than re-checked at each destructive call site, so a site added later
+    // cannot forget it. Asking for the root *directly* is still allowed — listing it and
+    // uploading into it are ordinary operations — because that is the client naming the root
+    // rather than a link quietly landing on it.
+    BOOL const askedForRoot = (normalizedPath.length == 0) || [normalizedPath isEqualToString:@"/"];
+
+    if ((resolvedRelativePath.length == 0) && !askedForRoot) {
+        return nil;
+    }
+
     if (outHidden && !_allowHiddenItems) {
         // Both spellings: what the client typed, and where the bytes actually live. The first
         // catches "/.git/config"; the second catches a symlink named "pub" pointing at ".git",
@@ -1255,12 +1272,24 @@ static NSString *_OriginAuthority(NSString *value) {
     // a single leaf component and reject the traversal specials.
     NSString *const fileName = [file.fileName lastPathComponent];
 
-    if ((fileName.length == 0) || [fileName isEqualToString:@"."] || [fileName isEqualToString:@".."] ||
+    // The NUL test belongs with the others: this value reaches -stringByAppendingPathComponent:,
+    // which returns nil for a NUL-bearing receiver, and nil then reaches a place that cannot take
+    // one. The same shape that made "/list?path=%00" terminate the process — the query and form
+    // fields were guarded then, this one was missed because it arrives through the multipart
+    // parser rather than the request arguments.
+    if ((fileName.length == 0) || WSKPathContainsNULByte(fileName) || [fileName isEqualToString:@"."] || [fileName isEqualToString:@".."] ||
         (!_allowHiddenItems && [fileName hasPrefix:@"."]) || ![self _checkFileExtension:fileName]) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Uploaded file name \"%@\" is not allowed", file.fileName];
     }
 
     NSString *const relativePath = [[request firstArgumentForControlName:@"path"] string];
+
+    if (WSKPathContainsNULByte(relativePath)) {
+        // Same reason as the file name above, and the same reason as every other client path in
+        // this file: truncating at the NUL would place the upload in a directory the client did
+        // not name.
+        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"Path contains a NUL byte"];
+    }
     // Vet the destination DIRECTORY once — the leaf is already reduced to a single validated
     // component above — and compose onto the resolved directory. The client-supplied "path" may
     // traverse a symlink out of the share, and a non-hidden file name is not enough on its own:

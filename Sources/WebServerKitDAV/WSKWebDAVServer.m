@@ -194,6 +194,23 @@ NS_ASSUME_NONNULL_END
         return nil;
     }
 
+    // A symlink that resolves to the share root itself is never what the client meant, and
+    // acting on it is catastrophic: every "not the root directory" guard in this file is
+    // evaluated on the path the client *typed*, then this resolved path is substituted for it,
+    // so "DELETE /self" passed a guard about "/self" and then removed the whole share. Measured:
+    // one unauthenticated request destroyed every file served, through DAV DELETE, DAV
+    // COPY/MOVE and the uploader's /delete alike, each answering 204 or 200.
+    //
+    // Refused here rather than re-checked at each destructive call site, so a site added later
+    // cannot forget it. Asking for the root *directly* is still allowed — listing it and
+    // uploading into it are ordinary operations — because that is the client naming the root
+    // rather than a link quietly landing on it.
+    BOOL const askedForRoot = (normalizedPath.length == 0) || [normalizedPath isEqualToString:@"/"];
+
+    if ((resolvedRelativePath.length == 0) && !askedForRoot) {
+        return nil;
+    }
+
     if (outHidden && !_allowHiddenItems) {
         for (NSString *component in [normalizedPath pathComponents]) {
             if ([component hasPrefix:@"."]) {
