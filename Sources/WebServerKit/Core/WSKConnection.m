@@ -946,6 +946,24 @@ static BOOL _ValidateRequestLine(const unsigned char *line, NSUInteger length) {
         }
     }
 
+    // A '#' in the request-target is not a fragment to be discarded, it is a malformed target: RFC
+    // 9110 §7.1 says the fragment is not part of the request target at all. CFURLCopyPath() honours
+    // it as a delimiter and hands back only the prefix, and every verb was then executed against
+    // that prefix — so `PUT /ci/MyApp#42.ipa` wrote to `/ci/MyApp`, three builds published that way
+    // collapsed into one file under 201/204/204, and `DELETE /D1/#nope` answered 204 having
+    // destroyed `/D1`. Same shape as the NUL truncation the eighth pass refused rather than
+    // honoured, at a delimiter that fix never covered, and refused here for the same reason:
+    // truncating does not make the request mean what the client wrote.
+    //
+    // Checked on the raw wire bytes, ahead of any CF parsing, so a -rewriteRequestURL: subclass
+    // cannot route around it. "%23" still addresses a '#'-bearing filename correctly and must keep
+    // working — that is the case a naive fix breaks.
+    for (NSUInteger i = firstSpace + 1; i < lastSpace; i++) {
+        if (line[i] == '#') {
+            return NO;
+        }
+    }
+
     NSUInteger const versionLength = length - lastSpace - 1;
     const unsigned char *const version = line + lastSpace + 1;
 

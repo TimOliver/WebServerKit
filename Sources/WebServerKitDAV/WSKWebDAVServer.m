@@ -180,11 +180,15 @@ static inline BOOL _HeaderTokenIs(NSString *value, NSString *token) {
 // If-Match requires the STRONG comparison (RFC 9110 §13.1.1), where a "W/" tag can never match;
 // If-None-Match uses the weak one, where the prefix is stripped from both sides. Tags this
 // server issues are always strong, so only the client's side can carry the prefix.
-static BOOL _EntityTagMatchesList(NSString *currentTag, NSString *list, BOOL strong) {
+static BOOL _EntityTagMatchesList(BOOL resourceExists, NSString *currentTag, NSString *list, BOOL strong) {
     NSString *const trimmed = [list stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
 
+    // "*" asks whether the origin has a current representation AT ALL (RFC 9110 §13.1.1), which is
+    // not the same question as "does it have an entity tag". Keying it on the tag made `If-Match: *`
+    // always FAIL for a collection, since no tag is minted for a directory — so a conditional
+    // DELETE, MOVE or COPY of a folder could never succeed.
     if ([trimmed isEqualToString:@"*"]) {
-        return (currentTag != nil);
+        return resourceExists;
     }
 
     if (currentTag == nil) {
@@ -244,7 +248,7 @@ static BOOL _EntityTagMatchesList(NSString *currentTag, NSString *list, BOOL str
     // Evaluation order is RFC 9110 §13.2.2: If-Match, then If-Unmodified-Since only in its
     // absence, then If-None-Match. If-Modified-Since plays no part in a state-changing method.
     if (ifMatch != nil) {
-        if (!_EntityTagMatchesList(currentTag, ifMatch, YES)) {
+        if (!_EntityTagMatchesList(stated, currentTag, ifMatch, YES)) {
             return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_PreconditionFailed message:@"\"If-Match\" precondition failed for \"%@\"", request.path];
         }
     } else if (ifUnmodifiedSince != nil) {
@@ -258,7 +262,7 @@ static BOOL _EntityTagMatchesList(NSString *currentTag, NSString *list, BOOL str
         if (stated && (limit != nil) && ((time_t)floor(limit.timeIntervalSince1970) < info.st_mtimespec.tv_sec)) {
             return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_PreconditionFailed message:@"\"If-Unmodified-Since\" precondition failed for \"%@\"", request.path];
         }
-    } else if (_EntityTagMatchesList(currentTag, ifNoneMatch, NO)) {
+    } else if (_EntityTagMatchesList(stated, currentTag, ifNoneMatch, NO)) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_PreconditionFailed message:@"\"If-None-Match\" precondition failed for \"%@\"", request.path];
     }
 
@@ -849,6 +853,17 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
     // file — any short, common, or ".local" host that happened to appear in a name did it.
     if ((destinationHeader.length == 0) || (hostHeader.length == 0)) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"Malformed 'Destination' header: %@", destinationHeader];
+    }
+
+    // The same fragment truncation the request-line validator refuses, at the one place it can
+    // still arrive: HTTP stacks sanitize a URL they put in the request line but never a header
+    // value, so curl strips '#' from the target and passes it through here untouched. Measured with
+    // the request-target guard alone in place: `COPY /tiny.txt` with `Destination: http://h/Builds#x`
+    // still answered 204 and still replaced a three-build collection with a 4-byte file. Guarding
+    // only the target and calling the class closed would be exactly the "fixed at one of the sites
+    // it occurs at" pattern this file keeps recording.
+    if ([destinationHeader rangeOfString:@"#"].location != NSNotFound) {
+        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"Malformed 'Destination' header: a fragment is not part of a request target: %@", destinationHeader];
     }
 
     // RFC 4918 lets Destination be an absolute URI or an absolute path. Take the path
