@@ -40,6 +40,10 @@
     NSUInteger _offset;
     NSUInteger _size;
     int _file;
+    // The representation this response promised, captured from the same fstat every header is
+    // derived from, so end-of-body can tell whether the bytes just sent were still that one.
+    off_t _expectedSize;
+    struct timespec _expectedModified;
 }
 
 @dynamic contentType, lastModifiedDate, eTag;
@@ -167,6 +171,9 @@ static NSString *_EscapeExtValue(NSString *string) {
         WSK_LOG_ERROR(@"Refusing to serve \"%@\": not a regular file", path);
         return nil;
     }
+
+    _expectedSize = info.st_size;
+    _expectedModified = info.st_mtimespec;
 
     // Past the type check nothing can block in open(2) anymore, so restore the blocking
     // read semantics the body reader was written against. Failure is not fatal: O_NONBLOCK
@@ -401,16 +408,60 @@ static NSString *_EscapeExtValue(NSString *string) {
     if (result > 0) {
         [data setLength:result];
         _size -= result;
+
+        // Holding one descriptor makes this response immune to the file being REPLACED — rename(2)
+        // gives the new content a new inode and this one keeps reading the old bytes. It does not
+        // make it immune to the file being REWRITTEN IN PLACE: cp(1) and `cat >` open the
+        // destination O_TRUNC and write through the same inode, so a descriptor opened before the
+        // rewrite reads the NEW build's bytes from that point on. A client parked mid-body then
+        // received the tail of one representation spliced onto the prefix of another under a
+        // single 200 OK, one strong ETag naming the old one, and a Content-Length that matched
+        // exactly — nothing in the response for a client to check.
+        //
+        // Checked on EVERY chunk, before that chunk is handed over, which is the whole point:
+        // verifying only at end-of-body detects the change after the spliced bytes are already on
+        // the wire under a Content-Length that has been satisfied, so the client sees a complete,
+        // well-formed, wrong response. Failing here instead means the bytes already sent are all
+        // from the representation that was promised and the transfer then dies visibly. One fstat
+        // per 32 KiB is nothing against the read it accompanies.
+        if (![self _representationStillMatches:error]) {
+            return nil;
+        }
     } else {
-        // result == 0 is a premature EOF (e.g. the file was truncated or replaced
-        // mid-download). Return empty data to end the response rather than a buffer
-        // of zeros with _size never decremented, which would stream 32 KB zero
-        // chunks forever and exceed the declared Content-Length.
-        [data setLength:0];
+        // result == 0 with bytes still owed is a premature EOF: the file was truncated under us.
+        // This used to return empty data and report success, ending the body short of the
+        // Content-Length already promised — a truncated response the client is told is complete.
         _size = 0;
+
+        if (error) {
+            *error = [NSError errorWithDomain:kWSKErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"File \"%@\" was truncated while it was being served", _path]}];
+        }
+
+        return nil;
     }
 
     return data;
+}
+
+// Compares what the descriptor holds now against the representation whose size, ETag and
+// Last-Modified this response already sent. Size and mtime together are what cp(1) and `cat >`
+// both move; an equal-length rewrite that also restores the timestamp stays undetectable, exactly
+// as it does for the between-request validators, and nothing derived from stat(2) can close that.
+- (BOOL)_representationStillMatches:(NSError **)error {
+    struct stat info;
+
+    if ((fstat(_file, &info) == 0) && (info.st_size == _expectedSize) &&
+        (info.st_mtimespec.tv_sec == _expectedModified.tv_sec) && (info.st_mtimespec.tv_nsec == _expectedModified.tv_nsec)) {
+        return YES;
+    }
+
+    WSK_LOG_ERROR(@"File \"%@\" changed while it was being served", _path);
+
+    if (error) {
+        *error = [NSError errorWithDomain:kWSKErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"File \"%@\" changed while it was being served", _path]}];
+    }
+
+    return NO;
 }
 
 - (void)close {
