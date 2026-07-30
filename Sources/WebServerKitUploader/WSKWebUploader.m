@@ -1569,6 +1569,17 @@ static NSString *_OriginAuthority(NSString *value) {
             }
         }
 
+        // -removeItemAtPath: deletes as it walks and stops at the first member it cannot unlink,
+        // keeping everything it already destroyed and reporting only a failure. Measured here at
+        // 21 files in and 9 left, answered 500. Ask before touching anything. Deliberately NOT
+        // folded into the allow-list walk above, which is skipped entirely when no allow-list is
+        // configured — the default, and where this is reachable.
+        NSString *const unremovable = WSKFirstUnremovableItemAtPath(absolutePath);
+
+        if (unremovable) {
+            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not allowed: \"%@\" cannot be removed", relativePath, unremovable];
+        }
+
         if (![self shouldDeleteItemAtPath:absolutePath]) {
             return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not permitted", relativePath];
         }

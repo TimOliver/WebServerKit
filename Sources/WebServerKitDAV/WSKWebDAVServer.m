@@ -223,19 +223,40 @@ static BOOL _EntityTagMatchesList(NSString *currentTag, NSString *list, BOOL str
 - (nullable WSKResponse *)_preconditionFailureForRequest:(WSKRequest *)request atPath:(NSString *)absolutePath {
     NSString *const ifMatch = request.headers[@"If-Match"];
     NSString *const ifNoneMatch = request.headers[@"If-None-Match"];
+    // The date form of the same guarantee, and it was not read anywhere in the tree: a client that
+    // said "If-Unmodified-Since: <a date the file is newer than>" had its resource destroyed and was
+    // told the method succeeded. Same lost-update failure the entity-tag form was fixed for, left
+    // open in the spelling a date-only client uses.
+    NSString *const ifUnmodifiedSince = request.headers[@"If-Unmodified-Since"];
 
-    if ((ifMatch == nil) && (ifNoneMatch == nil)) {
+    if ((ifMatch == nil) && (ifNoneMatch == nil) && (ifUnmodifiedSince == nil)) {
         return nil;
     }
 
     struct stat info;
-    BOOL const exists = (stat([absolutePath fileSystemRepresentation], &info) == 0) && ((info.st_mode & S_IFMT) == S_IFREG);
+    // `stated` covers collections too, which the entity-tag path never reached because a tag is
+    // only minted for a regular file. A date condition is meaningful for a collection — DELETE of
+    // one is a destructive method like any other — so this deliberately admits a new refusal there.
+    BOOL const stated = (stat([absolutePath fileSystemRepresentation], &info) == 0);
+    BOOL const exists = stated && ((info.st_mode & S_IFMT) == S_IFREG);
     NSString *const currentTag = exists ? WSKEntityTagForFileInfo(&info) : nil;
 
-    // If-Match takes precedence; If-None-Match is only consulted in its absence (§13.2.2).
+    // Evaluation order is RFC 9110 §13.2.2: If-Match, then If-Unmodified-Since only in its
+    // absence, then If-None-Match. If-Modified-Since plays no part in a state-changing method.
     if (ifMatch != nil) {
         if (!_EntityTagMatchesList(currentTag, ifMatch, YES)) {
             return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_PreconditionFailed message:@"\"If-Match\" precondition failed for \"%@\"", request.path];
+        }
+    } else if (ifUnmodifiedSince != nil) {
+        NSDate *const limit = WSKParseRFC822(ifUnmodifiedSince);
+
+        // A date this server cannot parse is ignored rather than treated as failed, per RFC 9110
+        // §13.1.4. NOTE the cap that leaves: WSKParseRFC822 reads only the RFC 1123 form, so the
+        // RFC 850 and asctime spellings §5.6.7 also requires a server to accept parse to nil and
+        // the method PROCEEDS. That is shared with If-Modified-Since and If-Range rather than
+        // introduced here, so this closes the common spelling and not the whole class.
+        if (stated && (limit != nil) && ((time_t)floor(limit.timeIntervalSince1970) < info.st_mtimespec.tv_sec)) {
+            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_PreconditionFailed message:@"\"If-Unmodified-Since\" precondition failed for \"%@\"", request.path];
         }
     } else if (_EntityTagMatchesList(currentTag, ifNoneMatch, NO)) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_PreconditionFailed message:@"\"If-None-Match\" precondition failed for \"%@\"", request.path];
@@ -694,6 +715,16 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not allowed", relativePath];
     }
 
+    // A removal that only partly succeeds is the worst outcome this library recognises, and
+    // -removeItemAtPath: produces one by design: it deletes as it walks and stops at the first
+    // member it cannot unlink, keeping everything it already destroyed and reporting a bare
+    // failure. Refuse before touching anything instead.
+    NSString *const unremovable = WSKFirstUnremovableItemAtPath(absolutePath);
+
+    if (unremovable) {
+        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not allowed: \"%@\" cannot be removed", relativePath, unremovable];
+    }
+
     WSKResponse *const preconditionFailure = [self _preconditionFailureForRequest:request atPath:absolutePath];
 
     if (preconditionFailure) {
@@ -917,6 +948,15 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
         if (undeletable) {
             return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"%@ to \"%@\" is not allowed: it would destroy \"%@\"", isMove ? @"Moving" : @"Copying", dstRelativePath, undeletable];
         }
+
+        // The overwrite removes the destination, so it inherits the partial-removal problem too:
+        // measured at 7 files in the destination down to 1, answered 403, with the source also left
+        // in place — a failed operation AND a gutted destination.
+        NSString *const unremovable = WSKFirstUnremovableItemAtPath(dstAbsolutePath);
+
+        if (unremovable) {
+            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"%@ to \"%@\" is not allowed: \"%@\" cannot be removed", isMove ? @"Moving" : @"Copying", dstRelativePath, unremovable];
+        }
     }
 
     if (isMove) {
@@ -1059,7 +1099,28 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
             }
 
             if ((properties & kDAVProperty_LastModified) && isFile && attributes[NSFileModificationDate]) {  // Last modification date is not useful for directories as it changes implicitely and 'Last-Modified' header is not provided for directories anyway
-                [xmlString appendFormat:@"<D:getlastmodified>%@</D:getlastmodified>", WSKFormatRFC822((NSDate *)[attributes fileModificationDate])];
+                // The same rule the GET path applies when it MINTS a Last-Modified, for the same
+                // reason. Without it PROPFIND handed out precisely the date WSKFileResponse exists
+                // to refuse to issue — one still inside its own timestamp bucket, so a later
+                // If-Range resume carrying it spliced two builds under one 206. And PROPFIND emits
+                // no getetag, so that unsealed date was the ONLY validator a PROPFIND-driven client
+                // could obtain. Measured 12/12 splices before this.
+                //
+                // Opened O_NOFOLLOW because the containment and hidden-item rules have already
+                // judged the resolved path; this only needs the descriptor to ask the filesystem
+                // its timestamp granularity. If it cannot be opened the property is omitted, which
+                // is the same fail-closed direction as an unsealed date.
+                int const descriptor = open([itemPath fileSystemRepresentation], O_RDONLY | O_NOFOLLOW);
+
+                if (descriptor >= 0) {
+                    struct stat info;
+
+                    if ((fstat(descriptor, &info) == 0) && WSKLastModifiedDateIsSealed(descriptor, &info)) {
+                        [xmlString appendFormat:@"<D:getlastmodified>%@</D:getlastmodified>", WSKFormatRFC822((NSDate *)[attributes fileModificationDate])];
+                    }
+
+                    close(descriptor);
+                }
             }
 
             if ((properties & kDAVProperty_ContentLength) && !isDirectory && attributes[NSFileSize]) {

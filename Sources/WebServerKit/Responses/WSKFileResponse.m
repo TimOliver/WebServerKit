@@ -237,7 +237,11 @@ static NSString *_EscapeExtValue(NSString *string) {
     // worth of caching and costs everything else nothing. A future mtime (clock skew, an archive
     // restored with tomorrow's timestamp) is unsealed by the same test, which is the safe
     // direction and stops the server advertising a Last-Modified newer than its own Date.
-    BOOL const lastModifiedIsSealed = (time(NULL) - info.st_mtimespec.tv_sec) >= 1;
+    // Shared with WebDAV's PROPFIND through WSKLastModifiedDateIsSealed, because withholding the
+    // date here while another surface published it is exactly how a client obtained the unsealed
+    // validator this test exists to deny it. The descriptor is passed so the filesystem's own
+    // timestamp granularity decides the threshold — FAT's is two seconds, not one.
+    BOOL const lastModifiedIsSealed = WSKLastModifiedDateIsSealed(_file, &info);
 
     BOOL hasByteRange = WSKIsValidByteRange(range);
 

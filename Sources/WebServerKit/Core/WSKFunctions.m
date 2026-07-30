@@ -36,6 +36,8 @@
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <CommonCrypto/CommonDigest.h>
 #import <ifaddrs.h>
+#import <sys/mount.h>
+#import <sys/param.h>
 #import <os/lock.h>
 #import <net/if.h>
 #import <netdb.h>
@@ -634,4 +636,68 @@ BOOL WSKResolvedPathHasHiddenComponent(NSString *path, NSString *directory) {
 
 NSString *WSKEntityTagForFileInfo(const struct stat *info) {
     return [NSString stringWithFormat:@"\"%llu/%lld/%li/%li\"", info->st_ino, (long long)info->st_size, info->st_mtimespec.tv_sec, info->st_mtimespec.tv_nsec];
+}
+
+// FAT truncates mtime into two-second buckets, so a timestamp one second old there can still take
+// another write without moving. Measured: msdos/FAT16/FAT32 2s, exFAT 10ms, HFS+ 1s, APFS ns.
+// Unrecognised types fail CLOSED at two seconds — smbfs and nfs can be backed by FAT and cannot be
+// probed from here, and the cost of being wrong in that direction is one extra second of caching
+// rather than a spliced representation.
+static time_t _ModificationTimeGranularity(int descriptor) {
+    struct statfs info;
+
+    if (fstatfs(descriptor, &info) != 0) {
+        return 2;
+    }
+
+    if ((strcmp(info.f_fstypename, "apfs") == 0) || (strcmp(info.f_fstypename, "hfs") == 0) ||
+        (strcmp(info.f_fstypename, "exfat") == 0)) {
+        return 1;
+    }
+
+    return 2;
+}
+
+BOOL WSKLastModifiedDateIsSealed(int descriptor, const struct stat *info) {
+    // A future mtime — clock skew, or an archive restored with tomorrow's timestamp — is unsealed
+    // by the same comparison, which is the safe direction and also stops the server advertising a
+    // Last-Modified newer than its own Date header.
+    return (time(NULL) - info->st_mtimespec.tv_sec) >= _ModificationTimeGranularity(descriptor);
+}
+
+// Immutable or append-only defeats unlink(2) whatever the permissions say; an unreadable directory
+// cannot be walked and an unwritable one cannot have its children removed. Checked with lstat so a
+// symlink is judged as the entry it is — removing one never touches its target.
+static BOOL _ItemIsRemovable(NSString *path) {
+    struct stat info;
+
+    if (lstat([path fileSystemRepresentation], &info) != 0) {
+        return YES;  // Gone already, or unstattable; the removal will agree either way.
+    }
+
+    if (info.st_flags & (UF_IMMUTABLE | SF_IMMUTABLE | UF_APPEND | SF_APPEND)) {
+        return NO;
+    }
+
+    if ((info.st_mode & S_IFMT) == S_IFDIR) {
+        return access([path fileSystemRepresentation], R_OK | W_OK | X_OK) == 0;
+    }
+
+    return YES;
+}
+
+NSString *WSKFirstUnremovableItemAtPath(NSString *absolutePath) {
+    if (!_ItemIsRemovable(absolutePath)) {
+        return [absolutePath lastPathComponent];
+    }
+
+    NSDirectoryEnumerator<NSString *> *const enumerator = [[NSFileManager defaultManager] enumeratorAtPath:absolutePath];
+
+    for (NSString *subpath in enumerator) {
+        if (!_ItemIsRemovable([absolutePath stringByAppendingPathComponent:subpath])) {
+            return subpath;
+        }
+    }
+
+    return nil;
 }

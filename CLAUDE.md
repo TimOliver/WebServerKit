@@ -87,6 +87,84 @@ and the Bonjour/`.local` name only, so without it every request is refused with 
 
 ## Recent Changes
 
+### Twelfth audit pass: the harness reported CLEAN when its verifiers had died
+
+Four more never-used techniques: **filesystem fault injection on real disk images** (ENOSPC,
+read-only, case-sensitive, FAT32/FAT16/exFAT, force-eject), **clock and locale manipulation**
+(80,384 format/parse round-trips across 6 timezones and 10 non-Gregorian calendars, without ever
+touching the system clock), **platform-conditional iOS/tvOS code** — never compiled by any previous
+pass — and **declared-contract conformance**, sweeping every nullability annotation and prose
+promise in the public headers.
+
+**⚠️ The run first answered `CLEAN — nothing new found`, and that was an artefact.** All five
+skeptics died on transient API errors, so the verdict array was empty and `confirmed.length === 0`
+evaluated to "clean". The sweeps had found fourteen things. **A workflow that infers "clean" from an
+empty array cannot tell *nothing found* from *nothing checked*** — the same shape as the CI run that
+reported success for a pre-rebase SHA, and the probe that reported the previous build. Resuming the
+run (sweeps replayed from cache, only the skeptics re-ran) produced the real answer: five confirmed.
+
+**A recursive removal that half-succeeded was reported as a total failure.**
+`-[NSFileManager removeItemAtPath:]` deletes as it walks and stops at the first member it cannot
+unlink, keeping everything it already destroyed. One `chflags uchg` file — what Finder's "Locked"
+checkbox sets — or one unwritable subdirectory turned `DELETE /Folder` into **21 files in, 9 left,
+status 500**. Through an overwrite it was worse: `403`, destination gutted from 7 files to 1, *and*
+the source left in place, so the client has a failed move and a wrecked destination. Default
+configuration, both servers. `WSKFirstUnremovableItemAtPath()` now asks before anything is touched.
+
+**⚠️ The proposed fix for it was a no-op — fifth time a proposed fix has been the dangerous part.**
+It said to add the check inside `-_firstUnvettableItemAtPath:isDirectory:`, whose first line returns
+`nil` when `allowedFileExtensions` is unset — the default, and where every single reproduction lives.
+It would have shipped a change that did nothing behind a green suite that proved nothing. The
+removability walk has to be unconditional, and is.
+
+**`If-Unmodified-Since` was not read anywhere in the tree.** `grep -rn Unmodified Sources/` returned
+zero. So a client that said "only if it has not changed since <date>" against a file newer than that
+date had it destroyed and was told the method succeeded — the date-form twin of the `If-Match` gap
+the tenth pass closed, at the spelling a date-only client uses. Now evaluated for PUT, DELETE, MOVE
+and COPY in RFC 9110 §13.2.2 order. **Note the cap this leaves:** `WSKParseRFC822` reads only the
+RFC 1123 form, so the RFC 850 and asctime spellings §5.6.7 also requires a server to accept parse to
+nil and the method proceeds. Shared with `If-Modified-Since` and `If-Range` rather than introduced
+here — so this closes the common spelling, **not the class**.
+
+**PROPFIND published the validator the GET path refuses to issue**, and FAT's timestamp bucket is
+two seconds, not one. See the corrected seventh-pass note above.
+
+**The FAT threshold is a deliberate trade-off, and it is the fail-closed one.**
+`WSKLastModifiedDateIsSealed` asks `fstatfs` and allows one second only for `apfs`, `hfs` and
+`exfat` (measured at ns, 1s and 10ms); **everything else, including `smbfs`, `nfs` and an
+`fstatfs` failure, is assumed two-second**. A FAT volume reached over SMB reports `smbfs` and cannot
+be probed from here, and being wrong in that direction splices two builds while being wrong the
+other way costs a date-only client one second of caching. The blunt alternative — two seconds
+everywhere — closes the same class and costs that second on every volume; flipping to it is a
+one-line change if the caching matters more than the SMB case.
+
+**Still open from this pass, deliberately.** `Range: bytes=999999999-` kills a host app that reads
+the three properties `WSKFileResponse.h` redeclares non-null: the 416 path returns before setting
+them. Not fixed because the skeptic measured the proposed fix as unsafe and it is not reachable in a
+default configuration — it needs a handler written the way the header documents. Also open and low:
+`+responseWithFile:` is `nullable` but raises for an empty or NUL-bearing path (the same shape the
+eleventh pass fixed in `+responseWithJSONObject:`, at a site that fix did not reach);
+`WSKRequest`'s non-null address properties are nil on the request a `WSKMatchBlock` builds, so
+reading `remoteAddressString` there SEGVs; `addGETHandlerForBasePath:` enforces its undocumented
+trailing-slash precondition by aborting with no diagnostic in Debug and registering nothing in
+Release; ENOSPC and EROFS answer 500/403 rather than 507; six non-null properties on the uploader
+and DAV server return nil, three of them documented as defaulting to nil; the `Server` header
+default and the base-path no-match status are both documented wrongly; and a foreground restart
+failure on iOS/tvOS is silent.
+
+**Verified clean, quantitatively.** ENOSPC and EROFS across 14 verbs on a genuinely full volume left
+no staging residue and no half-files. A case-**sensitive** volume did not weaken containment,
+hiddenness or the allow-list across 26 probes. 80,384 date round-trips held across every timezone
+and calendar tried, including Buddhist, Islamic, Japanese, Persian and Hebrew — the formatters' pinned
+`en_US`/GMT is doing its job. A volume force-ejected mid-transfer produced no crash. iOS and tvOS
+Debug and Release all build.
+
+**An orchestration hazard worth remembering: `git stash` is repo-wide, not per-worktree.** One
+skeptic stashed its fix to build a comparison and a *different* agent's worktree popped it; a second
+skeptic found the fix it was meant to evaluate already applied when it started, and had to revert and
+rebuild or it would have measured the fix against itself. Never stash while a fleet is live — copy
+the files aside instead.
+
 ### Eleventh audit pass: four techniques never used here, and a proposed fix that was worse than the bug
 
 The tenth pass exhausted the technique list, so this one used four lenses the project had never
@@ -515,7 +593,14 @@ is not. Two builds written inside one wall-clock second still spliced under a 20
 
 It belongs where the validator is **minted**: a `Last-Modified` is now simply not issued while
 mtime is inside the current second, so every date a client can present was sealed before it was
-handed out and does identify one representation. The ETag carries `tv_nsec` and was never
+handed out and does identify one representation. **⚠️ Correction (twelfth pass): "every date a
+client can present" was false for two reasons.** WebDAV `PROPFIND` emitted `<D:getlastmodified>`
+with no seal test at all, and since it emits no `getetag` that unsealed date was the *only*
+validator a PROPFIND-driven client could obtain — 12/12 splices. And the one-second threshold is
+wrong on FAT, which stores mtime in **two-second** buckets and truncates downward, so a timestamp
+one second old there can still take another write; 12/12 splices and 12/12 stale 304s on a real
+FAT32 image. Both surfaces now share `WSKLastModifiedDateIsSealed`, which asks the descriptor's
+filesystem for its granularity. The ETag carries `tv_nsec` and was never
 affected — which is why the ETag control restarted correctly 4/4 while the date form spliced,
 the observation that ruled out a harness artefact. Costs a date-only client one second of
 caching; a future mtime is unsealed by the same test, which also stops the server advertising a

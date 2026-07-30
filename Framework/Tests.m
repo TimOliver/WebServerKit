@@ -1968,6 +1968,157 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     [fm removeItemAtPath:dir error:NULL];
 }
 
+// The date form of the lost-update guarantee. If-Match was fixed in the tenth pass;
+// If-Unmodified-Since was not parsed ANYWHERE in the tree, so a client that explicitly said
+// "only if it has not changed since <date the file is newer than>" had its resource destroyed and
+// was told the method succeeded.
+- (void)testDAVIfUnmodifiedSinceIsEnforcedBeforeTheWrite {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* target = [dir stringByAppendingPathComponent:@"f.txt"];
+    NSString* stale = @"If-Unmodified-Since: Thu, 01 Jan 1970 00:00:00 GMT\r\n";
+    void (^rebuild)(void) = ^{
+        XCTAssertTrue([@"ORIGINAL" writeToFile:target atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    };
+    NSString* (^contents)(void) = ^{
+        return [NSString stringWithContentsOfFile:target encoding:NSUTF8StringEncoding error:NULL];
+    };
+
+    rebuild();
+    NSString* put = SendRawRequest(server.port, [NSString stringWithFormat:@"PUT /f.txt HTTP/1.1\r\nHost: localhost\r\n%@Content-Length: 3\r\n\r\nNEW", stale]);
+    XCTAssertTrue([put hasPrefix:@"HTTP/1.1 412"], @"a stale If-Unmodified-Since should refuse a PUT: %@", [put substringToIndex:MIN((NSUInteger)40, put.length)]);
+    XCTAssertEqualObjects(contents(), @"ORIGINAL", @"the PUT happened despite a failed If-Unmodified-Since");
+
+    rebuild();
+    NSString* deleted = SendRawRequest(server.port, [NSString stringWithFormat:@"DELETE /f.txt HTTP/1.1\r\nHost: localhost\r\n%@\r\n", stale]);
+    XCTAssertTrue([deleted hasPrefix:@"HTTP/1.1 412"], @"a stale If-Unmodified-Since should refuse a DELETE: %@", [deleted substringToIndex:MIN((NSUInteger)40, deleted.length)]);
+    XCTAssertTrue([fm fileExistsAtPath:target], @"the DELETE happened despite a failed If-Unmodified-Since");
+
+    rebuild();
+    NSString* moved = SendRawRequest(server.port, [NSString stringWithFormat:@"MOVE /f.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /moved.txt\r\n%@\r\n", stale]);
+    XCTAssertTrue([moved hasPrefix:@"HTTP/1.1 412"], @"a stale If-Unmodified-Since should refuse a MOVE: %@", [moved substringToIndex:MIN((NSUInteger)40, moved.length)]);
+    XCTAssertTrue([fm fileExistsAtPath:target], @"the MOVE happened despite a failed If-Unmodified-Since");
+
+    // What must keep working: a date the file is NOT newer than, and no precondition at all.
+    rebuild();
+    NSString* future = @"If-Unmodified-Since: Sat, 01 Jan 2050 00:00:00 GMT\r\n";
+    NSString* allowed = SendRawRequest(server.port, [NSString stringWithFormat:@"PUT /f.txt HTTP/1.1\r\nHost: localhost\r\n%@Content-Length: 3\r\n\r\nNEW", future]);
+    XCTAssertTrue([allowed hasPrefix:@"HTTP/1.1 204"], @"a satisfied If-Unmodified-Since should be honoured: %@", [allowed substringToIndex:MIN((NSUInteger)40, allowed.length)]);
+    XCTAssertEqualObjects(contents(), @"NEW", @"a satisfied If-Unmodified-Since did not write");
+
+    rebuild();
+    XCTAssertTrue([SendRawRequest(server.port, @"PUT /plain.txt HTTP/1.1\r\nHost: localhost\r\nContent-Length: 3\r\n\r\nNEW") hasPrefix:@"HTTP/1.1 201"], @"a PUT with no precondition stopped working");
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// A recursive removal stops at the first member it cannot unlink and keeps everything it already
+// destroyed, reporting only a failure — so a collection holding one locked file (chflags uchg,
+// which is what Finder's "Locked" checkbox sets) answered 500 with most of its contents gone. On
+// the overwrite surface it was worse: a failed MOVE that also gutted the destination.
+- (void)testDestructiveVerbsRefuseATreeTheyCannotFullyRemove {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+
+    WSKWebDAVServer* dav = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([dav startWithOptions:options error:NULL]);
+    WSKWebUploader* uploader = [[WSKWebUploader alloc] initWithUploadDirectory:dir];
+    XCTAssertTrue([uploader startWithOptions:options error:NULL]);
+
+    NSString* folder = [dir stringByAppendingPathComponent:@"Folder"];
+    NSString* locked = [folder stringByAppendingPathComponent:@"locked.txt"];
+    NSUInteger (^countFiles)(void) = ^{
+        return (NSUInteger)[[fm subpathsOfDirectoryAtPath:folder error:NULL] count];
+    };
+    void (^rebuild)(void) = ^{
+        chflags(locked.fileSystemRepresentation, 0);
+        [fm removeItemAtPath:folder error:NULL];
+        XCTAssertTrue([fm createDirectoryAtPath:folder withIntermediateDirectories:YES attributes:nil error:NULL]);
+        for (NSUInteger i = 0; i < 4; i++) {
+            NSString* name = [NSString stringWithFormat:@"f%lu.txt", (unsigned long)i];
+            NSString* member = [folder stringByAppendingPathComponent:name];
+            XCTAssertTrue([@"data" writeToFile:member atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+        }
+        XCTAssertTrue([@"data" writeToFile:locked atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+        XCTAssertEqual(chflags(locked.fileSystemRepresentation, UF_IMMUTABLE), 0, @"could not lock the member");
+    };
+
+    rebuild();
+    NSUInteger const before = countFiles();
+    XCTAssertEqual(before, (NSUInteger)5);
+
+    NSString* davReply = SendRawRequest(dav.port, @"DELETE /Folder HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([davReply hasPrefix:@"HTTP/1.1 403"], @"DAV DELETE of a partly-removable tree should refuse: %@", [davReply substringToIndex:MIN((NSUInteger)40, davReply.length)]);
+    XCTAssertEqual(countFiles(), before, @"DAV DELETE destroyed part of a tree it could not fully remove");
+
+    rebuild();
+    NSString* uploaderHost = [NSString stringWithFormat:@"localhost:%lu", (unsigned long)uploader.port];
+    NSString* body = @"path=/Folder";
+    NSString* uploaderReply = SendRawRequest(uploader.port, [NSString stringWithFormat:@"POST /delete HTTP/1.1\r\nHost: %@\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %lu\r\n\r\n%@", uploaderHost, (unsigned long)body.length, body]);
+    XCTAssertTrue([uploaderReply containsString:@"403"], @"uploader /delete of a partly-removable tree should refuse: %@", uploaderReply);
+    XCTAssertEqual(countFiles(), before, @"uploader /delete destroyed part of a tree it could not fully remove");
+
+    rebuild();
+    XCTAssertTrue([@"src" writeToFile:[dir stringByAppendingPathComponent:@"src.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    NSString* overwrite = SendRawRequest(dav.port, @"MOVE /src.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /Folder\r\nOverwrite: T\r\n\r\n");
+    XCTAssertTrue([overwrite hasPrefix:@"HTTP/1.1 403"], @"an overwrite of a partly-removable destination should refuse: %@", [overwrite substringToIndex:MIN((NSUInteger)40, overwrite.length)]);
+    XCTAssertEqual(countFiles(), before, @"the overwrite gutted a destination it could not fully remove");
+    XCTAssertTrue([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"src.txt"]], @"the source vanished too");
+
+    // A fully removable tree must still be removable, or this is just an over-refusal.
+    rebuild();
+    XCTAssertEqual(chflags(locked.fileSystemRepresentation, 0), 0);
+    NSString* ok = SendRawRequest(dav.port, @"DELETE /Folder HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([ok hasPrefix:@"HTTP/1.1 204"], @"an ordinary recursive delete stopped working: %@", [ok substringToIndex:MIN((NSUInteger)40, ok.length)]);
+    XCTAssertFalse([fm fileExistsAtPath:folder], @"the deletable folder was not removed");
+
+    [dav stop];
+    [uploader stop];
+    chflags(locked.fileSystemRepresentation, 0);
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// WSKFileResponse withholds Last-Modified while mtime is still inside its own timestamp bucket, so
+// no client is ever handed a date that cannot identify one representation. PROPFIND applied no such
+// test and published exactly that date — and it emits no getetag, so the unsealed date was the ONLY
+// validator a PROPFIND-driven client could obtain. A later If-Range resume with it spliced two
+// builds under one 206.
+- (void)testDAVPropfindWithholdsAnUnsealedLastModified {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* propfind = @"PROPFIND /fresh.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\n\r\n";
+
+    // Written and asked for in the same instant: the GET path would withhold the date here, so
+    // PROPFIND must too, or the two surfaces disagree about what may be issued.
+    XCTAssertTrue([@"BUILD-A" writeToFile:[dir stringByAppendingPathComponent:@"fresh.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    NSString* unsealed = SendRawRequest(server.port, propfind);
+    XCTAssertTrue([unsealed hasPrefix:@"HTTP/1.1 207"], @"PROPFIND stopped working: %@", [unsealed substringToIndex:MIN((NSUInteger)40, unsealed.length)]);
+    XCTAssertFalse([unsealed containsString:@"getlastmodified"], @"PROPFIND published a Last-Modified the GET path withholds");
+    // The rest of the property set must be unaffected.
+    XCTAssertTrue([unsealed containsString:@"getcontentlength"], @"PROPFIND dropped more than the date");
+
+    // Once the bucket has closed the date must be published again, or this is a permanent
+    // regression rather than a one-second delay. Two seconds, because FAT's bucket is two.
+    [NSThread sleepForTimeInterval:2.2];
+    NSString* sealed = SendRawRequest(server.port, propfind);
+    XCTAssertTrue([sealed containsString:@"getlastmodified"], @"PROPFIND never publishes a Last-Modified at all: %@", sealed);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 // CLAUDE.md's design priorities say "Puck rewrites builds while they may be downloading —
 // WSKFileResponse opening once and deriving everything from fstat on that descriptor is what keeps
 // an in-flight download consistent". That is true for a REPLACEMENT and false for a rewrite in

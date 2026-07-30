@@ -212,6 +212,57 @@ BOOL WSKResolvedPathHasHiddenComponent(NSString *path, NSString *directory);
  */
 NSString *WSKEntityTagForFileInfo(const struct stat *info);
 
+/**
+ *  Returns YES if the modification time in `info` may be ISSUED as a `Last-Modified` validator for
+ *  the file open on `descriptor`.
+ *
+ *  A date validator is only strong once the instant it names can no longer be written again. While
+ *  mtime still falls inside the filesystem's current timestamp bucket the file can be rewritten
+ *  without the timestamp moving, so two representations would go out under one date and nothing
+ *  downstream could separate them. The rule therefore has to be applied where the validator is
+ *  MINTED, never where a resume redeems it — by redemption time the bucket has always closed, so
+ *  the test would report "strong" for precisely the representation that is not.
+ *
+ *  The bucket is not always one second. APFS records nanoseconds, HFS+ and exFAT a second or
+ *  better, but **FAT/msdos stores mtime in TWO-second units and truncates downward**, so on a USB
+ *  stick or SD card a timestamp one second old can still take another write. `descriptor` is asked
+ *  what it is actually sitting on; anything unrecognised — including `smbfs` and `nfs`, which may
+ *  be backed by FAT — is assumed coarse, because failing closed here costs a date-only client one
+ *  second of caching and failing open splices two builds together.
+ *
+ *  Both surfaces that hand out a modification date share this, so they cannot drift: withholding
+ *  it in one while the other publishes it is how a client obtained an unsealed date from PROPFIND
+ *  after the GET path had been fixed to refuse to issue one.
+ */
+BOOL WSKLastModifiedDateIsSealed(int descriptor, const struct stat *info);
+
+/**
+ *  Returns the first item at or under `absolutePath` that could not be removed, expressed relative
+ *  to `absolutePath` (or `absolutePath`'s own last component if it is the blocker), or nil when the
+ *  whole tree can go.
+ *
+ *  `-[NSFileManager removeItemAtPath:]` walks a tree deleting as it goes and stops at the first
+ *  member it cannot unlink — leaving everything it already removed removed, and reporting only a
+ *  failure. So a collection holding one locked file (`chflags uchg`, which is exactly what Finder's
+ *  "Locked" checkbox sets) or one unwritable subdirectory answered 500, or 403 through an overwrite,
+ *  with most of its contents destroyed. Measured: 21 files in, 9 left, status 500, and on the
+ *  MOVE/COPY surface the source was left in place too — a failed operation AND a gutted destination.
+ *
+ *  Asking first turns that into an untouched tree and a refusal that names the offending item, which
+ *  is what this library's "refuse clearly rather than half-succeed" priority requires. RFC 4918
+ *  §9.6.1's 207 Multi-Status is the conformant alternative and is strictly worse here: it reports
+ *  the damage rather than preventing it.
+ *
+ *  This cannot be folded into the extension-allow-list walk, tempting as that is: that walk returns
+ *  immediately when no allow-list is configured, which is the default and where all of this is
+ *  reachable. Removability has to be checked unconditionally.
+ *
+ *  Inherently advisory: flags and modes can change between this walk and the removal. Nothing in
+ *  this library changes either, so that window needs a local process, and closing it would need a
+ *  transactional filesystem.
+ */
+NSString *_Nullable WSKFirstUnremovableItemAtPath(NSString *absolutePath);
+
 #ifdef __cplusplus
 }
 #endif
