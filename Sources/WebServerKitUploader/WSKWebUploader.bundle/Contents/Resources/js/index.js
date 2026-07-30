@@ -34,6 +34,12 @@ var ENTER_KEYCODE = 13;
 // _enableReloads() — _reloadingDisabled stuck above zero and every later reload queued
 // forever, freezing the UI and holding an /events slot open for nothing.
 var _path = "/";
+// The path most recently ASKED for. _path is only assigned when a listing comes back, so between
+// _reload(hashPath) and its response it still reads "/" — and the SSE onopen re-sync fired in that
+// window re-requested "/", landing the user at the root. That made every deep link, and simply
+// pressing Reload inside a subfolder, bounce to the top (33 of 40 attempts), which is the opposite
+// of what this file's own "Restore path from URL hash on page load" comment intends.
+var _requestedPath = "/";
 var _pathRendered = false;  // The breadcrumb starts empty, so the first listing must always draw it.
 var _pendingReloads = [];
 var _reloadingDisabled = 0;
@@ -82,6 +88,8 @@ function _reload(path) {
   if (!path) {
     path = "/";
   }
+
+  _requestedPath = path;
 
   if (_reloadingDisabled) {
     if ($.inArray(path, _pendingReloads) < 0) {
@@ -136,7 +144,15 @@ function _reload(path) {
     
     $(".edit").editable(function(value, settings) { 
       var name = $(this).parent().parent().data("name");
-      if (value != name) {
+      // <input> in the Text state applies the "strip newlines" value sanitization algorithm, so the
+      // box can never hold a CR or LF even when the real name contains one. Comparing against the
+      // raw name was therefore unconditionally true for such a file, and opening the rename box and
+      // pressing Enter — with nothing typed — silently renamed it on disk. Same shape as the "&"
+      // seeding fix below, one layer further down: there the mangling was jeditable's and seeding
+      // cured it, here it is the browser's own and no seeding can. Compare against what the box can
+      // hold, so "unchanged" means unchanged.
+      var comparable = String(name).replace(/[\r\n]/g, "");
+      if (value != comparable) {
         var path = $(this).parent().parent().data("path");
         $.ajax({
           url: 'move',
@@ -379,12 +395,31 @@ $(document).ready(function() {
     }
   });
 
-  // Server-Sent Events for live updates
+  // Server-Sent Events for live updates.
+  //
+  // ONE stream per browser, not one per tab. A browser allows six HTTP/1.1 connections per origin
+  // and an EventSource never completes, so six open tabs consumed all six and the UI deadlocked in
+  // every tab at once — /list, /upload, /delete, and even a seventh tab's initial document, had no
+  // socket left. Measured: tabs 1-5 answered in 2 ms, the sixth timed out, a seventh rendered
+  // nothing for 13 minutes. The server was idle throughout with 122 free connection slots and 10
+  // free SSE channels, so kMaxSSEChannels (16) sits above the bound that actually binds: a single
+  // browser deadlocks itself at 6 and can never reach 16.
+  //
+  // The obvious fix — close the stream while the tab is hidden — was measured and is WORSE. The
+  // server only reclaims a browser-closed channel when a heartbeat write fails, 20-33 s later, so
+  // ordinary tab switching leaves zombies: 25 of 40 reconnects were refused and the tab actually
+  // being looked at stopped receiving updates. It also does nothing for six SIMULTANEOUSLY VISIBLE
+  // tabs (split view, a tiled window manager), where nothing is ever hidden.
+  //
+  // So exactly one tab holds the stream and relays what it receives to the rest. Leadership is a
+  // Web Lock, which the browser releases by itself when the holding tab goes away, so there is no
+  // heartbeat, no timeout, and no way to end up with the stream unheld or held twice. Where either
+  // API is missing, the old one-stream-per-tab behaviour stands — correct for a single tab, and no
+  // worse than before for several.
   if (typeof(EventSource) !== "undefined") {
-    var eventSource = new EventSource('/events');
+    var _eventChannel = (typeof(BroadcastChannel) !== "undefined") ? new BroadcastChannel('wsk-uploader-events') : null;
 
-    eventSource.addEventListener('change', function(event) {
-      var data = JSON.parse(event.data);
+    var _applyChangeEvent = function(data) {
       var eventPath = data.path || data.oldPath || '';
 
       // For external changes, path is the changed directory
@@ -412,17 +447,50 @@ $(document).ready(function() {
       if (eventDir === _path || newDir === _path) {
         _reload(_path);
       }
-    });
-
-    eventSource.onopen = function() {
-      // Re-sync on every (re)connect so any change missed while disconnected
-      // is picked up instead of leaving a stale listing.
-      _reload(_path);
     };
 
-    eventSource.onerror = function() {
-      console.log('SSE connection error, will auto-reconnect');
+    if (_eventChannel) {
+      // A follower tab holds no socket of its own and learns about changes from the leader.
+      _eventChannel.onmessage = function(event) {
+        _applyChangeEvent(event.data);
+      };
+    }
+
+    var _openEventStream = function() {
+      var eventSource = new EventSource('/events');
+
+      eventSource.addEventListener('change', function(event) {
+        var data = JSON.parse(event.data);
+
+        if (_eventChannel) {
+          _eventChannel.postMessage(data);  // Relay before acting, so no tab is served later than this one.
+        }
+
+        _applyChangeEvent(data);
+      });
+
+      eventSource.onopen = function() {
+        // Re-sync on every (re)connect so any change missed while disconnected is picked up
+        // instead of leaving a stale listing. Against the path most recently REQUESTED, not the
+        // one already rendered — on a deep link the listing has not arrived yet.
+        _reload(_requestedPath);
+      };
+
+      eventSource.onerror = function() {
+        console.log('SSE connection error, will auto-reconnect');
+      };
     };
+
+    if (_eventChannel && navigator.locks && navigator.locks.request) {
+      // The promise never settles, so this tab holds the lock for as long as it lives. When it goes
+      // away the browser releases the lock and whichever tab is next in the queue opens the stream.
+      navigator.locks.request('wsk-uploader-events', function() {
+        _openEventStream();
+        return new Promise(function() {});
+      });
+    } else {
+      _openEventStream();
+    }
   }
 
 });
