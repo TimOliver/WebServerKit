@@ -87,6 +87,94 @@ and the Bonjour/`.local` name only, so without it every request is refused with 
 
 ## Recent Changes
 
+### Thirteenth audit pass: an outside conformance suite, a real mounted client, and two regressions of my own
+
+Four more never-used techniques, and two of them were ones an earlier pass had written off as needing
+hardware: **litmus 0.13**, the standard WebDAV conformance suite, built from source (its 2005-era
+autoconf needs `CFLAGS=-Wno-implicit-function-declaration` on a modern clang, or it dies claiming it
+cannot find `socket`); **a real `mount_webdav` mount** driven by macOS's own kernel WebDAV client,
+which needs no privileges when an ordinary user owns the mount point; **mutational fuzzing seeded
+from the eight recorded real-client sessions** rather than from synthetic requests; and **the
+long-lived resources** — the SSE channel state machine, Bonjour, the heartbeat reaper — under churn.
+
+**A raw `#` in the request-target was discarded and every verb honoured against the prefix.**
+`CFURLCopyPath()` treats it as a fragment delimiter. `#` is a legal filename character and
+`MyApp#42.ipa` is an ordinary CI convention, so this needs no malice:
+
+    PUT /ci/MyApp#41.ipa -> 201     PUT /ci/MyApp#42.ipa -> 204    PUT /ci/MyApp#43.ipa -> 204
+    files on disk in /ci: ['MyApp'] = BUILD-43-BYTES
+    GET /ci/MyApp#42.ipa -> 200 OK    body = BUILD-43-BYTES
+    DELETE /D1/#nope     -> 204       /D1 destroyed
+
+Three builds collapse into one, two are destroyed, every answer says success, and a GET naming build
+42 hands over build 43. Same class as the NUL truncation the eighth pass refused rather than
+honoured, at a delimiter that fix never covered. litmus finds it independently (`delete_fragment`).
+Not an allow-list bypass — the allow-list judges the truncated path and still refuses.
+
+**⚠️ Guarding the request-target alone leaves the whole defect reachable.** HTTP stacks sanitize a
+URL they put in the request line but never a header value, so curl strips `#` from the target and
+passes it through in `Destination` untouched — measured with the target-only guard in place, `COPY`
+with `Destination: http://h/Builds#x` still answered 204 and still replaced a three-build collection
+with a 4-byte file. Both sites are guarded. The request-line check is on the raw wire bytes in
+`_ValidateRequestLine`, ahead of any CF parsing, so a `-rewriteRequestURL:` subclass cannot route
+around it. What it costs, measured: `GET /q.txt?a=1#b=2` and a bare trailing `#` become 400, and a
+`Destination` of `/Builds#nope.txt` no longer creates a file with that literal name. `%23` still
+addresses a `#`-bearing file correctly, and the test asserts that, because it is what a naive fix
+breaks.
+
+**⚠️ Two of this pass's findings were regressions from the TWELFTH pass — mine.** Both in the
+default configuration:
+
+- The removability walk required `W_OK` on every directory in the subtree, but `unlink(2)` and
+  `rmdir(2)` need write permission on the **parent**, not on the item — so an **empty** directory is
+  removable whatever its own mode says. `chmod 555` on one made its whole ancestry permanently
+  undeletable, and both `unzip` and `ditto -x -k` preserve 0555, so it arrives through ordinary
+  archive extraction. A directory is now only required to be writable if it actually has entries; one
+  that cannot be listed at all is still refused, and a read-only NON-empty directory is still refused,
+  which the test pins in both directions.
+- `If-Match: *` was keyed on the entity tag, which is only minted for a regular file, so it always
+  failed for a collection: a conditional `DELETE`, `MOVE` or `COPY` of a folder could never succeed.
+  `*` asks whether a representation exists at all (RFC 9110 §13.1.1), and now does.
+
+That is the fifth and sixth time a fix in this project planted the next defect, and the first time the
+fix was written here rather than proposed by an agent. The lesson generalises: **a guard justified by
+one failure mode has to be checked against the operations it now refuses**, not only against the one
+it was written to catch.
+
+**Still open from this pass, and worth deciding on.** Directory enumeration omits every symlink the
+same server serves with 200, so through a real mount `mv` returns 0, copies only what was listed, and
+then deletes the source — silent loss via the OS's own client. `MOVE`/`COPY` of a *collection*
+relocates and duplicates members the allow-list refuses individually, which is the class the eighth
+and twelfth passes closed for `DELETE` and the overwrite, at the two verbs they did not reach.
+PROPFIND publishes no `getetag` at all, so since the twelfth pass a just-written file has *zero*
+validators for a PROPFIND-driven client where it previously had one (an unsealed, useless one) — the
+skeptic measured the obvious fix as failing CI. MKCOL on an existing URL answers 500 rather than the
+RFC-required 405, breaking the universal "MKCOL each ancestor, treat 405 as already-exists" idiom;
+its fix is safe, but the "nearly free" second half — adding `Allow` to OPTIONS — **breaks the trace
+runner**, which fails on any header present in the response but absent from the recording. Also:
+`PROPPATCH` is 501 while `OPTIONS` advertises `DAV: 1` and the header promises class 1 compliance;
+`propname` is refused with 400; unavailable properties get no 404 propstat; `Depth: 0` is refused on
+COPY/DELETE of a plain file and MOVE has no Depth check at all; an SSE client that stops reading but
+holds its socket open is never reaped; SSE event paths collapse to `/` when the share is reached
+through a symlinked ancestor; and `-bonjourName` reports the configured name rather than the
+auto-renamed one.
+
+**A record correction that no server-side fix closes.** macOS's WebDAV client fetches a large file as
+~99 independent 1 MiB `Range` requests on separate connections. A build republished mid-download
+therefore produced a local file that was 20 MiB of build A and 80 MiB of build B — with the server
+answering every request truthfully and handing out two distinct ETags. Shape A's in-flight
+consistency guarantee holds *within* a response and cannot hold *across* independent requests. The
+client, not the server, is the only place that could bind them.
+
+**Verified clean, quantitatively.** litmus `basic` 16/16, `http` 4/4, `locks` 3/3, and 409/204
+overwrite semantics exactly right. Through a real mount: 2.3 GB of large writes and 33,269 mixed
+operations with zero wrong bytes and 3,290 mount-vs-disk listing comparisons agreeing; 34 hostile
+filenames including the NFC/NFD pair round-tripping both ways; **the twelfth pass's dateless-PROPFIND
+window is well tolerated by the OS client**, which falls back to `creationdate` — the specific
+question that pass could not answer. 316,047 trace-seeded mutated requests produced no crash and zero
+"refused but changed" across 176,661 snapshot comparisons. 1,268,184 SSE connection attempts with all
+16 slots reclaimed within two ticks, no retain cycle, and Bonjour deregistering 9 Add / 9 Rmv 1:1.
+
 ### Twelfth audit pass: the harness reported CLEAN when its verifiers had died
 
 Four more never-used techniques: **filesystem fault injection on real disk images** (ENOSPC,

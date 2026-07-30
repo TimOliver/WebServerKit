@@ -1968,6 +1968,116 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     [fm removeItemAtPath:dir error:NULL];
 }
 
+// CFURLCopyPath() treats '#' as a fragment delimiter and returns only the prefix, and every verb was
+// then honoured against that prefix. '#' is a legal filename character and "MyApp#42.ipa" is an
+// ordinary CI build-number convention, so this needs no malice: three builds published that way
+// collapsed into ONE file under 201/204/204, and a GET naming build 42 answered 200 with build 43's
+// bytes. Same class as the NUL truncation the eighth pass refused rather than honoured.
+//
+// Guarded in two places, because HTTP stacks sanitize a request line but never a header value —
+// curl strips '#' from the target and passes it through in Destination untouched. With only the
+// request-target guard, a COPY still destroyed a collection through Destination.
+- (void)testFragmentInRequestTargetIsRefusedRatherThanTruncated {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* collection = [dir stringByAppendingPathComponent:@"Builds"];
+    void (^rebuild)(void) = ^{
+        [fm removeItemAtPath:collection error:NULL];
+        XCTAssertTrue([fm createDirectoryAtPath:collection withIntermediateDirectories:YES attributes:nil error:NULL]);
+        XCTAssertTrue([@"BUILD" writeToFile:[collection stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+        XCTAssertTrue([@"SRC" writeToFile:[dir stringByAppendingPathComponent:@"src.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    };
+
+    // A fragment in the request-target must be refused, not silently dropped.
+    rebuild();
+    NSString* deleted = SendRawRequest(server.port, @"DELETE /Builds/#nonexistent HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([deleted hasPrefix:@"HTTP/1.1 400"], @"a '#' in the request-target should be refused: %@", [deleted substringToIndex:MIN((NSUInteger)40, deleted.length)]);
+    XCTAssertTrue([fm fileExistsAtPath:collection], @"the request destroyed a collection the client never named");
+
+    rebuild();
+    NSString* put = SendRawRequest(server.port, @"PUT /src.txt#new.ipa HTTP/1.1\r\nHost: localhost\r\nContent-Length: 9\r\n\r\nCLOBBERED");
+    XCTAssertTrue([put hasPrefix:@"HTTP/1.1 400"], @"a '#' in a PUT target should be refused: %@", [put substringToIndex:MIN((NSUInteger)40, put.length)]);
+    XCTAssertEqualObjects([NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:@"src.txt"] encoding:NSUTF8StringEncoding error:NULL], @"SRC", @"the PUT overwrote a different file than the one named");
+
+    // The same defect through the Destination header, which no HTTP stack sanitizes.
+    rebuild();
+    NSString* copied = SendRawRequest(server.port, @"COPY /src.txt HTTP/1.1\r\nHost: localhost\r\nDestination: http://localhost/Builds#nonexistent.txt\r\nOverwrite: T\r\n\r\n");
+    XCTAssertTrue([copied hasPrefix:@"HTTP/1.1 400"], @"a '#' in Destination should be refused: %@", [copied substringToIndex:MIN((NSUInteger)40, copied.length)]);
+    XCTAssertTrue([fm fileExistsAtPath:[collection stringByAppendingPathComponent:@"a.txt"]], @"the COPY replaced a collection named only by a discarded fragment");
+
+    // What must keep working: %23 is how a '#'-bearing filename is legitimately addressed, and a
+    // naive fix breaks exactly this.
+    rebuild();
+    NSString* encoded = SendRawRequest(server.port, @"PUT /MyApp%2342.ipa HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nBUILD");
+    XCTAssertTrue([encoded hasPrefix:@"HTTP/1.1 201"], @"%%23 must still address a '#'-bearing name: %@", [encoded substringToIndex:MIN((NSUInteger)40, encoded.length)]);
+    XCTAssertTrue([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"MyApp#42.ipa"]], @"the percent-encoded name did not land on disk");
+    XCTAssertTrue([SendRawRequest(server.port, @"GET /MyApp%2342.ipa HTTP/1.1\r\nHost: localhost\r\n\r\n") containsString:@"BUILD"], @"a '#'-bearing file could not be read back");
+    XCTAssertTrue([SendRawRequest(server.port, @"GET /src.txt HTTP/1.1\r\nHost: localhost\r\n\r\n") hasPrefix:@"HTTP/1.1 200"], @"an ordinary GET stopped working");
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// Two regressions from the twelfth pass's own fixes, both in the default configuration.
+//
+// The removability walk required W_OK on every directory in the subtree, but unlink(2) and rmdir(2)
+// need write permission on the PARENT, not on the item — so an EMPTY directory is removable whatever
+// its own mode says. `chmod 555` on one therefore made its whole ancestry permanently undeletable,
+// and both unzip and `ditto -x -k` preserve 0555, so it arrives through ordinary archive extraction.
+//
+// And `If-Match: *` was keyed on the entity tag, which is only minted for a regular file, so it
+// always failed for a collection: a conditional DELETE/MOVE/COPY of a folder could never succeed.
+- (void)testTwelfthPassFixesDoNotOverRefuse {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    // An extracted archive leaving a read-only EMPTY directory behind.
+    NSString* build = [dir stringByAppendingPathComponent:@"Build"];
+    NSString* empty = [build stringByAppendingPathComponent:@"Empty"];
+    XCTAssertTrue([fm createDirectoryAtPath:empty withIntermediateDirectories:YES attributes:nil error:NULL]);
+    XCTAssertTrue([@"data" writeToFile:[build stringByAppendingPathComponent:@"f.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertEqual(chmod(empty.fileSystemRepresentation, 0555), 0, @"could not make the directory read-only");
+
+    NSString* deleted = SendRawRequest(server.port, @"DELETE /Build HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([deleted hasPrefix:@"HTTP/1.1 204"], @"a read-only EMPTY directory must not make its parent undeletable: %@", [deleted substringToIndex:MIN((NSUInteger)40, deleted.length)]);
+    XCTAssertFalse([fm fileExistsAtPath:build], @"the tree was not removed");
+
+    // A read-only NON-empty directory genuinely cannot be emptied, so it must still be refused.
+    NSString* guarded = [dir stringByAppendingPathComponent:@"Guarded"];
+    NSString* inner = [guarded stringByAppendingPathComponent:@"Inner"];
+    XCTAssertTrue([fm createDirectoryAtPath:inner withIntermediateDirectories:YES attributes:nil error:NULL]);
+    XCTAssertTrue([@"data" writeToFile:[inner stringByAppendingPathComponent:@"stuck.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertEqual(chmod(inner.fileSystemRepresentation, 0555), 0);
+
+    NSString* refused = SendRawRequest(server.port, @"DELETE /Guarded HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([refused hasPrefix:@"HTTP/1.1 403"], @"a genuinely unremovable tree must still be refused: %@", [refused substringToIndex:MIN((NSUInteger)40, refused.length)]);
+    XCTAssertTrue([fm fileExistsAtPath:[inner stringByAppendingPathComponent:@"stuck.txt"]], @"the refused delete still destroyed part of the tree");
+    chmod(inner.fileSystemRepresentation, 0755);
+
+    // If-Match: * must succeed against a collection, which has no entity tag.
+    NSString* coll = [dir stringByAppendingPathComponent:@"Coll"];
+    XCTAssertTrue([fm createDirectoryAtPath:coll withIntermediateDirectories:YES attributes:nil error:NULL]);
+    NSString* conditional = SendRawRequest(server.port, @"DELETE /Coll HTTP/1.1\r\nHost: localhost\r\nIf-Match: *\r\n\r\n");
+    XCTAssertTrue([conditional hasPrefix:@"HTTP/1.1 204"], @"If-Match: * should succeed against an existing collection: %@", [conditional substringToIndex:MIN((NSUInteger)40, conditional.length)]);
+    XCTAssertFalse([fm fileExistsAtPath:coll], @"the conditional delete did not happen");
+
+    // And must still fail against something that does not exist.
+    NSString* absent = SendRawRequest(server.port, @"DELETE /Nope HTTP/1.1\r\nHost: localhost\r\nIf-Match: *\r\n\r\n");
+    XCTAssertFalse([absent hasPrefix:@"HTTP/1.1 2"], @"If-Match: * should not succeed against an absent resource: %@", [absent substringToIndex:MIN((NSUInteger)40, absent.length)]);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 // The date form of the lost-update guarantee. If-Match was fixed in the tenth pass;
 // If-Unmodified-Since was not parsed ANYWHERE in the tree, so a client that explicitly said
 // "only if it has not changed since <date the file is newer than>" had its resource destroyed and

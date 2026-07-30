@@ -680,7 +680,27 @@ static BOOL _ItemIsRemovable(NSString *path) {
     }
 
     if ((info.st_mode & S_IFMT) == S_IFDIR) {
-        return access([path fileSystemRepresentation], R_OK | W_OK | X_OK) == 0;
+        // A directory's own write permission is only needed to unlink its CHILDREN. Removing the
+        // directory itself is rmdir(2), which needs write permission on its PARENT — so an EMPTY
+        // directory is removable whatever its own mode says. Requiring W_OK unconditionally made
+        // `chmod 555` on an empty directory render its whole ancestry permanently undeletable, and
+        // both unzip and `ditto -x -k` preserve mode 0555, so that arrives through ordinary archive
+        // extraction with no attacker and in the default configuration.
+        //
+        // A directory that cannot be listed at all is refused: its children cannot be unlinked, and
+        // whether it has any cannot be established. That is the rare case (mode 0300); the common
+        // one is 0555, which is readable, so emptiness can be checked directly.
+        if (access([path fileSystemRepresentation], R_OK | X_OK) != 0) {
+            return NO;
+        }
+
+        NSArray<NSString *> *const contents = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:path error:NULL];
+
+        if (contents.count == 0) {
+            return YES;
+        }
+
+        return access([path fileSystemRepresentation], W_OK) == 0;
     }
 
     return YES;
