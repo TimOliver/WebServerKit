@@ -508,9 +508,11 @@ static NSDictionary<NSString *, NSString *> *_DeadPropertiesAtPath(NSString *pat
         return @{};
     }
 
-    id const stored = [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:NULL];
+    NSObject *const stored = [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:NULL];
 
-    return [stored isKindOfClass:[NSDictionary class]] ? stored : @{};
+    // Whatever was in the attribute is not necessarily what we put there — another tool can write
+    // this xattr — so the shape is checked rather than assumed.
+    return [stored isKindOfClass:[NSDictionary class]] ? (NSDictionary<NSString *, NSString *> *)stored : @{};
 }
 
 // NO on failure, with errno left as the filesystem set it. Filesystems that cannot store extended
@@ -1502,7 +1504,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"Invalid DAV property update for \"%@\"", relativePath];
     }
 
-    NSMutableDictionary<NSString *, NSString *> *const properties = [[_DeadPropertiesAtPath(absolutePath) mutableCopy] ?: [NSMutableDictionary dictionary] mutableCopy];
+    NSMutableDictionary<NSString *, NSString *> *const properties = [_DeadPropertiesAtPath(absolutePath) mutableCopy];
     NSMutableArray<NSString *> *const applied = [NSMutableArray array];
     NSMutableArray<NSString *> *const refused = [NSMutableArray array];
     BOOL changed = NO;
@@ -1554,7 +1556,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
                     xmlFree(content);
                 }
 
-                properties[key] = value ?: @"";
+                properties[key] = (value != nil) ? value : @"";
             } else {
                 [properties removeObjectForKey:key];
             }
@@ -1609,7 +1611,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
 
     [xmlString appendString:@"</D:response>\n</D:multistatus>"];
 
-    WSKDataResponse *const response = [WSKDataResponse responseWithData:[xmlString dataUsingEncoding:NSUTF8StringEncoding] contentType:@"application/xml; charset=\"utf-8\""];
+    WSKDataResponse *const response = [WSKDataResponse responseWithData:(NSData * _Nonnull)[xmlString dataUsingEncoding:NSUTF8StringEncoding] contentType:@"application/xml; charset=\"utf-8\""];
     response.statusCode = kWSKHTTPStatusCode_MultiStatus;
     return response;
 }
@@ -1626,7 +1628,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
         // RFC 4918 §9.1: a server that refuses an infinite-depth PROPFIND SHOULD answer 403 with
         // the DAV:propfind-finite-depth precondition, which is machine-readable and tells the
         // client to retry with a bounded depth. A bare 400 says only "malformed", which this is not.
-        WSKDataResponse *const response = [WSKDataResponse responseWithData:[@"<?xml version=\"1.0\" encoding=\"utf-8\" ?><D:error xmlns:D=\"DAV:\"><D:propfind-finite-depth/></D:error>" dataUsingEncoding:NSUTF8StringEncoding] contentType:@"application/xml; charset=\"utf-8\""];
+        WSKDataResponse *const response = [WSKDataResponse responseWithData:(NSData * _Nonnull)[@"<?xml version=\"1.0\" encoding=\"utf-8\" ?><D:error xmlns:D=\"DAV:\"><D:propfind-finite-depth/></D:error>" dataUsingEncoding:NSUTF8StringEncoding] contentType:@"application/xml; charset=\"utf-8\""];
         response.statusCode = kWSKHTTPStatusCode_Forbidden;
         return response;
     } else {

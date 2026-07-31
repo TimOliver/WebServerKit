@@ -1179,7 +1179,8 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
             NSString *const type = WSKServableFileTypeAtPath(itemPath, _uploadDirectory);
             // A symlink's own attributes report the length of its target PATH, not the file, so
             // ask again through the link for anything classified as a regular file.
-            NSDictionary *const effective = [attributes[NSFileType] isEqualToString:NSFileTypeSymbolicLink]
+            NSString *const rawType = attributes[NSFileType];
+            NSDictionary *const effective = [rawType isEqualToString:NSFileTypeSymbolicLink]
                                                 ? [[NSFileManager defaultManager] attributesOfItemAtPath:[itemPath stringByResolvingSymlinksInPath] error:NULL]
                                                 : attributes;
             NSNumber *const size = effective[NSFileSize];  // Nil if the item vanished between the listing and this stat; must not reach the literal below.

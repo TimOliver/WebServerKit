@@ -87,6 +87,35 @@ and the Bonjour/`.local` name only, so without it every request is refused with 
 
 ## Recent Changes
 
+### The non-null lie in WSKFileResponse, and five warnings an incremental build was hiding
+
+**⚠️ BREAKING CHANGE.** `WSKFileResponse` redeclared `contentType`, `lastModifiedDate` and `eTag` as
+non-null, over `WSKResponse`'s own `nullable` declarations. The code cannot keep that promise, so the
+redeclarations are gone — the base class's honest ones now apply, and **Swift callers will need
+`if let` or `?`**.
+
+Two cases make the promise false, both reachable with no host-app opt-in. `lastModifiedDate` is
+deliberately nil while mtime is inside its filesystem's timestamp bucket, which is the whole of the
+protection stopping two representations going out under one date. And an unsatisfiable byte range
+answers 416 with **none of the three set**, so one remote `Range: bytes=999999999-` handed a host app
+three nils from properties its own header said could not be nil — in Objective-C a nil heading for
+whatever the caller did next (this codebase's named recurring crash is a nil reaching a dictionary
+literal, and nothing in `Sources/` catches an NSException); in Swift, `lastModifiedDate` imported as
+a non-optional `Date` and **trapped**.
+
+Deleting three lines was the whole fix, which is worth noting: the properties were only ever
+*declared* wrongly. A header that lies to the type system is worse than one that changes.
+
+**⚠️ An incremental build hides warnings, and that is how five of them accumulated.** Removing the
+redeclarations forced a full rebuild, which surfaced five: two nullable-to-nonnull conversions, two
+uses of the GNU `?:` extension, and two messages to an unqualified `id` (one of them in the symlink
+listing that landed two PRs ago). Running `xcodebuild` twice in a row proves it — the first
+invocation reported four, the second reported zero, having recompiled nothing. **Check warnings
+against a clean `-derivedDataPath`, or the count means nothing.** It is the same shape as the
+`-Wbad-function-cast` warning found the same way a few PRs earlier. All five are fixed and a
+from-scratch build is at zero.
+
+
 ### WebDAV class 1, part two: PROPPATCH, and an independent suite finding my own bug
 
 `PROPPATCH` was 501 while `OPTIONS` advertised `DAV: 1`, which is the last of the class-1 MUSTs this

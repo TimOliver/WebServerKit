@@ -42,9 +42,25 @@ NS_ASSUME_NONNULL_BEGIN
  *  metadata.
  */
 @interface WSKFileResponse : WSKResponse
-@property (nonatomic, copy) NSString *contentType;  // Redeclare as non-null
-@property (nonatomic) NSDate *lastModifiedDate;     // Redeclare as non-null
-@property (nonatomic, copy) NSString *eTag;         // Redeclare as non-null
+
+/**
+ *  ⚠️ BREAKING CHANGE. These three were redeclared here as NON-NULL, and the code cannot keep that
+ *  promise, so the redeclarations are gone and WSKResponse's own `nullable` declarations apply.
+ *
+ *  Two cases make it false, both reachable without any host-app opt-in. `lastModifiedDate` is
+ *  deliberately nil while the file's mtime is still inside its filesystem's timestamp bucket — a
+ *  validator may only be ISSUED once the instant it names can no longer be written again, which is
+ *  what stops two representations going out under one date. And an unsatisfiable byte range answers
+ *  416 with none of the three set, so one remote `Range: bytes=999999999-` handed a host app three
+ *  nils from properties its own header said could not be nil.
+ *
+ *  In Objective-C that was a nil into whatever the caller did next — this codebase's named recurring
+ *  crash is a nil reaching a dictionary literal, and nothing in Sources/ catches an NSException. In
+ *  Swift `lastModifiedDate` imported as a non-optional `Date` and TRAPPED.
+ *
+ *  Swift callers will now need `if let` or `?`; that is the point. A header that lies to the type
+ *  system is worse than one that changes.
+ */
 
 /**
  *  Creates a response with the contents of a file.
