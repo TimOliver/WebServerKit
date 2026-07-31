@@ -259,7 +259,12 @@ static BOOL _EntityTagMatchesList(BOOL resourceExists, NSString *currentTag, NSS
         // RFC 850 and asctime spellings §5.6.7 also requires a server to accept parse to nil and
         // the method PROCEEDS. That is shared with If-Modified-Since and If-Range rather than
         // introduced here, so this closes the common spelling and not the whole class.
-        if (stated && (limit != nil) && ((time_t)floor(limit.timeIntervalSince1970) < info.st_mtimespec.tv_sec)) {
+        // Truncated to whole seconds through a named local rather than casting the call directly:
+        // -Weverything's -Wbad-function-cast flags a cast applied to a function result, and this
+        // project builds Debug with it.
+        double const limitSeconds = floor(limit.timeIntervalSince1970);
+
+        if (stated && (limit != nil) && ((time_t)limitSeconds < info.st_mtimespec.tv_sec)) {
             return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_PreconditionFailed message:@"\"If-Unmodified-Since\" precondition failed for \"%@\"", request.path];
         }
     } else if (_EntityTagMatchesList(stated, currentTag, ifNoneMatch, NO)) {
@@ -309,12 +314,24 @@ static BOOL _EntityTagMatchesList(BOOL resourceExists, NSString *currentTag, NSS
     NSDirectoryEnumerator<NSString *> *const enumerator = [[NSFileManager defaultManager] enumeratorAtPath:absolutePath];
 
     for (NSString *subpath in enumerator) {
+        NSString *const subpathType = [enumerator fileAttributes][NSFileType];
+
         if ([[subpath lastPathComponent] hasPrefix:@"."]) {
-            [enumerator skipDescendants];
+            // -skipDescendants is defined for the most recently returned SUBDIRECTORY. Calling it
+            // for a dot-named FILE popped the enclosing level instead, so every entry after the
+            // first dot-name in that directory's readdir order was never vetted — and a
+            // ".DS_Store" sits in every Finder-touched folder, sorting early. Measured: with an
+            // allow-list of "txt", DELETE of a collection holding "sub/{.DS_Store,id_rsa}"
+            // answered 204 and destroyed id_rsa, 60/60, while the same file addressed directly
+            // is refused 403. The top level of the addressed collection is immune, which is
+            // exactly why the existing tests could not see it. Only a dot-named DIRECTORY may be
+            // skipped wholesale — that part is deliberate and still holds.
+            if ([subpathType isEqualToString:NSFileTypeDirectory]) {
+                [enumerator skipDescendants];
+            }
+
             continue;
         }
-
-        NSString *const subpathType = [enumerator fileAttributes][NSFileType];
 
         if ([subpathType isEqualToString:NSFileTypeRegular] && ![self _checkFileExtension:subpath]) {
             return subpath;
@@ -442,8 +459,63 @@ static NSString *_StagingPathForPath(NSString *path) {
             return YES;
         }
 
+        int const exclusiveError = errno;
+
+        // Not every filesystem implements an exclusive rename. macOS 15's FSKit exFAT returns
+        // ENOTSUP, and with no fallback that made WebDAV MOVE and COPY to any NEW name answer 403
+        // on an exFAT-backed share — 10/10, files and collections alike, i.e. rename and duplicate
+        // simply did not work. APFS, FAT32 and HFS+ all implement it, which is why nothing caught
+        // it until the share was put on a USB stick.
+        //
+        // Reserve the name ourselves instead, which gets the same exclusivity from O_EXCL/mkdir:
+        // both fail with EEXIST if anything occupies the name, so an item that appeared in the
+        // window still survives and the request still refuses. ONLY on ENOTSUP/ENOSYS — every
+        // other errno, EEXIST above all, must keep failing, or the racing newcomer this branch
+        // exists to protect gets clobbered.
+        if ((exclusiveError == ENOTSUP) || (exclusiveError == ENOSYS)) {
+            struct stat stagedInfo;
+            BOOL const stagedIsDirectory = (lstat([stagingPath fileSystemRepresentation], &stagedInfo) == 0) &&
+                                           ((stagedInfo.st_mode & S_IFMT) == S_IFDIR);
+            BOOL reserved;
+
+            if (stagedIsDirectory) {
+                reserved = (mkdir([path fileSystemRepresentation], 0755) == 0);
+            } else {
+                int const descriptor = open([path fileSystemRepresentation], O_WRONLY | O_CREAT | O_EXCL, 0644);
+                reserved = (descriptor >= 0);
+
+                if (reserved) {
+                    close(descriptor);
+                }
+            }
+
+            if (reserved) {
+                if (rename([stagingPath fileSystemRepresentation], [path fileSystemRepresentation]) == 0) {
+                    return YES;
+                }
+
+                // Reclaim the reservation. Without this a failed rename leaves a zero-byte file or
+                // an empty directory at a name the request then refuses — a brand-new residue class
+                // on the failure path, which is exactly what this library says a transaction must
+                // never do. The original errno is what the client is told about.
+                int const renameError = errno;
+
+                if (stagedIsDirectory) {
+                    rmdir([path fileSystemRepresentation]);
+                } else {
+                    unlink([path fileSystemRepresentation]);
+                }
+
+                if (error) {
+                    *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:renameError userInfo:nil];
+                }
+
+                return NO;
+            }
+        }
+
         if (error) {
-            *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:errno userInfo:nil];
+            *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:exclusiveError userInfo:nil];
         }
 
         return NO;

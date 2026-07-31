@@ -1968,6 +1968,88 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     [fm removeItemAtPath:dir error:NULL];
 }
 
+// -skipDescendants is defined for the most recently returned SUBDIRECTORY. Both subtree walks called
+// it for every dot-name including regular FILES, which popped the enclosing level instead — so every
+// entry after the first dot-name in that directory's readdir order was never vetted. A ".DS_Store"
+// sits in every Finder-touched folder, so this was the ordinary case: DELETE of a collection holding
+// "sub/{.DS_Store, id_rsa}" answered 204 and destroyed id_rsa, 60/60, while the same file addressed
+// directly is refused 403 by the same server in the same configuration.
+//
+// NOTE THE FIXTURE. The victim MUST be one level down. testDAVRecursiveDeleteRespectsExtensionAllowList,
+// testDAVOverwriteRespectsExtensionAllowList and testUploaderRecursiveDeleteRespectsExtensionAllowList
+// all put theirs at the top of the collection, which is immune — all three pass against the unfixed
+// code, which is exactly why this survived three passes that were looking straight at it.
+- (void)testAllowListVettingSurvivesADotFileInASubdirectory {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+
+    WSKWebDAVServer* dav = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    dav.allowedFileExtensions = @[ @"txt" ];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([dav startWithOptions:options error:NULL]);
+    WSKWebUploader* uploader = [[WSKWebUploader alloc] initWithUploadDirectory:dir];
+    uploader.allowedFileExtensions = @[ @"txt" ];
+    XCTAssertTrue([uploader startWithOptions:options error:NULL]);
+
+    NSString* vault = [dir stringByAppendingPathComponent:@"Vault"];
+    NSString* sub = [vault stringByAppendingPathComponent:@"sub"];
+    NSString* victim = [sub stringByAppendingPathComponent:@"id_rsa"];
+    void (^rebuild)(void) = ^{
+        [fm removeItemAtPath:vault error:NULL];
+        XCTAssertTrue([fm createDirectoryAtPath:sub withIntermediateDirectories:YES attributes:nil error:NULL]);
+        XCTAssertTrue([@"ok" writeToFile:[vault stringByAppendingPathComponent:@"top.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+        // The dot-file precedes the victim in readdir order, which is what suppressed it.
+        XCTAssertTrue([@"junk" writeToFile:[sub stringByAppendingPathComponent:@".DS_Store"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+        XCTAssertTrue([@"KEYDATA" writeToFile:victim atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    };
+
+    // The control: addressed directly, this file is refused. The recursive forms must agree.
+    rebuild();
+    XCTAssertTrue([SendRawRequest(dav.port, @"DELETE /Vault/sub/id_rsa HTTP/1.1\r\nHost: localhost\r\n\r\n") hasPrefix:@"HTTP/1.1 403"], @"a direct delete of a disallowed file should be refused");
+
+    NSString* deleted = SendRawRequest(dav.port, @"DELETE /Vault HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([deleted hasPrefix:@"HTTP/1.1 403"], @"DAV DELETE should refuse a collection holding a disallowed file one level down: %@", [deleted substringToIndex:MIN((NSUInteger)40, deleted.length)]);
+    XCTAssertTrue([fm fileExistsAtPath:victim], @"the recursive delete destroyed a file a direct delete refuses");
+
+    rebuild();
+    NSString* host = [NSString stringWithFormat:@"localhost:%lu", (unsigned long)uploader.port];
+    NSString* body = @"path=/Vault";
+    NSString* uploaderReply = SendRawRequest(uploader.port, [NSString stringWithFormat:@"POST /delete HTTP/1.1\r\nHost: %@\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %lu\r\n\r\n%@", host, (unsigned long)body.length, body]);
+    XCTAssertTrue([uploaderReply containsString:@"403"], @"uploader /delete should refuse it too: %@", uploaderReply);
+    XCTAssertTrue([fm fileExistsAtPath:victim], @"the uploader's recursive delete destroyed it");
+
+    // The overwrite form: a collection destination whose name passes the allow-list.
+    rebuild();
+    XCTAssertTrue([fm moveItemAtPath:vault toPath:[dir stringByAppendingPathComponent:@"Backup.txt"] error:NULL]);
+    XCTAssertTrue([@"src" writeToFile:[dir stringByAppendingPathComponent:@"src.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    NSString* moved = SendRawRequest(dav.port, @"MOVE /src.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /Backup.txt\r\nOverwrite: T\r\n\r\n");
+    XCTAssertTrue([moved hasPrefix:@"HTTP/1.1 403"], @"an overwrite should refuse a destination holding a disallowed file one level down: %@", [moved substringToIndex:MIN((NSUInteger)40, moved.length)]);
+    XCTAssertTrue([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"Backup.txt/sub/id_rsa"]], @"the overwrite destroyed it");
+
+    // What must keep working — the eighth pass's two judgement calls, which this must not undo.
+    // A folder whose only extra entry is filesystem noise stays deletable, at any depth...
+    NSString* ordinary = [dir stringByAppendingPathComponent:@"Ordinary"];
+    NSString* ordinarySub = [ordinary stringByAppendingPathComponent:@"sub"];
+    XCTAssertTrue([fm createDirectoryAtPath:ordinarySub withIntermediateDirectories:YES attributes:nil error:NULL]);
+    XCTAssertTrue([@"ok" writeToFile:[ordinarySub stringByAppendingPathComponent:@"note.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([@"junk" writeToFile:[ordinarySub stringByAppendingPathComponent:@".DS_Store"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    NSString* allowed = SendRawRequest(dav.port, @"DELETE /Ordinary HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertFalse([allowed hasPrefix:@"HTTP/1.1 403"], @"a nested .DS_Store must not make an ordinary folder undeletable: %@", [allowed substringToIndex:MIN((NSUInteger)40, allowed.length)]);
+    XCTAssertFalse([fm fileExistsAtPath:ordinary], @"the deletable folder was not removed");
+
+    // ...and a hidden DIRECTORY and everything under it is still skipped wholesale.
+    NSString* withHidden = [dir stringByAppendingPathComponent:@"WithHidden"];
+    XCTAssertTrue([fm createDirectoryAtPath:[withHidden stringByAppendingPathComponent:@".git"] withIntermediateDirectories:YES attributes:nil error:NULL]);
+    XCTAssertTrue([@"ok" writeToFile:[withHidden stringByAppendingPathComponent:@"note.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([@"KEY" writeToFile:[withHidden stringByAppendingPathComponent:@".git/id_rsa"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    NSString* hiddenOK = SendRawRequest(dav.port, @"DELETE /WithHidden HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertFalse([hiddenOK hasPrefix:@"HTTP/1.1 403"], @"a hidden directory's contents must still be skipped: %@", [hiddenOK substringToIndex:MIN((NSUInteger)40, hiddenOK.length)]);
+
+    [dav stop];
+    [uploader stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 // CFURLCopyPath() treats '#' as a fragment delimiter and returns only the prefix, and every verb was
 // then honoured against that prefix. '#' is a legal filename character and "MyApp#42.ipa" is an
 // ordinary CI build-number convention, so this needs no malice: three builds published that way

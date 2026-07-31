@@ -431,10 +431,22 @@ static NSString *_EscapeExtValue(NSString *string) {
         if (![self _representationStillMatches:error]) {
             return nil;
         }
-    } else {
-        // result == 0 with bytes still owed is a premature EOF: the file was truncated under us.
+    } else if (_size > 0) {
+        // result == 0 with bytes STILL OWED is a premature EOF: the file was truncated under us.
         // This used to return empty data and report success, ending the body short of the
         // Content-Length already promised — a truncated response the client is told is complete.
+        //
+        // The `_size > 0` is load-bearing and its absence was a regression. Once the body is
+        // complete `_size` is 0, so `length` is 0 and read(2) returns 0 for the ordinary reason —
+        // there was nothing left to ask for. Treating that as truncation returned nil at the end of
+        // EVERY successful file response, which did two things: it logged an error falsely claiming
+        // the file had been truncated, destroying the very signal this check exists to provide; and
+        // because a ZERO-LENGTH NSData is the end-of-stream sentinel both consumers require —
+        // -[WSKConnection writeBodyWithCompletionBlock:] writes the terminal chunk on it, and
+        // -[WSKGZipEncoder readData:] selects Z_FINISH on it — nil aborted the chain instead. That
+        // left gzip on a file response producing an unterminated chunked stream and an undecodable
+        // gzip member at every size measured. Identity responses hid it, because Content-Length had
+        // already framed the body and the client had every byte before the sentinel mattered.
         _size = 0;
 
         if (error) {
