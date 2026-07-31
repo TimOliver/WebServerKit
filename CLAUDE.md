@@ -87,6 +87,39 @@ and the Bonjour/`.local` name only, so without it every request is refused with 
 
 ## Recent Changes
 
+### The reload guard was a counter two parties shared, and it has now wedged twice
+
+A listing arriving while the rename box is open froze the page permanently: it stopped tracking the
+share, and no later change — SSE, Refresh, navigation — ever moved it again.
+
+`_reloadingDisabled` was a COUNTER that two independent parties incremented and decremented:
+`_reload()` around its own request, and the rename box between `onedit` and `onsubmit`/`onreset`. A
+counter like that is only ever as correct as its least reliable decrement, and this one has now
+failed twice for two unrelated reasons. The first, already recorded in this file, was a throw
+skipping the release. The second: with a reload IN FLIGHT the box is opened (count 2), the listing
+lands and `$("#listing").empty()` destroys the box, so jeditable's `onsubmit` and `onreset` never
+fire and that increment is never matched — the request's own release takes it to 1, where it stays
+forever.
+
+**⚠️ The obvious repair makes it worse, which is why this was left for a designed fix.** Decrementing
+by the number of destroyed editors trips over jeditable's default `onblur: 'cancel'`, which fires
+`onreset` as well — so the same teardown can decrement twice and the counter goes NEGATIVE, which is
+just as truthy in `if (_reloadingDisabled)` and wedges identically.
+
+**So the counter is gone.** Re-entrancy is now a boolean owned solely by `_reload()` and cleared in
+its `.always()`, which jQuery always runs; and whether an editor is open is **derived from the DOM**
+rather than remembered, so there is no pairing to get wrong and nothing to leak. If a box is
+destroyed, the next question simply answers "no".
+
+That is the property that matters, and it is what the old design could not have: **self-healing**. A
+missed flush now leaves a stale listing until the next reload rather than a permanently frozen page.
+
+Verified in Chromium with the reload deliberately held in flight (a delayed route) so the box can be
+opened underneath it — the ordering the wedge actually needs, which an earlier attempt at the probe
+got wrong and so measured correct queueing instead of the bug. Unfixed: WEDGED. Fixed: healthy. The
+three UI fixes from the previous browser pass were re-checked in the same run and all still hold.
+
+
 ### The non-null lie in WSKFileResponse, and five warnings an incremental build was hiding
 
 **⚠️ BREAKING CHANGE.** `WSKFileResponse` redeclared `contentType`, `lastModifiedDate` and `eTag` as

@@ -30,9 +30,9 @@ var ENTER_KEYCODE = 13;
 // The root, not null: _reload() is called with _path from handlers that can fire before
 // the first listing comes back (the Refresh button, the EventSource "open" callback), and
 // a null there used to reach path.split("/") and throw. jQuery's Callbacks.fire has no
-// try/catch and .always() sits on the same list, so the throw also skipped
-// _enableReloads() — _reloadingDisabled stuck above zero and every later reload queued
-// forever, freezing the UI and holding an /events slot open for nothing.
+// try/catch and .always() sits on the same list, so the throw also skipped the reload guard's
+// release — it stuck "busy" and every later reload queued forever, freezing the UI and holding an
+// /events slot open for nothing. That guard is no longer a counter; see _reloadInFlight below.
 var _path = "/";
 // The path most recently ASKED for. _path is only assigned when a listing comes back, so between
 // _reload(hashPath) and its response it still reads "/" — and the SSE onopen re-sync fired in that
@@ -42,7 +42,20 @@ var _path = "/";
 var _requestedPath = "/";
 var _pathRendered = false;  // The breadcrumb starts empty, so the first listing must always draw it.
 var _pendingReloads = [];
-var _reloadingDisabled = 0;
+// Owned SOLELY by _reload(), and cleared in its .always(), which jQuery always runs. It used to be a
+// counter that two independent parties incremented and decremented — _reload() around its own
+// request, and the rename box between onedit and onsubmit/onreset — and a counter like that is only
+// ever as correct as its least reliable decrement. It has now wedged twice for two different
+// reasons: once when a throw skipped _enableReloads() (see the note on _path above), and once when a
+// listing arrived while the rename box was open, because $("#listing").empty() destroys the box so
+// jeditable's onsubmit and onreset never fire and the onedit increment is never matched. Both left
+// it stuck above zero with every later reload queued forever, and the page silently stopped tracking
+// the share.
+//
+// Decrementing by the number of destroyed editors — the obvious repair — makes it worse: jeditable's
+// default onblur is 'cancel', which fires onreset too, so the same teardown can decrement twice and
+// the counter goes NEGATIVE, which is just as truthy and wedges identically.
+var _reloadInFlight = false;
 
 // Escape server-provided strings (file/folder names, device name) before they are
 // concatenated into HTML, to prevent stored XSS via crafted names.
@@ -70,14 +83,16 @@ function _showError(message, textStatus, errorThrown) {
   }));
 }
 
-function _disableReloads() {
-  _reloadingDisabled += 1;
+// Whether a rename box is open is DERIVED from the DOM rather than remembered, so there is no
+// pairing to get wrong and nothing to leak: if the box is destroyed by a listing, the next question
+// simply answers "no". That is what makes this self-healing where the counter was not — a missed
+// flush leaves a stale listing until the next reload, not a permanently frozen page.
+function _editorIsOpen() {
+  return $("#listing").find("form input[name=value]").length > 0;
 }
 
-function _enableReloads() {
-  _reloadingDisabled -= 1;
-  
-  if (_pendingReloads.length > 0) {
+function _flushPendingReloads() {
+  if ((_pendingReloads.length > 0) && !_reloadInFlight && !_editorIsOpen()) {
     _reload(_pendingReloads.shift());
   }
 }
@@ -91,14 +106,14 @@ function _reload(path) {
 
   _requestedPath = path;
 
-  if (_reloadingDisabled) {
+  if (_reloadInFlight || _editorIsOpen()) {
     if ($.inArray(path, _pendingReloads) < 0) {
       _pendingReloads.push(path);
     }
     return;
   }
-  
-  _disableReloads();
+
+  _reloadInFlight = true;
   $.ajax({
     url: 'list',
     type: 'GET',
@@ -178,14 +193,14 @@ function _reload(path) {
         var name = $(this).parent().parent().data("name");
         return (name === undefined || name === null) ? revert : String(name);
       },
-      onedit: function(settings, original) {
-        _disableReloads();
-      },
+      // Nothing to disable on edit any more — _editorIsOpen() sees the box itself. These only
+      // flush, and do it after the current turn so jeditable has removed the form first; asking
+      // while it is still in the DOM would answer "still editing" and skip the flush.
       onsubmit: function(settings, original) {
-        _enableReloads();
+        setTimeout(_flushPendingReloads, 0);
       },
       onreset: function(settings, original) {
-        _enableReloads();
+        setTimeout(_flushPendingReloads, 0);
       },
       tooltip: 'Click to rename...'
     });
@@ -228,7 +243,8 @@ function _reload(path) {
     
     $(document).scrollTop(scrollPosition);
   }).always(function() {
-    _enableReloads();
+    _reloadInFlight = false;
+    _flushPendingReloads();
   });
 }
 
