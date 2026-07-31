@@ -87,6 +87,42 @@ and the Bonjour/`.local` name only, so without it every request is refused with 
 
 ## Recent Changes
 
+### WebDAV class 1, part two: PROPPATCH, and an independent suite finding my own bug
+
+`PROPPATCH` was 501 while `OPTIONS` advertised `DAV: 1`, which is the last of the class-1 MUSTs this
+server did not meet. Dead properties are stored in **one extended attribute** holding a plist keyed
+in Clark notation (`{namespace}localname`) — one blob rather than an xattr per property, so a key
+never has to be escaped into an xattr name and a set of properties is written in a single call and
+cannot half-apply. A filesystem that cannot store extended attributes at all reports `ENOTSUP` —
+**exFAT among them, measured rather than assumed** — and that becomes a per-property 403 rather than
+a pretence that the property was stored.
+
+**The method is atomic**, as §9.2 requires: the update is computed against a copy and only written if
+nothing was refused, so a client told 424 Failed Dependency can retry the whole document without
+working out what half-landed. Live properties are derived from the filesystem and are refused with
+403. `PROPFIND` reports stored properties by name, in `allprop`, and by name in `propname`.
+
+**⚠️ litmus found a bug of mine that the suite could not.** The two parsers disagreed: `PROPPATCH`
+keyed a property in NO namespace by its bare name, while `PROPFIND` defaulted the same case to
+`DAV:` — so such a property could be stored and then never read back. That is this codebase's
+signature defect shape (the same rule spelled two ways in two places) appearing in brand-new code,
+and 122 passing tests plus a live Apple client both missed it. litmus `props` went 28/30 → **29/30**
+once the convention was unified.
+
+The remaining failure is `propfind_invalid2`: an invalid namespace declaration in the body answers
+207 rather than 400, because libxml2 runs with `XML_PARSE_RECOVER` by deliberate choice. Tightening
+it risks rejecting bodies real clients send, so it is recorded rather than chased. `basic` is 16/16.
+
+**The lock stub is now documented for what it is.** `performLOCK` mints a token, returns a
+well-formed `lockdiscovery` document and stores **nothing** — no lock table, no timeout, no reaping,
+and the `If:` header is not parsed anywhere. It exists solely because Finder refuses to write to a
+share that does not advertise class 2. Deliberately not made real: locking prevents concurrent
+writers losing each other's updates, these deployments are single-user, and the same protection is
+now available statelessly through `If-Match` and `If-Unmodified-Since` — which every client can use,
+not only ones that lock. Real class 2 needs the `If:` grammar, i.e. a parser, and parsers have been
+by far the richest source of defects here.
+
+
 ### WebDAV class 1, part one: PROPFIND completeness and method semantics
 
 WebDAV was only partially promised in the original README, so this is **new capability rather than

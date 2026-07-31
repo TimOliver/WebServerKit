@@ -1992,6 +1992,64 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     [fm removeItemAtPath:dir error:NULL];
 }
 
+// PROPPATCH, the last class-1 MUST this server did not meet: it was 501 while OPTIONS advertised
+// "DAV: 1". Dead properties are stored in one extended attribute holding a plist keyed in Clark
+// notation, so a set of them is written in a single call and cannot half-apply.
+- (void)testDAVProppatchStoresAndRemovesDeadProperties {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    XCTAssertTrue([@"data" writeToFile:[dir stringByAppendingPathComponent:@"f.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* (^send)(NSString*, NSString*) = ^(NSString* method, NSString* body) {
+        return SendRawRequest(server.port, [NSString stringWithFormat:@"%@ /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@", method, (unsigned long)body.length, body]);
+    };
+
+    // Set two dead properties, one in a foreign namespace.
+    NSString* set = send(@"PROPPATCH", @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:X=\"urn:example\"><D:set><D:prop><X:colour>blue</X:colour><X:rating>5</X:rating></D:prop></D:set></D:propertyupdate>");
+    XCTAssertTrue([set hasPrefix:@"HTTP/1.1 207"], @"PROPPATCH should answer 207: %@", [set substringToIndex:MIN((NSUInteger)40, set.length)]);
+    XCTAssertTrue([set containsString:@"200 OK"], @"the set should have applied: %@", set);
+
+    // ...and read them back, by name and via allprop.
+    NSString* named = send(@"PROPFIND", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\" xmlns:X=\"urn:example\"><D:prop><X:colour/></D:prop></D:propfind>");
+    XCTAssertTrue([named containsString:@"blue"], @"a stored property must be readable by name: %@", named);
+    XCTAssertFalse([named containsString:@"404"], @"a stored property must not be reported missing: %@", named);
+
+    NSString* all = send(@"PROPFIND", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:allprop/></D:propfind>");
+    XCTAssertTrue([all containsString:@"blue"], @"allprop must include stored properties: %@", all);
+    XCTAssertTrue([all containsString:@"urn:example"], @"the namespace must survive the round trip");
+
+    // Remove one; the other survives.
+    NSString* removed = send(@"PROPPATCH", @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:X=\"urn:example\"><D:remove><D:prop><X:colour/></D:prop></D:remove></D:propertyupdate>");
+    XCTAssertTrue([removed hasPrefix:@"HTTP/1.1 207"], @"remove should answer 207");
+    NSString* after = send(@"PROPFIND", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:allprop/></D:propfind>");
+    XCTAssertFalse([after containsString:@"blue"], @"the removed property is still there: %@", after);
+    XCTAssertTrue([after containsString:@"5"], @"removing one property destroyed the other: %@", after);
+
+    // A live property is derived from the filesystem and cannot be set: 403, and ATOMIC, so the
+    // dead property alongside it must NOT have been stored either.
+    NSString* live = send(@"PROPPATCH", @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:X=\"urn:example\"><D:set><D:prop><D:getcontentlength>99</D:getcontentlength><X:sneaked>yes</X:sneaked></D:prop></D:set></D:propertyupdate>");
+    XCTAssertTrue([live containsString:@"403 Forbidden"], @"a live property must be refused: %@", live);
+    XCTAssertTrue([live containsString:@"424 Failed Dependency"], @"the rest of an atomic update must report 424: %@", live);
+    NSString* unchanged = send(@"PROPFIND", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:allprop/></D:propfind>");
+    XCTAssertFalse([unchanged containsString:@"sneaked"], @"a refused PROPPATCH still stored a property — it is not atomic: %@", unchanged);
+
+    // propname lists the stored names, and the live ones.
+    NSString* names = send(@"PROPFIND", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:propname/></D:propfind>");
+    XCTAssertTrue([names containsString:@"rating"], @"propname must list stored property names: %@", names);
+    XCTAssertTrue([names containsString:@"getcontentlength"], @"propname must still list the live names");
+
+    // And a property this server has never been told about is still a 404, not a silent omission.
+    NSString* missing = send(@"PROPFIND", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\" xmlns:X=\"urn:example\"><D:prop><X:nosuch/></D:prop></D:propfind>");
+    XCTAssertTrue([missing containsString:@"404 Not Found"], @"an unknown property must still be reported missing: %@", missing);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 // RFC 4918 class 1 completeness, minus PROPPATCH which needs storage of its own. Each of these was
 // a documented MUST that this server did not meet while OPTIONS advertised "DAV: 1".
 - (void)testDAVClassOnePropfindAndDepthSemantics {
