@@ -87,6 +87,71 @@ and the Bonjour/`.local` name only, so without it every request is refused with 
 
 ## Recent Changes
 
+### Known-open lows, batch C: the long-lived surfaces, and live updates that were broken by default
+
+**⚠️ The headline finding is far broader than the entry that predicted it.** It was carried as "SSE
+event paths collapse to `/` when the share is reached through a symlinked ancestor" — which reads
+like an exotic configuration. It is the **default**. `-_relativePathForAbsolutePath:` derives an
+event's path by chopping the share off the front of an absolute path; every caller hands it a
+`realpath(3)` result while `_uploadDirectory` has only been `-stringByStandardizingPath`'d. Those
+disagree for **every share under `NSTemporaryDirectory()`**, because `/var` is a symlink to
+`/private/var` that neither `-stringByStandardizingPath` nor `-stringByResolvingSymlinksInPath`
+expands — the same `/var` vs `/private/var` mismatch the tenth pass recorded in a different method.
+
+The prefix test therefore failed and the fallback fired, so every change event named the share
+root. Measured against a plain `mktemp -d "$TMPDIR/..."` share, creating a folder inside a
+subfolder:
+
+    before:  data: {"type":"create","path":"//"}
+    after:   data: {"type":"create","path":"/Sub (1)/"}
+
+`//` rather than `/` because the create path appends its own separator to the fallback. The browser
+only reloads when the changed directory matches the folder it is viewing, so **live updates
+silently did nothing for every subfolder** — the uploader's headline feature, in its ordinary
+deployment, with no error anywhere. `-presentedSubitemDidChangeAtURL:` had resolved both sides
+since the SSE work landed; this is the same rule at the one site that never got it, which is this
+codebase's signature defect shape yet again.
+
+**`-bonjourName` never saw an auto-rename.** `_resolutionService` is a `CFNetServiceCreateCopy` of
+the registration service taken immediately after `CFNetServiceRegisterWithOptions` is *initiated* —
+registration is asynchronous, so the copy freezes the name as configured. Registering with flags 0
+means auto-rename is on, so a second instance on the network becomes `<name> (2)` and the property
+reported the original for the rest of the run. Measured with two servers sharing a name:
+
+| | server 1 | server 2 |
+|---|---|---|
+| before | `WSKRenameProbe` | `WSKRenameProbe` |
+| after | `WSKRenameProbe (2)` | `WSKRenameProbe` |
+
+Reading `_registrationService` first is the whole fix; it is the service that was actually
+registered, and it has the same `-_start`/`-_stop` lifecycle, so the `_stateQueue` confinement the
+old comment existed to justify is unchanged.
+
+**A failed foreground restart said nothing, and the code admitted it.** `-_reconnectInForeground:`
+called `[self _start:NULL]` under a comment reading *"TODO: There's probably nothing we can do on
+failure"*. Something can: say so. The listening sockets are gone, the server is dead for the rest
+of the foreground session, and `-isRunning` and `-serverURL` still answer as though it were
+serving. It now logs the error and delivers `-webServerDidStop:`, on the main thread and outside
+`_stateQueue` — a delegate reading `-serverURL` from inside that block would deadlock on it.
+
+**⚠️ The SSE quiet-client reaping gap was REFUTED by measurement.** It was carried as "an SSE client
+that stops reading but holds its socket open is never reaped". Sixteen such clients against a
+16-channel server, sampled every 15 s for 90 s: a real client still obtained a stream at **5 of 7**
+sample points. The reaper does reclaim them; what remains is the expected window while slots are
+held, not a denial. That makes **four** recorded lows across batches B and C that evaporated on
+contact, against twelve that were real — the ratio is the argument for re-measuring rather than
+working from the list.
+
+**Verified together.** 134 tests and 0 failures on a clean build with no new warnings, the trace
+corpus green, iOS and tvOS Debug both clean, and both the SSE-path and Bonjour probes sensitive in
+each direction. One warning I introduced — the GNU `?:` extension, a class this project has fixed
+before — was caught by the clean build and removed before the suite ran.
+
+**The known-open backlog is now empty.** What remains are settled decisions rather than defects: the
+`//` status disagreement, `MOVE`-without-`Overwrite` defaulting to refuse, the directory-rename
+TOCTOU, and litmus's `propfind_invalid2`. The next piece of work is the structural cleanup that has
+been deferred since the programme began.
+
 ### Known-open lows, batch B: honest status codes, and three entries that were not defects
 
 **Three of the recorded items were refuted by re-measuring them, and one of the three would have

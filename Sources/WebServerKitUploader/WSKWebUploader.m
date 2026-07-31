@@ -221,6 +221,9 @@ static const NSTimeInterval kChangeCoalescingInterval = 0.1;
 static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
 
 @implementation WSKWebUploader {
+    // The share as realpath(3) sees it. Immutable after -initWithUploadDirectory:. See
+    // -_relativePathForAbsolutePath: for why the standardized spelling alone is not enough.
+    NSString *_resolvedUploadDirectory;
     NSMutableArray<WSKWebUploaderSSEChannel *> *_sseChannels;  // One per connected /events client. Accessed only on _sseQueue.
     dispatch_queue_t _sseQueue;
     BOOL _sseAcceptingChannels;  // Owned by _sseQueue. YES only between -start and -stop, while SSE is enabled.
@@ -268,6 +271,15 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
         // an absolute path, which silently produces the wrong answer for "/Docs/" and can
         // raise NSRangeException for a pathological run of separators.
         _uploadDirectory = [[path stringByStandardizingPath] copy];
+
+        // Resolved once, here, because every path handed to -_relativePathForAbsolutePath: has
+        // been through realpath(3) while this one has only been standardized, and the two
+        // disagree far more often than "an unusual symlink" suggests — see that method.
+        char resolvedBuffer[PATH_MAX];
+
+        if (realpath([_uploadDirectory fileSystemRepresentation], resolvedBuffer) != NULL) {
+            _resolvedUploadDirectory = [[[NSFileManager defaultManager] stringWithFileSystemRepresentation:resolvedBuffer length:strlen(resolvedBuffer)] copy];
+        }
         _serverSentEventsEnabled = YES;
         _sseChannels = [NSMutableArray array];
         _sseQueue = dispatch_queue_create("com.gcdwebuploader.sse", DISPATCH_QUEUE_SERIAL);
@@ -1072,12 +1084,29 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
 // defensive: a mismatch would otherwise yield a path the browser cannot match against the
 // folder it is viewing, or run off the end of the string.
 - (NSString *)_relativePathForAbsolutePath:(NSString *)absolutePath {
-    if ((_uploadDirectory.length == 0) || ![absolutePath hasPrefix:_uploadDirectory]) {
-        return @"/";
+    // Every caller hands over a path that has been through realpath(3), while _uploadDirectory
+    // has only been -stringByStandardizingPath'd — and those disagree for any share reached
+    // through a symlinked ancestor. That is NOT an exotic case: it is every share under
+    // NSTemporaryDirectory(), where "/var" is a symlink to "/private/var" that neither
+    // -stringByStandardizingPath nor -stringByResolvingSymlinksInPath expands. The prefix test
+    // then failed and the fallback fired, so a change event named "/" — or "//" for a create,
+    // which appends its own separator — and the browser, which only reloads when the changed
+    // directory matches the folder it is viewing, silently stopped updating for every subfolder.
+    //
+    // -presentedSubitemDidChangeAtURL: already resolved both sides before comparing. This is the
+    // same rule at the site that did not have it, which is this codebase's signature defect.
+    NSString *const resolvedRoot = _resolvedUploadDirectory ? _resolvedUploadDirectory : _uploadDirectory;
+
+    for (NSString *const root in @[ _uploadDirectory, resolvedRoot ]) {
+        if ((root.length == 0) || ![absolutePath hasPrefix:root]) {
+            continue;
+        }
+
+        NSString *const relativePath = [absolutePath substringFromIndex:root.length];
+        return [relativePath hasPrefix:@"/"] ? relativePath : [@"/" stringByAppendingString:relativePath];
     }
 
-    NSString *const relativePath = [absolutePath substringFromIndex:_uploadDirectory.length];
-    return [relativePath hasPrefix:@"/"] ? relativePath : [@"/" stringByAppendingString:relativePath];
+    return @"/";
 }
 
 // Do two paths name the same file on disk? Compares file resource identifiers (inode +

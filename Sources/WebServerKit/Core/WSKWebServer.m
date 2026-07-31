@@ -410,7 +410,18 @@ static void _ExecuteMainThreadRunLoopSources(void) {
     __block NSString *result = nil;
 
     dispatch_sync(_stateQueue, ^{
-        CFStringRef name = self->_resolutionService ? CFNetServiceGetName(self->_resolutionService) : NULL;
+        // _registrationService first, because it is the one that was actually registered and so
+        // the only one that carries an auto-renamed name. _resolutionService is a COPY taken
+        // immediately after CFNetServiceRegisterWithOptions is *initiated* — registration is
+        // asynchronous, so that copy froze the name as configured. Registering with flags 0
+        // means auto-rename is enabled, so a second instance on the network becomes
+        // "<name> (2)" and this property reported the original name for the rest of the run.
+        CFStringRef name = self->_registrationService ? CFNetServiceGetName(self->_registrationService) : NULL;
+
+        if ((name == NULL) || (CFStringGetLength(name) == 0)) {
+            name = self->_resolutionService ? CFNetServiceGetName(self->_resolutionService) : NULL;
+        }
+
         result = name && CFStringGetLength(name) ? CFBridgingRelease(CFStringCreateCopy(kCFAllocatorDefault, name)) : nil;
     });
     return result;
@@ -1107,12 +1118,30 @@ static inline NSString *_EncodeBase64(NSString *string) {
     // previously assigned port, so client URLs stay valid. See
     // swisspol/WSKWebServer#292. Existing (already-accepted) connections are
     // unaffected — only the listening sockets are rebuilt.
+    __block BOOL restarted = YES;
+
     dispatch_sync(_stateQueue, ^{
         if (self->_source4) {
             [self _stop];
-            [self _start:NULL];  // TODO: There's probably nothing we can do on failure
+            NSError *error = nil;
+            restarted = [self _start:&error];
+
+            if (!restarted) {
+                // Previously "[self _start:NULL]" with a TODO saying nothing could be done on
+                // failure. Something can: SAY SO. The listening sockets are gone and the server
+                // is silently dead for the rest of the foreground session, while -isRunning and
+                // -serverURL still answer as though it were serving. A host app that never
+                // learns cannot re-start it or tell the user why nothing is reachable.
+                WSK_LOG_ERROR(@"Failed restarting %@ on returning to the foreground: %@", [self class], error);
+            }
         }
     });
+
+    // Delivered on the main thread and outside _stateQueue, like every other delegate call
+    // here — a delegate reading -serverURL from inside that block would deadlock on it.
+    if (!restarted && [self.delegate respondsToSelector:@selector(webServerDidStop:)]) {
+        [self.delegate webServerDidStop:self];
+    }
 }
 
 #endif
