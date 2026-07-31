@@ -87,6 +87,46 @@ and the Bonjour/`.local` name only, so without it every request is refused with 
 
 ## Recent Changes
 
+### Symlinks are aliases: decided semantics, not a defect fix
+
+Two owner decisions, implemented together because the eleventh pass's skeptic established that source
+and destination semantics have to be decided as one or the next pass finds the half that was missed.
+
+**A destructive verb now acts on the entry the client NAMED, not on what it points at.** `DELETE
+/latest` where `latest -> build/` used to remove the multi-hundred-megabyte build directory and leave
+the dangling link behind, answering 204; no shell tool behaves that way, and the residue was then
+invisible to every listing and removable by nothing. `rm` removes the alias, `mv a latest` replaces
+it, and reads still FOLLOW it — `GET /latest/app.ipa` is unchanged. Applied to DELETE, and to
+MOVE/COPY on **both** source and destination, in both servers.
+
+**The three dangers the skeptic measured are each addressed rather than accepted.** It resolves
+ONCE — `WSKResolveNamedEntryWithinDirectory()` resolves the PARENT and appends the raw leaf, deriving
+containment and hiddenness from that single observation, so the two-observations shape the eighth
+pass closed is not reopened. The destination side is covered, which the proposed fix left untouched.
+And the "it relaxes the extension allow-list" objection dissolves under these semantics rather than
+being overridden: removing an alias named `x.txt` that points at `id_rsa` does not touch `id_rsa`, so
+refusing it was the wrong answer.
+
+**Containment is exactly as strong**, and that is what the new test asserts hardest: the parent is
+still resolved, so `PUT /escape/x` through a link out of the share is still 403 with nothing landing
+outside, and reads and deletes through it are still refused.
+
+**⚠️ `testSymlinkResolvingToTheShareRootCannotDestroyIt` was deliberately re-pointed.** It asserted
+that `DELETE /self` (where `self -> .`) is REFUSED, because when the resolver substituted the
+resolved path the only safe answer was refusal. Acting on the named entry means the share root is
+never the thing operated on, so the catastrophe it guards — the ninth pass's five-entry share emptied
+to zero by one request — is now impossible **by construction**. The test now asserts that the
+contents survive rather than that the request was refused, which is the property that actually
+matters.
+
+**Symlinks now appear in listings**, classified by what they point at. They were served but omitted
+from all three enumerations, which through a real mounted client is data loss rather than cosmetics:
+`mv` returns 0 having copied only what the listing reported, then deletes the source. A link is only
+advertised when its target resolves INSIDE the share and is a regular file or directory — otherwise
+it would be advertised and then refused on access, which is the same disagreement with the sign
+flipped. Shared through `WSKServableFileTypeAtPath()` so the three enumerators cannot drift.
+
+
 ### Full confirmation re-run: every technique at once, and it caught what the individual passes could not
 
 Not a new technique — **all ten technique families re-run simultaneously against tip**, at the owner's

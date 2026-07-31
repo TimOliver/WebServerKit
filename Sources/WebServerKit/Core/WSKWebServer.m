@@ -1530,7 +1530,12 @@ static NSString *_EscapeHTMLString(NSString *string) {
         // disagreement, in the opposite direction, that the sixth pass fixed by refusing to
         // serve what this listing hid.
         if (includeHiddenItems || ![entry hasPrefix:@"."]) {
-            NSString *const type = [[NSFileManager defaultManager] attributesOfItemAtPath:[path stringByAppendingPathComponent:entry] error:NULL][NSFileType];
+            // Classified by what a symlink points at, so the index describes what is actually
+            // served — the same "the listing must agree with the handler" rule the sixth and
+            // eighth passes each fixed in the other direction. A link out of the served root, or
+            // a dangling one, classifies as nothing and stays unlisted, because that is what the
+            // handler would refuse.
+            NSString *const type = WSKServableFileTypeAtPath([path stringByAppendingPathComponent:entry], path);
 
             // Any process can delete the entry between the directory read above and this
             // stat, so a missing type is an ordinary race, not a logic error to assert on.

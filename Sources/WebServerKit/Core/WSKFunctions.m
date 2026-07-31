@@ -582,6 +582,74 @@ NSString *WSKResolveWithinDirectory(NSString *path, NSString *directory, NSStrin
     return resolvedPath;
 }
 
+NSString *WSKServableFileTypeAtPath(NSString *path, NSString *directory) {
+    NSDictionary *const attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:NULL];
+    NSString *const type = attributes[NSFileType];
+
+    if (![type isEqualToString:NSFileTypeSymbolicLink]) {
+        return type;
+    }
+
+    // Judge the link by what it points at, and only when that is something this server would
+    // actually serve: inside the directory, and a regular file or a directory itself.
+    if (!WSKResolvedPathIsWithinDirectory(path, directory)) {
+        return nil;
+    }
+
+    struct stat info;
+
+    if (stat([path fileSystemRepresentation], &info) != 0) {
+        return nil;  // Dangling, or a loop: there is nothing to advertise.
+    }
+
+    if ((info.st_mode & S_IFMT) == S_IFDIR) {
+        return NSFileTypeDirectory;
+    }
+
+    if ((info.st_mode & S_IFMT) == S_IFREG) {
+        return NSFileTypeRegular;
+    }
+
+    return nil;
+}
+
+NSString *WSKResolveNamedEntryWithinDirectory(NSString *path, NSString *directory, NSString *__autoreleasing *outRelativePath) {
+    if (outRelativePath) {
+        *outRelativePath = nil;
+    }
+
+    NSString *const leaf = [path lastPathComponent];
+    NSString *const parent = [path stringByDeletingLastPathComponent];
+
+    // No final component to preserve — "/" and the directory itself. Every destructive verb
+    // refuses the root separately, so returning nil here is the same answer by a shorter route.
+    if ((leaf.length == 0) || [leaf isEqualToString:@"/"] || (parent.length == 0)) {
+        return nil;
+    }
+
+    NSString *const resolvedParent = _RealPath(parent);
+    NSString *const resolvedDirectory = _RealPath(directory);
+
+    if ((resolvedParent == nil) || (resolvedDirectory == nil)) {
+        return nil;  // Fail closed rather than acting on a path we could not verify.
+    }
+
+    if (![resolvedParent isEqualToString:resolvedDirectory] && !WSKPathIsInsideDirectory(resolvedParent, resolvedDirectory)) {
+        return nil;
+    }
+
+    NSString *const namedPath = [resolvedParent stringByAppendingPathComponent:leaf];
+
+    if (outRelativePath) {
+        NSString *const parentRelative = [resolvedParent isEqualToString:resolvedDirectory]
+                                             ? @""
+                                             : [resolvedParent substringFromIndex:(resolvedDirectory.length + ([resolvedDirectory hasSuffix:@"/"] ? 0 : 1))];
+        *outRelativePath = (parentRelative.length == 0) ? leaf : [parentRelative stringByAppendingPathComponent:leaf];
+    }
+
+    return namedPath;
+}
+
 NSString *WSKResolvedPathRelativeToDirectory(NSString *path, NSString *directory) {
     NSString *const resolvedPath = _RealPath(path);
     // Resolve the directory too: /var is itself a symlink to /private/var on Apple
