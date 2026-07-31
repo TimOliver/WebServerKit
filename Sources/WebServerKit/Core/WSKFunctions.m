@@ -118,33 +118,61 @@ NSUInteger WSKReservedMemoryLength(void) {
 @end
 
 static NSDateFormatter *_dateFormatterRFC822 = nil;
+// RFC 9110 s5.6.7 requires a recipient to accept all three HTTP-date formats. Only
+// IMF-fixdate was handled, so If-Modified-Since / If-Unmodified-Since / If-Range carrying
+// either obsolete spelling parsed to nil and the precondition was treated as ABSENT — a
+// conditional request failing OPEN, which is the wrong direction for a validator. Only
+// ever parsed with, never formatted: senders must emit IMF-fixdate.
+static NSDateFormatter *_dateFormatterRFC850 = nil;
+static NSDateFormatter *_dateFormatterAsctime = nil;
 static NSDateFormatter *_dateFormatterISO8601 = nil;
 static dispatch_queue_t _dateFormatterQueue = NULL;
 
-// TODO: Handle RFC 850 and ANSI C's asctime() format
-void WSKInitializeFunctions(void) {
-    WSK_DCHECK([NSThread isMainThread]);  // NSDateFormatter should be initialized on main thread
+// Idempotent and safe from any thread: everything here is built exactly once, under
+// dispatch_once, and read-only thereafter (all use is serialized on _dateFormatterQueue).
+//
+// It is called lazily from every function that touches a formatter, not only from
+// +[WSKWebServer initialize]. Previously it ran ONLY from there, so the public
+// WSKFormatRFC822 / WSKParseRFC822 / WSKFormatISO8601 / WSKParseISO8601 dispatch_sync'd on
+// a NULL queue — an immediate crash — for any host app that called one before touching the
+// server class at all. There is no longer a main-thread requirement: NSDateFormatter has
+// been safe to construct off the main thread for many OS releases, and dispatch_once
+// removes the race the old assertion was standing in for.
+static void _EnsureDateFormatters(void) {
+    static dispatch_once_t onceToken;
 
-    if (_dateFormatterRFC822 == nil) {
+    dispatch_once(&onceToken, ^{
         _dateFormatterRFC822 = [[NSDateFormatter alloc] init];
         _dateFormatterRFC822.timeZone = [NSTimeZone timeZoneWithAbbreviation:@"GMT"];
         _dateFormatterRFC822.dateFormat = @"EEE',' dd MMM yyyy HH':'mm':'ss 'GMT'";
         _dateFormatterRFC822.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US"];
-        WSK_DCHECK(_dateFormatterRFC822);
-    }
 
-    if (_dateFormatterISO8601 == nil) {
+        _dateFormatterRFC850 = [[NSDateFormatter alloc] init];
+        _dateFormatterRFC850.timeZone = [NSTimeZone timeZoneWithAbbreviation:@"GMT"];
+        _dateFormatterRFC850.dateFormat = @"EEEE',' dd'-'MMM'-'yy HH':'mm':'ss 'GMT'";
+        _dateFormatterRFC850.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US"];
+        // RFC 9110 s5.6.7: a two-digit year more than 50 years in the future means the most
+        // recent past year with those digits. A window opening 50 years ago is exactly that
+        // rule. Sampled once, which is right for a formatter built once — the boundary moves
+        // by a year annually and no HTTP client is sending dates near it.
+        _dateFormatterRFC850.twoDigitStartDate = [NSDate dateWithTimeIntervalSinceNow:-50.0 * 365.2425 * 24.0 * 60.0 * 60.0];
+
+        _dateFormatterAsctime = [[NSDateFormatter alloc] init];
+        _dateFormatterAsctime.timeZone = [NSTimeZone timeZoneWithAbbreviation:@"GMT"];
+        _dateFormatterAsctime.dateFormat = @"EEE MMM d HH':'mm':'ss yyyy";
+        _dateFormatterAsctime.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US"];
+
         _dateFormatterISO8601 = [[NSDateFormatter alloc] init];
         _dateFormatterISO8601.timeZone = [NSTimeZone timeZoneWithAbbreviation:@"GMT"];
         _dateFormatterISO8601.dateFormat = @"yyyy-MM-dd'T'HH:mm:ss'+00:00'";
         _dateFormatterISO8601.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US"];
-        WSK_DCHECK(_dateFormatterISO8601);
-    }
 
-    if (_dateFormatterQueue == NULL) {
         _dateFormatterQueue = dispatch_queue_create(NULL, DISPATCH_QUEUE_SERIAL);
-        WSK_DCHECK(_dateFormatterQueue);
-    }
+    });
+}
+
+void WSKInitializeFunctions(void) {
+    _EnsureDateFormatters();
 }
 
 NSString *WSKNormalizeHeaderValue(NSString *value) {
@@ -237,6 +265,7 @@ NSStringEncoding WSKStringEncodingFromCharset(NSString *charset) {
 NSString *WSKFormatRFC822(NSDate *date) {
     __block NSString *string;
 
+    _EnsureDateFormatters();
     dispatch_sync(_dateFormatterQueue, ^{
         string = [_dateFormatterRFC822 stringFromDate:date];
     });
@@ -244,10 +273,27 @@ NSString *WSKFormatRFC822(NSDate *date) {
 }
 
 NSDate *WSKParseRFC822(NSString *string) {
+    if (string.length == 0) {
+        return nil;
+    }
+
     __block NSDate *date;
 
+    _EnsureDateFormatters();
     dispatch_sync(_dateFormatterQueue, ^{
         date = [_dateFormatterRFC822 dateFromString:string];
+
+        if (date == nil) {
+            date = [_dateFormatterRFC850 dateFromString:string];
+        }
+
+        if (date == nil) {
+            // asctime() pads a single-digit day to width two ("Sun Nov  6 ..."), which the
+            // "d" specifier does not absorb. Collapsing runs of spaces makes the one legal
+            // variant parse without loosening the pattern itself.
+            NSString *const collapsed = [string stringByReplacingOccurrencesOfString:@"  " withString:@" "];
+            date = [_dateFormatterAsctime dateFromString:collapsed];
+        }
     });
     return date;
 }
@@ -255,6 +301,7 @@ NSDate *WSKParseRFC822(NSString *string) {
 NSString *WSKFormatISO8601(NSDate *date) {
     __block NSString *string;
 
+    _EnsureDateFormatters();
     dispatch_sync(_dateFormatterQueue, ^{
         string = [_dateFormatterISO8601 stringFromDate:date];
     });
@@ -264,6 +311,7 @@ NSString *WSKFormatISO8601(NSDate *date) {
 NSDate *WSKParseISO8601(NSString *string) {
     __block NSDate *date;
 
+    _EnsureDateFormatters();
     dispatch_sync(_dateFormatterQueue, ^{
         date = [_dateFormatterISO8601 dateFromString:string];
     });
@@ -374,6 +422,16 @@ NSDictionary<NSString *, NSString *> *WSKParseURLEncodedForm(NSString *form) {
 NSString *WSKStringFromSockAddr(const struct sockaddr *addr, BOOL includeService) {
     char hostBuffer[NI_MAXHOST];
     char serviceBuffer[NI_MAXSERV];
+
+    // sa_len is read below before getnameinfo can fail, so a NULL address is a SEGV rather
+    // than an error return. It is reachable: a WSKRequest built by a WSKMatchBlock has no
+    // address data until the connection populates it AFTER the block returns, so a block
+    // that inspects the request it just built — which is the block's entire job — crashed
+    // the process. Same "" the getnameinfo failure below returns, so callers need no new
+    // case.
+    if (addr == NULL) {
+        return @"";
+    }
 
     // Always return on failure. Falling through would format two uninitialized stack
     // buffers into the result, leaking stack contents into logs — which is what happened

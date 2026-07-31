@@ -87,6 +87,80 @@ and the Bonjour/`.local` name only, so without it every request is refused with 
 
 ## Recent Changes
 
+### Known-open lows, batch A: six ways a host app could kill the process
+
+The ~20 items the audit programme deferred were all filed as "low". For these six that label was
+measuring the wrong axis: they are low in **reachability** — each needs a host app to use a
+documented API in a documented way — not in consequence. **Four of the six kill the process**, and
+the proof is how the regression tests behaved against the unfixed tree: they did not fail, they
+crashed the test runner four separate times and the suite reported `Executed 0 tests, with 0
+failures`. That is the third time this file has recorded that exact trap. Read the executed count.
+
+**`+responseWithFile:` is declared `nullable` and raised instead.** `-fileSystemRepresentation`
+raises `NSInvalidArgumentException` for an empty or NUL-bearing receiver rather than returning
+NULL, and the raise escapes through the host app's handler into the connection. Any handler that
+builds a path from request input can reach both spellings. This is the same shape the eleventh pass
+fixed in `+responseWithJSONObject:` — **the fourth time a fix for the nil/NUL class has failed to
+reach every site the value can arrive by**, which is now this codebase's single most repeated
+defect. The NUL check is kept even though `open(2)` would truncate there anyway: truncating makes
+the server act on a prefix of what was asked for, which is refused everywhere else here.
+
+**A `WSKMatchBlock` inspecting the request it just built SEGV'd.** The connection populates a
+request's addresses *after* the match block returns, so inside the block they are nil — and
+`WSKStringFromSockAddr` reads `addr->sa_len` before `getnameinfo` can fail, so there is nothing to
+fail closed on. Inspecting the request is the match block's entire job. It now returns the same
+`@""` it already returned for a `getnameinfo` failure, so no caller needs a new case, and
+`localAddressData`/`remoteAddressData` are **`nullable`** now because they genuinely are in that
+window. Source-breaking for Swift, deliberately — the same call as the `WSKFileResponse` validators.
+
+**The public date functions crashed unless a server had been created first.** `WSKFormatRFC822`,
+`WSKParseRFC822`, `WSKFormatISO8601` and `WSKParseISO8601` `dispatch_sync` on a queue only built by
+`WSKInitializeFunctions`, which ran only from `+[WSKWebServer initialize]` — so calling any of the
+four before touching the server class was an immediate crash. Carried in this file as known-open
+since the sixth pass. Now `dispatch_once`, called lazily from each of the four. The main-thread
+assertion is gone with it: `NSDateFormatter` has been safe to build off the main thread for many
+releases, and `dispatch_once` removes the race the assertion stood in for.
+
+**⚠️ The in-suite test for that one cannot regress-guard it, and it would have been easy to claim
+otherwise.** XCTest runs one process in alphabetical order, so in a full-suite run some earlier
+test has already messaged `WSKWebServer` and the formatters exist by the time it runs — it only
+exercised the lazy path because it happened to run in *isolation*. The real oracle is
+out-of-process: a binary that links the framework and names `WSKWebServer` nowhere. Fixed library
+prints OK; unfixed exits **139 (SIGSEGV)**. Kept in the scratch harness, not the suite, because it
+needs its own link line.
+
+**Date preconditions failed OPEN for two of the three formats RFC 9110 requires.** Only IMF-fixdate
+parsed, so an `If-Modified-Since`, `If-Unmodified-Since` or `If-Range` carrying an RFC 850 or
+`asctime()` date parsed to nil and the precondition was treated as *absent* — a validator failing in
+the permissive direction. Both are parsed now (never formatted; senders must still emit
+IMF-fixdate). Two details that are easy to get wrong: RFC 9110 §5.6.7's two-digit-year rule is
+exactly a window opening 50 years ago, which is what `twoDigitStartDate` is set to; and `asctime()`
+pads a single-digit day to width two ("Sun Nov  6"), which `d` does not absorb, so runs of spaces are
+collapsed rather than the pattern being loosened.
+
+**Two `WSK_DNOT_REACHED()` sites punished the careful host app.** `addGETHandlerForBasePath:`
+enforced an *undocumented* leading/trailing-slash precondition by aborting in Debug with no
+diagnostic and, in Release, registering nothing and returning — so every request 404'd with no clue
+why. Neither spelling is ambiguous, so both are normalized now. And `-stop` on a server whose start
+**failed** aborted a Debug build, which is precisely what an error path does right after
+`-startWithOptions:error:` returns NO; it is idempotent tidy-up now. While in the header, the
+base-path handler's documented no-match status was corrected from 401 to the 404 it actually
+returns.
+
+**Verified together, not per-fix.** 127 tests and 0 failures on a clean build with no new warnings,
+the trace corpus green, iOS and tvOS Debug both building with 0 warnings, and the date oracle
+sensitive in both directions. The full-suite run is the load-bearing one: per-fix greens are what
+let two regressions ride `main` through three CI runs earlier in this programme.
+
+**Still open:** the remaining lows, which split into batch B (status-code and documentation honesty
+— `If-Match` on a missing resource answering 404 not 412, ENOSPC/EROFS answering 500/403 not 507,
+MKCOL's 500-after-create, empty header names, the six non-null-but-nil properties on the uploader
+and DAV server, `-startWithOptions:error:` not setting `*error`) and batch C (the long-lived
+surfaces — the SSE quiet-client reaping gap, SSE paths collapsing to `/` through a symlinked
+ancestor, `-bonjourName` after an auto-rename, the silent iOS foreground-restart failure). The `//`
+status disagreement, `MOVE`-without-`Overwrite` and the directory-rename TOCTOU remain settled
+decisions rather than defects.
+
 ### The reload guard was a counter two parties shared, and it has now wedged twice
 
 A listing arriving while the rename box is open froze the page permanently: it stopped tracking the
@@ -652,7 +726,8 @@ aborts a Debug build inside `WSKInitializeFunctions` (and `+initialize` is inher
 `WSKWebServer` first does not protect a subclass); `-stop` after a *failed* start aborts a Debug
 build, with no public way to tell that state from a stoppable one; and
 `-startWithOptions:error:` returns NO without setting `*error` when the server is already running.
-Also carried forward and re-confirmed 10/10: `WSKFormatRFC822` before any server exists still
+Also carried forward and re-confirmed 10/10 (**closed in batch A of the known-open lows, above**):
+`WSKFormatRFC822` before any server exists still
 crashes.
 
 ### Tenth audit pass: the scan that was meant to end the programme, and did not
@@ -1129,7 +1204,8 @@ suppressed. Fix it off the wire method if it ever becomes reachable.
 
 Carried forward from the sixth pass, both still true and both pre-existing: `bootstrap.css`
 requests `.woff`/`.woff2` glyphicons that are not in the bundle (a 404 on every page load;
-browsers fall back to the `.ttf` that ships), and `WSKFormatRFC822`/`WSKParseRFC822` are public
+browsers fall back to the `.ttf` that ships), and — **closed in batch A of the known-open lows,
+above** — `WSKFormatRFC822`/`WSKParseRFC822` are public
 but `dispatch_sync` on a queue only created by `+[WSKWebServer initialize]`, so calling either
 before any server exists crashes.
 
@@ -1253,6 +1329,7 @@ its terminator.
 **Still open:** nothing from this pass's findings. Noted but deliberately untouched, both
 pre-existing: `bootstrap.css` requests `.woff`/`.woff2` glyphicons that are not in the bundle
 (a 404 on every page load; browsers fall back to the `.ttf` that ships), and
+**closed in batch A of the known-open lows, above** —
 `WSKFormatRFC822`/`WSKParseRFC822` are public but `dispatch_sync` on a queue only created by
 `+[WSKWebServer initialize]`, so calling either before any server exists crashes.
 
