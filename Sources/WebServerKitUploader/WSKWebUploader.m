@@ -1551,12 +1551,22 @@ static NSString *_OriginAuthority(NSString *value) {
                 // pathExtension is in no allow-list), so vetting them would make ordinary
                 // directories permanently undeletable. Note this cannot use the shared rule,
                 // which reports NO for everything once hidden items are allowed.
+                NSString *const subpathType = [enumerator fileAttributes][NSFileType];
+
                 if ([[subpath lastPathComponent] hasPrefix:@"."]) {
-                    [enumerator skipDescendants];
+                    // -skipDescendants is defined for the most recently returned SUBDIRECTORY.
+                    // Calling it for a dot-named FILE popped the enclosing level instead, so every
+                    // entry after the first dot-name in that directory's readdir order was never
+                    // vetted at all — and a ".DS_Store" sits in every Finder-touched folder. The
+                    // top level of the addressed collection is immune, which is exactly why the
+                    // existing fixtures could not see it: they put the unvettable file there.
+                    // Only a dot-named DIRECTORY may be skipped wholesale.
+                    if ([subpathType isEqualToString:NSFileTypeDirectory]) {
+                        [enumerator skipDescendants];
+                    }
+
                     continue;
                 }
-
-                NSString *const subpathType = [enumerator fileAttributes][NSFileType];
 
                 // An extensionless file ("README", "LICENSE") is vetted like any other: a
                 // direct DELETE of it is already refused, so letting a recursive delete

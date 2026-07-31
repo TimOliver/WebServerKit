@@ -87,6 +87,72 @@ and the Bonjour/`.local` name only, so without it every request is refused with 
 
 ## Recent Changes
 
+### Full confirmation re-run: every technique at once, and it caught what the individual passes could not
+
+Not a new technique — **all ten technique families re-run simultaneously against tip**, at the owner's
+request, as a sanity check. It was worth far more than expected, and the reason is worth keeping:
+every technique had last run against an OLDER commit, and five PRs had landed since. The individual
+passes each asked "is this correct?"; only running them together against the accumulated result asks
+**"do the repairs hold together?"** — and three times the answer was no.
+
+**Two of the findings were regressions from my own PR #48, and the full harness could not see
+either.** 118 tests, eight recorded trace suites and Release builds on three platforms passed on that
+PR and on every one since.
+
+**Every successful file response logged a false truncation, and gzip on a file response was entirely
+broken.** PR #48's per-chunk verification treated normal end-of-body as a premature EOF: once `_size`
+reaches 0 the read length is 0, so `read(2)` returns 0 for the ordinary reason. A **zero-length
+NSData is the end-of-stream sentinel** both consumers require — `-[WSKConnection
+writeBodyWithCompletionBlock:]` writes the terminal chunk on it and `-[WSKGZipEncoder readData:]`
+selects `Z_FINISH` on it — so returning nil aborted the chain. Measured: gzip broken at all 8 sizes
+from 0 B to 200 KB, chunked stream never terminated, and 8/8 successful responses logging an ERROR
+falsely claiming truncation — destroying the exact signal that change existed to create. Identity
+responses hid it completely, because `Content-Length` had already framed the body. One token:
+`} else {` → `} else if (_size > 0) {`.
+
+**On exFAT, WebDAV MOVE and COPY to any new name answered 403 — rename and duplicate simply did not
+work.** PR #48 swaps with `renamex_np(RENAME_EXCL)` when nothing was vetted, and macOS 15's FSKit
+exFAT returns `ENOTSUP` for it. APFS, FAT32 and HFS+ all implement it, which is exactly why every
+test passed: they run on APFS. Measured on a real exFAT image, 0/10 before and 10/10 after, with zero
+staging residue. The fallback reserves the name itself — `mkdir` for a staged directory,
+`open(O_CREAT|O_EXCL)` otherwise — which gets the same exclusivity, and **fires only on
+ENOTSUP/ENOSYS**: every other errno, `EEXIST` above all, must keep failing or the racing newcomer
+that branch exists to protect gets clobbered. **The proposed fix omitted reclaiming the reservation
+when the following `rename(2)` fails**, which would have left a zero-byte file or empty directory at
+a name the request then refuses — a brand-new residue class, and the seventh instance of a fix
+planting the next defect. What shipped unlinks or rmdirs it and preserves the original errno.
+
+**A dot-file one level down switched off the extension allow-list for the rest of that directory.**
+`-skipDescendants` is defined for the most recently returned SUBDIRECTORY; both subtree walks called
+it for every dot-name including regular FILES, which pops the enclosing level — so every entry after
+the first dot-name in that directory's readdir order was never vetted. A `.DS_Store` sits in every
+Finder-touched folder and sorts early, so this was the ordinary case: `DELETE /Vault` answered 204 and
+destroyed `sub/id_rsa` 60/60, as did the uploader's `/delete` and a MOVE/COPY overwrite, while the
+same file addressed directly is refused 403 by the same server in the same configuration. **The top
+level of the addressed collection is immune, which is why three existing tests looking straight at
+this all pass against the unfixed code** — their fixtures put the victim at the top. Any regression
+test for this class must put it one level down, and the new one does.
+
+This is the **fourth recurrence** of the class the eighth and tenth passes each declared closed, and
+it falsifies the design-priorities sentence "a recursive delete refuses when it would destroy a file
+a direct delete would have refused" for essentially every macOS folder. Pre-existing — established by
+building `e53c43d` and measuring, not by reading the diff. Only a dot-named DIRECTORY is skipped
+wholesale now; that judgement call is deliberate and still holds.
+
+**Still open from this run, deliberately.** The browser reload wedge — a listing arriving while the
+rename box is open leaves `_reloadingDisabled` above zero and the page stops tracking the share — is
+confirmed, but **the proposed fix re-introduces the identical permanent wedge with a negative
+counter**, so it needs a different approach. `WSKFileResponse.lastModifiedDate` being declared
+non-null while nil inside the timestamp bucket is real but its fix is a **source-breaking public API
+change**. Also low and open: an empty header name is accepted; MKCOL answers 500 after creating the
+collection in Debug builds; a header-time refusal can lose its error page body to a TCP reset (the
+status is never lost); `If-Match` on a resource that does not exist answers 404 rather than 412; and
+a MOVE whose swap fails can strand its staged item under an unreachable dot-name.
+
+**The lesson worth carrying: run everything together, periodically.** A per-pass green harness proved
+nothing about the accumulated tree, and the two regressions above sat on `main` through three
+subsequent PRs and their CI runs.
+
 ### Fourteenth audit pass: the browser was never in scope, and that is where the defects were
 
 Four oracles, weighted deliberately toward things outside this project's own reasoning: **static
