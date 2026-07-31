@@ -87,6 +87,90 @@ and the Bonjour/`.local` name only, so without it every request is refused with 
 
 ## Recent Changes
 
+### Sixteenth pass: it was not green, and four of the findings were mine
+
+A full top-down re-run at the owner's request, to see whether the tree finally came back clean after
+the three known-open-low batches. It did not: **17 confirmed findings, 5 refuted, across 8 lenses
+with 22 skeptics and none dead** — the coverage counters are reported explicitly this time, because
+the twelfth pass returned `CLEAN` when every one of its verifiers had died.
+
+**Four of the seventeen were regressions from the three batches that had just landed.** This entry
+fixes those four; the rest are recorded for the cleanup.
+
+**⚠️ The uploader initializer was made to kill the process — by the very session that fixed that
+class.** Batch C added `realpath([_uploadDirectory fileSystemRepresentation], ...)` with no guard,
+and `-fileSystemRepresentation` raises for an empty or NUL-bearing receiver. That is the **fifth
+recurrence** of this codebase's most repeated defect, the first that was self-inflicted, and it
+landed three files from the comment in `WSKFileResponse.m` explaining the exact hazard. Nothing
+about knowing a rule prevents breaking it somewhere else.
+
+**A validator that failed OPEN was replaced by one that fails CLOSED.** Batch A's new RFC 850 and
+asctime patterns are parsed by ICU, which accepts 1–3 digits for a `yyyy` field and 1 for `yy`, so
+`Sun Nov  6 08:49:37 94` parsed to the year **0094** rather than failing. Such a date precedes every
+real mtime, so an `If-Unmodified-Since` carrying it produced a **permanent 412 that no retry could
+ever satisfy**, where RFC 9110 §13.1.4 requires an unparseable date to be ignored. Measured 412/412/412
+against 204/204/204 at the pre-batch commit. The fix anchors the calendar year rather than tightening
+three ICU patterns, and applies to **all three** spellings rather than the two where it was noticed —
+"closed at one of the sites the rule applies to" being the shape that keeps recurring here.
+
+**Rejecting a non-date became linear in its length.** Two extra formatter passes plus a whole-string
+double-space collapse, all inside the single process-wide serial queue that also serializes the
+`Date` header of *every* response — 74× baseline, 1.48 ms of exclusive CPU at the 64 KB header cap,
+and `If-Modified-Since` is parsed for every request before any handler or authentication runs. A
+length precheck restores constant-time rejection; no legal HTTP-date exceeds 33 characters. Pinned by
+a test with a deliberately loose bound (2000 rejections under 2 s, against 3.78 s unfixed) so it
+catches the class without flaking under load.
+
+**`webServerDidStop:` was delivered twice for one stop.** `-_stop` already posts it; batch C added a
+second, synchronous, so the duplicate arrived *first* and inverted the ordering against
+`-webServerDidDisconnect:`. The added call is now gone. **⚠️ And the claim that justified it was
+false:** that entry asserted `-isRunning` and `-serverURL` "still answer as though it were serving",
+which the skeptic measured on both trees, 7/7, as reporting stopped. **Sixth time this file has
+asserted a property the code did not have.**
+
+**A guard that quoted the whole rule and enforced one spelling of it.** Batch B's empty-header-name
+check cited RFC 9112 §5 `field-name = 1*tchar` and then rejected only the empty string. A name
+beginning with a space serializes as an obs-fold continuation and is therefore appended to the
+**preceding header's value** — measured against the real `Date` header — and interior spaces, tabs
+and non-ASCII went out verbatim. The request parser's own `tchar` predicate is now **shared** rather
+than restated, in `WSKFunctions`, so the two sites cannot drift.
+
+**⚠️ Verification limit, stated rather than papered over.** The duplicate-`webServerDidStop:` fix is
+`#if TARGET_OS_IPHONE`, so the Mac suite is structurally blind to it, and the failure regime could
+not be re-synthesized on demand: `-_stop` releases the listening descriptors before `-_start:` runs,
+so exhausting file descriptors beforehand always lands in the SUCCESS regime, where both trees report
+one stop and the measurement discriminates nothing. Two probe attempts did exactly that and were
+discarded. What IS established: the skeptic pinned the duplicate to that line by measuring the
+synchronous phase (tip `stops=1` before the run loop drained, baseline `stops=0`), and exactly one
+delivery site now remains in the tree. The after-state is *not* measured, and this entry does not
+claim it is.
+
+**Five findings were refuted** by the skeptics, including one that would have broken conformance had
+it been "fixed". Combined with batches B and C that is **nine refuted against sixteen real** — a
+recorded finding in this project is roughly a 2-in-3 shot, so reproduce before fixing.
+
+**Verified together.** 138 tests and 0 failures on a clean build with no new warnings — including one
+nullable-to-nonnull warning this change introduced and removed before shipping — the trace corpus
+green, and iOS and tvOS Debug both clean.
+
+**Still open, and now the argument for the cleanup rather than another pass.** Thirteen confirmed
+findings are left, all pre-existing and mostly low: MKCOL answering 500 rather than RFC 4918 §9.3.1's
+405 on an existing collection (**medium — rclone cannot copy into any existing folder**, and the
+error body leaks the server-side path); a 403 where a 404 belongs when a parent collection is absent
+(same rclone breakage); `WSKDataRequest.text` and `.jsonObject` aborting for exactly the case their
+header documents as returning nil; `addHandlerForMethod:path:` aborting in Debug and registering
+nothing in Release for a missing leading slash — the identical shape batch A fixed one method away;
+`OPTIONS` omitting PROPPATCH from `Allow`; LOCK/UNLOCK 405s carrying no `Allow`; the SSE prefix test
+having no separator boundary; `_resolvedUploadDirectory` being captured once so the batch C fix
+reverts if the share's realpath changes; and a symlinked share receiving no `NSFilePresenter` events
+at all.
+
+**The rate is not falling, and the reason is now measured.** Each batch of fixes has introduced
+roughly one new defect per five it closed, clustered in exactly what the fix touched. Auditing harder
+does not converge while that holds. Every one of the four regressions above came from adding a guard
+or a call without asking what it now refuses, duplicates, or costs — so the next work is the deferred
+structural cleanup, starting from the rules that have more than one implementation.
+
 ### Known-open lows, batch C: the long-lived surfaces, and live updates that were broken by default
 
 **⚠️ The headline finding is far broader than the entry that predicted it.** It was carried as "SSE

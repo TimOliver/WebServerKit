@@ -922,33 +922,6 @@ static NSString *_WithoutRootLabel(NSString *host) {
 }
 
 // RFC 9112 §5.1: tchar, the only characters legal in a field name or a method.
-static BOOL _IsHeaderTokenCharacter(unsigned char character) {
-    if (((character >= 'a') && (character <= 'z')) || ((character >= 'A') && (character <= 'Z')) || ((character >= '0') && (character <= '9'))) {
-        return YES;
-    }
-
-    switch (character) {
-        case '!':
-        case '#':
-        case '$':
-        case '%':
-        case '&':
-        case '\'':
-        case '*':
-        case '+':
-        case '-':
-        case '.':
-        case '^':
-        case '_':
-        case '`':
-        case '|':
-        case '~':
-            return YES;
-
-        default:
-            return NO;
-    }
-}
 
 // method SP request-target SP HTTP-version, with no room for interpretation. Without
 // this a request line is split on the first two spaces and whatever remains becomes part
@@ -979,7 +952,7 @@ static BOOL _ValidateRequestLine(const unsigned char *line, NSUInteger length) {
     }
 
     for (NSUInteger i = 0; i < firstSpace; i++) {
-        if (!_IsHeaderTokenCharacter(line[i])) {
+        if (!WSKIsHeaderTokenCharacter(line[i])) {
             return NO;
         }
     }
@@ -1076,7 +1049,7 @@ static BOOL _ValidateRequestHeaderBlock(const void *rawBytes, NSUInteger length)
             }
 
             for (NSUInteger j = 0; j < colon; j++) {
-                if (!_IsHeaderTokenCharacter(line[j])) {
+                if (!WSKIsHeaderTokenCharacter(line[j])) {
                     return NO;  // Includes whitespace before the colon
                 }
             }

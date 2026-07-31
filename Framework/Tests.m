@@ -5001,4 +5001,84 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     return result;
 }
 
+
+#pragma mark - Regressions from the audit batches (self-inflicted)
+
+// Batch C added realpath([_uploadDirectory fileSystemRepresentation], ...) to the initializer with
+// no guard — and -fileSystemRepresentation RAISES for an empty or NUL-bearing receiver. That is
+// precisely the class batch A existed to close, re-opened three files from the comment explaining
+// it. Fifth recurrence of this codebase's most repeated defect, and the first self-inflicted one.
+- (void)testUploaderInitDoesNotRaiseForAnUnusablePath {
+    XCTAssertNoThrow([[WSKWebUploader alloc] initWithUploadDirectory:@""]);
+
+    unichar const nulBearing[] = {'/', 't', 'm', 'p', '/', 0, 'x'};
+    NSString* nulPath = [NSString stringWithCharacters:nulBearing length:(sizeof(nulBearing) / sizeof(nulBearing[0]))];
+    XCTAssertNoThrow([[WSKWebUploader alloc] initWithUploadDirectory:nulPath]);
+
+    // An ordinary share must still resolve, or this could pass by refusing everything.
+    NSString* dir = MakeTempDirectory();
+    WSKWebUploader* ok = [[WSKWebUploader alloc] initWithUploadDirectory:dir];
+    XCTAssertNotNil(ok);
+    [[NSFileManager defaultManager] removeItemAtPath:dir error:NULL];
+}
+
+// RFC 9110 §13.1.4: a recipient MUST IGNORE a precondition whose value is not a valid HTTP-date.
+// Batch A's new RFC 850 and asctime patterns are parsed by ICU, which accepts 1-3 digits for a
+// "yyyy" field and 1 for "yy" — so a malformed value parsed to a first- or second-century date
+// instead of nil. That date precedes every real mtime, so If-Unmodified-Since failed and NO retry
+// could ever succeed. A validator that failed OPEN was replaced by one that fails CLOSED.
+- (void)testMalformedHTTPDatesAreIgnoredRatherThanParsedToAncientYears {
+    XCTAssertNil(WSKParseRFC822(@"Sun Nov  6 08:49:37 94"), @"a 2-digit asctime year is not an HTTP-date");
+    XCTAssertNil(WSKParseRFC822(@"Sun Nov  6 08:49:37 199"), @"a 3-digit asctime year is not an HTTP-date");
+    XCTAssertNil(WSKParseRFC822(@"Sunday, 06-Nov-9 08:49:37 GMT"), @"a 1-digit RFC 850 year is not an HTTP-date");
+
+    // The three legal spellings must still parse, or this closes the hole by breaking the feature.
+    NSDate* expected = [NSDate dateWithTimeIntervalSince1970:784111777.0];
+    for (NSString* legal in @[ @"Sun, 06 Nov 1994 08:49:37 GMT", @"Sunday, 06-Nov-94 08:49:37 GMT", @"Sun Nov  6 08:49:37 1994" ]) {
+        NSDate* parsed = WSKParseRFC822(legal);
+        XCTAssertNotNil(parsed, @"must still parse: %@", legal);
+        XCTAssertEqualWithAccuracy([parsed timeIntervalSince1970], [expected timeIntervalSince1970], 0.5, @"%@", legal);
+    }
+}
+
+// Batch A's two extra formatter passes and a whole-string double-space collapse made rejecting a
+// non-date LINEAR in its length — 74x at the 64 KB header cap — inside the single process-wide
+// serial queue that also serializes the Date header of every response. If-Modified-Since is parsed
+// for every request, so no handler and no authentication is needed to reach it.
+//
+// The bound is deliberately loose (a 74x regression is ~1.5 ms per call, so 2000 calls would take
+// ~3 s) because timing assertions flake under load; it catches the class, not a percentage.
+- (void)testRejectingALongNonDateStaysCheap {
+    NSMutableString* padding = [NSMutableString string];
+    while (padding.length < 60000) {
+        [padding appendString:@"  "];  // Double spaces: the input that triggered the collapse.
+    }
+
+    NSDate* started = [NSDate date];
+    for (NSUInteger i = 0; i < 2000; i++) {
+        XCTAssertNil(WSKParseRFC822(padding));
+    }
+    NSTimeInterval elapsed = -[started timeIntervalSinceNow];
+    XCTAssertLessThan(elapsed, 2.0, @"2000 rejections of a 60 KB non-date took %.2fs; rejection must not be linear in length", elapsed);
+}
+
+// The batch B guard cited RFC 9112 §5 field-name = 1*tchar and then rejected only the EMPTY
+// spelling. A name beginning with a space serializes as an obs-fold continuation line, so it is
+// appended to the PRECEDING header's value — measured against the real Date header. Closing one
+// spelling of a rule while quoting the whole rule is this codebase's most repeated shape.
+- (void)testResponseRefusesAHeaderNameThatIsNotAToken {
+    WSKResponse* response = [WSKResponse responseWithStatusCode:kWSKHTTPStatusCode_OK];
+
+    for (NSString* illegal in @[ @"", @" X-Folded", @"X-A B", @"X-Tab\tName", @"X-Üni", @"X-Trailing " ]) {
+        [response setValue:@"INJECTED" forAdditionalHeader:illegal];
+        XCTAssertNil([response valueForAdditionalHeader:illegal], @"a non-token header name must be refused: \"%@\"", illegal);
+    }
+
+    // Every character the token rule allows must still work.
+    for (NSString* legal in @[ @"Accept-Ranges", @"X-Custom_Header", @"X-A.B", @"X-1234", @"!#$%&'*+-.^_`|~" ]) {
+        [response setValue:@"ok" forAdditionalHeader:legal];
+        XCTAssertEqualObjects([response valueForAdditionalHeader:legal], @"ok", @"a legal token name must be accepted: \"%@\"", legal);
+    }
+}
+
 @end

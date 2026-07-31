@@ -1118,30 +1118,32 @@ static inline NSString *_EncodeBase64(NSString *string) {
     // previously assigned port, so client URLs stay valid. See
     // swisspol/WSKWebServer#292. Existing (already-accepted) connections are
     // unaffected — only the listening sockets are rebuilt.
-    __block BOOL restarted = YES;
-
     dispatch_sync(_stateQueue, ^{
         if (self->_source4) {
             [self _stop];
             NSError *error = nil;
-            restarted = [self _start:&error];
+            BOOL const restarted = [self _start:&error];
 
             if (!restarted) {
                 // Previously "[self _start:NULL]" with a TODO saying nothing could be done on
-                // failure. Something can: SAY SO. The listening sockets are gone and the server
-                // is silently dead for the rest of the foreground session, while -isRunning and
-                // -serverURL still answer as though it were serving. A host app that never
-                // learns cannot re-start it or tell the user why nothing is reachable.
+                // failure. Something can: log it. The listening sockets are gone and the server is
+                // dead for the rest of the foreground session, so an operator staring at an
+                // unreachable device otherwise has nothing at all to go on.
+                //
+                // Deliberately NOT a -webServerDidStop: call. -_stop above already posts one, so
+                // adding a second delivered TWO callbacks for one stop — and the added one fired
+                // synchronously, so it arrived FIRST and inverted the ordering against
+                // -webServerDidDisconnect:. The delegate could already tell this case apart
+                // without it: a failed restart delivers a stop with no matching start.
+                //
+                // The claim that justified that call — that -isRunning and -serverURL "still
+                // answer as though it were serving" — was measured FALSE on both trees, 7/7:
+                // both report stopped. Recorded here because this file has now overstated the
+                // code five times, and this is the correction.
                 WSK_LOG_ERROR(@"Failed restarting %@ on returning to the foreground: %@", [self class], error);
             }
         }
     });
-
-    // Delivered on the main thread and outside _stateQueue, like every other delegate call
-    // here — a delegate reading -serverURL from inside that block would deadlock on it.
-    if (!restarted && [self.delegate respondsToSelector:@selector(webServerDidStop:)]) {
-        [self.delegate webServerDidStop:self];
-    }
 }
 
 #endif
