@@ -4953,4 +4953,52 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     [fm removeItemAtPath:dir error:NULL];
 }
 
+
+#pragma mark - Long-lived surfaces (batch C)
+
+// SSE change events name the directory that changed, and the browser only reloads when that
+// matches the folder it is viewing. The path was derived by chopping the share off the front of
+// a realpath(3) result while the share itself had only been -stringByStandardizingPath'd — which
+// disagree for any share under NSTemporaryDirectory(), since "/var" is a symlink to
+// "/private/var" that neither standardizing nor -stringByResolvingSymlinksInPath expands. Every
+// event then collapsed to "/" (or "//" for a create), so live updates silently stopped for every
+// subfolder. MakeTempDirectory() returns exactly such a path, so this reproduces by default.
+- (void)testSSEEventsNameTheSubfolderThatChanged {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    NSString* sub = [dir stringByAppendingPathComponent:@"Sub"];
+    [fm createDirectoryAtPath:sub withIntermediateDirectories:YES attributes:nil error:NULL];
+
+    WSKWebUploader* server = [[WSKWebUploader alloc] initWithUploadDirectory:dir];
+
+    // The share must actually be one whose realpath differs, or this proves nothing.
+    NSString* resolved = [dir stringByResolvingSymlinksInPath];
+    char buffer[PATH_MAX];
+    if (realpath([dir fileSystemRepresentation], buffer) != NULL) {
+        resolved = [fm stringWithFileSystemRepresentation:buffer length:strlen(buffer)];
+    }
+    XCTAssertNotEqualObjects(resolved, dir, @"this test needs a share whose realpath differs; got %@", dir);
+
+    // Drive the private derivation directly: the event payload is built from it, and going
+    // through the network would make this a test of the SSE plumbing instead.
+    NSString* relative = [server valueForKey:@"uploadDirectory"] ? [self relativePathFrom:server forAbsolute:[resolved stringByAppendingPathComponent:@"Sub"]] : nil;
+    XCTAssertEqualObjects(relative, @"/Sub", @"an event for a subfolder must name it, not collapse to \"/\"");
+
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+- (NSString*)relativePathFrom:(WSKWebUploader*)server forAbsolute:(NSString*)absolutePath {
+    SEL selector = NSSelectorFromString(@"_relativePathForAbsolutePath:");
+    XCTAssertTrue([server respondsToSelector:selector]);
+    NSMethodSignature* signature = [server methodSignatureForSelector:selector];
+    NSInvocation* invocation = [NSInvocation invocationWithMethodSignature:signature];
+    invocation.target = server;
+    invocation.selector = selector;
+    [invocation setArgument:&absolutePath atIndex:2];
+    [invocation invoke];
+    __unsafe_unretained NSString* result = nil;
+    [invocation getReturnValue:&result];
+    return result;
+}
+
 @end
