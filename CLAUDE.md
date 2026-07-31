@@ -87,6 +87,74 @@ and the Bonjour/`.local` name only, so without it every request is refused with 
 
 ## Recent Changes
 
+### Fourteenth audit pass: the browser was never in scope, and that is where the defects were
+
+Four oracles, weighted deliberately toward things outside this project's own reasoning: **static
+analysis**, **a second and third independent client**, **the uploader's page in a real browser**, and
+**a two-binary differential against upstream GCDWebServer**. Three of the four findings live in
+`index.js`, which thirteen passes had never touched.
+
+**Static analysis found nothing reproducible, and that is the most informative clean result yet.**
+Nine analyzer configurations across three engines, every plausible diagnostic then driven from the
+network before being believed. Zero survived. After thirteen passes of runtime instrumentation this
+says the defects that remain are not the kind a symbolic explorer finds — do not re-run it.
+
+**Six open browser tabs deadlocked the uploader UI completely.** A browser allows six HTTP/1.1
+connections per origin and an `EventSource` never completes, so six tabs consumed all six. Measured:
+tabs 1–5 answered in 2 ms, the sixth timed out, a seventh rendered nothing for 13.5 minutes. The
+server was idle throughout — curl through the same relay answered 200 with 122 free connection slots
+and 10 free SSE channels. **`kMaxSSEChannels` (16) sits above the bound that actually binds**: one
+browser deadlocks itself at 6 and can never reach 16. Default configuration, no hostility, and it is
+Shape B's entire deployment.
+
+**⚠️ The obvious fix is worse than the defect, and was measured rather than reasoned about.** Closing
+the stream on `visibilitychange` trades the deadlock for a live-update blackout: the server only
+reclaims a browser-closed channel when a heartbeat write fails 20–33 s later, so ordinary tab
+switching left zombies — 25 of 40 reconnects refused, and the tab actually being looked at stopped
+updating. It also does nothing for six *simultaneously visible* tabs. What shipped instead is **one
+stream per browser**: a single tab holds `/events` under a Web Lock and relays over a
+`BroadcastChannel`. The lock is released by the browser itself when the holding tab goes away, so
+there is no heartbeat, no timeout, and no way to leave the stream unheld or held twice; where either
+API is missing the old behaviour stands. Verified in Chromium: seven tabs all answering in 1–2 ms
+against tab 6 dead for 20 s before.
+
+**A deep link, or simply pressing Reload inside a subfolder, bounced to the root.** `_path` is only
+assigned when a listing *returns*, so between `_reload(hashPath)` and its response it still read
+`"/"` — and the SSE `onopen` re-sync firing in that window re-requested the root. 33 of 40 attempts.
+The re-sync now targets the path most recently *requested*.
+
+**Opening the rename box on a CR-bearing filename and pressing Enter renamed it, with nothing
+typed.** `<input>` in the Text state applies the "strip newlines" sanitization algorithm, so the box
+can never hold a CR — making `value != name` unconditionally true. This is the same shape as the
+fourth pass's `&` fix one layer further down: there the mangling was jeditable's and seeding cured
+it; here it is the browser's own and no seeding can. The comparison is now against what the box can
+actually hold.
+
+**The Host allow-list refused any Host whose port differed from the listening port** — contradicting
+`WSKOption_AllowedHostNames`' own documentation ("may include a port ...; **without one, any port
+matches**"), and refusing every deployment behind a port-translating hop. **This one is a judgement
+call and is easy to reverse:** the port comparison is gone, and an existing assertion in
+`testHostValidationRefusesRebindingButAllowsRealNames` was deliberately inverted. The reasoning is
+that `Host` is derived from the request URL, not from the page's origin, so a browser fetching this
+server can only ever state *this* server's port; a differing one comes from a forwarder, or from a
+non-browser client that could state any `Host` it liked and against which rebinding — which requires
+a browser — does not apply. The name carries the entire defence, and every rebinding assertion still
+passes unchanged. An entry that pins a port is still honoured verbatim.
+
+**Refuted, and worth recording as the method rather than the result.** A case-variant `PUT` on a
+case-insensitive volume looked like a real defect until the skeptic ran `rclone serve webdav` over
+the same directory and got byte-identical behaviour. Not a WebServerKit deviation — inherent to
+vending a case-insensitive namespace through a protocol whose clients assume otherwise.
+
+**Verified clean:** litmus `basic` 16/16, `http` 4/4, `locks` 3/3; 2.3 GB through a real
+`mount_webdav` client byte-perfect across 33,269 mixed operations; rclone `sync`/`check` agreeing in
+both directions; upstream GCDWebServer builds on a current toolchain and the behavioural differential
+found the hardening intended and documented.
+
+**The JS has no test harness**, so all three `index.js` fixes are verified by a Chromium probe run
+against the unfixed and fixed builds, not by the XCTest suite — which is blind to them and stayed at
+118/118 throughout, in both states.
+
 ### Thirteenth audit pass: an outside conformance suite, a real mounted client, and two regressions of my own
 
 Four more never-used techniques, and two of them were ones an earlier pass had written off as needing

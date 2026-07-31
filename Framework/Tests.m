@@ -4192,7 +4192,15 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     for (NSString* host in @[ @"evil.example", @"localhost.evil.com", @"attacker.localhost.evil.com" ]) {
         XCTAssertTrue([get(host) containsString:@"421"], @"host \"%@\" should have been refused", host);
     }
-    XCTAssertTrue([get([NSString stringWithFormat:@"localhost:%lu", (unsigned long)server.port + 1]) containsString:@"421"], @"a mismatched port should be refused");
+    // A mismatched port is deliberately NOT refused any more, and this assertion was inverted on
+    // purpose — see testHostValidationMatchesAnyPortUnlessAnEntryPinsOne. It used to be refused,
+    // which contradicted WSKOption_AllowedHostNames' own documentation and broke every deployment
+    // behind a port-translating hop. It protected nothing: Host is derived from the request URL,
+    // not from the page's origin, so a browser fetching this server can only ever state THIS
+    // server's port — a differing one comes from a forwarder, or from a non-browser client that
+    // could state any Host it liked and for which rebinding (which needs a browser) does not apply.
+    // The name is what carries the defence, and the assertions above still prove it does.
+    XCTAssertFalse([get([NSString stringWithFormat:@"localhost:%lu", (unsigned long)server.port + 1]) containsString:@"421"], @"a differing port on an accepted name should no longer be refused");
 
     // No Host at all is allowed: HTTP/1.0 and native clients omit it, and rebinding needs a
     // browser, which never does.
@@ -4225,6 +4233,54 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 
 // The escape hatch for anyone reached under another name — a reverse proxy, a custom DNS
 // entry. Entries may pin their own port.
+// WSKOption_AllowedHostNames documents that an entry "may include a port ... without one, any port
+// matches". The code did the opposite: a Host stating ANY port was refused unless that port equalled
+// the one the connection arrived on, checked before the name was even consulted. Every deployment
+// behind a port-translating hop was therefore 421 for every request — which is the priority
+// deployment, since Tailscale Serve terminates TLS on 443 and forwards to a local port.
+//
+// Dropping the comparison costs no security: the DNS-rebinding defence turns entirely on the NAME,
+// and an attacker controls the port he targets either way. An entry that DOES pin a port is still
+// honoured verbatim, which this pins in both directions.
+- (void)testHostValidationMatchesAnyPortUnlessAnEntryPinsOne {
+    NSString* dir = MakeTempDirectory();
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addGETHandlerForBasePath:@"/" directoryPath:dir indexFilename:nil cacheAge:0 allowRangeRequests:NO];
+    NSDictionary* options = @{
+        WSKOption_Port : @0,
+        WSKOption_BindToLocalhost : @YES,
+        WSKOption_AllowedHostNames : @[ @"files.example", @"pinned.example:9999" ]
+    };
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* (^get)(NSString*) = ^(NSString* host) {
+        return SendRawRequest(server.port, [NSString stringWithFormat:@"GET / HTTP/1.1\r\nHost: %@\r\n\r\n", host]);
+    };
+
+    // An entry with no port matches whatever port the client states, including none.
+    for (NSString* host in @[ @"files.example", @"files.example:80", @"files.example:443", @"files.example:8080" ]) {
+        XCTAssertFalse([get(host) hasPrefix:@"HTTP/1.1 421"], @"an unpinned entry should match any port, but \"%@\" was refused", host);
+    }
+
+    // The same for the names accepted without configuration — a forwarded localhost or IP literal
+    // arrives carrying the port the client dialled, not the one being listened on.
+    for (NSString* host in @[ @"localhost", @"localhost:8080", @"127.0.0.1:8080", @"[::1]:8080" ]) {
+        XCTAssertFalse([get(host) hasPrefix:@"HTTP/1.1 421"], @"\"%@\" should be accepted whatever port it states", host);
+    }
+
+    // An entry that pins a port still means it, and a name not on the list is still refused —
+    // the rebinding defence must be exactly as strong as before.
+    XCTAssertFalse([get(@"pinned.example:9999") hasPrefix:@"HTTP/1.1 421"], @"a pinned entry should match its own port");
+    XCTAssertTrue([get(@"pinned.example:1234") hasPrefix:@"HTTP/1.1 421"], @"a pinned entry must not match a different port");
+    XCTAssertTrue([get(@"evil.example") hasPrefix:@"HTTP/1.1 421"], @"an unlisted name must still be refused");
+    XCTAssertTrue([get(@"evil.example:8080") hasPrefix:@"HTTP/1.1 421"], @"an unlisted name must still be refused whatever port it states");
+    // A syntactically impossible port is still a malformed Host.
+    XCTAssertTrue([get(@"files.example:notaport") hasPrefix:@"HTTP/1.1 421"], @"a non-numeric port should still be refused");
+
+    [server stop];
+    [[NSFileManager defaultManager] removeItemAtPath:dir error:NULL];
+}
+
 - (void)testHostValidationHonoursConfiguredNames {
     WSKWebServer* server = [[WSKWebServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"

@@ -186,26 +186,6 @@ static BOOL _IsIPAddressLiteral(NSString *host) {
     return (inet_pton(AF_INET, value, &address4) == 1) || (inet_pton(AF_INET6, value, &address6) == 1);
 }
 
-// The port this connection was actually accepted on. Taken from the connection's own local
-// address rather than the server's mutable _port ivar, which -_stop clears from another
-// thread while connections are still live.
-static uint16_t _LocalPortFromAddress(NSData *localAddressData) {
-    const struct sockaddr *const address = localAddressData.bytes;
-
-    if (address == NULL) {
-        return 0;
-    }
-
-    if (address->sa_family == AF_INET) {
-        return ntohs(((const struct sockaddr_in *)address)->sin_port);
-    }
-
-    if (address->sa_family == AF_INET6) {
-        return ntohs(((const struct sockaddr_in6 *)address)->sin6_port);
-    }
-
-    return 0;
-}
 
 // Refuse a request whose "Host" names something this server does not answer to. This is the
 // only defence against DNS rebinding: once a page on evil.example repoints its DNS here, the
@@ -273,8 +253,20 @@ static NSString *_WithoutRootLabel(NSString *host) {
         return nil;
     }
 
-    // A stated port must be the one this connection arrived on; omitting it is fine, since
-    // that is what a client reaching a default port sends.
+    // A stated port must be syntactically a port, but it is deliberately NOT required to equal the
+    // one this connection arrived on. It used to be, which contradicted this option's own
+    // documentation ("may include a port ...; without one, any port matches") and refused every
+    // deployment behind a port-translating hop: the client states the port it dialled, the hop
+    // forwards to a different one, and the server saw a mismatch. That is precisely the priority
+    // deployment — Tailscale Serve terminating TLS on 443 and forwarding to an ephemeral local
+    // port — where it presented as a total outage, 421 for every request.
+    //
+    // Dropping it costs no security, which is the whole reason it can go. The DNS-rebinding
+    // defence turns entirely on the NAME: an attacker who repoints DNS still cannot make a browser
+    // put a raw IP literal or a name we accept into Host, and he controls the port he targets
+    // either way, so matching it proves nothing about who is asking. An entry that DOES pin a port
+    // is still honoured verbatim, by the canonical comparison above, so a deployment that wants the
+    // stricter behaviour can still ask for it explicitly.
     if (portText.length) {
         BOOL digitsOnly = (portText.length <= 5);
 
@@ -283,7 +275,7 @@ static NSString *_WithoutRootLabel(NSString *host) {
             digitsOnly = ((character >= '0') && (character <= '9'));
         }
 
-        if (!digitsOnly || ([portText integerValue] != (NSInteger)_LocalPortFromAddress(_localAddressData))) {
+        if (!digitsOnly) {
             return [self _misdirectedResponseForHost:hostHeader];
         }
     }
