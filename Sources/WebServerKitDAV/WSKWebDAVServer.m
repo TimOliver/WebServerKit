@@ -52,6 +52,17 @@
 // of empty elements took the process from 5 MB to 561 MB and still answered 207.
 #define kDAVMaxRequestBodyLength (256 * 1024)
 
+// What a PROPFIND body asked for. The old model was a bitmask of the four live properties and an
+// unrecognised name was logged and dropped — which is why a requested-but-unavailable property got
+// no acknowledgement at all, and why <propname/> could not be answered. RFC 4918 §9.1 requires both:
+// a property that cannot be returned is reported in its own propstat with 404, and propname returns
+// the NAMES with empty values. Remembering the request is what makes either expressible.
+typedef NS_ENUM(NSInteger, DAVPropFindKind) {
+    kDAVPropFind_AllProp = 0,
+    kDAVPropFind_PropName,
+    kDAVPropFind_Named
+};
+
 typedef NS_ENUM(NSInteger, DAVProperties) {
     kDAVProperty_ResourceType = (1 << 0),
     kDAVProperty_CreationDate = (1 << 1),
@@ -639,8 +650,14 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
     return ([userAgentHeader hasPrefix:@"WebDAVFS/"] || [userAgentHeader hasPrefix:@"WebDAVLib/"]);  // OS X WebDAV client
 }
 
+// Every method this server implements. RFC 9110 §15.5.6 requires an Allow header on a 405, and
+// §10.2.1 recommends one on OPTIONS; a client discovering capabilities from OPTIONS otherwise has
+// to guess. Kept beside performOPTIONS: so adding a verb without advertising it is visible here.
+static NSString *const kDAVAllowedMethods = @"OPTIONS, HEAD, GET, PUT, DELETE, MKCOL, PROPFIND, COPY, MOVE, LOCK, UNLOCK";
+
 - (WSKResponse *)performOPTIONS:(WSKRequest *)request {
     WSKResponse *response = [WSKResponse response];
+    [response setValue:kDAVAllowedMethods forAdditionalHeader:@"Allow"];
 
     if (_IsMacFinder(request)) {
         [response setValue:@"1, 2" forAdditionalHeader:@"DAV"];  // Classes 1 and 2
@@ -742,7 +759,9 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
     BOOL existing = [[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory];
 
     if (existing && isDirectory) {
-        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_MethodNotAllowed message:@"PUT not allowed on existing collection \"%@\"", relativePath];
+        WSKResponse *const notAllowed = [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_MethodNotAllowed message:@"PUT not allowed on existing collection \"%@\"", relativePath];
+        [notAllowed setValue:kDAVAllowedMethods forAdditionalHeader:@"Allow"];  // Required on a 405 by RFC 9110 §15.5.6.
+        return notAllowed;
     }
 
     NSString *const fileName = [absolutePath lastPathComponent];
@@ -797,7 +816,11 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
 - (WSKResponse *)performDELETE:(WSKRequest *)request {
     NSString *const depthHeader = request.headers[@"Depth"];
 
-    if (depthHeader && !_HeaderTokenIs(depthHeader, @"infinity")) {
+    // "Depth: 0" is accepted as well as "infinity". For a resource with no internal members it cannot
+    // mean anything else, and refusing it meant a client that sets Depth uniformly could not delete
+    // or copy a single FILE at all — 400 for an operation that is trivially satisfiable. RFC 4918
+    // §9.6.1 fixes DELETE's depth at infinity regardless, so accepting "0" costs nothing.
+    if (depthHeader && !_HeaderTokenIs(depthHeader, @"infinity") && !_HeaderTokenIs(depthHeader, @"0")) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"Unsupported 'Depth' header: %@", depthHeader];
     }
 
@@ -956,7 +979,7 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
     if (!isMove) {
         NSString *const depthHeader = request.headers[@"Depth"];  // TODO: Support "Depth: 0"
 
-        if (depthHeader && !_HeaderTokenIs(depthHeader, @"infinity")) {
+        if (depthHeader && !_HeaderTokenIs(depthHeader, @"infinity") && !_HeaderTokenIs(depthHeader, @"0")) {
             return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"Unsupported 'Depth' header: %@", depthHeader];
         }
     }
@@ -1205,7 +1228,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
     return NULL;
 }
 
-- (void)_addPropertyResponseForItem:(NSString *)itemPath resource:(NSString *)resourcePath properties:(DAVProperties)properties xmlString:(NSMutableString *)xmlString {
+- (void)_addPropertyResponseForItem:(NSString *)itemPath resource:(NSString *)resourcePath properties:(DAVProperties)properties kind:(DAVPropFindKind)kind unsupported:(NSArray<NSString *> *)unsupported xmlString:(NSMutableString *)xmlString {
     NSMutableCharacterSet *const allowed = [[NSCharacterSet URLPathAllowedCharacterSet] mutableCopy];
     [allowed removeCharactersInString:@"<&>?+"];
     NSString *const escapedPath = [resourcePath stringByAddingPercentEncodingWithAllowedCharacters:allowed];
@@ -1220,6 +1243,25 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
         if ((isFile && [self _checkFileExtension:itemPath]) || isDirectory) {
             [xmlString appendString:@"<D:response>"];
             [xmlString appendFormat:@"<D:href>%@</D:href>", escapedPath];
+
+            // <propname/> asks which properties EXIST, not what they hold, so the names go out as
+            // empty elements. RFC 4918 §9.1 makes it part of the method; it used to be refused with
+            // 400 by the body parser, which told a client the request was malformed.
+            if (kind == kDAVPropFind_PropName) {
+                [xmlString appendString:@"<D:propstat><D:prop>"];
+                [xmlString appendString:@"<D:resourcetype/>"];
+                [xmlString appendString:@"<D:creationdate/>"];
+
+                if (isFile) {
+                    [xmlString appendString:@"<D:getlastmodified/>"];
+                    [xmlString appendString:@"<D:getcontentlength/>"];
+                }
+
+                [xmlString appendString:@"</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>"];
+                [xmlString appendString:@"</D:response>\n"];
+                return;
+            }
+
             [xmlString appendString:@"<D:propstat>"];
             [xmlString appendString:@"<D:prop>"];
 
@@ -1267,6 +1309,22 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
             [xmlString appendString:@"</D:prop>"];
             [xmlString appendString:@"<D:status>HTTP/1.1 200 OK</D:status>"];
             [xmlString appendString:@"</D:propstat>"];
+
+            // A property that was asked for and cannot be returned gets its OWN propstat with 404.
+            // Without it the response asserted "HTTP/1.1 200 OK" over a <prop> that silently
+            // omitted them, so a client asking for three properties and receiving one could not
+            // tell "this property does not exist here" from "it exists and is empty" — which is
+            // the distinction the propstat structure exists to draw.
+            if (unsupported.count > 0) {
+                [xmlString appendString:@"<D:propstat><D:prop>"];
+
+                for (NSString *element in unsupported) {
+                    [xmlString appendString:element];
+                }
+
+                [xmlString appendString:@"</D:prop><D:status>HTTP/1.1 404 Not Found</D:status></D:propstat>"];
+            }
+
             [xmlString appendString:@"</D:response>\n"];
         }
 
@@ -1283,11 +1341,20 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
         depth = 0;
     } else if ([depthHeader isEqualToString:@"1"]) {
         depth = 1;
+    } else if (_HeaderTokenIs(depthHeader, @"infinity")) {
+        // RFC 4918 §9.1: a server that refuses an infinite-depth PROPFIND SHOULD answer 403 with
+        // the DAV:propfind-finite-depth precondition, which is machine-readable and tells the
+        // client to retry with a bounded depth. A bare 400 says only "malformed", which this is not.
+        WSKDataResponse *const response = [WSKDataResponse responseWithData:[@"<?xml version=\"1.0\" encoding=\"utf-8\" ?><D:error xmlns:D=\"DAV:\"><D:propfind-finite-depth/></D:error>" dataUsingEncoding:NSUTF8StringEncoding] contentType:@"application/xml; charset=\"utf-8\""];
+        response.statusCode = kWSKHTTPStatusCode_Forbidden;
+        return response;
     } else {
-        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"Unsupported 'Depth' header: %@", depthHeader];  // TODO: Return 403 / propfind-finite-depth for "infinity" depth
+        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"Unsupported 'Depth' header: %@", depthHeader];
     }
 
     DAVProperties properties = 0;
+    DAVPropFindKind kind = kDAVPropFind_AllProp;
+    NSMutableArray<NSString *> *const unsupported = [NSMutableArray array];
 
     if (request.data.length) {
         WSKErrorResponse *const tooLarge = _ResponseIfRequestBodyTooLarge(request);
@@ -1302,11 +1369,16 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
         if (document) {
             xmlNodePtr rootNode = _XMLChildWithName(document->children, (const xmlChar *)"propfind");
             xmlNodePtr allNode = rootNode ? _XMLChildWithName(rootNode->children, (const xmlChar *)"allprop") : NULL;
+            xmlNodePtr nameNode = rootNode ? _XMLChildWithName(rootNode->children, (const xmlChar *)"propname") : NULL;
             xmlNodePtr propNode = rootNode ? _XMLChildWithName(rootNode->children, (const xmlChar *)"prop") : NULL;
 
             if (allNode) {
                 properties = kDAVAllProperties;
+            } else if (nameNode) {
+                kind = kDAVPropFind_PropName;
+                properties = kDAVAllProperties;
             } else if (propNode) {
+                kind = kDAVPropFind_Named;
                 xmlNodePtr node = propNode->children;
 
                 while (node) {
@@ -1318,8 +1390,20 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
                         properties |= kDAVProperty_LastModified;
                     } else if (!xmlStrcmp(node->name, (const xmlChar *)"getcontentlength")) {
                         properties |= kDAVProperty_ContentLength;
-                    } else {
-                        [self logWarning:@"Unknown DAV property requested \"%s\"", node->name];
+                    } else if (node->type == XML_ELEMENT_NODE) {
+                        // Remembered rather than dropped, so it can be reported in a 404 propstat.
+                        // The namespace travels with it: a client asking for a property in its own
+                        // namespace must see that name back, not a DAV:-qualified guess at it.
+                        NSString *const localName = [NSString stringWithUTF8String:(const char *)node->name];
+                        const char *const href = (node->ns && node->ns->href) ? (const char *)node->ns->href : NULL;
+
+                        if (localName.length) {
+                            if (href && strcmp(href, "DAV:")) {
+                                [unsupported addObject:[NSString stringWithFormat:@"<W:%@ xmlns:W=\"%@\"/>", _XMLEscape(localName), _XMLEscape([NSString stringWithUTF8String:href])]];
+                            } else {
+                                [unsupported addObject:[NSString stringWithFormat:@"<D:%@/>", _XMLEscape(localName)]];
+                            }
+                        }
                     }
 
                     node = node->next;
@@ -1384,7 +1468,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
         relativePath = [@"/" stringByAppendingString:relativePath];
     }
 
-    [self _addPropertyResponseForItem:absolutePath resource:relativePath properties:properties xmlString:xmlString];
+    [self _addPropertyResponseForItem:absolutePath resource:relativePath properties:properties kind:kind unsupported:unsupported xmlString:xmlString];
 
     if (depth == 1) {
         if (![relativePath hasSuffix:@"/"]) {
@@ -1393,7 +1477,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
 
         for (NSString *item in items) {
             if (_allowHiddenItems || ![item hasPrefix:@"."]) {
-                [self _addPropertyResponseForItem:[absolutePath stringByAppendingPathComponent:item] resource:[relativePath stringByAppendingString:item] properties:properties xmlString:xmlString];
+                [self _addPropertyResponseForItem:[absolutePath stringByAppendingPathComponent:item] resource:[relativePath stringByAppendingString:item] properties:properties kind:kind unsupported:unsupported xmlString:xmlString];
             }
         }
     }

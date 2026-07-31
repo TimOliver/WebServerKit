@@ -1992,6 +1992,60 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     [fm removeItemAtPath:dir error:NULL];
 }
 
+// RFC 4918 class 1 completeness, minus PROPPATCH which needs storage of its own. Each of these was
+// a documented MUST that this server did not meet while OPTIONS advertised "DAV: 1".
+- (void)testDAVClassOnePropfindAndDepthSemantics {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    XCTAssertTrue([@"data" writeToFile:[dir stringByAppendingPathComponent:@"f.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([fm createDirectoryAtPath:[dir stringByAppendingPathComponent:@"coll"] withIntermediateDirectories:YES attributes:nil error:NULL]);
+
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* (^propfind)(NSString*, NSString*) = ^(NSString* depth, NSString* body) {
+        return SendRawRequest(server.port, [NSString stringWithFormat:@"PROPFIND /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: %@\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@", depth, (unsigned long)body.length, body]);
+    };
+
+    // A property that cannot be returned gets its own propstat with 404, rather than being dropped
+    // from a <prop> the response then declares "200 OK".
+    NSString* mixed = propfind(@"0", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:prop><D:getcontentlength/><D:getetag/><X:custom xmlns:X=\"urn:example\"/></D:prop></D:propfind>");
+    XCTAssertTrue([mixed hasPrefix:@"HTTP/1.1 207"], @"PROPFIND stopped working: %@", [mixed substringToIndex:MIN((NSUInteger)40, mixed.length)]);
+    XCTAssertTrue([mixed containsString:@"getcontentlength"], @"the supported property is missing");
+    XCTAssertTrue([mixed containsString:@"404 Not Found"], @"an unavailable property must be reported in a 404 propstat: %@", mixed);
+    XCTAssertTrue([mixed containsString:@"getetag"], @"the unavailable property must be named back");
+    XCTAssertTrue([mixed containsString:@"urn:example"], @"a foreign namespace must survive into the 404 propstat");
+
+    // <propname/> returns the names with empty values, and used to be refused with 400.
+    NSString* names = propfind(@"0", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:propname/></D:propfind>");
+    XCTAssertTrue([names hasPrefix:@"HTTP/1.1 207"], @"propname should be supported: %@", [names substringToIndex:MIN((NSUInteger)40, names.length)]);
+    XCTAssertTrue([names containsString:@"getcontentlength"], @"propname must list the property names");
+    XCTAssertFalse([names containsString:@"404"], @"propname reports names, not failures: %@", names);
+
+    // Depth: infinity is refused with the machine-readable precondition RFC 4918 §9.1 defines.
+    NSString* infinite = propfind(@"infinity", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:allprop/></D:propfind>");
+    XCTAssertTrue([infinite hasPrefix:@"HTTP/1.1 403"], @"an infinite-depth PROPFIND should be 403: %@", [infinite substringToIndex:MIN((NSUInteger)40, infinite.length)]);
+    XCTAssertTrue([infinite containsString:@"propfind-finite-depth"], @"the refusal must carry the precondition element: %@", infinite);
+
+    // Depth: 0 is meaningless for a plain file, so it must not make DELETE or COPY unusable.
+    XCTAssertTrue([SendRawRequest(server.port, @"COPY /f.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /copy.txt\r\nDepth: 0\r\n\r\n") hasPrefix:@"HTTP/1.1 201"], @"COPY of a file with Depth: 0 should be allowed");
+    XCTAssertTrue([SendRawRequest(server.port, @"DELETE /copy.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\n\r\n") hasPrefix:@"HTTP/1.1 204"], @"DELETE with Depth: 0 should be allowed");
+    // ...and a nonsense Depth is still refused.
+    XCTAssertTrue([SendRawRequest(server.port, @"DELETE /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 7\r\n\r\n") hasPrefix:@"HTTP/1.1 400"], @"an unrecognised Depth should still be refused");
+
+    // Allow, on OPTIONS and on the 405.
+    NSString* opts = SendRawRequest(server.port, @"OPTIONS / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([opts containsString:@"Allow:"], @"OPTIONS should advertise Allow: %@", opts);
+    XCTAssertTrue([opts containsString:@"PROPFIND"], @"Allow should name the DAV methods");
+    NSString* onCollection = SendRawRequest(server.port, @"PUT /coll HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1\r\n\r\nx");
+    XCTAssertTrue([onCollection hasPrefix:@"HTTP/1.1 405"], @"PUT onto a collection should still be 405");
+    XCTAssertTrue([onCollection containsString:@"Allow:"], @"a 405 must carry Allow (RFC 9110 §15.5.6): %@", onCollection);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 // A symlink is an alias, so the verbs that REMOVE or RELOCATE one act on the entry the client named
 // rather than on what it points at — `rm latest` removes the link, `mv a latest` replaces it — while
 // reads still follow it. DELETE used to remove the multi-hundred-megabyte build directory and leave
