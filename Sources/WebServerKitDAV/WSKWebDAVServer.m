@@ -34,6 +34,8 @@
 // Requires "HEADER_SEARCH_PATHS = $(SDKROOT)/usr/include/libxml2" in Xcode build settings
 #import "WSKWebDAVServer.h"
 
+#import <sys/xattr.h>
+
 #import <libxml/parser.h>
 
 #import "WSKDataRequest.h"
@@ -81,6 +83,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (nullable WSKResponse *)performMKCOL:(WSKDataRequest *)request;
 - (nullable WSKResponse *)performCOPY:(WSKRequest *)request isMove:(BOOL)isMove;
 - (nullable WSKResponse *)performPROPFIND:(WSKDataRequest *)request;
+- (nullable WSKResponse *)performPROPPATCH:(WSKDataRequest *)request;
 - (nullable WSKResponse *)performLOCK:(WSKDataRequest *)request;
 - (nullable WSKResponse *)performUNLOCK:(WSKRequest *)request;
 @end
@@ -104,6 +107,13 @@ NS_ASSUME_NONNULL_END
                             requestClass:[WSKDataRequest class]
                             processBlock:^WSKResponse *(WSKRequest *request) {
                                 return [server performPROPFIND:(WSKDataRequest *)request];
+                            }];
+
+        // 9.2 PROPPATCH method
+        [self addDefaultHandlerForMethod:@"PROPPATCH"
+                            requestClass:[WSKDataRequest class]
+                            processBlock:^WSKResponse *(WSKRequest *request) {
+                                return [server performPROPPATCH:(WSKDataRequest *)request];
                             }];
 
         // 9.3 MKCOL Method
@@ -475,6 +485,78 @@ static BOOL _EntityTagMatchesList(BOOL resourceExists, NSString *currentTag, NSS
 // what is already at `path` and writing over it — keeps the destination intact until the
 // new content is complete on disk, and keeps the final swap a rename(2) within a single
 // directory, which is atomic and cannot fail for being cross-volume.
+// Dead properties — the arbitrary name/value pairs PROPPATCH stores — live in a single extended
+// attribute holding a property list keyed in Clark notation ("{namespace}localname"). One blob
+// rather than one xattr per property so the key never has to be escaped into an xattr name, and so
+// a set of properties is written in one call and cannot half-apply.
+//
+// Deliberately NOT added to WSKFunctions: this is WebDAV's business, and that header is public, so
+// putting it there would widen the API for a build-graph reason. See the structural-cleanup note.
+static NSString *const kDAVDeadPropertyAttribute = @"com.webserverkit.dav.deadproperties";
+
+static NSDictionary<NSString *, NSString *> *_DeadPropertiesAtPath(NSString *path) {
+    const char *const filePath = [path fileSystemRepresentation];
+    ssize_t const size = getxattr(filePath, [kDAVDeadPropertyAttribute UTF8String], NULL, 0, 0, 0);
+
+    if (size <= 0) {
+        return @{};  // None stored, or the filesystem does not keep them.
+    }
+
+    NSMutableData *const data = [NSMutableData dataWithLength:(NSUInteger)size];
+
+    if (getxattr(filePath, [kDAVDeadPropertyAttribute UTF8String], data.mutableBytes, (size_t)size, 0, 0) != size) {
+        return @{};
+    }
+
+    id const stored = [NSPropertyListSerialization propertyListWithData:data options:NSPropertyListImmutable format:NULL error:NULL];
+
+    return [stored isKindOfClass:[NSDictionary class]] ? stored : @{};
+}
+
+// NO on failure, with errno left as the filesystem set it. Filesystems that cannot store extended
+// attributes at all — exFAT among them, which this project has now measured rather than assumed —
+// report ENOTSUP, and the caller turns that into a per-property 403 rather than pretending the
+// property was stored.
+static BOOL _SetDeadPropertiesAtPath(NSString *path, NSDictionary<NSString *, NSString *> *properties) {
+    const char *const filePath = [path fileSystemRepresentation];
+
+    if (properties.count == 0) {
+        return (removexattr(filePath, [kDAVDeadPropertyAttribute UTF8String], 0) == 0) || (errno == ENOATTR);
+    }
+
+    NSData *const data = [NSPropertyListSerialization dataWithPropertyList:properties format:NSPropertyListBinaryFormat_v1_0 options:0 error:NULL];
+
+    if (data == nil) {
+        errno = EINVAL;
+        return NO;
+    }
+
+    return setxattr(filePath, [kDAVDeadPropertyAttribute UTF8String], data.bytes, data.length, 0, 0) == 0;
+}
+
+// "{namespace}localname", the unambiguous spelling of a qualified name, and the element markup to
+// echo it back with. A property in no namespace is keyed by its bare name.
+static NSString *_DeadPropertyKey(NSString *namespaceHref, NSString *localName) {
+    return namespaceHref.length ? [NSString stringWithFormat:@"{%@}%@", namespaceHref, localName] : localName;
+}
+
+static NSString *_DeadPropertyElement(NSString *key) {
+    NSRange const close = [key rangeOfString:@"}"];
+
+    if (![key hasPrefix:@"{"] || (close.location == NSNotFound)) {
+        return [NSString stringWithFormat:@"<%@/>", _XMLEscape(key)];
+    }
+
+    NSString *const href = [key substringWithRange:NSMakeRange(1, close.location - 1)];
+    NSString *const name = [key substringFromIndex:(close.location + 1)];
+
+    if ([href isEqualToString:@"DAV:"]) {
+        return [NSString stringWithFormat:@"<D:%@/>", _XMLEscape(name)];
+    }
+
+    return [NSString stringWithFormat:@"<W:%@ xmlns:W=\"%@\"/>", _XMLEscape(name), _XMLEscape(href)];
+}
+
 static WSKErrorResponse *_ResponseIfRequestBodyTooLarge(WSKDataRequest *request) {
     if (request.data.length <= kDAVMaxRequestBodyLength) {
         return nil;
@@ -1228,6 +1310,19 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
     return NULL;
 }
 
+// The closing tag matching _DeadPropertyElement()'s opening one, so a stored value can be wrapped.
+- (NSString *)_closingElementForDeadPropertyKey:(NSString *)key {
+    NSRange const close = [key rangeOfString:@"}"];
+
+    if (![key hasPrefix:@"{"] || (close.location == NSNotFound)) {
+        return [NSString stringWithFormat:@"</%@>", _XMLEscape(key)];
+    }
+
+    NSString *const href = [key substringWithRange:NSMakeRange(1, close.location - 1)];
+    NSString *const name = [key substringFromIndex:(close.location + 1)];
+    return [NSString stringWithFormat:@"</%@:%@>", [href isEqualToString:@"DAV:"] ? @"D" : @"W", _XMLEscape(name)];
+}
+
 - (void)_addPropertyResponseForItem:(NSString *)itemPath resource:(NSString *)resourcePath properties:(DAVProperties)properties kind:(DAVPropFindKind)kind unsupported:(NSArray<NSString *> *)unsupported xmlString:(NSMutableString *)xmlString {
     NSMutableCharacterSet *const allowed = [[NSCharacterSet URLPathAllowedCharacterSet] mutableCopy];
     [allowed removeCharactersInString:@"<&>?+"];
@@ -1255,6 +1350,10 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
                 if (isFile) {
                     [xmlString appendString:@"<D:getlastmodified/>"];
                     [xmlString appendString:@"<D:getcontentlength/>"];
+                }
+
+                for (NSString *key in _DeadPropertiesAtPath(itemPath)) {
+                    [xmlString appendString:_DeadPropertyElement(key)];
                 }
 
                 [xmlString appendString:@"</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>"];
@@ -1306,6 +1405,27 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
                 [xmlString appendFormat:@"<D:getcontentlength>%llu</D:getcontentlength>", [attributes fileSize]];
             }
 
+            // Dead properties stored by PROPPATCH. <allprop/> returns them all; a named request
+            // returns the ones it asked for and reports the rest as 404 below.
+            NSDictionary<NSString *, NSString *> *const dead = _DeadPropertiesAtPath(itemPath);
+            NSMutableArray<NSString *> *const notFound = [NSMutableArray array];
+
+            if (kind == kDAVPropFind_AllProp) {
+                for (NSString *key in dead) {
+                    [xmlString appendFormat:@"%@%@%@", [_DeadPropertyElement(key) stringByReplacingOccurrencesOfString:@"/>" withString:@">"], _XMLEscape(dead[key]), [self _closingElementForDeadPropertyKey:key]];
+                }
+            } else {
+                for (NSString *key in unsupported) {
+                    NSString *const value = dead[key];
+
+                    if (value) {
+                        [xmlString appendFormat:@"%@%@%@", [_DeadPropertyElement(key) stringByReplacingOccurrencesOfString:@"/>" withString:@">"], _XMLEscape(value), [self _closingElementForDeadPropertyKey:key]];
+                    } else {
+                        [notFound addObject:key];
+                    }
+                }
+            }
+
             [xmlString appendString:@"</D:prop>"];
             [xmlString appendString:@"<D:status>HTTP/1.1 200 OK</D:status>"];
             [xmlString appendString:@"</D:propstat>"];
@@ -1315,11 +1435,11 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
             // omitted them, so a client asking for three properties and receiving one could not
             // tell "this property does not exist here" from "it exists and is empty" — which is
             // the distinction the propstat structure exists to draw.
-            if (unsupported.count > 0) {
+            if (notFound.count > 0) {
                 [xmlString appendString:@"<D:propstat><D:prop>"];
 
-                for (NSString *element in unsupported) {
-                    [xmlString appendString:element];
+                for (NSString *key in notFound) {
+                    [xmlString appendString:_DeadPropertyElement(key)];
                 }
 
                 [xmlString appendString:@"</D:prop><D:status>HTTP/1.1 404 Not Found</D:status></D:propstat>"];
@@ -1331,6 +1451,167 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
     } else {
         [self logError:@"Failed escaping path: %@", itemPath];
     }
+}
+
+// RFC 4918 §9.2. Class 1 lists this as a MUST, and it was 501 while OPTIONS advertised "DAV: 1" —
+// a promise the code did not keep. Live properties are derived from the filesystem and cannot be
+// set, so they are refused with 403; everything else is a dead property and is stored.
+//
+// The method is ATOMIC (§9.2): either every instruction applies or none does. So the whole update is
+// computed against a copy first, and only written if nothing was refused — a client told 424 Failed
+// Dependency for the rest can retry the whole document without having to work out what half-landed.
+- (WSKResponse *)performPROPPATCH:(WSKDataRequest *)request {
+    WSKErrorResponse *const tooLarge = _ResponseIfRequestBodyTooLarge(request);
+
+    if (tooLarge) {
+        return tooLarge;
+    }
+
+    NSString *const relativePath = request.path;
+    BOOL isHidden = NO;
+    NSString *const absolutePath = [self _resolvedPathForRelativePath:relativePath hidden:&isHidden];
+
+    if (absolutePath == nil) {
+        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Setting properties on \"%@\" is not allowed", relativePath];
+    }
+
+    BOOL isDirectory = NO;
+
+    if (![[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory]) {
+        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
+    }
+
+    if (isHidden || (!isDirectory && ![self _checkFileExtension:[absolutePath lastPathComponent]])) {
+        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Setting properties on \"%@\" is not allowed", relativePath];
+    }
+
+    WSKResponse *const preconditionFailure = [self _preconditionFailureForRequest:request atPath:absolutePath];
+
+    if (preconditionFailure) {
+        return preconditionFailure;
+    }
+
+    xmlDocPtr const document = request.data.length ? xmlReadMemory(request.data.bytes, (int)request.data.length, NULL, NULL, kXMLParseOptions) : NULL;
+    xmlNodePtr const rootNode = document ? _XMLChildWithName(document->children, (const xmlChar *)"propertyupdate") : NULL;
+
+    if (rootNode == NULL) {
+        if (document) {
+            xmlFreeDoc(document);
+        }
+
+        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"Invalid DAV property update for \"%@\"", relativePath];
+    }
+
+    NSMutableDictionary<NSString *, NSString *> *const properties = [[_DeadPropertiesAtPath(absolutePath) mutableCopy] ?: [NSMutableDictionary dictionary] mutableCopy];
+    NSMutableArray<NSString *> *const applied = [NSMutableArray array];
+    NSMutableArray<NSString *> *const refused = [NSMutableArray array];
+    BOOL changed = NO;
+
+    for (xmlNodePtr instruction = rootNode->children; instruction != NULL; instruction = instruction->next) {
+        if (instruction->type != XML_ELEMENT_NODE) {
+            continue;
+        }
+
+        BOOL const isSet = !xmlStrcmp(instruction->name, (const xmlChar *)"set");
+        BOOL const isRemove = !xmlStrcmp(instruction->name, (const xmlChar *)"remove");
+
+        if (!isSet && !isRemove) {
+            continue;
+        }
+
+        xmlNodePtr const propNode = _XMLChildWithName(instruction->children, (const xmlChar *)"prop");
+
+        for (xmlNodePtr node = propNode ? propNode->children : NULL; node != NULL; node = node->next) {
+            if (node->type != XML_ELEMENT_NODE) {
+                continue;
+            }
+
+            NSString *const localName = [NSString stringWithUTF8String:(const char *)node->name];
+            NSString *const href = (node->ns && node->ns->href) ? [NSString stringWithUTF8String:(const char *)node->ns->href] : @"";
+
+            if (localName.length == 0) {
+                continue;
+            }
+
+            // A live property is computed from the filesystem, so it cannot be stored. RFC 4918
+            // §9.2 wants that reported per-property rather than the request failing as malformed.
+            if ([href isEqualToString:@"DAV:"] &&
+                ([localName isEqualToString:@"resourcetype"] || [localName isEqualToString:@"creationdate"] ||
+                 [localName isEqualToString:@"getlastmodified"] || [localName isEqualToString:@"getcontentlength"] ||
+                 [localName isEqualToString:@"getetag"] || [localName isEqualToString:@"lockdiscovery"] ||
+                 [localName isEqualToString:@"supportedlock"])) {
+                [refused addObject:_DeadPropertyElement(_DeadPropertyKey(href, localName))];
+                continue;
+            }
+
+            NSString *const key = _DeadPropertyKey(href, localName);
+
+            if (isSet) {
+                xmlChar *const content = xmlNodeGetContent(node);
+                NSString *const value = content ? [NSString stringWithUTF8String:(const char *)content] : @"";
+
+                if (content) {
+                    xmlFree(content);
+                }
+
+                properties[key] = value ?: @"";
+            } else {
+                [properties removeObjectForKey:key];
+            }
+
+            [applied addObject:_DeadPropertyElement(key)];
+            changed = YES;
+        }
+    }
+
+    xmlFreeDoc(document);
+
+    // Atomic: nothing is written when any instruction was refused, and the applied ones become 424.
+    if ((refused.count == 0) && changed && !_SetDeadPropertiesAtPath(absolutePath, properties)) {
+        int const failure = errno;
+        [self logWarning:@"Failed storing DAV properties for \"%@\" (errno %i)", relativePath, failure];
+        [refused addObjectsFromArray:applied];
+        [applied removeAllObjects];
+    }
+
+    NSMutableString *const xmlString = [NSMutableString stringWithString:@"<?xml version=\"1.0\" encoding=\"utf-8\" ?>"];
+    [xmlString appendString:@"<D:multistatus xmlns:D=\"DAV:\">\n"];
+    [xmlString appendString:@"<D:response>"];
+    [xmlString appendFormat:@"<D:href>%@</D:href>", _XMLEscape([relativePath hasPrefix:@"/"] ? relativePath : [@"/" stringByAppendingString:relativePath])];
+
+    if (refused.count > 0) {
+        [xmlString appendString:@"<D:propstat><D:prop>"];
+
+        for (NSString *element in refused) {
+            [xmlString appendString:element];
+        }
+
+        [xmlString appendString:@"</D:prop><D:status>HTTP/1.1 403 Forbidden</D:status></D:propstat>"];
+
+        if (applied.count > 0) {
+            [xmlString appendString:@"<D:propstat><D:prop>"];
+
+            for (NSString *element in applied) {
+                [xmlString appendString:element];
+            }
+
+            [xmlString appendString:@"</D:prop><D:status>HTTP/1.1 424 Failed Dependency</D:status></D:propstat>"];
+        }
+    } else {
+        [xmlString appendString:@"<D:propstat><D:prop>"];
+
+        for (NSString *element in applied) {
+            [xmlString appendString:element];
+        }
+
+        [xmlString appendString:@"</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>"];
+    }
+
+    [xmlString appendString:@"</D:response>\n</D:multistatus>"];
+
+    WSKDataResponse *const response = [WSKDataResponse responseWithData:[xmlString dataUsingEncoding:NSUTF8StringEncoding] contentType:@"application/xml; charset=\"utf-8\""];
+    response.statusCode = kWSKHTTPStatusCode_MultiStatus;
+    return response;
 }
 
 - (WSKResponse *)performPROPFIND:(WSKDataRequest *)request {
@@ -1398,11 +1679,11 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
                         const char *const href = (node->ns && node->ns->href) ? (const char *)node->ns->href : NULL;
 
                         if (localName.length) {
-                            if (href && strcmp(href, "DAV:")) {
-                                [unsupported addObject:[NSString stringWithFormat:@"<W:%@ xmlns:W=\"%@\"/>", _XMLEscape(localName), _XMLEscape([NSString stringWithUTF8String:href])]];
-                            } else {
-                                [unsupported addObject:[NSString stringWithFormat:@"<D:%@/>", _XMLEscape(localName)]];
-                            }
+                            // The SAME convention PROPPATCH keys by — a property in no namespace
+                            // keys by its bare name. Defaulting to "DAV:" here instead made the two
+                            // parsers disagree, so a no-namespace property could be stored and then
+                            // never read back. litmus's propnullns/propget pair found it.
+                            [unsupported addObject:_DeadPropertyKey(href ? [NSString stringWithUTF8String:href] : @"", localName)];
                         }
                     }
 
@@ -1491,6 +1772,21 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
 }
 
 - (WSKResponse *)performLOCK:(WSKDataRequest *)request {
+    // ⚠️ THIS DOES NOT LOCK ANYTHING, and the name is the only thing about it that says otherwise.
+    // It mints a token, returns a well-formed lockdiscovery document, and stores NO state: there is
+    // no lock table, no timeout, no reaping, and the "If:" header is not parsed anywhere in this
+    // file. A second client is neither blocked nor told about the first.
+    //
+    // It exists solely because macOS Finder refuses to write to a share that does not advertise
+    // class 2, which is also why OPTIONS answers "1, 2" for Finder alone. Deliberately not made
+    // real: locking exists to stop concurrent writers losing each other's updates, the deployments
+    // here are single-user, and the same protection is now available statelessly through If-Match
+    // and If-Unmodified-Since — which every client can use, not only ones that lock. Real class 2
+    // would need the "If:" header grammar (tagged and untagged lists, Not, tokens versus ETags),
+    // which is a parser, and parsers have been by far the richest source of defects in this
+    // codebase; plus long-lived lock state, which is the accumulation hazard the design priorities
+    // single out. If a genuinely concurrent client ever matters, the cheap version is an in-memory
+    // path -> token map enforced on the destructive verbs, accepting only "If: (<token>)".
     if (!_IsMacFinder(request)) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_MethodNotAllowed message:@"LOCK method only allowed for Mac Finder"];
     }
