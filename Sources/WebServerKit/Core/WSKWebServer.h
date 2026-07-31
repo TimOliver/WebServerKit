@@ -576,11 +576,15 @@ extern NSString *const WSKAuthenticationMethod_DigestAccess;
 /**
  *  Adds a handler to the server to respond to incoming "GET" HTTP requests
  *  with a case-insensitive path inside a base path with the corresponding file
- *  inside a local directory. If no local file matches the request path, a 401
+ *  inside a local directory. If no local file matches the request path, a 404
  *  HTTP status code is returned to the client.
  *
  *  The "indexFilename" argument allows to specify an "index" file name to use
  *  when the request path corresponds to a directory.
+ *
+ *  "basePath" is normalized: a missing leading or trailing "/" is added, so "files",
+ *  "/files" and "/files/" all register the same handler. An empty base path registers
+ *  nothing and logs an error.
  */
 - (void)addGETHandlerForBasePath:(NSString *)basePath directoryPath:(NSString *)directoryPath indexFilename:(nullable NSString *)indexFilename cacheAge:(NSUInteger)cacheAge allowRangeRequests:(BOOL)allowRangeRequests;
 

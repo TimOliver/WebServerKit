@@ -4718,4 +4718,105 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     XCTAssertEqualObjects([[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding], @"chunkchunkchunk");
 }
 
+
+#pragma mark - Host-app API safety (batch A: the crashers)
+
+// +responseWithFile: is declared nullable, so a path it cannot use must come back nil.
+// -fileSystemRepresentation RAISES for an empty or NUL-bearing receiver, and the raise
+// escapes through a host app's handler into the connection, so this is a process kill
+// reachable from any handler that builds a path from client input. Same shape the
+// eleventh pass fixed in +responseWithJSONObject:, at a site that fix did not reach.
+- (void)testFileResponseReturnsNilRatherThanRaisingForAnUnusablePath {
+    XCTAssertNoThrow([WSKFileResponse responseWithFile:@""]);
+    XCTAssertNil([WSKFileResponse responseWithFile:@""]);
+
+    unichar const nulBearing[] = {'/', 't', 'm', 'p', '/', 0, 'x'};
+    NSString* nulPath = [NSString stringWithCharacters:nulBearing length:(sizeof(nulBearing) / sizeof(nulBearing[0]))];
+    XCTAssertNoThrow([WSKFileResponse responseWithFile:nulPath]);
+    XCTAssertNil([WSKFileResponse responseWithFile:nulPath]);
+
+    // The ordinary path must still work, or this could pass by refusing everything.
+    NSString* dir = MakeTempDirectory();
+    NSString* file = [dir stringByAppendingPathComponent:@"ok.txt"];
+    [@"hello" writeToFile:file atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    XCTAssertNotNil([WSKFileResponse responseWithFile:file]);
+    [[NSFileManager defaultManager] removeItemAtPath:dir error:NULL];
+}
+
+// A WSKMatchBlock builds the request, and the connection only populates its addresses
+// AFTER the block returns — so inside the block they are nil. Reading them there fed a
+// NULL sockaddr to WSKStringFromSockAddr, which dereferences addr->sa_len before it can
+// fail, i.e. SEGV rather than a nil. Inspecting the request is the match block's job.
+- (void)testRequestAddressAccessorsAreSafeBeforeTheServerPopulatesThem {
+    WSKRequest* request = [[WSKRequest alloc] initWithMethod:@"GET"
+                                                         url:[NSURL URLWithString:@"http://localhost/x"]
+                                                     headers:@{}
+                                                        path:@"/x"
+                                                       query:@{}];
+    XCTAssertNoThrow([request remoteAddressString]);
+    XCTAssertNoThrow([request localAddressString]);
+}
+
+// RFC 9110 s5.6.7 requires a recipient to accept all three HTTP-date formats. Only
+// IMF-fixdate parsed, so If-Modified-Since / If-Unmodified-Since / If-Range carrying the
+// obsolete spellings parsed to nil and the precondition was treated as ABSENT — a
+// conditional request failing open, which is the wrong direction for a validator.
+- (void)testHTTPDateParsingAcceptsAllThreeFormatsRFC9110Requires {
+    NSDate* expected = [NSDate dateWithTimeIntervalSince1970:784111777.0];  // Sun, 06 Nov 1994 08:49:37 GMT
+
+    NSDate* imf = WSKParseRFC822(@"Sun, 06 Nov 1994 08:49:37 GMT");
+    XCTAssertNotNil(imf, @"IMF-fixdate must parse");
+    XCTAssertEqualWithAccuracy([imf timeIntervalSince1970], [expected timeIntervalSince1970], 0.5);
+
+    NSDate* rfc850 = WSKParseRFC822(@"Sunday, 06-Nov-94 08:49:37 GMT");
+    XCTAssertNotNil(rfc850, @"RFC 850 date must parse");
+    XCTAssertEqualWithAccuracy([rfc850 timeIntervalSince1970], [expected timeIntervalSince1970], 0.5);
+
+    NSDate* asctime = WSKParseRFC822(@"Sun Nov  6 08:49:37 1994");
+    XCTAssertNotNil(asctime, @"asctime() date must parse");
+    XCTAssertEqualWithAccuracy([asctime timeIntervalSince1970], [expected timeIntervalSince1970], 0.5);
+
+    // Garbage must still be refused, or "accept everything" would pass the above.
+    XCTAssertNil(WSKParseRFC822(@"not a date at all"));
+    XCTAssertNil(WSKParseRFC822(@""));
+}
+
+// The trailing-slash precondition was undocumented and enforced by WSK_DNOT_REACHED():
+// abort with no diagnostic in Debug, and in Release it registered NOTHING and returned,
+// so every request 404'd with the host app given no clue why.
+- (void)testBasePathHandlerAcceptsABasePathWithoutATrailingSlash {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    [@"served" writeToFile:[dir stringByAppendingPathComponent:@"x.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    XCTAssertNoThrow([server addGETHandlerForBasePath:@"/files" directoryPath:dir indexFilename:nil cacheAge:0 allowRangeRequests:YES]);
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* response = SendRawRequest(server.port, @"GET /files/x.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([response containsString:@"200"], @"a base path without a trailing slash must still serve: %@", [response substringToIndex:MIN((NSUInteger)40, response.length)]);
+    XCTAssertTrue([response containsString:@"served"], @"the body must be the file's contents");
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// -stop on a server whose start FAILED asserted _source4 != NULL, so the tidy-up an
+// error path would naturally do aborted a Debug build. Stopping something that never
+// started must be a no-op.
+- (void)testStopAfterAFailedStartIsANoOp {
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET" requestClass:[WSKRequest class] processBlock:^WSKResponse*(WSKRequest* request) {
+        return [WSKDataResponse responseWithText:@"hi"];
+    }];
+
+    // Port 1 is privileged, so bind(2) fails for an unprivileged test process.
+    NSDictionary* privileged = @{WSKOption_Port : @1, WSKOption_BindToLocalhost : @YES};
+    XCTAssertFalse([server startWithOptions:privileged error:NULL]);
+    XCTAssertFalse(server.isRunning);
+    XCTAssertNoThrow([server stop]);
+    XCTAssertNoThrow([server stop]);
+}
+
 @end

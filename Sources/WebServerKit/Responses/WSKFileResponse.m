@@ -139,6 +139,19 @@ static NSString *_EscapeExtValue(NSString *string) {
 
     _file = -1;  // Not 0, which is a legal descriptor -close must not close by accident
 
+    // -fileSystemRepresentation RAISES for an empty or NUL-bearing receiver rather than
+    // returning NULL, and this initializer is declared nullable, so the raise escaped
+    // through the host app's handler and killed the process. Both spellings are reachable
+    // from client input by any handler that builds a path from a request. Same shape the
+    // eleventh pass fixed in +responseWithJSONObject:, at a site that fix did not reach.
+    // The NUL check stays even though open(2) would truncate there anyway: truncating
+    // makes the server act on a prefix of what was asked for, which is the outcome this
+    // library refuses everywhere else.
+    if ((path.length == 0) || WSKPathContainsNULByte(path)) {
+        WSK_LOG_ERROR(@"Refusing to serve a file with an empty or NUL-bearing path");
+        return nil;
+    }
+
     // Open the file *once*, here, and derive contentLength, lastModifiedDate and the ETag
     // from an fstat() of that descriptor. The old lstat()-here plus open()-in--open: pair
     // walked the path twice with the whole runtime of the request handler in between, so a

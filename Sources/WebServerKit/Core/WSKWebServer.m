@@ -1226,9 +1226,12 @@ static inline NSString *_EncodeBase64(NSString *string) {
         }
 
         _options = nil;
-    } else {
-        WSK_DNOT_REACHED();  // Stopping a server that was never started is an API misuse by the host app
     }
+
+    // Deliberately NOT WSK_DNOT_REACHED(). -stop on a server that never started is what an
+    // error path naturally does — most obviously right after -startWithOptions:error:
+    // returned NO, which leaves _options nil — and aborting a Debug build for it punished
+    // exactly the careful host app. Idempotent tidy-up is the useful contract here.
 }
 
 - (void)stop {
@@ -1574,7 +1577,25 @@ static NSString *_EscapeHTMLString(NSString *string) {
 }
 
 - (void)addGETHandlerForBasePath:(NSString *)basePath directoryPath:(NSString *)directoryPath indexFilename:(NSString *)indexFilename cacheAge:(NSUInteger)cacheAge allowRangeRequests:(BOOL)allowRangeRequests allowHiddenItems:(BOOL)allowHiddenItems {
-    if ([basePath hasPrefix:@"/"] && [basePath hasSuffix:@"/"]) {
+    // The leading and trailing slashes used to be an undocumented precondition enforced by
+    // WSK_DNOT_REACHED(): abort with no diagnostic in Debug, and in Release register
+    // NOTHING and return, so every request 404'd with the host app given no clue why.
+    // Neither spelling is ambiguous, so both are simply normalized. Only a genuinely
+    // unusable base path is refused now, and loudly.
+    if (basePath.length == 0) {
+        WSK_LOG_ERROR(@"Refusing to add a base-path handler: the base path is empty");
+        return;
+    }
+
+    if (![basePath hasPrefix:@"/"]) {
+        basePath = [@"/" stringByAppendingString:basePath];
+    }
+
+    if (![basePath hasSuffix:@"/"]) {
+        basePath = [basePath stringByAppendingString:@"/"];
+    }
+
+    {
         WSKWebServer *__unsafe_unretained server = self;
         [self
             addHandlerWithMatchBlock:^WSKRequest *(NSString *requestMethod, NSURL *requestURL, NSDictionary<NSString *, NSString *> *requestHeaders, NSString *urlPath, NSDictionary<NSString *, NSString *> *urlQuery) {
@@ -1690,8 +1711,6 @@ static NSString *_EscapeHTMLString(NSString *string) {
 
                 return response;
             }];
-    } else {
-        WSK_DNOT_REACHED();
     }
 }
 

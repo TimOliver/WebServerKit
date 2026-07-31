@@ -187,7 +187,12 @@ extern NSString *const WSKRequestAttribute_RegexCaptures;
  *  Returns the address of the local peer (i.e. server) for the request
  *  as a raw "struct sockaddr".
  */
-@property (nonatomic, readonly) NSData *localAddressData;
+/**
+ *  Nil until the server populates it, which happens AFTER a WSKMatchBlock returns the
+ *  request — so a match block inspecting the request it just built sees nil here. The
+ *  string form below is non-null in that window and reports "".
+ */
+@property (nonatomic, readonly, nullable) NSData *localAddressData;
 
 /**
  *  Returns the address of the local peer (i.e. server) for the request
@@ -199,7 +204,7 @@ extern NSString *const WSKRequestAttribute_RegexCaptures;
  *  Returns the address of the remote peer (i.e. client) for the request
  *  as a raw "struct sockaddr".
  */
-@property (nonatomic, readonly) NSData *remoteAddressData;
+@property (nonatomic, readonly, nullable) NSData *remoteAddressData;
 
 /**
  *  Returns the address of the remote peer (i.e. client) for the request
