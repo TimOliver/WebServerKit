@@ -97,7 +97,7 @@ NS_ASSUME_NONNULL_BEGIN
  *
  *  The default value is nil i.e. all file extensions are allowed.
  */
-@property (nonatomic, copy) NSArray<NSString *> *allowedFileExtensions;
+@property (nonatomic, copy, nullable) NSArray<NSString *> *allowedFileExtensions;
 
 /**
  *  Sets if files and directories whose name start with a period are allowed to
@@ -123,7 +123,7 @@ NS_ASSUME_NONNULL_BEGIN
  *  @warning Any reserved HTML characters in the string value for this property
  *  must have been replaced by character entities e.g. "&" becomes "&amp;".
  */
-@property (nonatomic, copy) NSString *title;
+@property (nonatomic, copy, nullable) NSString *title;
 
 /**
  *  Sets the header for the uploader web interface.
@@ -133,7 +133,7 @@ NS_ASSUME_NONNULL_BEGIN
  *  @warning Any reserved HTML characters in the string value for this property
  *  must have been replaced by character entities e.g. "&" becomes "&amp;".
  */
-@property (nonatomic, copy) NSString *header;
+@property (nonatomic, copy, nullable) NSString *header;
 
 /**
  *  Sets the prologue for the uploader web interface.
@@ -143,7 +143,7 @@ NS_ASSUME_NONNULL_BEGIN
  *  @warning The string value for this property must be raw HTML
  *  e.g. "<p>Some text</p>"
  */
-@property (nonatomic, copy) NSString *prologue;
+@property (nonatomic, copy, nullable) NSString *prologue;
 
 /**
  *  Sets the epilogue for the uploader web interface.
@@ -153,7 +153,7 @@ NS_ASSUME_NONNULL_BEGIN
  *  @warning The string value for this property must be raw HTML
  *  e.g. "<p>Some text</p>"
  */
-@property (nonatomic, copy) NSString *epilogue;
+@property (nonatomic, copy, nullable) NSString *epilogue;
 
 /**
  *  Sets the footer for the uploader web interface.
@@ -163,7 +163,7 @@ NS_ASSUME_NONNULL_BEGIN
  *  @warning Any reserved HTML characters in the string value for this property
  *  must have been replaced by character entities e.g. "&" becomes "&amp;".
  */
-@property (nonatomic, copy) NSString *footer;
+@property (nonatomic, copy, nullable) NSString *footer;
 
 /**
  *  This method is the designated initializer for the class.

@@ -163,9 +163,55 @@ NS_ASSUME_NONNULL_END
     return (localSockAddr->sa_family == AF_INET6);
 }
 
+// CFHTTPMessageCreateResponse's own reason-phrase table stops at HTTP/1.1 as it stood in 1999,
+// so every status registered since gets its class default instead of its name. Three of them
+// this library emits in ordinary operation: 421 Misdirected Request — the Host allow-list
+// refusal, i.e. the DNS-rebinding defence — went out as "421 Bad Request", as did 424 Failed
+// Dependency (PROPPATCH's atomicity refusal) and 431 Request Header Fields Too Large (the
+// header cap). Measured across all 56 codes in WSKHTTPStatusCodes.h: fourteen were wrong.
+//
+// ONLY those fourteen are supplied. Everything CF already gets right is left to CF, so every
+// status the recorded-trace corpus contains (200, 201, 207, 404) still serializes byte for
+// byte — the corpus fails on any difference, and rewriting phrases it records would have made
+// this a corpus change rather than a fix.
+static CFStringRef _ReasonPhraseForStatusCode(NSInteger statusCode) {
+    switch (statusCode) {
+        case 102:
+            return CFSTR("Processing");
+        case 208:
+            return CFSTR("Already Reported");
+        case 421:
+            return CFSTR("Misdirected Request");
+        case 422:
+            return CFSTR("Unprocessable Content");
+        case 423:
+            return CFSTR("Locked");
+        case 424:
+            return CFSTR("Failed Dependency");
+        case 426:
+            return CFSTR("Upgrade Required");
+        case 428:
+            return CFSTR("Precondition Required");
+        case 429:
+            return CFSTR("Too Many Requests");
+        case 431:
+            return CFSTR("Request Header Fields Too Large");
+        case 507:
+            return CFSTR("Insufficient Storage");
+        case 508:
+            return CFSTR("Loop Detected");
+        case 510:
+            return CFSTR("Not Extended");
+        case 511:
+            return CFSTR("Network Authentication Required");
+        default:
+            return NULL;  // CF's phrase is correct for this one.
+    }
+}
+
 - (void)_initializeResponseHeadersWithStatusCode:(NSInteger)statusCode {
     _statusCode = statusCode;
-    _responseMessage = CFHTTPMessageCreateResponse(kCFAllocatorDefault, statusCode, NULL, kCFHTTPVersion1_1);
+    _responseMessage = CFHTTPMessageCreateResponse(kCFAllocatorDefault, statusCode, _ReasonPhraseForStatusCode(statusCode), kCFHTTPVersion1_1);
     CFHTTPMessageSetHeaderFieldValue(_responseMessage, CFSTR("Connection"), CFSTR("Close"));
     CFHTTPMessageSetHeaderFieldValue(_responseMessage, CFSTR("Server"), (__bridge CFStringRef)_serverName);
     CFHTTPMessageSetHeaderFieldValue(_responseMessage, CFSTR("Date"), (__bridge CFStringRef)WSKFormatRFC822([NSDate date]));

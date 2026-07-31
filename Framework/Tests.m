@@ -4819,4 +4819,138 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     XCTAssertNoThrow([server stop]);
 }
 
+
+#pragma mark - Honest status codes and contracts (batch B)
+
+// The creation-date block runs AFTER the collection exists, so a failure there answered 500
+// having already created it — the client is told the method failed and a retry then gets 405
+// because the collection is there. "A transaction leaves nothing behind" applies to the
+// failure paths too, so the collection is removed before the error goes out.
+- (void)testMKCOLLeavesNothingBehindWhenItFailsAfterCreating {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    // An unparseable creation date fails the step that runs after the directory is made.
+    NSString* response = SendRawRequest(server.port, @"MKCOL /NewFolder HTTP/1.1\r\nHost: localhost\r\nX-WebServerKit-CreationDate: not-a-date\r\n\r\n");
+    BOOL const refused = ![response containsString:@" 201"];
+    BOOL const present = [fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"NewFolder"]];
+
+    NSString* const detail = [NSString stringWithFormat:@"refused=%d present=%d response=%@", refused, present, [response substringToIndex:MIN((NSUInteger)40, response.length)]];
+    XCTAssertFalse(refused && present, @"a refused MKCOL must not leave the collection behind: %@", detail);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// An empty field name serializes as ": value", which is not a field-line at all. The request
+// parser already refuses one; this is the response side, which did not.
+- (void)testResponseRefusesAnEmptyAdditionalHeaderName {
+    WSKResponse* response = [WSKResponse responseWithStatusCode:kWSKHTTPStatusCode_OK];
+    [response setValue:@"x" forAdditionalHeader:@""];
+    XCTAssertNil([response valueForAdditionalHeader:@""], @"an empty header name must be refused, not stored");
+
+    // A legitimate name must still work, or this could pass by refusing everything.
+    [response setValue:@"bytes" forAdditionalHeader:@"Accept-Ranges"];
+    XCTAssertEqualObjects([response valueForAdditionalHeader:@"Accept-Ranges"], @"bytes");
+}
+
+// -startWithOptions:error: returns NO for an already-running server but left *error nil, so a
+// host app doing the documented thing had nothing to report. It also aborted a Debug build.
+- (void)testStartingAnAlreadyStartedServerReportsAnError {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addGETHandlerForBasePath:@"/" directoryPath:dir indexFilename:nil cacheAge:0 allowRangeRequests:YES];
+
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSError* error = nil;
+    BOOL started = NO;
+    XCTAssertNoThrow(started = [server startWithOptions:options error:&error]);
+    XCTAssertFalse(started, @"starting twice must fail");
+    XCTAssertNotNil(error, @"a failed start must set *error");
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+
+// RFC 4918 §11.5: a volume that cannot store the representation is 507, not 500. Answering 500
+// invites the client to retry an operation that cannot succeed until something is freed. Both
+// spellings have to be read — NSFileManager reports a full volume as a Cocoa error, while
+// EDQUOT only ever arrives as a POSIX errno under NSUnderlyingError.
+- (void)testFullVolumeErrorsMapToInsufficientStorage {
+    NSError* cocoa = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileWriteOutOfSpaceError userInfo:nil];
+    XCTAssertEqual(WSKServerErrorStatusCodeForError(cocoa), kWSKHTTPStatusCode_InsufficientStorage);
+
+    NSError* posix = [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOSPC userInfo:nil];
+    XCTAssertEqual(WSKServerErrorStatusCodeForError(posix), kWSKHTTPStatusCode_InsufficientStorage);
+
+    NSError* quota = [NSError errorWithDomain:NSPOSIXErrorDomain code:EDQUOT userInfo:nil];
+    XCTAssertEqual(WSKServerErrorStatusCodeForError(quota), kWSKHTTPStatusCode_InsufficientStorage);
+
+    // The errno is usually buried under a Cocoa wrapper rather than at the top level.
+    NSDictionary* wrapped = @{NSUnderlyingErrorKey : [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOSPC userInfo:nil]};
+    NSError* nested = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileWriteUnknownError userInfo:wrapped];
+    XCTAssertEqual(WSKServerErrorStatusCodeForError(nested), kWSKHTTPStatusCode_InsufficientStorage);
+
+    // Everything else must stay 500, or this would relabel every failure as a full disk.
+    NSError* permissions = [NSError errorWithDomain:NSPOSIXErrorDomain code:EACCES userInfo:nil];
+    XCTAssertEqual(WSKServerErrorStatusCodeForError(permissions), kWSKHTTPStatusCode_InternalServerError);
+    XCTAssertEqual(WSKServerErrorStatusCodeForError(nil), kWSKHTTPStatusCode_InternalServerError);
+}
+
+// RFC 9110 §13.2.1 requires preconditions to be IGNORED when the unconditional response would
+// be anything other than 2xx or 412 — so a conditional DELETE of a resource that does not exist
+// must answer 404, not 412. PUT is the opposite case: it would create (201), so the condition is
+// evaluated and a missing resource fails "If-Match: *". Pinned in both directions because the
+// obvious "fix" for the 404 would break the rule this test exists to state.
+- (void)testConditionalRequestsOnAMissingResourceFollowTheEvaluationRule {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* deleted = SendRawRequest(server.port, @"DELETE /gone.txt HTTP/1.1\r\nHost: localhost\r\nIf-Match: *\r\n\r\n");
+    XCTAssertTrue([deleted containsString:@" 404"], @"DELETE of a missing resource must ignore the precondition and 404: %@", [deleted substringToIndex:MIN((NSUInteger)40, deleted.length)]);
+
+    NSString* put = SendRawRequest(server.port, @"PUT /gone.txt HTTP/1.1\r\nHost: localhost\r\nIf-Match: *\r\nContent-Length: 2\r\n\r\nhi");
+    XCTAssertTrue([put containsString:@" 412"], @"PUT would create, so \"If-Match: *\" on a missing resource must fail 412: %@", [put substringToIndex:MIN((NSUInteger)40, put.length)]);
+    XCTAssertFalse([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"gone.txt"]], @"a 412 must not have written anything");
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+
+// CFHTTPMessageCreateResponse's reason-phrase table predates every status registered after
+// HTTP/1.1, so it answered the class default for fourteen of the codes this library declares.
+// 421 is the Host allow-list refusal — the DNS-rebinding defence — and it went out labelled
+// "Bad Request", which is a different claim about why the request was refused.
+- (void)testStatusLinesCarryTheirOwnReasonPhrase {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addGETHandlerForBasePath:@"/" directoryPath:dir indexFilename:nil cacheAge:0 allowRangeRequests:YES];
+
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES, WSKOption_AllowedHostNames : @[@"allowed.example"]};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* misdirected = SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: evil.example\r\n\r\n");
+    XCTAssertTrue([misdirected hasPrefix:@"HTTP/1.1 421 Misdirected Request"], @"421 must name itself: %@", [misdirected substringToIndex:MIN((NSUInteger)40, misdirected.length)]);
+
+    // A code CoreFoundation already gets right must be untouched — the recorded-trace corpus
+    // compares response bytes, so a phrase changing there would be a corpus break.
+    NSString* notFound = SendRawRequest(server.port, @"GET /nope.txt HTTP/1.1\r\nHost: allowed.example\r\n\r\n");
+    XCTAssertTrue([notFound hasPrefix:@"HTTP/1.1 404 Not Found"], @"404's phrase must be unchanged: %@", [notFound substringToIndex:MIN((NSUInteger)40, notFound.length)]);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 @end

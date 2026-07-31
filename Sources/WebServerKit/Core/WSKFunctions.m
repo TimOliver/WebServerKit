@@ -447,6 +447,27 @@ NSString *WSKStringFromSockAddr(const struct sockaddr *addr, BOOL includeService
     return includeService ? [NSString stringWithFormat:@"%s:%s", hostBuffer, serviceBuffer] : (NSString *)[NSString stringWithUTF8String:hostBuffer];
 }
 
+WSKServerErrorHTTPStatusCode WSKServerErrorStatusCodeForError(NSError *error) {
+    if (error == nil) {
+        return kWSKHTTPStatusCode_InternalServerError;
+    }
+
+    // NSFileManager reports a full volume as a Cocoa error, but the POSIX errno survives under
+    // NSUnderlyingError for the calls that go through it, and EDQUOT never gets a Cocoa code of
+    // its own. Both spellings have to be read or the mapping closes only half the class.
+    for (NSError *candidate = error; candidate != nil; candidate = candidate.userInfo[NSUnderlyingErrorKey]) {
+        if ([candidate.domain isEqualToString:NSCocoaErrorDomain] && (candidate.code == NSFileWriteOutOfSpaceError)) {
+            return kWSKHTTPStatusCode_InsufficientStorage;
+        }
+
+        if ([candidate.domain isEqualToString:NSPOSIXErrorDomain] && ((candidate.code == ENOSPC) || (candidate.code == EDQUOT))) {
+            return kWSKHTTPStatusCode_InsufficientStorage;
+        }
+    }
+
+    return kWSKHTTPStatusCode_InternalServerError;
+}
+
 NSString *WSKGetPrimaryIPAddress(BOOL useIPv6) {
     NSString *address = nil;
 

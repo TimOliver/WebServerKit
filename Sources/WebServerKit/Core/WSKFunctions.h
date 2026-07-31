@@ -27,6 +27,12 @@
 
 #import <Foundation/Foundation.h>
 
+#if __has_include(<WebServerKit/WSKHTTPStatusCodes.h>)
+#import <WebServerKit/WSKHTTPStatusCodes.h>
+#else
+#import "WSKHTTPStatusCodes.h"
+#endif
+
 #include <sys/stat.h>
 
 NS_ASSUME_NONNULL_BEGIN
@@ -117,6 +123,16 @@ NSDate *_Nullable WSKParseISO8601(NSString *string);
  *  it by another route.
  */
 BOOL WSKPathContainsNULByte(NSString *_Nullable path);
+
+/**
+ *  Maps a filesystem NSError onto the server-error status that describes it honestly.
+ *
+ *  RFC 4918 §11.5: 507 Insufficient Storage means the method could not be performed because
+ *  the server cannot store the representation. A full volume or an exceeded quota is exactly
+ *  that, and answering 500 invites the client to retry an operation that cannot succeed until
+ *  something is freed. Everything else stays 500.
+ */
+WSKServerErrorHTTPStatusCode WSKServerErrorStatusCodeForError(NSError *_Nullable error);
 
 /**
  *  Removes "//", "/./" and "/../" components from path as well as any trailing slash.
