@@ -172,7 +172,7 @@ extern NSString *const WSKOption_MaxPendingConnections;
 /**
  *  The value for "Server" HTTP header used by the WSKWebServer (NSString).
  *
- *  The default value is the WSKWebServer class name.
+ *  The default value is "WebServerKit".
  */
 extern NSString *const WSKOption_ServerName;
 

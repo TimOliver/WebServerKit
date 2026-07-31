@@ -295,6 +295,15 @@
     // untrusted input would split the response and inject headers of the attacker's
     // choosing. No caller in this library does that, but this is the chokepoint, and a host
     // app naming a header after request data should not be able to forge a response.
+    // RFC 9112 §5 field-name is 1*tchar, so an empty name is not a field-line at all — it
+    // serializes as ": value", which a recipient may drop, treat as a continuation, or refuse
+    // the whole message over. The request parser already refuses one; this is the same rule on
+    // the response side, which did not have it.
+    if (header.length == 0) {
+        WSK_LOG_ERROR(@"Ignoring additional response header with an empty name");
+        return;
+    }
+
     NSRange controlCharacter = [header rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"\r\n:"]];
 
     if (controlCharacter.location != NSNotFound) {

@@ -87,6 +87,86 @@ and the Bonjour/`.local` name only, so without it every request is refused with 
 
 ## Recent Changes
 
+### Known-open lows, batch B: honest status codes, and three entries that were not defects
+
+**Three of the recorded items were refuted by re-measuring them, and one of the three would have
+been an actively harmful "fix".** That is the fourth time this programme has found an aged finding
+evaporate on contact, and it is why the rule is to re-measure rather than work from the list:
+
+- **`If-Match` on a missing resource answering 404 is REQUIRED, not a bug.** RFC 9110 §13.2.1 says
+  a server MUST ignore all preconditions when the unconditional response would be anything other
+  than 2xx or 412 — so a conditional `DELETE` of something that does not exist must answer 404, and
+  "fixing" it to 412 would have broken conformance. `PUT` is the opposite case, because it would
+  create (201), so the condition IS evaluated and `If-Match: *` on a missing path correctly fails
+  412. Both directions are now pinned by a test, precisely so a later pass does not re-find the 404
+  and "correct" it.
+- **An empty header name was already refused** on the request side (`colon == 0`). The gap was on
+  the *response* side, which had no such check — fixed there instead.
+- **A MOVE whose swap fails already unwinds**, restoring the source rather than stranding it under
+  the staging dot-name. Only a double failure can leave residue, and nothing better is available
+  when the filesystem itself is refusing.
+
+**A full volume answered "you are not allowed".** ENOSPC and EDQUOT were mapped onto 500 for PUT
+and MKCOL, and — the sharp one — onto **403 Forbidden** for COPY and MOVE. 403 is a claim that the
+client may never do this, so a client that would have retried after freeing space gives up
+permanently instead. RFC 4918 §11.5 defines 507 for exactly this. Measured on a genuinely full
+2 MB volume, before and after:
+
+| verb | before | after |
+|---|---|---|
+| PUT | 500 Internal Server Error | 507 Insufficient Storage |
+| MKCOL | 500 Internal Server Error | 507 Insufficient Storage |
+| COPY | **403 Forbidden** | 507 Insufficient Storage |
+
+Both spellings have to be read or the mapping closes half the class: `NSFileManager` reports a full
+volume as `NSFileWriteOutOfSpaceError`, while `EDQUOT` only ever arrives as a POSIX errno nested
+under `NSUnderlyingError`.
+
+**⚠️ Fourteen status codes went out under the wrong reason phrase, and the unit test could not have
+found it.** `CFHTTPMessageCreateResponse`'s own table stops at HTTP/1.1 as it stood in 1999, so
+every status registered since gets its class default. Three of them this library emits in ordinary
+operation: **`421 Misdirected Request` — the Host allow-list refusal, i.e. the whole DNS-rebinding
+defence — was serialized as `421 Bad Request`**, as were `424 Failed Dependency` (PROPPATCH's
+atomicity refusal, added earlier in this programme) and `431 Request Header Fields Too Large` (the
+fifth pass's header cap). Measured across all 56 codes in `WSKHTTPStatusCodes.h`.
+
+The lesson is the one this file keeps re-learning from a different angle: the 507 work was covered
+by a unit test over the mapping function, which passed and proved only that the *function* was
+right. The end-to-end probe against a real full volume is what showed the status line itself, and
+that is where the phrase was visibly wrong. **A test of the helper is not a test of the wiring.**
+
+Only those fourteen are supplied; everything CF already gets right is left to CF, so all four
+statuses the recorded-trace corpus contains (200, 201, 207, 404) still serialize byte for byte. The
+corpus fails on any difference, so rewriting phrases it records would have turned a fix into a
+corpus change.
+
+**MKCOL answered 500 with the collection already created.** The creation-date step runs after the
+directory exists, so a failure there told the client the method failed while leaving the collection
+behind — and the retry then gets 405 because it is there. The collection is removed before the error
+goes out. "A refused transaction leaves nothing behind" applies to the failure paths too.
+
+**`-startWithOptions:error:` on an already-running server was a fourth process kill.** It is
+documented to return NO, and the way a host app finds out is `*error` — which was never set. In
+Debug it did not return at all: `WSK_DNOT_REACHED()` aborted. Same shape as all six of batch A, found
+because the test for the *documented* behaviour crashed the runner rather than failing.
+
+**Six non-null properties that are genuinely nil are `nullable` now** — `allowedFileExtensions` on
+both servers, and `title`, `header`, `prologue`, `epilogue` and `footer` on the uploader. nil is
+*meaningful* for every one of them (no extension restriction; use the computed default), so
+substituting a value in the getter would have destroyed information rather than told the truth. One
+of them, `epilogue`, was documented as "the default value is nil" directly beneath a non-null
+declaration. Source-breaking for Swift, deliberately, as in batch A. The `Server` header default was
+also documented as the class name when it is `"WebServerKit"`.
+
+**Verified together.** 133 tests and 0 failures on a clean build with no new warnings, the trace
+corpus green, iOS and tvOS Debug both clean, and the full-volume probe sensitive in both directions.
+
+**Still open:** batch C, the long-lived surfaces — the SSE quiet-client reaping gap, SSE paths
+collapsing to `/` through a symlinked ancestor, `-bonjourName` after an auto-rename, and the silent
+iOS foreground-restart failure. The `//` status disagreement, `MOVE`-without-`Overwrite`, the
+directory-rename TOCTOU and litmus's `propfind_invalid2` remain settled decisions rather than
+defects.
+
 ### Known-open lows, batch A: six ways a host app could kill the process
 
 The ~20 items the audit programme deferred were all filed as "low". For these six that label was

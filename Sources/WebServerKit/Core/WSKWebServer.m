@@ -1159,8 +1159,15 @@ static inline NSString *_EncodeBase64(NSString *string) {
 
 #endif
         return YES;
-    } else {
-        WSK_DNOT_REACHED();  // Starting an already-started server is an API misuse by the host app
+    }
+
+    // Deliberately NOT WSK_DNOT_REACHED(). This returns NO, so the documented way for a host
+    // app to find out is *error — which was never set, leaving a caller that did exactly what
+    // the header says with nothing to report and, in Debug, an abort instead of a return.
+    WSK_LOG_ERROR(@"Refusing to start: the server is already running");
+
+    if (error) {
+        *error = [NSError errorWithDomain:kWSKErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: @"The server is already running"}];
     }
 
     return NO;

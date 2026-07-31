@@ -880,12 +880,12 @@ static NSString *const kDAVAllowedMethods = @"OPTIONS, HEAD, GET, PUT, DELETE, M
     BOOL const haveVetted = existing && (lstat([absolutePath fileSystemRepresentation], &vetted) == 0);
 
     if (![fileManager moveItemAtPath:request.temporaryPath toPath:writePath error:&error]) {
-        return [WSKErrorResponse responseWithServerError:kWSKHTTPStatusCode_InternalServerError underlyingError:error message:@"Failed moving uploaded file to \"%@\"", relativePath];
+        return [WSKErrorResponse responseWithServerError:WSKServerErrorStatusCodeForError(error) underlyingError:error message:@"Failed moving uploaded file to \"%@\"", relativePath];
     }
 
     if (stagingPath && ![self _replaceItemAtPath:absolutePath withStagedItemAtPath:stagingPath expecting:(haveVetted ? &vetted : NULL) error:&error]) {
         [fileManager removeItemAtPath:stagingPath error:NULL];
-        return [WSKErrorResponse responseWithServerError:kWSKHTTPStatusCode_InternalServerError underlyingError:error message:@"Failed moving uploaded file to \"%@\"", relativePath];
+        return [WSKErrorResponse responseWithServerError:WSKServerErrorStatusCodeForError(error) underlyingError:error message:@"Failed moving uploaded file to \"%@\"", relativePath];
     }
 
     if ([self.delegate respondsToSelector:@selector(davServer:didUploadFileAtPath:)]) {
@@ -1020,7 +1020,7 @@ static NSString *const kDAVAllowedMethods = @"OPTIONS, HEAD, GET, PUT, DELETE, M
     NSError *error = nil;
 
     if (![[NSFileManager defaultManager] createDirectoryAtPath:absolutePath withIntermediateDirectories:NO attributes:nil error:&error]) {
-        return [WSKErrorResponse responseWithServerError:kWSKHTTPStatusCode_InternalServerError underlyingError:error message:@"Failed creating directory \"%@\"", relativePath];
+        return [WSKErrorResponse responseWithServerError:WSKServerErrorStatusCodeForError(error) underlyingError:error message:@"Failed creating directory \"%@\"", relativePath];
     }
 
 #ifdef __WEBSERVERKIT_ENABLE_TESTING__
@@ -1030,6 +1030,11 @@ static NSString *const kDAVAllowedMethods = @"OPTIONS, HEAD, GET, PUT, DELETE, M
         NSDate *const date = WSKParseISO8601(creationDateHeader);
 
         if (!date || ![[NSFileManager defaultManager] setAttributes:@{NSFileCreationDate: date} ofItemAtPath:absolutePath error:&error]) {
+            // This step runs AFTER the collection exists, so returning here used to answer 500
+            // having already created it: the client is told the method failed, and a retry then
+            // gets 405 because the collection is there. "A refused transaction leaves nothing
+            // behind" applies to the failure paths too.
+            [[NSFileManager defaultManager] removeItemAtPath:absolutePath error:NULL];
             return [WSKErrorResponse responseWithServerError:kWSKHTTPStatusCode_InternalServerError underlyingError:error message:@"Failed setting creation date for directory \"%@\"", relativePath];
         }
     }
@@ -1262,11 +1267,22 @@ static NSString *const kDAVAllowedMethods = @"OPTIONS, HEAD, GET, PUT, DELETE, M
 
     if (isMove) {
         if (![fileManager moveItemAtPath:srcAbsolutePath toPath:writePath error:&error]) {
+            // A full volume is not a permission problem, and 403 tells the client it is never
+            // allowed to do this rather than that there is no room for it right now.
+            if (WSKServerErrorStatusCodeForError(error) == kWSKHTTPStatusCode_InsufficientStorage) {
+                return [WSKErrorResponse responseWithServerError:kWSKHTTPStatusCode_InsufficientStorage underlyingError:error message:@"Failed moving \"%@\" to \"%@\"", srcRelativePath, dstRelativePath];
+            }
+
             return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden underlyingError:error message:@"Failed moving \"%@\" to \"%@\"", srcRelativePath, dstRelativePath];
         }
     } else {
         if (![fileManager copyItemAtPath:srcAbsolutePath toPath:writePath error:&error]) {
             [fileManager removeItemAtPath:writePath error:NULL];  // A failed tree copy leaves a partial tree behind.
+
+            if (WSKServerErrorStatusCodeForError(error) == kWSKHTTPStatusCode_InsufficientStorage) {
+                return [WSKErrorResponse responseWithServerError:kWSKHTTPStatusCode_InsufficientStorage underlyingError:error message:@"Failed copying \"%@\" to \"%@\"", srcRelativePath, dstRelativePath];
+            }
+
             return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden underlyingError:error message:@"Failed copying \"%@\" to \"%@\"", srcRelativePath, dstRelativePath];
         }
     }
