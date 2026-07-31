@@ -348,6 +348,55 @@ static BOOL _EntityTagMatchesList(BOOL resourceExists, NSString *currentTag, NSS
 // observation, and act on the returned path rather than the one the client sent. A symlink
 // retargeted between two independent resolutions served content from outside the share and
 // landed a PUT outside it.
+// The same resolution, but yielding the entry the client NAMED rather than what it points at —
+// see WSKResolveNamedEntryWithinDirectory(). Used by the verbs that REMOVE or RELOCATE an entry
+// (DELETE, and MOVE/COPY on both their source and their destination), because `rm latest` removes
+// the alias and `mv a latest` replaces it; only reads follow a link. The NUL guard, the
+// containment check, the hidden-item rule and the refusal to act on the root all still apply, and
+// all still come from a single resolution.
+- (nullable NSString *)_namedEntryPathForRelativePath:(NSString *)relativePath hidden:(BOOL *)outHidden {
+    if (WSKPathContainsNULByte(relativePath)) {
+        return nil;
+    }
+
+    NSString *const normalizedPath = WSKNormalizePath(relativePath);
+
+    if (outHidden) {
+        *outHidden = NO;
+    }
+
+    // Naming the root itself is not something a destructive verb may act on, and there is no
+    // final component to preserve either.
+    if ((normalizedPath.length == 0) || [normalizedPath isEqualToString:@"/"]) {
+        return nil;
+    }
+
+    NSString *namedRelativePath = nil;
+    NSString *const namedPath = WSKResolveNamedEntryWithinDirectory([_uploadDirectory stringByAppendingPathComponent:normalizedPath], _uploadDirectory, &namedRelativePath);
+
+    if (namedPath == nil) {
+        return nil;
+    }
+
+    if (outHidden && !_allowHiddenItems) {
+        for (NSString *component in [normalizedPath pathComponents]) {
+            if ([component hasPrefix:@"."]) {
+                *outHidden = YES;
+                return namedPath;
+            }
+        }
+
+        for (NSString *component in [namedRelativePath pathComponents]) {
+            if ([component hasPrefix:@"."]) {
+                *outHidden = YES;
+                return namedPath;
+            }
+        }
+    }
+
+    return namedPath;
+}
+
 - (nullable NSString *)_resolvedPathForRelativePath:(NSString *)relativePath hidden:(BOOL *)outHidden {
     // WSKNormalizePath truncates at an embedded NUL — deliberately, because the filesystem's
     // C-string APIs do and the mismatch is otherwise exploitable. But truncating does not make
@@ -765,7 +814,7 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
     // Deleting is destructive, so also confirm the resolved target is inside the share
     // rather than whatever a symlink points to outside it.
     BOOL isHidden = NO;
-    NSString *const resolvedPath = [self _resolvedPathForRelativePath:relativePath hidden:&isHidden];
+    NSString *const resolvedPath = [self _namedEntryPathForRelativePath:relativePath hidden:&isHidden];
 
     if (resolvedPath == nil) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not allowed", relativePath];
@@ -987,8 +1036,8 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
     // falls back to its parent.
     BOOL srcIsHidden = NO;
     BOOL dstIsHidden = NO;
-    NSString *const resolvedSrcPath = [self _resolvedPathForRelativePath:srcRelativePath hidden:&srcIsHidden];
-    NSString *const resolvedDstPath = [self _resolvedPathForRelativePath:dstRelativePath hidden:&dstIsHidden];
+    NSString *const resolvedSrcPath = [self _namedEntryPathForRelativePath:srcRelativePath hidden:&srcIsHidden];
+    NSString *const resolvedDstPath = [self _namedEntryPathForRelativePath:dstRelativePath hidden:&dstIsHidden];
 
     if ((resolvedSrcPath == nil) || (resolvedDstPath == nil)) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"%@ \"%@\" to \"%@\" is not allowed", isMove ? @"Moving" : @"Copying", srcRelativePath, dstRelativePath];
@@ -1163,7 +1212,8 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
 
     if (escapedPath) {
         NSDictionary *const attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:itemPath error:NULL];
-        NSString *const type = attributes[NSFileType];
+        // Classified by what a symlink points at, so the listing describes what is actually served.
+        NSString *const type = WSKServableFileTypeAtPath(itemPath, _uploadDirectory);
         BOOL isFile = [type isEqualToString:NSFileTypeRegular];
         BOOL isDirectory = [type isEqualToString:NSFileTypeDirectory];
 

@@ -182,6 +182,47 @@ BOOL WSKResolvedPathIsWithinDirectory(NSString *path, NSString *directory);
  */
 NSString *_Nullable WSKResolveWithinDirectory(NSString *path, NSString *directory, NSString *_Nullable __autoreleasing *_Nullable outRelativePath);
 
+/**
+ *  Like WSKResolveWithinDirectory(), but returns the entry the client NAMED rather than what that
+ *  entry points at: the parent is resolved, and the final component is appended raw.
+ *
+ *  Read paths want the target — `GET /latest/app.ipa` should follow the link, and does. Verbs that
+ *  REMOVE or RELOCATE an entry want the entry, because that is what `rm`, `mv` and `cp -P` do and
+ *  what a user means: `DELETE /latest` used to remove the multi-hundred-megabyte build directory
+ *  the link pointed at and leave the dangling link behind, answering 204. No shell tool behaves
+ *  that way, and the residue was then invisible to every listing and removable by nothing.
+ *
+ *  The PARENT is resolved, and the containment and hidden-item verdicts are both derived from that
+ *  one observation, exactly as WSKResolveWithinDirectory() does for the full path. That matters:
+ *  resolving once for the verdict and again for the path to act on is the two-observations shape
+ *  the eighth pass closed and this file names as the form that will recur. It also keeps the
+ *  eighth pass's protection intact — `PUT /link/x` where `link` retargets outside is still refused,
+ *  because the escape is in the parent and the parent is still resolved.
+ *
+ *  Unlinking or renaming a symlink never touches its target, so a link pointing outside the share
+ *  is safe to remove: the entry itself lives inside. Returns nil when the parent does not resolve
+ *  inside `directory`, or when `path` names the directory itself (which has no final component to
+ *  keep, and which every destructive verb must refuse anyway).
+ */
+NSString *_Nullable WSKResolveNamedEntryWithinDirectory(NSString *path, NSString *directory, NSString *_Nullable __autoreleasing *_Nullable outRelativePath);
+
+/**
+ *  The NSFileType an enumeration should CLASSIFY `path` as, which for a symlink is the type of what
+ *  it points at — or nil when nothing servable is there.
+ *
+ *  `-attributesOfItemAtPath:` does not follow links, so a symlink is neither NSFileTypeRegular nor
+ *  NSFileTypeDirectory and fell out of all three listings while the same servers happily served
+ *  through it. That disagreement is the one this project has now fixed twice in the opposite
+ *  direction, and through a real mounted client it is data loss rather than cosmetics: `mv` returns
+ *  0 having copied only what the listing reported, then deletes the source, so the entries it never
+ *  saw are gone.
+ *
+ *  A link is only classified when its target resolves INSIDE `directory` — otherwise it would be
+ *  advertised and then refused on access, which is the same disagreement with the sign flipped. A
+ *  dangling link resolves to nothing and is likewise not classified.
+ */
+NSString *_Nullable WSKServableFileTypeAtPath(NSString *path, NSString *directory);
+
 NSString *_Nullable WSKResolvedPathRelativeToDirectory(NSString *path, NSString *directory);
 
 /**

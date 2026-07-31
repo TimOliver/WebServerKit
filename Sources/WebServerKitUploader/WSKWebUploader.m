@@ -965,6 +965,55 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
 //
 // Returns nil when the path does not resolve inside the share. Sets *outHidden when the
 // resolved location — or the path the client typed — lies inside a hidden item.
+// The same resolution, but yielding the entry the client NAMED rather than what it points at —
+// see WSKResolveNamedEntryWithinDirectory(). Used by the verbs that REMOVE or RELOCATE an entry
+// (DELETE, and MOVE/COPY on both their source and their destination), because `rm latest` removes
+// the alias and `mv a latest` replaces it; only reads follow a link. The NUL guard, the
+// containment check, the hidden-item rule and the refusal to act on the root all still apply, and
+// all still come from a single resolution.
+- (nullable NSString *)_namedEntryPathForRelativePath:(NSString *)relativePath hidden:(BOOL *)outHidden {
+    if (WSKPathContainsNULByte(relativePath)) {
+        return nil;
+    }
+
+    NSString *const normalizedPath = WSKNormalizePath(relativePath);
+
+    if (outHidden) {
+        *outHidden = NO;
+    }
+
+    // Naming the root itself is not something a destructive verb may act on, and there is no
+    // final component to preserve either.
+    if ((normalizedPath.length == 0) || [normalizedPath isEqualToString:@"/"]) {
+        return nil;
+    }
+
+    NSString *namedRelativePath = nil;
+    NSString *const namedPath = WSKResolveNamedEntryWithinDirectory([_uploadDirectory stringByAppendingPathComponent:normalizedPath], _uploadDirectory, &namedRelativePath);
+
+    if (namedPath == nil) {
+        return nil;
+    }
+
+    if (outHidden && !_allowHiddenItems) {
+        for (NSString *component in [normalizedPath pathComponents]) {
+            if ([component hasPrefix:@"."]) {
+                *outHidden = YES;
+                return namedPath;
+            }
+        }
+
+        for (NSString *component in [namedRelativePath pathComponents]) {
+            if ([component hasPrefix:@"."]) {
+                *outHidden = YES;
+                return namedPath;
+            }
+        }
+    }
+
+    return namedPath;
+}
+
 - (nullable NSString *)_resolvedPathForRelativePath:(NSString *)relativePath hidden:(BOOL *)outHidden {
     NSString *const normalizedPath = WSKNormalizePath(relativePath);
     NSString *resolvedRelativePath = nil;
@@ -1124,9 +1173,16 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
 
     for (NSString *item in [contents sortedArrayUsingSelector:@selector(localizedStandardCompare:)]) {
         if (_allowHiddenItems || ![item hasPrefix:@"."]) {
-            NSDictionary *const attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:[absolutePath stringByAppendingPathComponent:item] error:NULL];
-            NSString *const type = attributes[NSFileType];
-            NSNumber *const size = attributes[NSFileSize];  // Nil if the item vanished between the listing and this stat; must not reach the literal below.
+            NSString *const itemPath = [absolutePath stringByAppendingPathComponent:item];
+            NSDictionary *const attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:itemPath error:NULL];
+            // Classified by what a symlink points at, so the listing describes what is served.
+            NSString *const type = WSKServableFileTypeAtPath(itemPath, _uploadDirectory);
+            // A symlink's own attributes report the length of its target PATH, not the file, so
+            // ask again through the link for anything classified as a regular file.
+            NSDictionary *const effective = [attributes[NSFileType] isEqualToString:NSFileTypeSymbolicLink]
+                                                ? [[NSFileManager defaultManager] attributesOfItemAtPath:[itemPath stringByResolvingSymlinksInPath] error:NULL]
+                                                : attributes;
+            NSNumber *const size = effective[NSFileSize];  // Nil if the item vanished between the listing and this stat; must not reach the literal below.
 
             if ([type isEqualToString:NSFileTypeRegular] && size && [self _checkFileExtension:item]) {
                 [array addObject:@{
@@ -1405,8 +1461,8 @@ static NSString *_OriginAuthority(NSString *value) {
     // into plain view, and a move into one would smuggle files past the same guard.
     BOOL oldIsHidden = NO;
     BOOL newIsHidden = NO;
-    NSString *const resolvedOldPath = [self _resolvedPathForRelativePath:oldRelativePath hidden:&oldIsHidden];
-    NSString *const resolvedNewPath = [self _resolvedPathForRelativePath:newRelativePath hidden:&newIsHidden];
+    NSString *const resolvedOldPath = [self _namedEntryPathForRelativePath:oldRelativePath hidden:&oldIsHidden];
+    NSString *const resolvedNewPath = [self _namedEntryPathForRelativePath:newRelativePath hidden:&newIsHidden];
 
     if ((resolvedOldPath == nil) || (resolvedNewPath == nil)) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Moving \"%@\" to \"%@\" is not allowed", oldRelativePath, newRelativePath];
@@ -1508,7 +1564,7 @@ static NSString *_OriginAuthority(NSString *value) {
     // Deleting is destructive, so resolve once and destroy exactly what was vetted: a symlink
     // retargeted between the check and the unlink would otherwise decide what gets removed.
     BOOL isHidden = NO;
-    NSString *const resolvedPath = [self _resolvedPathForRelativePath:relativePath hidden:&isHidden];
+    NSString *const resolvedPath = [self _namedEntryPathForRelativePath:relativePath hidden:&isHidden];
 
     if (resolvedPath == nil) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not allowed", relativePath];

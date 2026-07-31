@@ -1655,17 +1655,37 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     NSString* davRoot = fixture(@"dav");
     WSKWebDAVServer* dav = [[WSKWebDAVServer alloc] initWithUploadDirectory:davRoot];
     XCTAssertTrue([dav startWithOptions:options error:NULL]);
+    // The catastrophe this test exists for is the share being EMPTIED — the ninth pass measured one
+    // unauthenticated request taking a five-entry share to zero. That is now impossible by
+    // construction rather than by a special-case refusal: a destructive verb resolves the PARENT and
+    // acts on the entry the client named, so the share root is never the thing operated on. Removing
+    // the alias itself is the correct answer to "DELETE /self" and is what `rm self` does; the
+    // assertions below therefore check that the CONTENTS survive, not that the request was refused.
     NSString* deleted = SendRawRequest(dav.port, @"DELETE /self HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    XCTAssertTrue([deleted hasPrefix:@"HTTP/1.1 403"], @"DELETE through a self-referential link: %@", [deleted substringToIndex:MIN((NSUInteger)40, deleted.length)]);
-    XCTAssertEqual(count(davRoot), (NSUInteger)5, @"the share was emptied by a DELETE through a link resolving to its root");
+    XCTAssertTrue([deleted hasPrefix:@"HTTP/1.1 204"], @"DELETE of a self-referential link should remove the link: %@", [deleted substringToIndex:MIN((NSUInteger)40, deleted.length)]);
 
+    for (NSUInteger i = 0; i < 4; i++) {
+        NSString* build = [davRoot stringByAppendingPathComponent:[NSString stringWithFormat:@"build%lu.txt", (unsigned long)i]];
+        XCTAssertTrue([fm fileExistsAtPath:build], @"the share was emptied by a DELETE through a link resolving to its root");
+    }
+
+    XCTAssertEqual(count(davRoot), (NSUInteger)4, @"exactly the alias should have gone");
+
+    // Moving onto the alias replaces the alias. The share's other contents must be untouched.
+    symlink(".", [[davRoot stringByAppendingPathComponent:@"self"] fileSystemRepresentation]);
     NSString* moved = SendRawRequest(dav.port, [NSString stringWithFormat:@"MOVE /build0.txt HTTP/1.1\r\nHost: localhost:%lu\r\nDestination: http://localhost:%lu/self\r\nOverwrite: T\r\n\r\n", (unsigned long)dav.port, (unsigned long)dav.port]);
-    XCTAssertTrue([moved hasPrefix:@"HTTP/1.1 403"], @"MOVE onto a self-referential link: %@", [moved substringToIndex:MIN((NSUInteger)40, moved.length)]);
-    XCTAssertEqual(count(davRoot), (NSUInteger)5, @"the share was replaced by a MOVE onto a link resolving to its root");
+    XCTAssertTrue([moved hasPrefix:@"HTTP/1.1 204"], @"MOVE onto a self-referential link should replace the link: %@", [moved substringToIndex:MIN((NSUInteger)40, moved.length)]);
+
+    for (NSUInteger i = 1; i < 4; i++) {
+        NSString* build = [davRoot stringByAppendingPathComponent:[NSString stringWithFormat:@"build%lu.txt", (unsigned long)i]];
+        XCTAssertTrue([fm fileExistsAtPath:build], @"the share was replaced by a MOVE onto a link resolving to its root");
+    }
+
+    XCTAssertEqualObjects([NSString stringWithContentsOfFile:[davRoot stringByAppendingPathComponent:@"self"] encoding:NSUTF8StringEncoding error:NULL], @"build 0", @"the alias was not replaced by the moved file");
 
     // The ordinary destructive operation must still work, or this has just disabled the feature.
     XCTAssertTrue([SendRawRequest(dav.port, @"DELETE /build1.txt HTTP/1.1\r\nHost: localhost\r\n\r\n") hasPrefix:@"HTTP/1.1 204"], @"an ordinary DELETE stopped working");
-    XCTAssertEqual(count(davRoot), (NSUInteger)4);
+    XCTAssertFalse([fm fileExistsAtPath:[davRoot stringByAppendingPathComponent:@"build1.txt"]], @"an ordinary DELETE did not remove the file");
     [dav stop];
 
     NSString* upRoot = fixture(@"up");
@@ -1673,8 +1693,12 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     XCTAssertTrue([uploader startWithOptions:options error:NULL]);
     NSString* body = @"path=%2Fself";
     NSString* reply = SendRawRequest(uploader.port, [NSString stringWithFormat:@"POST /delete HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)body.length, body]);
-    XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 403"], @"the uploader deleted through a self-referential link: %@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
-    XCTAssertEqual(count(upRoot), (NSUInteger)5, @"the share was emptied by /delete through a link resolving to its root");
+    XCTAssertTrue([reply containsString:@"200"], @"the uploader should remove the alias: %@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+
+    for (NSUInteger i = 0; i < 4; i++) {
+        NSString* build = [upRoot stringByAppendingPathComponent:[NSString stringWithFormat:@"build%lu.txt", (unsigned long)i]];
+        XCTAssertTrue([fm fileExistsAtPath:build], @"the share was emptied by /delete through a link resolving to its root");
+    }
 
     // Listing the root by name is still an ordinary operation and must not be caught by this.
     XCTAssertTrue([SendRawRequest(uploader.port, @"GET /list?path=/ HTTP/1.1\r\nHost: localhost\r\n\r\n") hasPrefix:@"HTTP/1.1 200"], @"listing the share root stopped working");
@@ -1966,6 +1990,79 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 
     [server stop];
     [fm removeItemAtPath:dir error:NULL];
+}
+
+// A symlink is an alias, so the verbs that REMOVE or RELOCATE one act on the entry the client named
+// rather than on what it points at — `rm latest` removes the link, `mv a latest` replaces it — while
+// reads still follow it. DELETE used to remove the multi-hundred-megabyte build directory and leave
+// the dangling link behind, answering 204; no shell tool behaves that way, and the residue was then
+// invisible to every listing and removable by nothing.
+//
+// And a symlink is now LISTED, classified by what it points at. It was served but omitted from all
+// three enumerations, which through a real mounted client is data loss rather than cosmetics: `mv`
+// returns 0 having copied only what the listing reported, then deletes the source.
+//
+// The dangerous part of this change is that it must not weaken containment, so that is asserted
+// hardest: the parent is still resolved, so an escape through an intermediate link is still refused.
+- (void)testSymlinksAreAliasesToDestructiveVerbsAndAppearInListings {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* parent = MakeTempDirectory();
+    NSString* dir = [parent stringByAppendingPathComponent:@"share"];
+    NSString* outside = [parent stringByAppendingPathComponent:@"outside"];
+    XCTAssertTrue([fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:NULL]);
+    XCTAssertTrue([fm createDirectoryAtPath:outside withIntermediateDirectories:YES attributes:nil error:NULL]);
+    XCTAssertTrue([@"SECRET" writeToFile:[outside stringByAppendingPathComponent:@"o.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    NSString* build = [dir stringByAppendingPathComponent:@"build"];
+    XCTAssertTrue([fm createDirectoryAtPath:build withIntermediateDirectories:YES attributes:nil error:NULL]);
+    XCTAssertTrue([@"BUILD" writeToFile:[build stringByAppendingPathComponent:@"app.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([fm createSymbolicLinkAtPath:[dir stringByAppendingPathComponent:@"latest"] withDestinationPath:@"build" error:NULL]);
+    XCTAssertTrue([fm createSymbolicLinkAtPath:[dir stringByAppendingPathComponent:@"escape"] withDestinationPath:outside error:NULL]);
+
+    WSKWebDAVServer* dav = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([dav startWithOptions:options error:NULL]);
+
+    // Reading still FOLLOWS the link — that is what a link is for.
+    XCTAssertTrue([SendRawRequest(dav.port, @"GET /latest/app.txt HTTP/1.1\r\nHost: localhost\r\n\r\n") containsString:@"BUILD"], @"reading through a symlink stopped working");
+
+    // The listing now advertises it, classified as the directory it points at.
+    NSString* listing = SendRawRequest(dav.port, @"PROPFIND / HTTP/1.1\r\nHost: localhost\r\nDepth: 1\r\n\r\n");
+    XCTAssertTrue([listing containsString:@"latest"], @"a served symlink must appear in the listing: %@", [listing substringToIndex:MIN((NSUInteger)200, listing.length)]);
+    // ...but one pointing OUT of the share is not servable, so it is not advertised either.
+    XCTAssertFalse([listing containsString:@"escape"], @"a symlink out of the share must not be advertised");
+
+    // DELETE removes the ALIAS and preserves the target.
+    NSString* deleted = SendRawRequest(dav.port, @"DELETE /latest HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([deleted hasPrefix:@"HTTP/1.1 204"], @"deleting a symlink should succeed: %@", [deleted substringToIndex:MIN((NSUInteger)40, deleted.length)]);
+    struct stat info;
+    XCTAssertNotEqual(lstat([[dir stringByAppendingPathComponent:@"latest"] fileSystemRepresentation], &info), 0, @"the link itself was not removed");
+    XCTAssertTrue([fm fileExistsAtPath:[build stringByAppendingPathComponent:@"app.txt"]], @"deleting the alias destroyed the target it pointed at");
+
+    // MOVE renames the alias rather than the target.
+    XCTAssertTrue([fm createSymbolicLinkAtPath:[dir stringByAppendingPathComponent:@"current"] withDestinationPath:@"build" error:NULL]);
+    NSString* moved = SendRawRequest(dav.port, @"MOVE /current HTTP/1.1\r\nHost: localhost\r\nDestination: /renamed\r\n\r\n");
+    XCTAssertTrue([moved hasPrefix:@"HTTP/1.1 201"], @"moving a symlink should succeed: %@", [moved substringToIndex:MIN((NSUInteger)40, moved.length)]);
+    XCTAssertEqual(lstat([[dir stringByAppendingPathComponent:@"renamed"] fileSystemRepresentation], &info), 0, @"the renamed alias is missing");
+    XCTAssertTrue([fm fileExistsAtPath:build], @"the move relocated the target instead of the alias");
+
+    // Moving ONTO an alias replaces the alias, not what it points at — the destination side.
+    XCTAssertTrue([@"NEW" writeToFile:[dir stringByAppendingPathComponent:@"new.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    NSString* onto = SendRawRequest(dav.port, @"MOVE /new.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /renamed\r\nOverwrite: T\r\n\r\n");
+    XCTAssertTrue([onto hasPrefix:@"HTTP/1.1 204"], @"moving onto a symlink should replace it: %@", [onto substringToIndex:MIN((NSUInteger)40, onto.length)]);
+    XCTAssertTrue([fm fileExistsAtPath:[build stringByAppendingPathComponent:@"app.txt"]], @"moving onto an alias destroyed the directory it pointed at");
+    XCTAssertEqualObjects([NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:@"renamed"] encoding:NSUTF8StringEncoding error:NULL], @"NEW", @"the alias was not replaced by the moved file");
+
+    // CONTAINMENT MUST BE EXACTLY AS STRONG. The parent is still resolved, so a write or a read
+    // through a link that leaves the share is still refused, and the outside file is untouched.
+    XCTAssertTrue([SendRawRequest(dav.port, @"PUT /escape/planted.txt HTTP/1.1\r\nHost: localhost\r\nContent-Length: 3\r\n\r\nBAD") hasPrefix:@"HTTP/1.1 403"], @"a write through an escaping symlink must still be refused");
+    XCTAssertFalse([fm fileExistsAtPath:[outside stringByAppendingPathComponent:@"planted.txt"]], @"a write landed outside the share");
+    XCTAssertFalse([SendRawRequest(dav.port, @"GET /escape/o.txt HTTP/1.1\r\nHost: localhost\r\n\r\n") containsString:@"SECRET"], @"a read through an escaping symlink must still be refused");
+    XCTAssertTrue([SendRawRequest(dav.port, @"DELETE /escape/o.txt HTTP/1.1\r\nHost: localhost\r\n\r\n") hasPrefix:@"HTTP/1.1 403"], @"a delete through an escaping symlink must still be refused");
+    XCTAssertTrue([fm fileExistsAtPath:[outside stringByAppendingPathComponent:@"o.txt"]], @"a delete reached outside the share");
+
+    [dav stop];
+    [fm removeItemAtPath:parent error:NULL];
 }
 
 // -skipDescendants is defined for the most recently returned SUBDIRECTORY. Both subtree walks called
