@@ -87,6 +87,46 @@ and the Bonjour/`.local` name only, so without it every request is refused with 
 
 ## Recent Changes
 
+### WebDAV class 1, part one: PROPFIND completeness and method semantics
+
+WebDAV was only partially promised in the original README, so this is **new capability rather than
+repair** — the gaps below are undocumented scope, not regressions. Split from `PROPPATCH`, which
+needs a dead-property storage design of its own, so each half stays reviewable.
+
+**A property that cannot be returned now gets its own propstat with 404.** The old model was a
+bitmask of the four live properties and an unrecognised name was logged and dropped, so a client
+asking for three properties and receiving one was told `HTTP/1.1 200 OK` over a `<prop>` that
+silently omitted the rest — unable to tell "this property does not exist here" from "it exists and is
+empty", which is the distinction the propstat structure exists to draw. Requested names are now
+remembered, with their namespace, so a client asking in its own namespace sees that name back rather
+than a `DAV:`-qualified guess.
+
+**`<propname/>` is supported** — it returns the names with empty values, and used to be refused with
+400, telling a client its perfectly legal request was malformed.
+
+**`Depth: infinity` on PROPFIND answers 403 with `<DAV:propfind-finite-depth/>`**, the
+machine-readable precondition RFC 4918 §9.1 defines for exactly this refusal, instead of a bare 400.
+
+**`Depth: 0` is accepted on COPY and DELETE.** For a resource with no internal members it cannot mean
+anything else, and refusing it meant a client that sets Depth uniformly could not delete or copy a
+single FILE at all. An unrecognised Depth is still refused.
+
+**`Allow` is sent on OPTIONS and on the 405**, the latter required by RFC 9110 §15.5.6.
+
+**⚠️ The trace corpus needed re-recording, exactly as predicted, and one recording was a lie worth
+keeping.** Four OPTIONS recordings gained the `Allow` header. The fifth is the interesting one:
+Finder asks for four quota properties, and the recorded response was `207` carrying
+`<D:propstat><D:prop></D:prop><D:status>HTTP/1.1 200 OK</D:status>` — "OK" over nothing. That is the
+dishonesty this change fixes, preserved in the corpus since 2014. Re-recorded by reconstructing the
+body and **validating the method against the OLD byte count first** (208 reconstructed = 208
+recorded) before trusting the new one (364 = 364 emitted).
+
+**A live Apple WebDAV client was driven against the change**, because CLAUDE.md records that the
+corpus proves recorded replay and "cannot prove live-client tolerance" — the class that broke Finder
+when the sixth pass first tightened `If-Range`. Mounted with `mount_webdav`, then list, read, write,
+read-back, mkdir, rename, delete and rmdir all succeeded, and it unmounted clean.
+
+
 ### Symlinks are aliases: decided semantics, not a defect fix
 
 Two owner decisions, implemented together because the eleventh pass's skeptic established that source
