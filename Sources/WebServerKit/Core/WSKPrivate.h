@@ -277,6 +277,7 @@ extern NSString *WSKStringFromSockAddr(const struct sockaddr *addr, BOOL include
 @property (nonatomic, readonly) BOOL shouldAutomaticallyMapHEADToGET;
 @property (nonatomic, readonly) dispatch_queue_priority_t dispatchQueuePriority;
 @property (nonatomic, readonly) NSTimeInterval connectionIdleTimeout;
+@property (nonatomic, readonly) NSTimeInterval connectionKeepAliveTimeout;
 - (void)willStartConnection:(WSKConnection *)connection;
 - (void)didEndConnection:(WSKConnection *)connection;
 @end

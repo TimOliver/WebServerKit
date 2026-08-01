@@ -71,6 +71,7 @@ NSString *const WSKOption_AutomaticallyMapHEADToGET = @"AutomaticallyMapHEADToGE
 NSString *const WSKOption_ConnectedStateCoalescingInterval = @"ConnectedStateCoalescingInterval";
 NSString *const WSKOption_DispatchQueuePriority = @"DispatchQueuePriority";
 NSString *const WSKOption_ConnectionIdleTimeout = @"ConnectionIdleTimeout";
+NSString *const WSKOption_ConnectionKeepAliveTimeout = @"ConnectionKeepAliveTimeout";
 #if TARGET_OS_IPHONE
 NSString *const WSKOption_AutomaticallySuspendInBackground = @"AutomaticallySuspendInBackground";
 #endif
@@ -580,6 +581,7 @@ static NSString *_ValidateOptions(NSDictionary<NSString *, id> *options) {
         WSKOption_ConnectedStateCoalescingInterval: [NSNumber class],
         WSKOption_DispatchQueuePriority: [NSNumber class],
         WSKOption_ConnectionIdleTimeout: [NSNumber class],
+        WSKOption_ConnectionKeepAliveTimeout: [NSNumber class],
 #if TARGET_OS_IPHONE
         WSKOption_AutomaticallySuspendInBackground: [NSNumber class],
 #endif
@@ -859,6 +861,7 @@ static inline NSString *_EncodeBase64(NSString *string) {
     _disconnectDelay = [(NSNumber *)_GetOption(_options, WSKOption_ConnectedStateCoalescingInterval, @1.0) doubleValue];
     _dispatchQueuePriority = [(NSNumber *)_GetOption(_options, WSKOption_DispatchQueuePriority, @(DISPATCH_QUEUE_PRIORITY_DEFAULT)) longValue];
     _connectionIdleTimeout = [(NSNumber *)_GetOption(_options, WSKOption_ConnectionIdleTimeout, @30.0) doubleValue];
+    _connectionKeepAliveTimeout = [(NSNumber *)_GetOption(_options, WSKOption_ConnectionKeepAliveTimeout, @0.0) doubleValue];
 
     _source4 = [self _createDispatchSourceWithListeningSocket:listeningSocket4 isIPv6:NO];
     _source6 = [self _createDispatchSourceWithListeningSocket:listeningSocket6 isIPv6:YES];
