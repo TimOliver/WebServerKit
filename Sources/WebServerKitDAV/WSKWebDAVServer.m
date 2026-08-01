@@ -606,7 +606,25 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
 // Every method this server implements. RFC 9110 §15.5.6 requires an Allow header on a 405, and
 // §10.2.1 recommends one on OPTIONS; a client discovering capabilities from OPTIONS otherwise has
 // to guess. Kept beside performOPTIONS: so adding a verb without advertising it is visible here.
-static NSString *const kDAVAllowedMethods = @"OPTIONS, HEAD, GET, PUT, DELETE, MKCOL, PROPFIND, COPY, MOVE, LOCK, UNLOCK";
+// PROPPATCH was implemented by the class-1 work and never added here, so capability discovery
+// disagreed with routing: a client reading OPTIONS concluded the method was unavailable and never
+// tried it, while the server would have answered it perfectly well.
+static NSString *const kDAVAllowedMethods = @"OPTIONS, HEAD, GET, PUT, DELETE, MKCOL, PROPFIND, PROPPATCH, COPY, MOVE, LOCK, UNLOCK";
+
+// RFC 9110 §15.5.6 makes Allow mandatory on a 405. Every site answering one goes through here so
+// a refusal added later cannot forget it — the omission this replaces was in two of the four.
+static WSKResponse *_MethodNotAllowed(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
+
+static WSKResponse *_MethodNotAllowed(NSString *format, ...) {
+    va_list arguments;
+    va_start(arguments, format);
+    NSString *const message = [[NSString alloc] initWithFormat:format arguments:arguments];
+    va_end(arguments);
+
+    WSKResponse *const response = [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_MethodNotAllowed message:@"%@", message];
+    [response setValue:kDAVAllowedMethods forAdditionalHeader:@"Allow"];
+    return response;
+}
 
 - (WSKResponse *)performOPTIONS:(WSKRequest *)request {
     WSKResponse *response = [WSKResponse response];
@@ -717,9 +735,7 @@ static NSString *const kDAVAllowedMethods = @"OPTIONS, HEAD, GET, PUT, DELETE, M
     BOOL existing = [[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory];
 
     if (existing && isDirectory) {
-        WSKResponse *const notAllowed = [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_MethodNotAllowed message:@"PUT not allowed on existing collection \"%@\"", relativePath];
-        [notAllowed setValue:kDAVAllowedMethods forAdditionalHeader:@"Allow"];  // Required on a 405 by RFC 9110 §15.5.6.
-        return notAllowed;
+        return _MethodNotAllowed(@"PUT not allowed on existing collection \"%@\"", relativePath);
     }
 
     NSString *const fileName = [absolutePath lastPathComponent];
@@ -891,9 +907,33 @@ static NSString *const kDAVAllowedMethods = @"OPTIONS, HEAD, GET, PUT, DELETE, M
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Creating directory \"%@\" is not permitted", relativePath];
     }
 
+    // RFC 4918 §9.3.1: a URL that already identifies a resource MUST answer 405, not a 5xx.
+    // createDirectoryAtPath:withIntermediateDirectories:NO reports EEXIST as
+    // NSFileWriteFileExistsError, which WSKServerErrorStatusCodeForError does not recognise, so it
+    // fell through to 500 — and "MKCOL each ancestor, treat 405 as already-exists" is how every
+    // client creates a tree, so a 5xx reads as "the server broke" and the whole copy aborts.
+    // Keyed on the RESOLVED path so it asks about the same entry creation will attempt, and placed
+    // after the permission checks so an existing item the caller may not touch still reports the
+    // refusal rather than its existence. Tested against an existing FILE as well as a collection:
+    // §9.3.1 says "resource", not "collection", and both took the 500 branch.
+    if ([[NSFileManager defaultManager] fileExistsAtPath:absolutePath]) {
+        return _MethodNotAllowed(@"Collection \"%@\" already exists", relativePath);
+    }
+
     NSError *error = nil;
 
     if (![[NSFileManager defaultManager] createDirectoryAtPath:absolutePath withIntermediateDirectories:NO attributes:nil error:&error]) {
+        // The preflight above cannot close the window between asking and creating, so an entry
+        // that appears in it must still answer 405 rather than the 500 the mapping would give.
+        for (NSError *candidate = error; candidate != nil; candidate = candidate.userInfo[NSUnderlyingErrorKey]) {
+            BOOL const cocoaExists = [candidate.domain isEqualToString:NSCocoaErrorDomain] && (candidate.code == NSFileWriteFileExistsError);
+            BOOL const posixExists = [candidate.domain isEqualToString:NSPOSIXErrorDomain] && (candidate.code == EEXIST);
+
+            if (cocoaExists || posixExists) {
+                return _MethodNotAllowed(@"Collection \"%@\" already exists", relativePath);
+            }
+        }
+
         return [WSKErrorResponse responseWithServerError:WSKServerErrorStatusCodeForError(error) underlyingError:error message:@"Failed creating directory \"%@\"", relativePath];
     }
 
@@ -931,12 +971,22 @@ static NSString *const kDAVAllowedMethods = @"OPTIONS, HEAD, GET, PUT, DELETE, M
 }
 
 - (WSKResponse *)performCOPY:(WSKRequest *)request isMove:(BOOL)isMove {
+    // RFC 4918 §9.8.3: "Depth: 0" copies the collection itself WITHOUT its members, and an absent
+    // header means infinity. The value was validated and then discarded — the implementation
+    // always did a recursive copy — so a client asking for a shallow copy was answered 201 and
+    // silently handed the whole subtree. Silently doing an approximation of what was asked is the
+    // outcome this project refuses everywhere else, and for Shape A a collection of builds is not
+    // a cheap thing to duplicate by accident.
+    BOOL shallowCopy = NO;
+
     if (!isMove) {
-        NSString *const depthHeader = request.headers[@"Depth"];  // TODO: Support "Depth: 0"
+        NSString *const depthHeader = request.headers[@"Depth"];
 
         if (depthHeader && !_HeaderTokenIs(depthHeader, @"infinity") && !_HeaderTokenIs(depthHeader, @"0")) {
             return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"Unsupported 'Depth' header: %@", depthHeader];
         }
+
+        shallowCopy = _HeaderTokenIs(depthHeader, @"0");
     }
 
     NSString *const srcRelativePath = request.path;
@@ -1140,6 +1190,19 @@ static NSString *const kDAVAllowedMethods = @"OPTIONS, HEAD, GET, PUT, DELETE, M
             }
 
             return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden underlyingError:error message:@"Failed moving \"%@\" to \"%@\"", srcRelativePath, dstRelativePath];
+        }
+    } else if (shallowCopy && srcIsDirectory) {
+        // The collection without its members. Built under the same staging name and swapped in by
+        // the same exclusive path as every other spelling, so the destination is replaced only if
+        // it was vetted — a separate "just mkdir it" shortcut here would sidestep that.
+        // Deliberately NOT applied to a plain file: it has no internal members, so Depth: 0 and
+        // Depth: infinity mean the same thing and copying the bytes is the only sensible reading.
+        if (![fileManager createDirectoryAtPath:writePath withIntermediateDirectories:NO attributes:nil error:&error]) {
+            if (WSKServerErrorStatusCodeForError(error) == kWSKHTTPStatusCode_InsufficientStorage) {
+                return [WSKErrorResponse responseWithServerError:kWSKHTTPStatusCode_InsufficientStorage underlyingError:error message:@"Failed copying \"%@\" to \"%@\"", srcRelativePath, dstRelativePath];
+            }
+
+            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden underlyingError:error message:@"Failed copying \"%@\" to \"%@\"", srcRelativePath, dstRelativePath];
         }
     } else {
         if (![fileManager copyItemAtPath:srcAbsolutePath toPath:writePath error:&error]) {
@@ -1507,7 +1570,11 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
         depth = 0;
     } else if ([depthHeader isEqualToString:@"1"]) {
         depth = 1;
-    } else if (_HeaderTokenIs(depthHeader, @"infinity")) {
+    } else if ((depthHeader == nil) || _HeaderTokenIs(depthHeader, @"infinity")) {
+        // RFC 4918 §9.1: an absent Depth on PROPFIND means "infinity". It fell through to the
+        // bare 400 below, telling a client its perfectly legal request was malformed rather than
+        // that it should retry with a bounded depth — the same rule as the explicit spelling,
+        // enforced at only one of its two spellings.
         // RFC 4918 §9.1: a server that refuses an infinite-depth PROPFIND SHOULD answer 403 with
         // the DAV:propfind-finite-depth precondition, which is machine-readable and tells the
         // client to retry with a bounded depth. A bare 400 says only "malformed", which this is not.
@@ -1673,7 +1740,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
     // single out. If a genuinely concurrent client ever matters, the cheap version is an in-memory
     // path -> token map enforced on the destructive verbs, accepting only "If: (<token>)".
     if (!_IsMacFinder(request)) {
-        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_MethodNotAllowed message:@"LOCK method only allowed for Mac Finder"];
+        return _MethodNotAllowed(@"LOCK method only allowed for Mac Finder");
     }
 
     // The Host header is required because it is interpolated into the <D:lockroot>
@@ -1821,7 +1888,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
 
 - (WSKResponse *)performUNLOCK:(WSKRequest *)request {
     if (!_IsMacFinder(request)) {
-        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_MethodNotAllowed message:@"UNLOCK method only allowed for Mac Finder"];
+        return _MethodNotAllowed(@"UNLOCK method only allowed for Mac Finder");
     }
 
     NSString *const relativePath = request.path;
