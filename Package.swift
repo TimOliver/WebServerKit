@@ -18,12 +18,19 @@ let coreSources: [CSetting] = [
     .headerSearchPath("Responses")
 ]
 
-// The .m files in the sibling targets import core headers by bare filename, which SwiftPM
-// does not resolve for a dependency. This points at the symlink directory rather than at
-// Core/Requests/Responses on purpose: reaching the same header by two different paths makes
-// clang treat it as two files and fail with "duplicate interface definition".
+// The .m files in the sibling targets import core headers by bare filename, which SwiftPM does not
+// resolve for a dependency.
+//
+// Core/ is listed as well as the symlink directory so the siblings can reach WSKPrivate.h, which is
+// deliberately NOT in the farm. An older comment here warned that reaching the same header by two
+// paths makes clang treat it as two files and fail with "duplicate interface definition" — that was
+// MEASURED against this toolchain and did not reproduce, with a sibling importing WSKPrivate.h and
+// an external SwiftPM consumer building clean. It may well have been true when written. The check
+// that would catch a regression is an out-of-package consumer, because `swift build` inside this
+// package can reach every header regardless.
 let coreFromSibling: [CSetting] = [
-    .headerSearchPath("../WebServerKit/include/WebServerKit")
+    .headerSearchPath("../WebServerKit/include/WebServerKit"),
+    .headerSearchPath("../WebServerKit/Core")
 ]
 
 let package = Package(
