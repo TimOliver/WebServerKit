@@ -1323,7 +1323,9 @@ static BOOL gAbortRequestSawVirtualHEAD = NO;
 
     BOOL sawEOF = NO;
     NSString* reply = [[NSString alloc] initWithData:ReadToEOF(fd, &sawEOF) encoding:NSUTF8StringEncoding];
-    XCTAssertTrue(([reply containsString:@"500"] || [reply containsString:@"400"]), @"server did not reject unbounded chunk framing (reply: %@)", reply);
+    // Tightened from "500 or 400": the framing bound is a size limit, so 413 is what it owes, and
+    // that is now what it sends. The loose form was written when every body failure was 500.
+    XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 413"], @"server did not reject unbounded chunk framing with 413 (reply: %@)", reply);
     close(fd);
     [server stop];
 }
@@ -2984,6 +2986,93 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 
     [server stop];
     [fm removeItemAtPath:dir error:NULL];
+}
+
+// Every way a request body could be refused answered 500. The fixed-length and chunked readers
+// report failure as a plain BOOL, and every error they carried was `code:-1` distinguished only by
+// its localized description, so the connection had nothing to key on.
+//
+// 500 is a claim that the SERVER broke. It tells a client to retry something that can never succeed
+// (malformed chunk framing, a corrupt gzip stream) and makes it give up on something that could (a
+// momentarily exhausted budget). Each of these now answers what it owes.
+- (void)testRequestBodyRefusalsAnswerTheirOwnStatus {
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addHandlerForMethod:@"POST"
+                           path:@"/echo"
+                   requestClass:[WSKDataRequest class]
+                   processBlock:^WSKResponse*(WSKRequest* request) {
+                       return [WSKDataResponse responseWithText:@"OK"];
+                   }];
+    [server addHandlerForMethod:@"POST"
+                           path:@"/form"
+                   requestClass:[WSKMultiPartFormRequest class]
+                   processBlock:^WSKResponse*(WSKRequest* request) {
+                       return [WSKDataResponse responseWithText:@"OK"];
+                   }];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    // A chunk-size line that is not a hex number at all. The client's framing is wrong, so 400.
+    NSString* badChunk = SendRawRequest(server.port, @"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nabcd\r\n0\r\n\r\n");
+    XCTAssertTrue([badChunk hasPrefix:@"HTTP/1.1 400"], @"a malformed chunk length is the client's error: %@", [badChunk substringToIndex:MIN((NSUInteger)40, badChunk.length)]);
+
+    // A gzip stream that satisfies its Content-Length but stops part-way through. Also the client's.
+    NSData* full = GZipCompress([NSMutableData dataWithLength:(64 * 1024)]);
+    XCTAssertGreaterThan(full.length, (NSUInteger)20);
+    NSData* prefix = [full subdataWithRange:NSMakeRange(0, 20)];
+    NSMutableData* truncated = [[[NSString stringWithFormat:@"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nContent-Encoding: gzip\r\nContent-Length: %lu\r\n\r\n", (unsigned long)prefix.length] dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+    [truncated appendData:prefix];
+    NSString* truncatedReply = SendRawDataRequest(server.port, truncated);
+    XCTAssertTrue([truncatedReply hasPrefix:@"HTTP/1.1 400"], @"a truncated gzip body is the client's error: %@", [truncatedReply substringToIndex:MIN((NSUInteger)40, truncatedReply.length)]);
+
+    // A body larger than the in-memory cap is a size problem, so 413 — not "the server broke".
+    WSKSetMemoryLimitsForTesting(4 * 1024, 4 * 1024, 1024 * 1024);
+    [self addTeardownBlock:^{
+        WSKSetMemoryLimitsForTesting(0, 0, 0);
+    }];
+
+    NSMutableString* big = [NSMutableString string];
+
+    while (big.length < 32 * 1024) {
+        [big appendString:@"0123456789abcdef"];
+    }
+
+    NSString* oversized = SendRawRequest(server.port, [NSString stringWithFormat:@"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)big.length, big]);
+    XCTAssertTrue([oversized hasPrefix:@"HTTP/1.1 413"], @"an oversized body owes 413: %@", [oversized substringToIndex:MIN((NSUInteger)40, oversized.length)]);
+
+    // A chunk whose DATA is not followed by CRLF. A different branch from the bad size line above,
+    // seventeen lines away in the same loop, and it was the one left answering 500 — which is why
+    // both spellings are asserted rather than trusting that one covers the class.
+    NSString* badTerminator = SendRawRequest(server.port, @"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nabcdXX\r\n0\r\n\r\n");
+    XCTAssertTrue([badTerminator hasPrefix:@"HTTP/1.1 400"], @"a chunk not terminated by CRLF is the client's error: %@", [badTerminator substringToIndex:MIN((NSUInteger)40, badTerminator.length)]);
+
+    // A multipart body with no usable boundary fails in -open:, whose error both readers used to
+    // discard before aborting with a hardcoded 500.
+    NSString* noBoundary = SendRawRequest(server.port, @"POST /form HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data\r\nContent-Length: 4\r\n\r\nxxxx");
+    XCTAssertTrue([noBoundary hasPrefix:@"HTTP/1.1 400"], @"a multipart body with no boundary is malformed: %@", [noBoundary substringToIndex:MIN((NSUInteger)40, noBoundary.length)]);
+
+    // The multipart parser fails for seven unrelated reasons through one `return NO`. Coding them
+    // all as "malformed" — which the first version of this change did — turns a full disk and an
+    // exhausted budget into 400, the status that says NEVER SEND THIS AGAIN. It is the same
+    // mistake as answering 403 for ENOSPC, which this project fixed once already. A size cap must
+    // read as a size problem.
+    NSMutableString* part = [NSMutableString stringWithString:@"--B\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\n"];
+
+    while (part.length < 32 * 1024) {
+        [part appendString:@"0123456789abcdef"];
+    }
+
+    [part appendString:@"\r\n--B--\r\n"];
+    NSString* oversizedPart = SendRawRequest(server.port, [NSString stringWithFormat:@"POST /form HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data; boundary=B\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)part.length, part]);
+    XCTAssertTrue([oversizedPart hasPrefix:@"HTTP/1.1 413"], @"a multipart body over the size cap owes 413, not a permanent 400: %@", [oversizedPart substringToIndex:MIN((NSUInteger)40, oversizedPart.length)]);
+
+    // And the half that must keep working: a body inside the cap is still served normally. A
+    // status-mapping change is exactly where an over-refusal would hide.
+    NSString* fine = SendRawRequest(server.port, @"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nContent-Length: 5\r\n\r\nhello");
+    XCTAssertTrue([fine hasPrefix:@"HTTP/1.1 200"], @"an ordinary body is unaffected: %@", [fine substringToIndex:MIN((NSUInteger)40, fine.length)]);
+    XCTAssertTrue([fine hasSuffix:@"OK"], @"…and reaches the handler");
+
+    [server stop];
 }
 
 // Connection reuse, and the restriction that makes it safe. A client normally pays a TCP handshake

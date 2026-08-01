@@ -56,7 +56,7 @@
 
     if (_data == nil) {
         if (error) {
-            *error = [NSError errorWithDomain:kWSKErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: @"Failed allocating memory"}];
+            *error = [NSError errorWithDomain:kWSKErrorDomain code:kWSKRequestBodyError_Internal userInfo:@{NSLocalizedDescriptionKey: @"Failed allocating memory"}];
         }
 
         return NO;
@@ -72,7 +72,7 @@
         WSK_LOG_ERROR(@"Request body exceeds the %lu byte in-memory limit", (unsigned long)WSKMaxInMemoryBodyLength());
 
         if (error) {
-            *error = [NSError errorWithDomain:kWSKErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: @"Request body exceeds maximum in-memory size"}];
+            *error = [NSError errorWithDomain:kWSKErrorDomain code:kWSKRequestBodyError_TooLarge userInfo:@{NSLocalizedDescriptionKey: @"Request body exceeds maximum in-memory size"}];
         }
 
         return NO;
@@ -84,7 +84,7 @@
         WSK_LOG_ERROR(@"Refusing request body: the server is already holding its %lu byte in-memory limit across all connections", (unsigned long)kWSKMaxTotalInMemoryLength);
 
         if (error) {
-            *error = [NSError errorWithDomain:kWSKErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: @"Server is at its total in-memory capacity"}];
+            *error = [NSError errorWithDomain:kWSKErrorDomain code:kWSKRequestBodyError_ServerAtCapacity userInfo:@{NSLocalizedDescriptionKey: @"Server is at its total in-memory capacity"}];
         }
 
         return NO;

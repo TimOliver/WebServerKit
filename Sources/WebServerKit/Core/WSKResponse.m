@@ -33,7 +33,6 @@
 
 #import "WSKPrivate.h"
 
-#define kZlibErrorDomain @"ZlibErrorDomain"
 #define kGZipInitialBufferSize (256 * 1024)
 
 @interface WSKBodyEncoder : NSObject <WSKBodyReader>
