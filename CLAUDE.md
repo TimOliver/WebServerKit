@@ -87,6 +87,106 @@ and the Bonjour/`.local` name only, so without it every request is refused with 
 
 ## Recent Changes
 
+### An outside audit, and three PRs: what an independent reader found, and what it got wrong
+
+**A second AI agent (Codex) audited tip independently and produced 23 findings.** It never ran the
+code — its sandbox blocked `xcodebuild`, which it stated plainly — so every finding was unreproduced
+reading. Each was then verified against the source, and the ones that survived went to a skeptic
+briefed to refute them.
+
+| | count | |
+|---|---|---|
+| Refuted at verification | 2 | the two crash claims |
+| Documented deliberate choices | 3 | re-found, not new |
+| Killed by the skeptic | 3 | including its headline P0 |
+| **Survived** | **5** | |
+| Confirmed/partly but **never skeptic-checked** | 10 | fan-out was capped; treat as leads |
+
+**All four of its P0s are gone.** The hit rate — 5 solid out of 23 — is indistinguishable from this
+project's own recorded 1-in-3, which is the useful result: *an outside reader is not more reliable,
+only differently blind.* What it was genuinely good at was independently re-finding known-opens
+(MKCOL 405, the `Allow` gaps, the cached `_resolvedUploadDirectory`, the SSE prefix boundary,
+direct-`HEAD`-with-body) — agreement between two unrelated readers is a much stronger signal than
+either alone.
+
+**⚠️ Twice more, a finding named the wrong cause while pointing at something real.** That is now
+five times. Its P0 said `Overwrite` was compared with `-isEqualToString:@"F"` — the tenth pass fixed
+exactly that, and `_HeaderTokenIs` is right there. What survives is only that COPY treats an invalid
+value as permission, and RFC 4918 §10.6 makes an ABSENT `Overwrite` mean `T`, so "garbage" grants an
+attacker nothing over the conformant default request. **I repeated the error downstream**, reporting
+it to the owner as a live fail-open before the skeptic corrected me. And its foreground-restart
+finding I called "a regression of mine"; `git log -L` shows that site is untouched original upstream
+code. Read the history before assigning blame, including to yourself.
+
+**The real finding underneath it is still this codebase's signature shape.** There are two sibling
+methods: `-_reconnectInForeground:` got the error handling, and `-_willEnterForeground:` — the
+**default** path — still has `[self _start:NULL]` under a TODO saying nothing can be done. The fix
+landed on the opt-in configuration. Still open.
+
+Three PRs followed (#70, #71, #72).
+
+**WebDAV status conformance (#70).** `MKCOL` on an existing resource answered 500 — `EEXIST` arrives
+as `NSFileWriteFileExistsError`, which the error mapping does not recognise — where §9.3.1 requires
+405; "MKCOL each ancestor, treat 405 as already-exists" is how every client builds a tree, so a 5xx
+aborts the whole copy. An existing **file** takes the same path and is also a §9.3.1 case, which the
+finding missed. `PROPFIND` with no `Depth` answered 400 though §9.1 makes it mean `infinity` and the
+explicit spelling already answers 403 with `propfind-finite-depth`. `COPY` validated `Depth: 0` and
+then discarded it, always copying recursively. And `Allow` omitted `PROPPATCH` while `LOCK`/`UNLOCK`
+405s carried no `Allow` at all; all four 405 sites now go through one helper.
+
+**Uploader media serving (#71).** `/download` passed `NSMakeRange(NSUIntegerMax, 0)` and so **ignored
+`Range` entirely** — 200 and the whole file for every range, including an unsatisfiable one. The
+base-path handler and DAV's `GET` have passed `byteRange`/`ifRange` for several passes; this was the
+one file-vending surface that never did, so an interrupted build download could not resume. Same
+shape, again. `/preview` is a new inert-media-only inline endpoint: inline content runs in the
+server's own origin and this UI's buttons delete and move files, so serving an uploaded `.html`
+inline is stored XSS against the share. **SVG is excluded deliberately** — it is the one image that
+carries and runs script, so "anything beginning `image/`" admits exactly the wrong thing.
+`fileCacheControlMaxAge` is opt-in and defaults to 0.
+
+**Connection reuse (#72).** `WSKOption_ConnectionKeepAliveTimeout`, **defaulting to 0**, so nothing
+changes until a deployment opts in. Reuse is restricted to requests carrying **no body framing at
+all**, and that restriction is the design rather than a simplification: smuggling is a disagreement
+about where a body ends, so a connection on which no body is ever read cannot be desynchronized —
+the guarantee this file already relies on stays *structural* instead of becoming "we parse
+carefully". Measured 0.515 → 0.377 ms/request, 26.7% on loopback, where the handshake is nearly
+free; on a real link it is about one RTT per request.
+
+**Four lessons worth more than the fixes.**
+
+**A test that still passes when you delete the code it tests is not a test.** The first keep-alive
+reclaim test passed with the entire idle branch removed — it was measuring the pre-existing
+slowloris deadline. Both security-critical assertions in #71 and #72 were then verified by breaking
+the implementation and watching them fail: deleting the SVG exclusion produces `200 OK` with
+`alert(1)` in the body; removing the bodyless restriction makes `Content-Length` and
+`Transfer-Encoding: identity` reusable.
+
+**Messaging nil returns a ZEROED struct, and a check that fails safe can disable a feature in
+silence.** `[_request.headers[@"Connection"] rangeOfString:@"close"].location != NSNotFound` was true
+for every request that omitted the header — so keep-alive refused everything and was never on, while
+every functional test passed.
+
+**`-[WSKRequest hasBody]` is not "has body framing".** It keys on `_contentType`, and
+`Transfer-Encoding: identity` sets none — so `hasBody` answers NO for a request that *does* carry
+transfer-coding framing, which is the exact shape a TE.CL desync is built from. Gating reuse on it
+would have made that one shape the eligible one. Read the raw header names for any framing decision.
+
+**A dictionary literal inside `XCTAssertTrue()` splits on its commas.** Fourth occurrence. Hoist to a
+local.
+
+**Still open, unchanged in priority order:** the request-body error-status collapse (F2 — real and
+broader than the one instance recorded under "Aggregate in-memory budget"; needs a typed failure
+reason threaded through the body-read path); `_willEnterForeground:` above; `indexFilename` appended
+without re-resolving containment (host-app reachable only, every in-tree caller passes nil);
+`acceptsGzipContentEncoding` parsed by case-sensitive substring **and read by nothing in the
+library**; 501 where 404/405 belongs; and ten of Codex's findings that never saw a skeptic.
+
+**⚠️ This file is now past 2,450 lines and the consolidation drafted earlier is still not installed.**
+The extraction that produced it found **55 claims later work had overturned**. Codex was to have
+produced an independent consolidation to diff against; it tripped guardrails on the attempt and
+produced this audit instead, so that comparison never happened. The draft stands at 1,088 lines and
+is unreviewed by any second reader.
+
 ### Cleanup phase 3, group C: the public surface goes 27 → 7, and both reasons it could not were stale
 
 The last structural item. Fourteen audit-shaped functions — the resolvers, the vetting walks, the

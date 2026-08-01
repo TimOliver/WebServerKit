@@ -6,3 +6,4 @@ project.xcworkspace
 /.claude
 /.build
 /.swiftpm
+/AUDIT.md
