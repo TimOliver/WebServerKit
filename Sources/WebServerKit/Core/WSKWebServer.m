@@ -879,19 +879,24 @@ static inline NSString *_EncodeBase64(NSString *string) {
     NSString *const advertisedName = (bonjourName.length ? bonjourName : _serverName);
 
     if (advertisedName.length) {
-        [allowedHostNames addObject:[[advertisedName stringByAppendingString:@".local"] lowercaseString]];
+        [allowedHostNames addObject:[WSKHostNameWithoutRootLabel([advertisedName stringByAppendingString:@".local"]) lowercaseString]];
     }
 
     NSString *const machineName = [[NSProcessInfo processInfo] hostName];  // Typically "<device>.local"
 
     if (machineName.length) {
         // A trailing dot makes an mDNS name fully qualified; browsers send it without.
-        [allowedHostNames addObject:[[machineName hasSuffix:@"."] ? [machineName substringToIndex:(machineName.length - 1)] : machineName lowercaseString]];
+        [allowedHostNames addObject:[WSKHostNameWithoutRootLabel(machineName) lowercaseString]];
     }
 
+    // Normalized through the SAME helper the check side uses. Previously these entries were only
+    // lowercased, while the incoming Host had its root label stripped — so an entry written as a
+    // fully-qualified name ("puck.tailnet.ts.net.") could never match anything, and the server
+    // answered 421 to every request. That is the one option a Tailscale deployment is REQUIRED to
+    // set, so the failure presents as "the server just doesn't work".
     for (NSString *name in (NSArray *)_GetOption(_options, WSKOption_AllowedHostNames, @[])) {
         if ([name isKindOfClass:[NSString class]] && name.length) {
-            [allowedHostNames addObject:[name lowercaseString]];
+            [allowedHostNames addObject:[WSKHostNameWithoutRootLabel(name) lowercaseString]];
         }
     }
 
@@ -1576,7 +1581,7 @@ static NSString *_EscapeHTMLString(NSString *string) {
             // eighth passes each fixed in the other direction. A link out of the served root, or
             // a dangling one, classifies as nothing and stays unlisted, because that is what the
             // handler would refuse.
-            NSString *const type = WSKServableFileTypeAtPath([path stringByAppendingPathComponent:entry], path);
+            NSString *const type = WSKServableFileTypeAtPath([path stringByAppendingPathComponent:entry], path, includeHiddenItems);
 
             // Any process can delete the entry between the directory read above and this
             // stat, so a missing type is an ordinary race, not a logic error to assert on.

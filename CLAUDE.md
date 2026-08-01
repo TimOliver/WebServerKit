@@ -87,6 +87,56 @@ and the Bonjour/`.local` name only, so without it every request is refused with 
 
 ## Recent Changes
 
+### Structural cleanup, phase 1: the survey found live bugs before it moved a line of code
+
+The cleanup deferred since the fourteenth pass began, deliberately, with a **read-only inventory**:
+seven lenses over every rule implemented in more than one place. That ordering was the whole point —
+a mechanical sweep is exactly when a check quietly stops being enforced, and unifying two copies
+before knowing which one is *correct* cements whichever spelling was read first.
+
+**72 rules inventoried; 23 of them already disagree.** Those are not cleanup, they are latent
+defects, and four were measured from the network before anything was touched. All four reproduced.
+
+**A root-dotted `WSKOption_AllowedHostNames` entry admitted NOTHING — not even its own spelling.**
+The two sides of the allow-list had drifted: the check side strips the DNS root label from the
+incoming `Host`, the config side only lowercased the entry. So `puck.tailnet.ts.net.` — how DNS
+canonically writes a fully-qualified name — matched neither `puck.tailnet.ts.net.` (stripped on
+arrival) nor `puck.tailnet.ts.net`, and **every request answered 421**. That is the one option a
+Tailscale deployment is *required* to set, so it presents as "the server just doesn't work" in
+Shape A's only deployment. Measured 421/421 before, 200/200 after. The rule now has one home,
+`WSKHostNameWithoutRootLabel`, used by both sides.
+
+**All three listings advertised entries every handler refuses.** `WSKServableFileTypeAtPath` tested
+containment and never hiddenness, so a link whose own name carries no dot but which resolves inside
+a dot-directory was listed and then answered 403. Measured: listed YES, `GET` 403. This is the
+"advertise iff served" rule the sixth, eighth and fifteenth passes each restored in one direction or
+another, back in a third.
+
+**The uploader's follow-resolver had no NUL guard**, where DAV's has one *inside* the resolver under
+a comment saying it lives there "so a verb added later cannot forget it". Six per-endpoint
+pre-checks compensated, so behaviour matched only because every current caller remembered. Moved
+inside. No behaviour change today; what it removes is the requirement that the next endpoint
+remembers, which is how `POST /delete path=/Keep%00/x` once destroyed `/Keep`.
+
+**Two confirmed and deliberately NOT fixed here.** The uploader's read endpoints stat before
+resolving, so `404`-vs-`403` is an existence oracle for paths outside the share (measured: 403 when
+the out-of-share target exists, 404 when it does not; `/list` leaks the same way with 400/404) — a
+small reordering, but it belongs with the resolver unification rather than as a spot fix. And the
+extension allow-list judges the **alias** name in listings and the **resolved target's** name on
+access (measured: `alias.txt -> real.bin` listed then 403; `alias.bin -> real.txt` unlisted then
+served 200). That one is a **semantics decision, not a defect fix** — the "symlinks are aliases"
+ruling says a destructive verb acts on the named entry, but a *read* through an alias discloses the
+target, so judging the alias name alone would be a disclosure. The fail-closed answer is to require
+both names to pass, and that is the owner's call, exactly as the source/destination semantics were.
+
+**Verified together.** 140 tests and 0 failures on a clean build with no new warnings, the trace
+corpus green, and the probe sensitive in both directions on both fixes.
+
+**Phase 2 is the 48 rules that agree but are duplicated** — the safe half, where a mistake surfaces
+as a test failure rather than a behaviour change. Phase 3 is the API-shape debt (including the
+target visibility that would let several symbols leave the public `WSKFunctions.h`) and consolidating
+this file.
+
 ### Sixteenth pass: it was not green, and four of the findings were mine
 
 A full top-down re-run at the owner's request, to see whether the tree finally came back clean after

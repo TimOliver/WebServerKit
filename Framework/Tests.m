@@ -5081,4 +5081,66 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     }
 }
 
+
+#pragma mark - Cleanup phase 1: rules that had drifted apart
+
+// The two sides of the Host allow-list disagreed: the CHECK side strips the DNS root label from
+// the incoming header, the CONFIG side did not strip it from a WSKOption_AllowedHostNames entry.
+// So an entry written as a fully-qualified name matched NOTHING — not even its own spelling — and
+// every request answered 421. That is the one option a Tailscale deployment is required to set.
+- (void)testAllowedHostNameEntryIsHonouredWithOrWithoutItsRootLabel {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    [@"served" writeToFile:[dir stringByAppendingPathComponent:@"x.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addGETHandlerForBasePath:@"/" directoryPath:dir indexFilename:nil cacheAge:0 allowRangeRequests:YES];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES, WSKOption_AllowedHostNames : @[ @"puck.tailnet.ts.net." ]};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* dotted = SendRawRequest(server.port, @"GET /x.txt HTTP/1.1\r\nHost: puck.tailnet.ts.net.\r\n\r\n");
+    XCTAssertTrue([dotted containsString:@" 200"], @"the entry's own spelling must be admitted: %@", [dotted substringToIndex:MIN((NSUInteger)40, dotted.length)]);
+
+    NSString* plain = SendRawRequest(server.port, @"GET /x.txt HTTP/1.1\r\nHost: puck.tailnet.ts.net\r\n\r\n");
+    XCTAssertTrue([plain containsString:@" 200"], @"the spelling browsers send must be admitted: %@", [plain substringToIndex:MIN((NSUInteger)40, plain.length)]);
+
+    // A name that is genuinely not on the list must still be refused, or this passes by admitting all.
+    NSString* other = SendRawRequest(server.port, @"GET /x.txt HTTP/1.1\r\nHost: evil.example\r\n\r\n");
+    XCTAssertTrue([other containsString:@" 421"], @"an unlisted name must still be refused: %@", [other substringToIndex:MIN((NSUInteger)40, other.length)]);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// "Advertise iff served": WSKServableFileTypeAtPath tested containment and not hiddenness, so a
+// link whose own name carries no dot but which resolves INSIDE a dot-directory was advertised by
+// all three listings and then refused 403 by every handler. Measured before the fix.
+- (void)testListingDoesNotAdvertiseALinkResolvingIntoAHiddenDirectory {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    NSString* hidden = [dir stringByAppendingPathComponent:@".hidden"];
+    [fm createDirectoryAtPath:hidden withIntermediateDirectories:YES attributes:nil error:NULL];
+    [@"secret" writeToFile:[hidden stringByAppendingPathComponent:@"f.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    [fm createSymbolicLinkAtPath:[dir stringByAppendingPathComponent:@"pub.txt"] withDestinationPath:[hidden stringByAppendingPathComponent:@"f.txt"] error:NULL];
+    [@"ordinary" writeToFile:[dir stringByAppendingPathComponent:@"plain.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+
+    WSKWebUploader* uploader = [[WSKWebUploader alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([uploader startWithOptions:options error:NULL]);
+
+    NSString* listing = SendRawRequest(uploader.port, @"GET /list?path=%2F HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString* download = SendRawRequest(uploader.port, @"GET /download?path=%2Fpub.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+
+    BOOL const advertised = [listing containsString:@"pub.txt"];
+    BOOL const served = [download containsString:@" 200"];
+    NSString* const detail = [NSString stringWithFormat:@"advertised=%d served=%d", advertised, served];
+    XCTAssertEqual(advertised, served, @"a listing must advertise an entry if and only if the handler serves it: %@", detail);
+
+    // An ordinary file must still be listed, or this could pass by listing nothing.
+    XCTAssertTrue([listing containsString:@"plain.txt"], @"ordinary entries must still be advertised");
+
+    [uploader stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 @end
