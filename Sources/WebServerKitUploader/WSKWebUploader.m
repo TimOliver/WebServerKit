@@ -992,107 +992,11 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
 // containment check, the hidden-item rule and the refusal to act on the root all still apply, and
 // all still come from a single resolution.
 - (nullable NSString *)_namedEntryPathForRelativePath:(NSString *)relativePath hidden:(BOOL *)outHidden {
-    if (WSKPathContainsNULByte(relativePath)) {
-        return nil;
-    }
-
-    NSString *const normalizedPath = WSKNormalizePath(relativePath);
-
-    if (outHidden) {
-        *outHidden = NO;
-    }
-
-    // Naming the root itself is not something a destructive verb may act on, and there is no
-    // final component to preserve either.
-    if ((normalizedPath.length == 0) || [normalizedPath isEqualToString:@"/"]) {
-        return nil;
-    }
-
-    NSString *namedRelativePath = nil;
-    NSString *const namedPath = WSKResolveNamedEntryWithinDirectory([_uploadDirectory stringByAppendingPathComponent:normalizedPath], _uploadDirectory, &namedRelativePath);
-
-    if (namedPath == nil) {
-        return nil;
-    }
-
-    if (outHidden && !_allowHiddenItems) {
-        for (NSString *component in [normalizedPath pathComponents]) {
-            if ([component hasPrefix:@"."]) {
-                *outHidden = YES;
-                return namedPath;
-            }
-        }
-
-        for (NSString *component in [namedRelativePath pathComponents]) {
-            if ([component hasPrefix:@"."]) {
-                *outHidden = YES;
-                return namedPath;
-            }
-        }
-    }
-
-    return namedPath;
+    return WSKNamedEntryPathForRelativePath(relativePath, _uploadDirectory, _allowHiddenItems, outHidden);
 }
 
 - (nullable NSString *)_resolvedPathForRelativePath:(NSString *)relativePath hidden:(BOOL *)outHidden {
-    // The refusal lives HERE, not only in the callers, so a verb added later cannot forget it —
-    // which is exactly where DAV's equivalent puts it. Every current caller pre-checks as well, so
-    // this changes no behaviour today; what it removes is the requirement that the next one
-    // remembers. WSKNormalizePath truncates at a NUL, and acting on the truncated prefix is how
-    // "POST /delete path=/Keep%00/nonexistent" once destroyed /Keep and answered success.
-    if (WSKPathContainsNULByte(relativePath)) {
-        return nil;
-    }
-
-    NSString *const normalizedPath = WSKNormalizePath(relativePath);
-    NSString *resolvedRelativePath = nil;
-    NSString *const resolvedPath = WSKResolveWithinDirectory([_uploadDirectory stringByAppendingPathComponent:normalizedPath], _uploadDirectory, &resolvedRelativePath);
-
-    if (outHidden) {
-        *outHidden = NO;
-    }
-
-    if (resolvedPath == nil) {
-        return nil;
-    }
-
-    // A symlink that resolves to the share root itself is never what the client meant, and
-    // acting on it is catastrophic: every "not the root directory" guard in this file is
-    // evaluated on the path the client *typed*, then this resolved path is substituted for it,
-    // so "DELETE /self" passed a guard about "/self" and then removed the whole share. Measured:
-    // one unauthenticated request destroyed every file served, through DAV DELETE, DAV
-    // COPY/MOVE and the uploader's /delete alike, each answering 204 or 200.
-    //
-    // Refused here rather than re-checked at each destructive call site, so a site added later
-    // cannot forget it. Asking for the root *directly* is still allowed — listing it and
-    // uploading into it are ordinary operations — because that is the client naming the root
-    // rather than a link quietly landing on it.
-    BOOL const askedForRoot = (normalizedPath.length == 0) || [normalizedPath isEqualToString:@"/"];
-
-    if ((resolvedRelativePath.length == 0) && !askedForRoot) {
-        return nil;
-    }
-
-    if (outHidden && !_allowHiddenItems) {
-        // Both spellings: what the client typed, and where the bytes actually live. The first
-        // catches "/.git/config"; the second catches a symlink named "pub" pointing at ".git",
-        // which carries no dot at all in the path the client sent.
-        for (NSString *component in [normalizedPath pathComponents]) {
-            if ([component hasPrefix:@"."]) {
-                *outHidden = YES;
-                return resolvedPath;
-            }
-        }
-
-        for (NSString *component in [resolvedRelativePath pathComponents]) {
-            if ([component hasPrefix:@"."]) {
-                *outHidden = YES;
-                return resolvedPath;
-            }
-        }
-    }
-
-    return resolvedPath;
+    return WSKResolvedPathForRelativePath(relativePath, _uploadDirectory, _allowHiddenItems, outHidden);
 }
 
 // Map an absolute path inside the share back to the client-facing relative path used in
@@ -1180,19 +1084,14 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
 
     NSString *const relativePath = requestedPath ? requestedPath : @"/";
     NSString *const normalizedPath = WSKNormalizePath(relativePath);
-    NSString *absolutePath = [_uploadDirectory stringByAppendingPathComponent:normalizedPath];
     BOOL isDirectory = NO;
 
-    if (!absolutePath || ![[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory]) {
-        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
-    }
-
-    if (!isDirectory) {
-        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"\"%@\" is not a directory", relativePath];
-    }
-
-    // Verify the resolved location, not just the path text: a symlink somewhere inside
-    // the share can point out of it, and normalize/prefix checks cannot see that.
+    // Containment is confirmed BEFORE the item is stat'ed. Answering 404-vs-403 from a path that
+    // has not been vetted yet makes the status an existence oracle for the whole filesystem: a
+    // symlink pointing out of the share answered 403 when its target existed and 404 when it did
+    // not, so a client could probe for files it can never read. DAV has enforced and documented
+    // this ordering since the eighth pass; these two endpoints inverted it, and -deleteItem: in
+    // this same file gets it right — the rule disagreed with itself inside one server.
     BOOL isHidden = NO;
     NSString *const resolvedPath = [self _resolvedPathForRelativePath:relativePath hidden:&isHidden];
 
@@ -1202,6 +1101,16 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
 
     if (isHidden) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Listing hidden path \"%@\" is not allowed", relativePath];
+    }
+
+    NSString *absolutePath = resolvedPath;
+
+    if (![[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory]) {
+        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
+    }
+
+    if (!isDirectory) {
+        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"\"%@\" is not a directory", relativePath];
     }
 
     // Everything below enumerates the location that was just vetted, not the one the client
@@ -1263,18 +1172,14 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
     }
 
     NSString *const relativePath = requestedPath ? requestedPath : @"/";
-    NSString *absolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)];
     BOOL isDirectory = NO;
 
-    if (![[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory]) {
-        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
-    }
-
-    if (isDirectory) {
-        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"\"%@\" is a directory", relativePath];
-    }
-
-    // As in -listDirectory:, resolved once and served from that resolution.
+    // Containment is confirmed BEFORE the item is stat'ed. Answering 404-vs-403 from a path that
+    // has not been vetted yet makes the status an existence oracle for the whole filesystem: a
+    // symlink pointing out of the share answered 403 when its target existed and 404 when it did
+    // not, so a client could probe for files it can never read. DAV has enforced and documented
+    // this ordering since the eighth pass; these two endpoints inverted it, and -deleteItem: in
+    // this same file gets it right — the rule disagreed with itself inside one server.
     BOOL isHidden = NO;
     NSString *const resolvedPath = [self _resolvedPathForRelativePath:relativePath hidden:&isHidden];
 
@@ -1286,7 +1191,15 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Downloading hidden path \"%@\" is not allowed", relativePath];
     }
 
-    absolutePath = resolvedPath;
+    NSString *const absolutePath = resolvedPath;
+
+    if (![[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory]) {
+        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
+    }
+
+    if (isDirectory) {
+        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"\"%@\" is a directory", relativePath];
+    }
 
     // As in DAV's GET: absolutePath is resolved by here, so judge the client's name too.
     NSString *const fileName = [relativePath lastPathComponent];

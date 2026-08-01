@@ -87,6 +87,47 @@ and the Bonjour/`.local` name only, so without it every request is refused with 
 
 ## Recent Changes
 
+### Cleanup phase 2: the four resolver copies are one, and an oracle whose cause was not what the survey said
+
+**The largest duplication in the library is gone.** `-_namedEntryPathForRelativePath:hidden:` and
+`-_resolvedPathForRelativePath:hidden:` existed once per server — four near-verbatim methods, ~100
+lines each side — and these are the methods every path-taking verb passes through. **Five of this
+project's historical defects lived in exactly these copies**: the NUL guard, the hidden-item rule,
+recursive-delete vetting, `If-Range` and the overwrite vetting were each closed in one server and
+left open in another.
+
+**They were verified line-for-line identical before being merged**, with comments and blank lines
+stripped and the two servers diffed — the last difference, the uploader's missing NUL guard, was
+closed in phase 1. So this move *cannot* change behaviour; what it removes is the possibility of the
+next divergence. 198 lines left the two servers; each keeps a three-line wrapper so every call site
+still binds the result to the variable it already used, which makes "I missed one" structurally
+impossible.
+
+**The uploader's two read endpoints now resolve before they stat.** `/list` and `/download` answered
+404-vs-403 from a path that had not been vetted, while DAV has enforced and documented the opposite
+ordering since the eighth pass — and `-deleteItem:` in the *same file* already got it right, so the
+rule disagreed with itself inside one server.
+
+**⚠️ That did NOT close the existence oracle, and the survey's stated cause was wrong.** Measured
+after the reorder: `/list` improved from 400 to 403 and now agrees with `/download`, but the
+exists-vs-absent difference survives — 403 when an escaping symlink's target exists, 404 when it does
+not. The real cause is `_RealPath`: when `realpath(3)` fails it falls back to resolving the PARENT
+and appending the raw leaf, which is required so a `PUT` to a not-yet-existing path resolves at all.
+A **dangling** link also fails `realpath`, so it takes that same branch and resolves to a path
+*inside* the share. Recorded as still open rather than patched, because the fix changes the most
+security-critical function in the library and needs its own measured pass.
+
+**One hypothesis raised and killed rather than written up.** If a dangling link resolves to a path
+inside the share, does a `PUT` through it escape? Measured: no — refused, the link survives, nothing
+lands outside; the stage-and-swap machinery holds. Worth recording as a negative result, because the
+reasoning that produced it was sound and the answer was still no.
+
+**Verified together.** 141 tests and 0 failures on a clean build with no new warnings, the trace
+corpus green, iOS and tvOS Debug clean, and the probe re-run in full — A, B and D all "not
+reproduced", C improved but honestly still confirmed.
+
+**Phase 2 continues** with the remaining ~45 inventoried rules.
+
 ### Cleanup phase 2, first rule: the extension allow-list now judges BOTH names a symlink presents
 
 **A decided semantics question, not a defect fix**, and the first of the 48 duplicated-but-agreeing

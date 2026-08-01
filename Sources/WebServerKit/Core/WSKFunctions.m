@@ -825,6 +825,124 @@ NSString *WSKServableFileTypeAtPath(NSString *path, NSString *directory, BOOL al
     return nil;
 }
 
+// The two path resolvers every path-taking verb in this library goes through.
+//
+// These were FOUR near-verbatim copies — one pair per server — and the copies drifting is this
+// codebase's single most reliable defect class: the NUL guard, the hidden-item rule, recursive
+// delete vetting, If-Range and the overwrite vetting were each closed in one server and left open
+// in another. The copies were verified line-for-line identical before being merged here, so this
+// move cannot change behaviour; what it removes is the possibility of the next divergence.
+//
+// Each server keeps a three-line method wrapping these, so every call site binds the result to the
+// variable it already used — chosen over rewriting the downstream uses because it makes "I missed
+// one" structurally impossible, which is the failure mode that would matter most here.
+
+NSString *WSKNamedEntryPathForRelativePath(NSString *relativePath, NSString *directory, BOOL allowHiddenItems, BOOL *outHidden) {
+    if (WSKPathContainsNULByte(relativePath)) {
+        return nil;
+    }
+
+    NSString *const normalizedPath = WSKNormalizePath(relativePath);
+
+    if (outHidden) {
+        *outHidden = NO;
+    }
+
+    // Naming the root itself is not something a destructive verb may act on, and there is no
+    // final component to preserve either.
+    if ((normalizedPath.length == 0) || [normalizedPath isEqualToString:@"/"]) {
+        return nil;
+    }
+
+    NSString *namedRelativePath = nil;
+    NSString *const namedPath = WSKResolveNamedEntryWithinDirectory([directory stringByAppendingPathComponent:normalizedPath], directory, &namedRelativePath);
+
+    if (namedPath == nil) {
+        return nil;
+    }
+
+    if (outHidden && !allowHiddenItems) {
+        for (NSString *component in [normalizedPath pathComponents]) {
+            if ([component hasPrefix:@"."]) {
+                *outHidden = YES;
+                return namedPath;
+            }
+        }
+
+        for (NSString *component in [namedRelativePath pathComponents]) {
+            if ([component hasPrefix:@"."]) {
+                *outHidden = YES;
+                return namedPath;
+            }
+        }
+    }
+
+    return namedPath;
+}
+
+NSString *WSKResolvedPathForRelativePath(NSString *relativePath, NSString *directory, BOOL allowHiddenItems, BOOL *outHidden) {
+    // WSKNormalizePath truncates at an embedded NUL — deliberately, because the filesystem's
+    // C-string APIs do and the mismatch is otherwise exploitable. But truncating does not make
+    // the request mean what the client wrote, and acting on the prefix is how
+    // "DELETE /Victim\0/does-not-exist" answered 204 and destroyed /Victim, and how a MOVE with a
+    // NUL-bearing Destination replaced a whole directory with the moved file. The uploader has
+    // refused this since the eighth pass; this server was never swept for it.
+    //
+    // Refused here, at the one point every path-taking verb goes through, so a verb added later
+    // cannot forget it. Normalization keeps truncating as the second line, so the
+    // "secret.dat\0.png" extension-allow-list bypass stays closed.
+    if (WSKPathContainsNULByte(relativePath)) {
+        return nil;
+    }
+
+    NSString *const normalizedPath = WSKNormalizePath(relativePath);
+    NSString *resolvedRelativePath = nil;
+    NSString *const resolvedPath = WSKResolveWithinDirectory([directory stringByAppendingPathComponent:normalizedPath], directory, &resolvedRelativePath);
+
+    if (outHidden) {
+        *outHidden = NO;
+    }
+
+    if (resolvedPath == nil) {
+        return nil;
+    }
+
+    // A symlink that resolves to the share root itself is never what the client meant, and
+    // acting on it is catastrophic: every "not the root directory" guard in this file is
+    // evaluated on the path the client *typed*, then this resolved path is substituted for it,
+    // so "DELETE /self" passed a guard about "/self" and then removed the whole share. Measured:
+    // one unauthenticated request destroyed every file served, through DAV DELETE, DAV
+    // COPY/MOVE and the uploader's /delete alike, each answering 204 or 200.
+    //
+    // Refused here rather than re-checked at each destructive call site, so a site added later
+    // cannot forget it. Asking for the root *directly* is still allowed — listing it and
+    // uploading into it are ordinary operations — because that is the client naming the root
+    // rather than a link quietly landing on it.
+    BOOL const askedForRoot = (normalizedPath.length == 0) || [normalizedPath isEqualToString:@"/"];
+
+    if ((resolvedRelativePath.length == 0) && !askedForRoot) {
+        return nil;
+    }
+
+    if (outHidden && !allowHiddenItems) {
+        for (NSString *component in [normalizedPath pathComponents]) {
+            if ([component hasPrefix:@"."]) {
+                *outHidden = YES;
+                return resolvedPath;
+            }
+        }
+
+        for (NSString *component in [resolvedRelativePath pathComponents]) {
+            if ([component hasPrefix:@"."]) {
+                *outHidden = YES;
+                return resolvedPath;
+            }
+        }
+    }
+
+    return resolvedPath;
+}
+
 NSString *WSKResolveNamedEntryWithinDirectory(NSString *path, NSString *directory, NSString *__autoreleasing *outRelativePath) {
     if (outRelativePath) {
         *outRelativePath = nil;
