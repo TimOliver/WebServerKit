@@ -49,6 +49,7 @@ FOUNDATION_EXPORT NSBundle *WebServerKitUploader_SWIFTPM_MODULE_BUNDLE(void);
 #import "WSKMultiPartFormRequest.h"
 #import "WSKStreamedResponse.h"
 #import "WSKURLEncodedFormRequest.h"
+#import "WSKPrivate.h"
 #import "WSKWebUploader.h"
 #import "WSKWebUploaderSSEChannel.h"
 

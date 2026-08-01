@@ -87,6 +87,50 @@ and the Bonjour/`.local` name only, so without it every request is refused with 
 
 ## Recent Changes
 
+### Cleanup phase 3, group C: the public surface goes 27 → 7, and both reasons it could not were stale
+
+The last structural item. Fourteen audit-shaped functions — the resolvers, the vetting walks, the
+allow-list predicates, the validators, same-file detection — leave the public `WSKFunctions.h` for
+`WSKPrivate.h`. **The public function surface is now 7 declarations, down from 27**, and what remains
+is exactly the general-purpose utilities: URL escaping, MIME type, primary IP, the HTTP date
+format/parse pair, form parsing, the NUL check, and the filesystem-error status mapping.
+
+These were public for one stated reason: the SPM sibling targets could not see `WSKPrivate.h`. The
+manifest gave two justifications for why that could not change. **Both were measured and neither
+reproduced.**
+
+| manifest claim | measured |
+|---|---|
+| `WSKPrivate.h` in the symlink farm makes the module unbuildable by a Swift consumer — "the umbrella would drag in the private header, which imports a dozen others it cannot find" | builds clean, 4.7 s forced rebuild |
+| a sibling reaching `Core/` by a second search path hits clang's "duplicate interface definition" | builds clean, 5.2 s, with a sibling importing `WSKPrivate.h` |
+
+Both may well have been true when written — `#if __has_include` arms and toolchains have moved. The
+point is that neither constrains the layout now, and the change collapsed from "restructure the
+package" to **one extra `headerSearchPath`**. No new header, no modulemap change, no pbxproj change.
+The symlink farm, hand-written modulemap and `SWIFT_PACKAGE` bundle accessor are all untouched.
+
+**⚠️ The oracle had to be built first, and proving it sensitive took two attempts.** `swift build`
+inside this package cannot catch a module that is unbuildable from *outside* it, because every header
+is reachable there — so the check is an **external SwiftPM consumer** that depends on the package by
+path and imports all three modules from Swift. The first sensitivity attempt was worthless twice
+over: a `cd` moved the cleanup out of the repo (leaving a stray symlink behind, caught by
+`git status`), and the build it measured completed in 0.15 s because it was cached. The real check —
+removing a symlink the consumer genuinely needs — produces
+`fatal error: 'WSKWebServer.h' file not found`, which is what makes the green results above worth
+anything.
+
+**Why this matters beyond tidiness.** Every one of the fourteen changed contract during the audit
+programme: `WSKServableFileTypeAtPath` gained two parameters, the resolvers were merged from four
+copies, the allow-list predicate learned a second name. Each of those was a silent source break for
+anyone who had bound to them, published as public API by accident of the build graph.
+
+**Verified together.** 142 tests and 0 failures on a clean build with no warnings, the external SPM
+consumer building and linking against all three modules, `swift build`, the trace corpus, and iOS and
+tvOS Debug all clean.
+
+**The structural cleanup is complete.** What remains is phase 2's low-value tail (the URI-to-path
+derivation, the limits and constants) and consolidating this file, which is past 2,000 lines.
+
 ### Cleanup phase 3, group B: the header-field and host-name rules go private
 
 Three more off the public surface — `WSKIsHeaderTokenCharacter`, `WSKIsHeaderTokenString` and
