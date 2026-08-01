@@ -134,6 +134,7 @@ NS_ASSUME_NONNULL_BEGIN
 @interface WSKWebUploader (Methods)
 - (nullable WSKResponse *)listDirectory:(WSKRequest *)request;
 - (nullable WSKResponse *)downloadFile:(WSKRequest *)request;
+- (nullable WSKResponse *)previewFile:(WSKRequest *)request;
 - (nullable WSKResponse *)uploadFile:(WSKMultiPartFormRequest *)request;
 - (nullable WSKResponse *)moveItem:(WSKURLEncodedFormRequest *)request;
 - (nullable WSKResponse *)deleteItem:(WSKURLEncodedFormRequest *)request;
@@ -457,6 +458,17 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
                      requestClass:[WSKRequest class]
                      processBlock:^WSKResponse *(WSKRequest *request) {
                          return [server downloadFile:request];
+                     }];
+
+        // Inline media, for an interface that shows pictures rather than listing them. Separate
+        // from /download rather than a flag on it: "always an attachment" and "always inert and
+        // inline" are each defensible in one sentence, where one endpoint with a switch has a
+        // wrong setting to reach.
+        [self addHandlerForMethod:@"GET"
+                             path:@"/preview"
+                     requestClass:[WSKRequest class]
+                     processBlock:^WSKResponse *(WSKRequest *request) {
+                         return [server previewFile:request];
                      }];
 
         // File upload
@@ -1152,7 +1164,39 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
     return [WSKDataResponse responseWithJSONObject:array];
 }
 
+// Types a browser renders but cannot execute. Serving a shared file INLINE puts it in this
+// server's own origin, and this interface's one-click buttons delete and move files — so an
+// uploaded ".html" served inline is stored XSS against the share. /download forces "attachment"
+// for exactly that reason, which is also why it cannot simply be relaxed: <img src="/download?…">
+// gets a save dialog instead of a picture.
+//
+// The list is an allow-list of whole types rather than a deny-list of dangerous ones, because a
+// deny-list is wrong the moment a new type is registered. "image/svg+xml" is excluded DELIBERATELY
+// and is the reason this is not simply "anything beginning image/": SVG carries script and runs it,
+// so an "images are inert" rule admits the one image that is not. PDF is excluded for the same
+// reason — it has its own scripting model.
+static BOOL _MimeTypeIsInertMedia(NSString *mimeType) {
+    NSString *const type = [[mimeType componentsSeparatedByString:@";"].firstObject stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]].lowercaseString;
+
+    if ([type isEqualToString:@"image/svg+xml"]) {
+        return NO;
+    }
+
+    return [type hasPrefix:@"image/"] || [type hasPrefix:@"audio/"] || [type hasPrefix:@"video/"];
+}
+
+- (WSKResponse *)previewFile:(WSKRequest *)request {
+    return [self _fileResponseForRequest:request inline:YES];
+}
+
 - (WSKResponse *)downloadFile:(WSKRequest *)request {
+    return [self _fileResponseForRequest:request inline:NO];
+}
+
+// One body for both surfaces. /preview is a second door to the same files, so every refusal
+// /download makes it has to make too — sharing the walk is what stops the two drifting, which is
+// this codebase's most reliable defect shape.
+- (WSKResponse *)_fileResponseForRequest:(WSKRequest *)request inline:(BOOL)serveInline {
     // Never nil, so error bodies name a path instead of "(null)" — and match -listDirectory:.
     NSString *const requestedPath = [request query][@"path"];
 
@@ -1202,13 +1246,46 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Downloading file name \"%@\" is not allowed", fileName];
     }
 
+    // Decided from the same extension mapping the response itself will use, so the type this
+    // refuses on and the type it then declares cannot disagree.
+    NSString *const mimeType = WSKGetMimeTypeForExtension([absolutePath pathExtension], nil);
+
+    if (serveInline && !_MimeTypeIsInertMedia(mimeType)) {
+        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"\"%@\" cannot be shown inline; use /download instead", [relativePath lastPathComponent]];
+    }
+
     if ([self.delegate respondsToSelector:@selector(webUploader:didDownloadFileAtPath:)]) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [self.delegate webUploader:self didDownloadFileAtPath:absolutePath];
         });
     }
 
-    return [WSKFileResponse responseWithFile:absolutePath isAttachment:YES];
+    // Range and If-Range are passed through now. This endpoint built its response with
+    // +responseWithFile:isAttachment:, which passes NSMakeRange(NSUIntegerMax, 0) — no range —
+    // so a "Range" header was ignored and the whole file came back 200: an interrupted download
+    // of a large build could not resume, and a <video> could not seek. The base-path handler and
+    // DAV's GET have both passed these for several passes; this was the one file-vending surface
+    // that did not. Going through the ifRange: variant is also what brings the If-Range protection
+    // with it, so a resume against a REPLACED file is refused rather than spliced.
+    WSKFileResponse *const response = [WSKFileResponse responseWithFile:absolutePath byteRange:request.byteRange isAttachment:!serveInline ifRange:request.ifRange];
+
+    if (response == nil) {
+        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
+    }
+
+    if (serveInline) {
+        // "attachment" is what +responseWithFile: sets when asked for one; the inline case sets
+        // none at all, which leaves the browser to guess from the type. Say it explicitly, and
+        // carry the two headers that make guessing harmless: nosniff so a .png full of markup
+        // cannot be sniffed into active content, and a policy that denies every subresource and
+        // script even if a type ever slips past the allow-list above.
+        [response setValue:@"inline" forAdditionalHeader:@"Content-Disposition"];
+        [response setValue:@"nosniff" forAdditionalHeader:@"X-Content-Type-Options"];
+        [response setValue:@"default-src 'none'; sandbox; frame-ancestors 'none'" forAdditionalHeader:@"Content-Security-Policy"];
+    }
+
+    response.cacheControlMaxAge = _fileCacheControlMaxAge;
+    return response;
 }
 
 // Extract the host[:port] authority from an Origin ("scheme://host:port") or a

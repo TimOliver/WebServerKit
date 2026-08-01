@@ -116,6 +116,24 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic) BOOL serverSentEventsEnabled;
 
 /**
+ *  Sets the "Cache-Control" max-age, in seconds, sent with file bodies served
+ *  from "/download" and "/preview".
+ *
+ *  The default value is 0, which sends "no-cache". That does not mean "do not
+ *  store": a browser still keeps the body and revalidates it with
+ *  "If-None-Match", so an unchanged file costs a 304 rather than a transfer.
+ *  Setting a non-zero age removes the revalidation request itself, which is
+ *  worth doing for a media-rich interface vending many small images.
+ *
+ *  @warning A shared directory is mutable, and files are uploaded, moved and
+ *  deleted through this very interface. For the duration of the age you set, a
+ *  browser may serve content the share no longer holds without making any
+ *  request that would reveal it. Prefer a short age, or address content by a
+ *  URL that changes when the content does.
+ */
+@property (nonatomic) NSUInteger fileCacheControlMaxAge;
+
+/**
  *  Sets the title for the uploader web interface.
  *
  *  The default value is the application name.
