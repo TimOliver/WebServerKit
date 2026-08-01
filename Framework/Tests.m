@@ -5188,4 +5188,55 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     [fm removeItemAtPath:dir error:NULL];
 }
 
+
+// _RealPath falls back to "resolve the parent, append the leaf" when realpath(3) fails, which is
+// what lets a PUT to a not-yet-existing path resolve at all. A DANGLING symlink also fails
+// realpath, so it took that branch and resolved INSIDE the share — making 404-vs-403 an existence
+// oracle for the filesystem outside it: 403 when an escaping link's target existed, 404 when it
+// did not. An entry that exists and cannot be resolved now fails closed.
+//
+// The second half of this test is the one that matters: the fallback must keep working, because a
+// guard justified by one failure mode has to be checked against everything it then refuses.
+- (void)testUnresolvableEntriesFailClosedWithoutBreakingCreation {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* root = MakeTempDirectory();
+    NSString* share = [root stringByAppendingPathComponent:@"share"];
+    NSString* outside = [root stringByAppendingPathComponent:@"outside"];
+    [fm createDirectoryAtPath:[share stringByAppendingPathComponent:@"sub"] withIntermediateDirectories:YES attributes:nil error:NULL];
+    [fm createDirectoryAtPath:outside withIntermediateDirectories:YES attributes:nil error:NULL];
+    [@"out" writeToFile:[outside stringByAppendingPathComponent:@"exists.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    [@"in" writeToFile:[share stringByAppendingPathComponent:@"real.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    [fm createSymbolicLinkAtPath:[share stringByAppendingPathComponent:@"esc-exists"] withDestinationPath:[outside stringByAppendingPathComponent:@"exists.txt"] error:NULL];
+    [fm createSymbolicLinkAtPath:[share stringByAppendingPathComponent:@"esc-absent"] withDestinationPath:[outside stringByAppendingPathComponent:@"absent.txt"] error:NULL];
+
+    WSKWebDAVServer* dav = [[WSKWebDAVServer alloc] initWithUploadDirectory:share];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([dav startWithOptions:options error:NULL]);
+
+    NSString* present = SendRawRequest(dav.port, @"GET /esc-exists HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString* absent = SendRawRequest(dav.port, @"GET /esc-absent HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString* presentStatus = [present substringWithRange:NSMakeRange(9, 3)];
+    NSString* absentStatus = [absent substringWithRange:NSMakeRange(9, 3)];
+    NSString* detail = [NSString stringWithFormat:@"target-exists=%@ target-absent=%@", presentStatus, absentStatus];
+    XCTAssertEqualObjects(presentStatus, absentStatus, @"the status must not reveal whether a file outside the share exists: %@", detail);
+    XCTAssertEqualObjects(presentStatus, @"403", @"an escaping link must be refused: %@", detail);
+
+    // The fallback exists so a path that does not exist yet can be created. If this regresses,
+    // every PUT and MKCOL of a new name breaks — which is far worse than the oracle.
+    NSArray* creations = @[ @[ @"PUT /brand-new.txt HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\nhi", @"201" ],
+                            @[ @"PUT /sub/nested.txt HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\nhi", @"201" ],
+                            @[ @"MKCOL /brand-new-dir HTTP/1.1\r\nHost: localhost\r\n\r\n", @"201" ],
+                            @[ @"PUT /real.txt HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\nhi", @"204" ],
+                            @[ @"GET /real.txt HTTP/1.1\r\nHost: localhost\r\n\r\n", @"200" ] ];
+
+    for (NSArray* row in creations) {
+        NSString* reply = SendRawRequest(dav.port, row[0]);
+        NSString* status = (reply.length > 12) ? [reply substringWithRange:NSMakeRange(9, 3)] : reply;
+        XCTAssertEqualObjects(status, row[1], @"the not-yet-exists fallback must keep working: %@ -> %@", [row[0] substringToIndex:MIN((NSUInteger)24, [row[0] length])], status);
+    }
+
+    [dav stop];
+    [fm removeItemAtPath:root error:NULL];
+}
+
 @end

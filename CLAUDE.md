@@ -87,6 +87,46 @@ and the Bonjour/`.local` name only, so without it every request is refused with 
 
 ## Recent Changes
 
+### The existence oracle closed at its real cause, and the fallback it lives in proved intact
+
+The oracle the fifteenth-pass inventory blamed on stat-before-resolve, and which reordering those
+endpoints did NOT close. The real cause is `_RealPath`: when `realpath(3)` fails it resolves the
+PARENT and appends the raw leaf — the branch that lets a `PUT` or `MKCOL` to a not-yet-existing name
+resolve at all. **A dangling symlink also fails `realpath`**, so it took the same branch and resolved
+to a location *inside* the share, which made the answer depend on whether the link's target existed:
+
+    GET escaping link, target EXISTS : 403
+    GET escaping link, target ABSENT : 404
+
+An entry that exists and cannot be resolved now fails closed. Both spellings answer 403.
+
+**⚠️ The important half of this change is what it does NOT break.** The fallback is load-bearing —
+without it every `PUT` and `MKCOL` of a new name fails — so the probe measured six operations that
+must survive alongside the two that must change, and the regression test asserts all of them. A
+guard justified by one failure mode has to be checked against everything it then refuses; that rule
+was written here after two self-inflicted over-refusals, and this is the first change made under it
+deliberately.
+
+| | before | after |
+|---|---|---|
+| escaping link, target exists | 403 | 403 |
+| escaping link, target absent | **404** | **403** |
+| PUT to a brand-new path | 201 | 201 |
+| PUT to a new path in a subfolder | 201 | 201 |
+| MKCOL a brand-new collection | 201 | 201 |
+| PUT over an existing file | 204 | 204 |
+| GET an ordinary file | 200 | 200 |
+| MOVE to a brand-new name | 201 | 201 |
+| dangling link inside the share | 404 | 403 |
+| symlink loop | 404 | 403 |
+
+The last two are the only other behaviour change, and neither was ever served — a `PUT` through a
+dangling link already answered 500, so no working operation is lost and only the status moves, in
+the honest direction.
+
+**Verified together.** 142 tests and 0 failures on a clean build with no new warnings, the trace
+corpus green, iOS and tvOS Debug clean.
+
 ### Cleanup phase 2, continued: the four-times-recurring walk gets one home
 
 **The recursive-destroy vetting walk was two implementations, comments and all.** DAV's

@@ -729,6 +729,26 @@ static NSString *_RealPath(NSString *path) {
         return [fileManager stringWithFileSystemRepresentation:buffer length:strlen(buffer)];
     }
 
+    // realpath(3) failed. Normally that means the path does not exist YET — a PUT or MKCOL to a new
+    // name — and resolving the parent then appending the leaf is exactly right for it. That branch
+    // is why this function has a fallback at all, so it must keep working.
+    //
+    // An entry that EXISTS and still fails realpath is a different thing: a dangling symlink, a
+    // loop, or a component that cannot be traversed. Treating one as "a new path inside the share"
+    // resolved it to a location inside, and the answer then depended on whether the link's target
+    // existed — 403 when it did, 404 when it did not — which is an existence oracle for the
+    // filesystem OUTSIDE the share, reachable through any escaping link in the served content.
+    //
+    // Fail closed: the entry is there and cannot be resolved, so it cannot be acted on. Measured
+    // effect beyond closing the oracle: a dangling link and a symlink loop answer 403 rather than
+    // 404. Neither was ever served, and a PUT through a dangling link answered 500 before, so no
+    // working operation is lost — only the status changes, in the honest direction.
+    struct stat entryInfo;
+
+    if (lstat([path fileSystemRepresentation], &entryInfo) == 0) {
+        return nil;
+    }
+
     NSString *const parent = [path stringByDeletingLastPathComponent];
 
     if ((parent.length == 0) || [parent isEqualToString:path]) {
