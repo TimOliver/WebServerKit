@@ -149,6 +149,29 @@ BOOL WSKIsHeaderTokenString(NSString *_Nullable string);
 NSString *WSKHostNameWithoutRootLabel(NSString *host);
 
 /**
+ *  Does a single name satisfy an extension allow-list? A nil list means "no restriction".
+ *
+ *  The rule itself, in one place: both servers' -_checkFileExtension: delegate here.
+ */
+BOOL WSKNamePassesExtensionAllowList(NSString *name, NSArray<NSString *> *_Nullable allowedExtensions);
+
+/**
+ *  Does an ENTRY satisfy the allow-list, judged by BOTH names it presents?
+ *
+ *  A symlink has two: the name the client used, and the name the bytes actually live under. Those
+ *  were judged inconsistently — listings vetted the alias, access vetted the resolved target — so
+ *  with a list of ["txt"], "alias.txt -> real.bin" was advertised and then refused 403, while
+ *  "alias.bin -> real.txt" was hidden and then served 200.
+ *
+ *  BOTH must pass. That is the fail-closed reading and the owner's decision: judging the alias
+ *  alone would make "alias.txt -> id_rsa" servable, which turns the allow-list into decoration for
+ *  reads; judging the target alone contradicts the "symlinks are aliases" semantics a destructive
+ *  verb already follows. Pass nil for resolvedName when there is no second name (a regular file, or
+ *  a caller with only one to offer), which is exactly the single-name rule.
+ */
+BOOL WSKEntryPassesExtensionAllowList(NSString *namedName, NSString *_Nullable resolvedName, NSArray<NSString *> *_Nullable allowedExtensions);
+
+/**
  *  Maps a filesystem NSError onto the server-error status that describes it honestly.
  *
  *  RFC 4918 §11.5: 507 Insufficient Storage means the method could not be performed because
@@ -261,7 +284,7 @@ NSString *_Nullable WSKResolveNamedEntryWithinDirectory(NSString *path, NSString
  *  advertised and then refused on access, which is the same disagreement with the sign flipped. A
  *  dangling link resolves to nothing and is likewise not classified.
  */
-NSString *_Nullable WSKServableFileTypeAtPath(NSString *path, NSString *directory, BOOL allowHiddenItems);
+NSString *_Nullable WSKServableFileTypeAtPath(NSString *path, NSString *directory, BOOL allowHiddenItems, NSString *_Nullable __autoreleasing *_Nullable outResolvedName);
 
 NSString *_Nullable WSKResolvedPathRelativeToDirectory(NSString *path, NSString *directory);
 

@@ -87,6 +87,46 @@ and the Bonjour/`.local` name only, so without it every request is refused with 
 
 ## Recent Changes
 
+### Cleanup phase 2, first rule: the extension allow-list now judges BOTH names a symlink presents
+
+**A decided semantics question, not a defect fix**, and the first of the 48 duplicated-but-agreeing
+rules the phase 1 survey inventoried — except this pair did not agree. A symlink presents two names:
+the one the client used and the one the bytes live under. Listings vetted the alias; access vetted
+the resolved target. Measured with `allowedFileExtensions = ["txt"]`:
+
+    alias.txt -> real.bin    listed YES,  GET 403
+    alias.bin -> real.txt    listed no,   GET 200
+
+**The ruling is that both must pass**, which is the fail-closed reading. The alternatives were put
+side by side and rejected on their measured consequences: judging the **alias alone** is the most
+faithful reading of the "symlinks are aliases" semantics, but a *read* through an alias hands over
+the target's bytes, so `alias.txt -> id_rsa` becomes servable and the allow-list stops being a
+control for reads at all. Judging the **target alone** is safe for reads but contradicts the
+destructive-verb semantics already chosen, where a verb acts on the entry the client named.
+
+The accepted cost, recorded because it will be noticed: a link named `.txt` pointing at a file whose
+own extension is not allow-listed stops being servable. Both refusals and the case that must keep
+working are pinned by one test that asserts, for five entries, that **the listing and the handler
+never disagree** — which is the property, rather than any particular verdict.
+
+**The rule has one home**, `WSKEntryPassesExtensionAllowList`, and both servers' `-_checkFileExtension:`
+now delegate to `WSKNamePassesExtensionAllowList` rather than each spelling `containsObject:` over a
+lowercased `pathExtension`.
+
+**⚠️ The resolved name is derived from the resolution the listing ALREADY performed.** A caller that
+resolved a second time to learn the target's name would be making two observations of a filesystem
+that need not agree — the class the eighth pass closed and this file names as the general form that
+will recur. `WSKServableFileTypeAtPath` therefore hands the resolved leaf back through an out-param
+instead, and the base-path index (which has no allow-list) passes NULL.
+
+**Verified together.** 141 tests and 0 failures on a clean build with no new warnings, the trace
+corpus green, iOS and tvOS Debug clean, and the probe sensitive in both directions.
+
+**Phase 2 continues** with the remaining 47 rules, which unlike this one already agree — so a
+mistake there surfaces as a test failure rather than a behaviour change. The uploader's read
+endpoints stat before resolving (an existence oracle for paths outside the share) is carried into it
+as part of the resolver unification.
+
 ### Structural cleanup, phase 1: the survey found live bugs before it moved a line of code
 
 The cleanup deferred since the fourteenth pass began, deliberately, with a **read-only inventory**:

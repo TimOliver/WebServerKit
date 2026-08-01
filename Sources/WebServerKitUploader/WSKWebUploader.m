@@ -958,11 +958,13 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
 @implementation WSKWebUploader (Methods)
 
 - (BOOL)_checkFileExtension:(NSString *)fileName {
-    if (_allowedFileExtensions && ![_allowedFileExtensions containsObject:[[fileName pathExtension] lowercaseString]]) {
-        return NO;
-    }
+    return WSKNamePassesExtensionAllowList(fileName, _allowedFileExtensions);
+}
 
-    return YES;
+// Both names an entry presents must satisfy the allow-list; see WSKEntryPassesExtensionAllowList.
+// `resolvedName` is nil for anything that is not a link, which reduces to the single-name rule.
+- (BOOL)_checkFileExtensionForName:(NSString *)namedName resolvedName:(nullable NSString *)resolvedName {
+    return WSKEntryPassesExtensionAllowList(namedName, resolvedName, _allowedFileExtensions);
 }
 
 // -allowHiddenItems was only ever enforced on the leaf component, so a hidden
@@ -1220,7 +1222,8 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
             NSString *const itemPath = [absolutePath stringByAppendingPathComponent:item];
             NSDictionary *const attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:itemPath error:NULL];
             // Classified by what a symlink points at, so the listing describes what is served.
-            NSString *const type = WSKServableFileTypeAtPath(itemPath, _uploadDirectory, _allowHiddenItems);
+            NSString *resolvedName = nil;
+            NSString *const type = WSKServableFileTypeAtPath(itemPath, _uploadDirectory, _allowHiddenItems, &resolvedName);
             // A symlink's own attributes report the length of its target PATH, not the file, so
             // ask again through the link for anything classified as a regular file.
             NSString *const rawType = attributes[NSFileType];
@@ -1229,7 +1232,7 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
                                                 : attributes;
             NSNumber *const size = effective[NSFileSize];  // Nil if the item vanished between the listing and this stat; must not reach the literal below.
 
-            if ([type isEqualToString:NSFileTypeRegular] && size && [self _checkFileExtension:item]) {
+            if ([type isEqualToString:NSFileTypeRegular] && size && [self _checkFileExtensionForName:item resolvedName:resolvedName]) {
                 [array addObject:@{
                     @"path": [normalizedPath stringByAppendingPathComponent:item],
                     @"name": item,
@@ -1285,10 +1288,12 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
 
     absolutePath = resolvedPath;
 
-    NSString *const fileName = [absolutePath lastPathComponent];
+    // As in DAV's GET: absolutePath is resolved by here, so judge the client's name too.
+    NSString *const fileName = [relativePath lastPathComponent];
+    NSString *const resolvedName = [absolutePath lastPathComponent];
 
-    if (![self _checkFileExtension:fileName]) {
-        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Downlading file name \"%@\" is not allowed", fileName];
+    if (![self _checkFileExtensionForName:fileName resolvedName:resolvedName]) {
+        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Downloading file name \"%@\" is not allowed", fileName];
     }
 
     if ([self.delegate respondsToSelector:@selector(webUploader:didDownloadFileAtPath:)]) {
