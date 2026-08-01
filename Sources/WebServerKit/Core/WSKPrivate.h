@@ -307,4 +307,46 @@ extern NSString *WSKStringFromSockAddr(const struct sockaddr *addr, BOOL include
 - (void)performClose;
 @end
 
+#pragma mark - Path resolution internals
+
+// These were declared in the PUBLIC WSKFunctions.h and are not used outside WSKFunctions.m — with
+// one exception: WSKResolvedPathIsWithinDirectory has eleven assertions in Framework/Tests.m, which
+// is why these move here rather than becoming static. Declaring an internal helper publicly binds
+// the library to a contract nobody asked for, and these three have security-shaped signatures that
+// invite a host app to build its own containment check out of them — the exact two-observation
+// pattern WSKResolveWithinDirectory() exists to replace.
+
+/**
+ *  Returns YES if `path`, with all symlinks resolved, is `directory` itself or a
+ *  location inside it. Resolves intermediate path components, and works for a path
+ *  that does not exist yet (e.g. an upload destination) by resolving its parent.
+ *
+ *  Symlinks are invisible to the textual checks: WSKNormalizePath() strips
+ *  ".." before any file is touched, and WSKPathIsInsideDirectory() compares
+ *  path text, but lstat(), open() and NSFileManager all follow symlinks found in
+ *  intermediate components. A symlink placed inside the served directory by some other
+ *  means — another app, a restored backup, a synced volume — could therefore be
+ *  traversed out of it. A symlink whose target stays inside the directory still
+ *  resolves inside and remains usable.
+ *
+ *  Returns NO if either path cannot be resolved, so callers fail closed.
+ */
+BOOL WSKResolvedPathIsWithinDirectory(NSString *path, NSString *directory);
+
+NSString *_Nullable WSKResolvedPathRelativeToDirectory(NSString *path, NSString *directory);
+
+/**
+ *  Returns YES if `path`, once symlinks are resolved, lies under a component starting with "."
+ *  relative to `directory`.
+ *
+ *  A textual test on the path a client sent cannot see this: a symlink named `pub` pointing at
+ *  `.git` yields the request path "/pub/config", which carries no dot, while containment passes
+ *  too because the target is inside the served root. Both servers' hidden-item rules were
+ *  therefore satisfied by a path whose bytes live inside a dot-directory.
+ *
+ *  Returns NO for a path that does not resolve inside `directory` at all — that is containment's
+ *  business, and reporting it as "hidden" here would mislabel an escape attempt.
+ */
+BOOL WSKResolvedPathHasHiddenComponent(NSString *path, NSString *directory);
+
 NS_ASSUME_NONNULL_END
