@@ -2913,6 +2913,171 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     [fm removeItemAtPath:dir error:NULL];
 }
 
+// RFC 4918 §9.3.1: MKCOL on a URL that already identifies a resource MUST answer 405. This
+// answered 500, because createDirectoryAtPath:withIntermediateDirectories:NO fails with
+// NSFileWriteFileExistsError and the error mapping recognises only the full-volume cases, so
+// EEXIST fell through to the 500 fallback. The cost is not cosmetic: "MKCOL each ancestor and
+// treat 405 as already-exists" is the universal way a client creates a directory tree, and a 5xx
+// says the SERVER broke rather than "it is already there" — so rclone and anything shaped like it
+// cannot copy into a folder that exists. An existing FILE at the name takes the same path and is
+// also a 405 case, which the finding as reported missed.
+- (void)testDAVMKCOLOnAnExistingResourceAnswersMethodNotAllowed {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    XCTAssertTrue([fm createDirectoryAtPath:[dir stringByAppendingPathComponent:@"Coll"] withIntermediateDirectories:YES attributes:nil error:NULL]);
+    XCTAssertTrue([@"FILE" writeToFile:[dir stringByAppendingPathComponent:@"file.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    // Both spellings of "something is already here" answer 405, and RFC 9110 §15.5.6 makes Allow
+    // mandatory on one.
+    for (NSString* existing in @[ @"/Coll", @"/file.txt" ]) {
+        NSString* reply = SendRawRequest(server.port, [NSString stringWithFormat:@"MKCOL %@ HTTP/1.1\r\nHost: localhost\r\n\r\n", existing]);
+        XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 405"], @"MKCOL on the existing %@ should be 405: %@", existing, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+        XCTAssertTrue([reply containsString:@"Allow:"], @"a 405 must carry Allow (RFC 9110 §15.5.6): %@", existing);
+    }
+
+    // The collection must be untouched — a refusal that destroyed it would be far worse than the
+    // wrong status it replaces.
+    BOOL isDirectory = NO;
+    XCTAssertTrue([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"Coll"] isDirectory:&isDirectory] && isDirectory, @"MKCOL on an existing collection must leave it alone");
+    XCTAssertEqualObjects([NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:@"file.txt"] encoding:NSUTF8StringEncoding error:NULL], @"FILE", @"MKCOL on an existing file must leave it alone");
+
+    // And what must keep working: a brand-new name is still created. This is the half a guard
+    // written for one failure mode is most likely to break.
+    NSString* created = SendRawRequest(server.port, @"MKCOL /Fresh HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([created hasPrefix:@"HTTP/1.1 201"], @"a brand-new collection must still be created: %@", [created substringToIndex:MIN((NSUInteger)40, created.length)]);
+    XCTAssertTrue([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"Fresh"] isDirectory:&isDirectory] && isDirectory);
+
+    // A missing intermediate collection is 409 and must NOT be absorbed into the new 405 branch;
+    // the two answers mean different things to a client walking a tree.
+    NSString* orphan = SendRawRequest(server.port, @"MKCOL /Nope/Deep HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([orphan hasPrefix:@"HTTP/1.1 409"], @"a missing parent is still 409: %@", [orphan substringToIndex:MIN((NSUInteger)40, orphan.length)]);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// RFC 4918 §9.1: an absent Depth on PROPFIND means "infinity". This server deliberately refuses
+// infinite traversal and answers 403 with the machine-readable DAV:propfind-finite-depth
+// precondition — but only for the EXPLICIT spelling. The absent case fell through to a bare 400,
+// telling a client its perfectly legal request was malformed rather than that it should retry with
+// a bounded depth. Same rule, one of its two spellings, which is this codebase's signature shape.
+- (void)testDAVPropfindWithoutDepthRefusesAsIfInfinite {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    XCTAssertTrue([@"DATA" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    // Absent must answer exactly as explicit "infinity" does, precondition element and all.
+    NSString* absent = SendRawRequest(server.port, @"PROPFIND / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([absent hasPrefix:@"HTTP/1.1 403"], @"an absent Depth means infinity, so 403: %@", [absent substringToIndex:MIN((NSUInteger)40, absent.length)]);
+    XCTAssertTrue([absent containsString:@"propfind-finite-depth"], @"the refusal must carry the precondition that tells the client what to do instead");
+
+    NSString* infinite = SendRawRequest(server.port, @"PROPFIND / HTTP/1.1\r\nHost: localhost\r\nDepth: infinity\r\n\r\n");
+    XCTAssertTrue([infinite hasPrefix:@"HTTP/1.1 403"], @"explicit infinity is unchanged");
+    XCTAssertTrue([infinite containsString:@"propfind-finite-depth"]);
+
+    // The depths every real client actually sends must keep working — this is what a careless
+    // reordering of the branch would break.
+    for (NSString* depth in @[ @"0", @"1" ]) {
+        NSString* reply = SendRawRequest(server.port, [NSString stringWithFormat:@"PROPFIND / HTTP/1.1\r\nHost: localhost\r\nDepth: %@\r\n\r\n", depth]);
+        XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 207"], @"Depth: %@ must still enumerate: %@", depth, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+    }
+
+    // A genuinely unparseable Depth is still malformed, and must not be folded into the 403.
+    NSString* garbage = SendRawRequest(server.port, @"PROPFIND / HTTP/1.1\r\nHost: localhost\r\nDepth: sideways\r\n\r\n");
+    XCTAssertTrue([garbage hasPrefix:@"HTTP/1.1 400"], @"an unrecognised Depth is still 400: %@", [garbage substringToIndex:MIN((NSUInteger)40, garbage.length)]);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// Two halves of the same rule: what the server says it can do, and what it says when it refuses.
+// PROPPATCH has been implemented since the class-1 work but was never added to the shared Allow
+// value, so capability discovery disagreed with routing — a client reading OPTIONS concluded
+// PROPPATCH was unavailable and never tried it. And the non-Finder LOCK/UNLOCK refusals answered
+// 405 with no Allow at all, which RFC 9110 §15.5.6 makes mandatory.
+- (void)testDAVAllowAdvertisesEveryImplementedMethodAndAccompaniesEvery405 {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    XCTAssertTrue([@"DATA" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* discovered = SendRawRequest(server.port, @"OPTIONS / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([discovered containsString:@"PROPPATCH"], @"OPTIONS must advertise PROPPATCH, which this server implements: %@", discovered);
+
+    // Every method named in Allow must actually route, or the advertisement is the lie in the
+    // other direction. PROPPATCH with an empty body is refused on its merits, not with 501.
+    NSString* proppatch = SendRawRequest(server.port, @"PROPPATCH /a.txt HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
+    XCTAssertFalse([proppatch hasPrefix:@"HTTP/1.1 501"], @"a method named in Allow must be routed: %@", [proppatch substringToIndex:MIN((NSUInteger)40, proppatch.length)]);
+
+    // The LOCK/UNLOCK 405s: this client is not Finder, so both refuse — and both must say what is
+    // allowed instead.
+    for (NSString* method in @[ @"LOCK", @"UNLOCK" ]) {
+        NSString* reply = SendRawRequest(server.port, [NSString stringWithFormat:@"%@ /a.txt HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n", method]);
+        XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 405"], @"%@ is refused for a non-Finder client: %@", method, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+        XCTAssertTrue([reply containsString:@"Allow:"], @"the %@ 405 must carry Allow (RFC 9110 §15.5.6)", method);
+    }
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// RFC 4918 §9.8.3: COPY of a collection with "Depth: 0" copies the collection itself WITHOUT its
+// members. The header was accepted and then ignored — the implementation always did a recursive
+// filesystem copy — so a client asking for a shallow copy was told 201 and silently given the whole
+// subtree. That is precisely the "silently doing an approximation of what was asked" this project
+// refuses everywhere else, and for Shape A a collection of builds is not a cheap thing to duplicate
+// by accident.
+- (void)testDAVShallowCopyOfCollectionOmitsMembers {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    XCTAssertTrue([fm createDirectoryAtPath:[dir stringByAppendingPathComponent:@"Coll/Inner"] withIntermediateDirectories:YES attributes:nil error:NULL]);
+    XCTAssertTrue([@"MEMBER" writeToFile:[dir stringByAppendingPathComponent:@"Coll/member.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([@"DEEP" writeToFile:[dir stringByAppendingPathComponent:@"Coll/Inner/deep.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* shallow = SendRawRequest(server.port, @"COPY /Coll HTTP/1.1\r\nHost: localhost\r\nDestination: /Shallow\r\nDepth: 0\r\n\r\n");
+    XCTAssertTrue([shallow hasPrefix:@"HTTP/1.1 201"], @"a shallow collection copy still succeeds: %@", [shallow substringToIndex:MIN((NSUInteger)40, shallow.length)]);
+
+    BOOL isDirectory = NO;
+    XCTAssertTrue([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"Shallow"] isDirectory:&isDirectory] && isDirectory, @"the collection itself is created");
+    XCTAssertFalse([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"Shallow/member.txt"]], @"Depth: 0 must NOT copy members");
+    XCTAssertFalse([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"Shallow/Inner"]], @"Depth: 0 must NOT copy member collections");
+
+    // Depth: infinity and an absent header both still copy everything (§9.8.3 makes absent mean
+    // infinity), which is what a naive fix that shallow-copied unconditionally would destroy.
+    NSString* deep = SendRawRequest(server.port, @"COPY /Coll HTTP/1.1\r\nHost: localhost\r\nDestination: /Deep\r\nDepth: infinity\r\n\r\n");
+    XCTAssertTrue([deep hasPrefix:@"HTTP/1.1 201"], @"a deep copy still succeeds: %@", [deep substringToIndex:MIN((NSUInteger)40, deep.length)]);
+    XCTAssertEqualObjects([NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:@"Deep/Inner/deep.txt"] encoding:NSUTF8StringEncoding error:NULL], @"DEEP", @"Depth: infinity must copy the whole subtree");
+
+    NSString* absent = SendRawRequest(server.port, @"COPY /Coll HTTP/1.1\r\nHost: localhost\r\nDestination: /Absent\r\n\r\n");
+    XCTAssertTrue([absent hasPrefix:@"HTTP/1.1 201"], @"an absent Depth still succeeds: %@", [absent substringToIndex:MIN((NSUInteger)40, absent.length)]);
+    XCTAssertEqualObjects([NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:@"Absent/member.txt"] encoding:NSUTF8StringEncoding error:NULL], @"MEMBER", @"an absent Depth means infinity, so members are copied");
+
+    // Depth: 0 on a plain FILE is meaningless and must keep working — a resource with no internal
+    // members cannot mean anything else, and refusing it would break a client that sets Depth
+    // uniformly. This is the case the thirteenth pass deliberately opened up.
+    NSString* file = SendRawRequest(server.port, @"COPY /Coll/member.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /leaf.txt\r\nDepth: 0\r\n\r\n");
+    XCTAssertTrue([file hasPrefix:@"HTTP/1.1 201"], @"Depth: 0 on a plain file is still fine: %@", [file substringToIndex:MIN((NSUInteger)40, file.length)]);
+    XCTAssertEqualObjects([NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:@"leaf.txt"] encoding:NSUTF8StringEncoding error:NULL], @"MEMBER");
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 // The browsable index has to describe the tree that is actually being vended. With
 // allowHiddenItems:YES the handler served a dot-file while the listing omitted it — the same
 // disagreement the sixth pass fixed in the opposite direction, when the listing hid items the
