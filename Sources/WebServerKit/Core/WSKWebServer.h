@@ -249,6 +249,29 @@ extern NSString *const WSKOption_DispatchQueuePriority;
  */
 extern NSString *const WSKOption_ConnectionIdleTimeout;
 
+/**
+ *  Allows a connection to carry more than one request, so a client does not pay
+ *  a TCP handshake per request (NSNumber / double, in seconds). The value is how
+ *  long an otherwise idle connection is held open waiting for the next request.
+ *
+ *  Reuse is deliberately restricted to requests that carry NO BODY — no
+ *  "Content-Length" and no "Transfer-Encoding" header at all. Request smuggling
+ *  is a disagreement about where one request's body ends and the next begins, so
+ *  a connection on which no body is ever read cannot be desynchronized: the
+ *  property is structural rather than a matter of parsing carefully. Anything
+ *  with a body is answered and the connection is closed, exactly as before, as is
+ *  any request that was refused, any HTTP/1.0 client, and any response whose
+ *  length the server cannot state up front.
+ *
+ *  This matters most for an interface that fetches many small resources — icons,
+ *  thumbnails, stylesheets — where the handshake dominates the transfer.
+ *
+ *  Set to 0.0 to serve exactly one request per connection.
+ *
+ *  The default value is 0.0.
+ */
+extern NSString *const WSKOption_ConnectionKeepAliveTimeout;
+
 #if TARGET_OS_IPHONE
 
 /**

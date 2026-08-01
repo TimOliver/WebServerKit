@@ -45,6 +45,7 @@
 #define kHeadersMaxLength (64 * 1024)  // Upper bound on total request header bytes, to cap memory for a client that never sends the terminating blank line.
 #define kMaxHeaderPhaseTicks 2  // Idle-timer ticks a connection may spend receiving its request line + headers before being closed (defeats a slowloris dribbling bytes just under the zero-progress check).
 #define kMinReceiveBytesPerSecond 32  // Throughput a connection must sustain while its request body is still arriving; see -_checkIdleTimeout.
+#define kMaxRequestsPerConnection 100  // Requests one reused connection may carry before it must be re-established; bounds how long a single client can hold one of the kWSKMaxConnections slots.
 
 typedef void (^ReadDataCompletionBlock)(BOOL success);
 typedef void (^ReadHeadersCompletionBlock)(NSData *extraData);
@@ -117,6 +118,19 @@ NS_ASSUME_NONNULL_END
     BOOL _earlyChecksRun;          // Host allow-list and preflight are decided once, as early as the headers allow
     NSInteger _headerFailureStatus;  // Why the header block was rejected; 500 only if nothing more specific applies
     NSTimeInterval _idleTimeout;   // Seconds between idle-timer ticks; 0 when idle timeouts are disabled
+
+    // Connection reuse. Deliberately restricted to requests carrying NO body, which is what keeps
+    // request smuggling structurally impossible rather than a matter of parsing carefully: a
+    // desync is a disagreement about where a body ends, and no body is ever read on a reused
+    // connection. Everything else — a body, a refusal, HTTP/1.0, an indeterminate response length
+    // — answers and closes exactly as it always has.
+    NSTimeInterval _keepAliveTimeout;   // 0 disables reuse entirely, which is the default
+    BOOL _requestIsBodyless;            // No Content-Length and no Transfer-Encoding, from the raw header names
+    BOOL _willKeepAlive;                // Decided before the headers go out, honoured after the body does
+    BOOL _awaitingNextRequest;          // Between requests: the idle rules differ from the header phase
+    NSUInteger _requestsServed;         // Bounds how long one client can hold a connection slot
+    NSUInteger _readBytesWhenIdleBegan;  // Read count when the last response finished; the next request can only arrive as reads
+    NSMutableData *_carryOverData;      // Bytes of the NEXT request that arrived in this request's last read
     WSKMemoryReservation *_chunkReservation;  // This connection's chunked framing buffer
 
 #ifdef __WEBSERVERKIT_ENABLE_TESTING__
@@ -359,6 +373,141 @@ static BOOL _IsIPAddressLiteral(NSString *host) {
     return [self preflightRequest:_request];
 }
 
+// A request is eligible for connection reuse only if it carries NO body framing at all. Read from
+// the RAW header names rather than from -[WSKRequest hasBody], which keys on _contentType and is
+// only equivalent to "has a body" because -initWithMethod: maintains that correspondence thirty
+// lines away. Basing a framing decision on a second spelling of the rule is how this codebase's
+// defects usually start — and the difference is not theoretical: "Transfer-Encoding: identity" sets
+// no content type, so -hasBody answers NO for a request that DOES carry transfer-coding framing,
+// which is exactly the shape a TE.CL desync is built from.
+//
+// Matched case-insensitively over every key, rather than by subscripting the two standard
+// spellings, because CFHTTPMessageCopyAllHeaderFields only standardizes the names it recognises.
+// CFHTTPMessageCopyAllHeaderFields only standardizes the names it recognises, so a lookup that
+// matters is done over the keys rather than by subscripting one spelling.
+static NSString *_HeaderValueForName(NSDictionary *headers, NSString *name) {
+    for (NSString *key in headers) {
+        if ([key caseInsensitiveCompare:name] == NSOrderedSame) {
+            return headers[key];
+        }
+    }
+
+    return nil;
+}
+
+static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
+    for (NSString *name in headers) {
+        if (([name caseInsensitiveCompare:@"Content-Length"] == NSOrderedSame) ||
+            ([name caseInsensitiveCompare:@"Transfer-Encoding"] == NSOrderedSame)) {
+            return NO;
+        }
+    }
+
+    return YES;
+}
+
+// Every condition that must hold for this connection to carry another request. Evaluated once, with
+// the response in hand, immediately before the header block that announces the decision goes out.
+- (BOOL)_shouldKeepConnectionAlive {
+    if (_keepAliveTimeout <= 0.0) {
+        return NO;  // Disabled, which is the default: one request per connection, as before.
+    }
+
+    // No body was read, so no body bytes can be left unconsumed and there is nothing for this
+    // server and an intermediary to disagree about. This is the whole basis of the guarantee.
+    if (!_requestIsBodyless) {
+        return NO;
+    }
+
+    // HTTP/1.0 has no persistent connections by default, and this server does not implement the
+    // "Connection: keep-alive" extension it would need. It is also the client for which the
+    // response may be framed by connection close.
+    if (_clientIsHTTP10) {
+        return NO;
+    }
+
+    // Note the nil guard: messaging nil returns a ZEROED struct, so a missing Connection header
+    // gives {0, 0} and `location != NSNotFound` is true — which made this refuse every request that
+    // did not send the header, i.e. all of them. It failed safe, so nothing was unsafe; the feature
+    // was simply never on.
+    NSString *const connectionHeader = _HeaderValueForName(_request.headers, @"Connection");
+
+    if (connectionHeader && ([connectionHeader rangeOfString:@"close" options:NSCaseInsensitiveSearch].location != NSNotFound)) {
+        return NO;  // The client asked us not to.
+    }
+
+    // The response must state its own length, or the client cannot tell where it ends without
+    // waiting for the close that reuse is avoiding. A chunked response frames itself; anything
+    // else needs Content-Length.
+    if (![self _shouldChunkResponse] && (_response.contentLength == NSUIntegerMax)) {
+        return NO;
+    }
+
+    // A bound on how long one client can hold a slot. With kWSKMaxConnections at 128 and a browser
+    // opening six per origin, unbounded reuse would let a handful of tabs occupy the server
+    // indefinitely — the cap that binds in practice is the connection pool, not this.
+    if (_requestsServed >= kMaxRequestsPerConnection) {
+        return NO;
+    }
+
+    return YES;
+}
+
+// Everything the next request must not inherit. Kept adjacent to the ivar block it mirrors,
+// because a field added there and forgotten here is a cross-request state leak — a defect class
+// this connection could not previously have, since it never served a second request.
+- (void)_resetForNextRequest {
+    if (_requestMessage) {
+        CFRelease(_requestMessage);
+        _requestMessage = NULL;
+    }
+
+    if (_responseMessage) {
+        CFRelease(_responseMessage);
+        _responseMessage = NULL;
+    }
+
+    _request = nil;
+    _response = nil;
+    _handler = nil;
+    _statusCode = 0;
+    _virtualHEAD = NO;
+    _requestReceived = NO;
+    _earlyChecksRun = NO;
+    _requestIsBodyless = NO;
+    _willKeepAlive = NO;
+    _clientIsHTTP10 = NO;
+    _headerFailureStatus = kWSKHTTPStatusCode_InternalServerError;
+    _headerPhaseTicks = 0;  // Or the second request inherits the first's deadline and is killed early.
+
+#ifdef __WEBSERVERKIT_ENABLE_TESTING__
+    _requestPath = nil;
+    _responsePath = nil;
+    _requestFD = 0;
+    _responseFD = 0;
+#endif
+}
+
+// The end of a response. Either the connection carries another request or it is simply released,
+// which is what closes it — the same unwind as before this existed.
+- (void)_finishConnectionOrReadNextRequest {
+    if (!_willKeepAlive) {
+        return;
+    }
+
+    [self close];  // Flush this request's log line and any recording while its state is still live.
+    _opened = NO;  // -dealloc must not close it a second time.
+    _requestsServed += 1;
+    [self _resetForNextRequest];
+    // Snapshot the READ count, not read+written. The response that just went out moved bytes, so
+    // comparing the combined total would make the very first idle tick conclude the next request
+    // had started arriving — dropping straight back into the header-phase deadline and closing the
+    // connection after two ticks regardless of the configured keep-alive.
+    _readBytesWhenIdleBegan = _totalBytesRead;
+    _awaitingNextRequest = YES;
+    [self _readRequestHeaders];
+}
+
 - (void)_startProcessingRequest {
     WSK_DCHECK(_responseMessage == NULL);
     _requestReceived = YES;  // Nothing further is read from the socket for this request
@@ -459,12 +608,33 @@ static BOOL _IsIPAddressLiteral(NSString *host) {
         [_response.additionalHeaders enumerateKeysAndObjectsUsingBlock:^(id key, id obj, BOOL *stop) {
             CFHTTPMessageSetHeaderFieldValue(self->_responseMessage, (__bridge CFStringRef)key, (__bridge CFStringRef)obj);
         }];
+
+        // Decided here rather than in -_initializeResponseHeadersWithStatusCode:, which sets
+        // "Close" unconditionally. That default is what makes every abort, every refusal and every
+        // path that does not reach this point close the connection by construction rather than by
+        // remembering to.
+        _willKeepAlive = [self _shouldKeepConnectionAlive];
+
+        if (_willKeepAlive) {
+            CFHTTPMessageSetHeaderFieldValue(_responseMessage, CFSTR("Connection"), CFSTR("keep-alive"));
+            CFHTTPMessageSetHeaderFieldValue(_responseMessage, CFSTR("Keep-Alive"), (__bridge CFStringRef)[NSString stringWithFormat:@"timeout=%i, max=%i", (int)_keepAliveTimeout, (int)(kMaxRequestsPerConnection - _requestsServed)]);
+        }
+
         [self writeHeadersWithCompletionBlock:^(BOOL success) {
             if (success) {
                 if (hasBody) {
                     [self writeBodyWithCompletionBlock:^(BOOL successInner) {
                         [self->_response performClose];  // TODO: There's nothing we can do on failure as headers have already been sent
+
+                        // Only a body that went out whole leaves the stream at a known
+                        // position; after a partial write the client cannot tell where the
+                        // next response begins, so the connection has to end.
+                        if (successInner) {
+                            [self _finishConnectionOrReadNextRequest];
+                        }
                     }];
+                } else {
+                    [self _finishConnectionOrReadNextRequest];
                 }
             } else if (hasBody) {
                 [self->_response performClose];
@@ -573,6 +743,35 @@ static BOOL _IsIPAddressLiteral(NSString *host) {
     NSUInteger transferredBytes = _totalBytesRead + _totalBytesWritten;
     BOOL waitingOnSocket = (_pendingIOCount > 0);
 
+    // A reused connection with no request in flight is idle BY DESIGN — that is what it is for —
+    // so the slowloris deadline below must not apply to it. It gets its own, longer allowance
+    // instead: the configured keep-alive timeout, after which the slot is reclaimed. The moment
+    // the first byte of the next request lands this reverts to the ordinary header-phase rules,
+    // so a client cannot buy slowloris immunity by keeping a connection alive first.
+    if (_awaitingNextRequest) {
+        if (_totalBytesRead > _readBytesWhenIdleBegan) {
+            // The next request has started arriving. Hand the ordinary header-phase deadline a
+            // FRESH budget: _headerPhaseTicks counts idle waiting above and header dribbling
+            // below, so carrying it across would charge this request for time the connection was
+            // legitimately idle and cut short a slow but genuine one.
+            _awaitingNextRequest = NO;
+            _headerPhaseTicks = 0;
+        } else {
+            _headerPhaseTicks += 1;
+
+            if ((_idleTimeout > 0.0) && ((NSTimeInterval)_headerPhaseTicks * _idleTimeout > _keepAliveTimeout)) {
+                WSK_LOG_DEBUG(@"Closing idle keep-alive connection on socket %i", _socket);
+                dispatch_source_cancel(_idleTimer);
+                shutdown(_socket, SHUT_RDWR);
+                return;
+            }
+
+            _idleCheckWasBusy = waitingOnSocket;
+            _idleCheckedBytes = transferredBytes;
+            return;
+        }
+    }
+
     // Absolute deadline for the request-line + headers phase (before any handler is
     // matched, i.e. while _request is still nil — assigned on this same queue). Headers
     // are small and bounded, so no legitimate client needs more than this; a deadline
@@ -624,6 +823,15 @@ static BOOL _IsIPAddressLiteral(NSString *host) {
 - (void)_readRequestHeaders {
     _requestMessage = CFHTTPMessageCreateEmpty(kCFAllocatorDefault, true);
     NSMutableData *const headersData = [[NSMutableData alloc] initWithCapacity:kHeadersReadCapacity];
+
+    // On a reused connection the next request's first bytes usually arrived in the previous
+    // request's final read. They are the ONLY thing carried across, and they can only ever be a
+    // request line: reuse requires that the previous request had no body, so there are no
+    // unconsumed body bytes that could be mistaken for one.
+    if (_carryOverData.length > 0) {
+        [headersData appendData:_carryOverData];
+        _carryOverData = nil;
+    }
     [self readHeaders:headersData
         withCompletionBlock:^(NSData *extraData) {
             if (extraData) {
@@ -640,6 +848,7 @@ static BOOL _IsIPAddressLiteral(NSString *host) {
                 }
 
                 NSDictionary *const requestHeaders = CFBridgingRelease(CFHTTPMessageCopyAllHeaderFields(self->_requestMessage));  // Header names are case-insensitive but CFHTTPMessageCopyAllHeaderFields() will standardize the common ones
+                self->_requestIsBodyless = _HeadersCarryNoBodyFraming(requestHeaders);
                 NSURL *requestURL = CFBridgingRelease(CFHTTPMessageCopyRequestURL(self->_requestMessage));
 
                 if (requestURL) {
@@ -733,6 +942,14 @@ static BOOL _IsIPAddressLiteral(NSString *host) {
                                 [self abortRequest:self->_request withStatusCode:kWSKHTTPStatusCode_BadRequest];
                             }
                         } else {
+                            // No body to read, so anything past the header block belongs to the
+                            // NEXT request. Held only when this connection may actually carry one;
+                            // otherwise it is dropped exactly as it always was, which is what made
+                            // "leftover bytes are never read" true.
+                            if ((self->_keepAliveTimeout > 0.0) && self->_requestIsBodyless && (extraData.length > 0)) {
+                                self->_carryOverData = [extraData mutableCopy];
+                            }
+
                             [self _startProcessingRequest];
                         }
                     } else {
@@ -800,6 +1017,7 @@ static BOOL _IsIPAddressLiteral(NSString *host) {
         _headerFailureStatus = kWSKHTTPStatusCode_InternalServerError;
         WSK_LOG_DEBUG(@"Did open connection on socket %i", _socket);
 
+        _keepAliveTimeout = server.connectionKeepAliveTimeout;
         NSTimeInterval idleTimeout = server.connectionIdleTimeout;
         _idleTimeout = idleTimeout;
 
@@ -1054,55 +1272,101 @@ static BOOL _ValidateRequestHeaderBlock(const void *rawBytes, NSUInteger length)
     return !expectingRequestLine;
 }
 
+typedef NS_ENUM(NSInteger, WSKHeaderBlockState) {
+    kWSKHeaderBlockIncomplete = 0,  // More bytes needed
+    kWSKHeaderBlockComplete,        // Parsed; anything past the terminator is returned as extra data
+    kWSKHeaderBlockFailed,          // Malformed or oversized; _headerFailureStatus says which
+};
+
+// Decide on what is already buffered, WITHOUT calling the completion block — the caller owns that,
+// so it is called exactly once on every path. (Folding the two together made the block's invocation
+// correlate with a return value the analyzer cannot relate, which it reported as both "never
+// called" and "called twice" in the same function.)
+//
+// Split out of -readHeaders: because a reused connection starts with the next request's bytes
+// ALREADY in the buffer, left there by the previous request's final read. Going straight to
+// dispatch_read in that state waits for bytes the client has no reason to send: it has a complete
+// request outstanding and is waiting for us. That is a hang until the idle timeout, and it is the
+// specific hazard that makes this a refactor rather than a one-line loop.
+- (WSKHeaderBlockState)_settleHeadersFromBuffer:(NSMutableData *)headersData extraData:(NSData *_Nullable *_Nonnull)outExtraData {
+    NSRange range = [headersData rangeOfData:_CRLFCRLFData options:0 range:NSMakeRange(0, headersData.length)];
+
+    if (range.location == NSNotFound) {
+        if (headersData.length > kHeadersMaxLength) {
+            WSK_LOG_ERROR(@"Request headers exceeded %i bytes on socket %i", (int)kHeadersMaxLength, _socket);
+            _headerFailureStatus = kWSKHTTPStatusCode_RequestHeaderFieldsTooLarge;
+            return kWSKHeaderBlockFailed;
+        }
+
+        return kWSKHeaderBlockIncomplete;
+    }
+
+    NSUInteger const length = range.location + range.length;
+
+    // kHeadersMaxLength was only ever enforced on the branch above, i.e. while still waiting for
+    // the terminator. A client that sent an oversized header block in one burst had it found,
+    // parsed and served — the cap was skipped entirely. Bound the block itself, not the buffer,
+    // which legitimately runs past it once body bytes arrive in the same read.
+    if (length > kHeadersMaxLength) {
+        WSK_LOG_ERROR(@"Request headers exceeded %i bytes on socket %i", (int)kHeadersMaxLength, _socket);
+        _headerFailureStatus = kWSKHTTPStatusCode_RequestHeaderFieldsTooLarge;
+        return kWSKHeaderBlockFailed;
+    }
+
+    if (!_ValidateRequestHeaderBlock(headersData.bytes, length)) {
+        WSK_LOG_ERROR(@"Rejecting malformed request line or header syntax on socket %i", _socket);
+        _headerFailureStatus = kWSKHTTPStatusCode_BadRequest;
+        return kWSKHeaderBlockFailed;
+    }
+
+    if (!CFHTTPMessageAppendBytes(_requestMessage, headersData.bytes, length)) {
+        WSK_LOG_ERROR(@"Failed appending request headers data from socket %i", _socket);
+        _headerFailureStatus = kWSKHTTPStatusCode_BadRequest;
+        return kWSKHeaderBlockFailed;
+    }
+
+    if (!CFHTTPMessageIsHeaderComplete(_requestMessage)) {
+        WSK_LOG_ERROR(@"Failed parsing request headers from socket %i", _socket);
+        _headerFailureStatus = kWSKHTTPStatusCode_BadRequest;
+        return kWSKHeaderBlockFailed;
+    }
+
+    *outExtraData = [headersData subdataWithRange:NSMakeRange(length, headersData.length - length)];
+    return kWSKHeaderBlockComplete;
+}
+
 - (void)readHeaders:(NSMutableData *)headersData withCompletionBlock:(ReadHeadersCompletionBlock)block {
     WSK_DCHECK(_requestMessage);
+    NSData *bufferedExtraData = nil;
+    WSKHeaderBlockState const buffered = [self _settleHeadersFromBuffer:headersData extraData:&bufferedExtraData];
+
+    if (buffered == kWSKHeaderBlockComplete) {
+        block(bufferedExtraData);
+        return;
+    }
+
+    if (buffered == kWSKHeaderBlockFailed) {
+        block(nil);
+        return;
+    }
+
     [self readData:headersData
              withLength:NSUIntegerMax
         completionBlock:^(BOOL success) {
-            if (success) {
-                NSRange range = [headersData rangeOfData:_CRLFCRLFData options:0 range:NSMakeRange(0, headersData.length)];
-
-                if (range.location == NSNotFound) {
-                    if (headersData.length > kHeadersMaxLength) {
-                        WSK_LOG_ERROR(@"Request headers exceeded %i bytes on socket %i", (int)kHeadersMaxLength, self->_socket);
-                        self->_headerFailureStatus = kWSKHTTPStatusCode_RequestHeaderFieldsTooLarge;
-                        block(nil);
-                    } else {
-                        [self readHeaders:headersData withCompletionBlock:block];
-                    }
-                } else {
-                    NSUInteger length = range.location + range.length;
-
-                    // kHeadersMaxLength was only ever enforced on the branch above, i.e.
-                    // while still waiting for the terminator. A client that sent an
-                    // oversized header block in one burst had it found, parsed and served
-                    // — the cap was skipped entirely. Bound the block itself, not the
-                    // buffer, which legitimately runs past it once body bytes arrive in the
-                    // same read.
-                    if (length > kHeadersMaxLength) {
-                        WSK_LOG_ERROR(@"Request headers exceeded %i bytes on socket %i", (int)kHeadersMaxLength, self->_socket);
-                        self->_headerFailureStatus = kWSKHTTPStatusCode_RequestHeaderFieldsTooLarge;
-                        block(nil);
-                    } else if (!_ValidateRequestHeaderBlock(headersData.bytes, length)) {
-                        WSK_LOG_ERROR(@"Rejecting malformed request line or header syntax on socket %i", self->_socket);
-                        self->_headerFailureStatus = kWSKHTTPStatusCode_BadRequest;
-                        block(nil);
-                    } else if (CFHTTPMessageAppendBytes(self->_requestMessage, headersData.bytes, length)) {
-                        if (CFHTTPMessageIsHeaderComplete(self->_requestMessage)) {
-                            block([headersData subdataWithRange:NSMakeRange(length, headersData.length - length)]);
-                        } else {
-                            WSK_LOG_ERROR(@"Failed parsing request headers from socket %i", self->_socket);
-                            self->_headerFailureStatus = kWSKHTTPStatusCode_BadRequest;
-                            block(nil);
-                        }
-                    } else {
-                        WSK_LOG_ERROR(@"Failed appending request headers data from socket %i", self->_socket);
-                        self->_headerFailureStatus = kWSKHTTPStatusCode_BadRequest;
-                        block(nil);
-                    }
-                }
-            } else {
+            if (!success) {
                 block(nil);
+                return;
+            }
+
+            NSData *extraData = nil;
+            WSKHeaderBlockState const state = [self _settleHeadersFromBuffer:headersData extraData:&extraData];
+
+            if (state == kWSKHeaderBlockComplete) {
+                block(extraData);
+            } else if (state == kWSKHeaderBlockFailed) {
+                block(nil);
+            } else {
+                [self readHeaders:headersData withCompletionBlock:block];
             }
         }];
 }

@@ -199,6 +199,79 @@ static NSString* SendRawRequest(NSUInteger port, NSString* request) {
     return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
 }
 
+// Sends several requests over ONE connection, returning each reply separately. Unlike
+// SendRawRequest it cannot read to EOF between requests — on a reused connection there is no EOF
+// until the last one — so each reply is delimited by its own framing: the header block is read,
+// then exactly Content-Length bytes. A reply that never completes ends the run rather than
+// hanging, and the count of replies returned is what the caller asserts on.
+static NSArray<NSString*>* SendRawRequestsOnOneConnection(NSUInteger port, NSArray<NSString*>* requests) {
+    int fd = ConnectToLocalhostPort(port);
+    if (fd < 0) {
+        return @[];
+    }
+
+    struct timeval tv = {2, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    NSMutableArray<NSString*>* replies = [NSMutableArray array];
+    NSMutableData* buffered = [NSMutableData data];
+
+    for (NSString* request in requests) {
+        const char* bytes = [request UTF8String];
+        if (send(fd, bytes, strlen(bytes), 0) < 0) {
+            break;
+        }
+
+        // Read until this reply's header block plus its declared body are both in hand.
+        NSData* terminator = [@"\r\n\r\n" dataUsingEncoding:NSUTF8StringEncoding];
+        NSRange headerEnd = NSMakeRange(NSNotFound, 0);
+        NSInteger expected = -1;
+        BOOL stalled = NO;
+
+        while (!stalled) {
+            if (headerEnd.location == NSNotFound) {
+                headerEnd = [buffered rangeOfData:terminator options:0 range:NSMakeRange(0, buffered.length)];
+
+                if (headerEnd.location != NSNotFound) {
+                    NSString* head = [[NSString alloc] initWithData:[buffered subdataWithRange:NSMakeRange(0, NSMaxRange(headerEnd))] encoding:NSUTF8StringEncoding];
+                    NSRange lengthRange = [head rangeOfString:@"Content-Length: " options:NSCaseInsensitiveSearch];
+                    expected = 0;
+
+                    if (lengthRange.location != NSNotFound) {
+                        expected = [[head substringFromIndex:NSMaxRange(lengthRange)] integerValue];
+                    }
+                }
+            }
+
+            if ((headerEnd.location != NSNotFound) && ((NSInteger)(buffered.length - NSMaxRange(headerEnd)) >= expected)) {
+                break;
+            }
+
+            char chunk[4096];
+            ssize_t got = recv(fd, chunk, sizeof(chunk), 0);
+
+            if (got <= 0) {
+                stalled = YES;
+            } else {
+                [buffered appendBytes:chunk length:(NSUInteger)got];
+            }
+        }
+
+        if (headerEnd.location == NSNotFound) {
+            break;  // No complete reply arrived; the caller sees a short array.
+        }
+
+        NSUInteger const total = NSMaxRange(headerEnd) + (NSUInteger)MAX((NSInteger)0, expected);
+        NSUInteger const take = MIN(total, buffered.length);
+        NSString* reply = [[NSString alloc] initWithData:[buffered subdataWithRange:NSMakeRange(0, take)] encoding:NSUTF8StringEncoding];
+        [replies addObject:(reply ? reply : @"")];
+        [buffered replaceBytesInRange:NSMakeRange(0, take) withBytes:NULL length:0];
+    }
+
+    close(fd);
+    return replies;
+}
+
 // As SendRawDataRequest, but split into two writes with a pause, so the tail arrives in a
 // separate socket read. Used to prove a verdict does not depend on how the client segmented.
 static NSString* SendRawDataRequestSplit(NSUInteger port, NSData* request, NSUInteger splitAt) {
@@ -2908,6 +2981,304 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     XCTAssertTrue([fm createDirectoryAtPath:[dir stringByAppendingPathComponent:@"Coll"] withIntermediateDirectories:YES attributes:nil error:NULL]);
     NSString* deleted = SendRawRequest(server.port, @"DELETE /Coll HTTP/1.1\r\nHost: localhost\r\nDepth: Infinity\r\n\r\n");
     XCTAssertTrue([deleted hasPrefix:@"HTTP/1.1 204"], @"Depth: Infinity should be accepted: %@", [deleted substringToIndex:MIN((NSUInteger)40, deleted.length)]);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// Connection reuse, and the restriction that makes it safe. A client normally pays a TCP handshake
+// per request because every response carried "Connection: Close" and the connection served exactly
+// one request — fine for a few large downloads, wasteful for an interface fetching many small
+// images.
+//
+// Reuse is allowed ONLY for requests carrying no body framing at all. Request smuggling is a
+// disagreement about where one request's body ends and the next begins, so a connection on which no
+// body is ever read cannot be desynchronized — the property is structural rather than a matter of
+// parsing carefully. This test pins both halves: that eligible requests really do share one
+// connection, and that every ineligible shape still closes.
+- (void)testConnectionKeepAliveCarriesBodylessRequestsAndClosesOnEverythingElse {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    XCTAssertTrue([@"ALPHA" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([@"BETA" writeToFile:[dir stringByAppendingPathComponent:@"b.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addGETHandlerForBasePath:@"/f/" directoryPath:dir indexFilename:nil cacheAge:0 allowRangeRequests:YES];
+    // Hoisted: a dictionary literal's commas split XCTAssertTrue's macro arguments. Fourth time
+    // this project has hit that.
+    NSDictionary* keepAliveOptions = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES, WSKOption_ConnectionKeepAliveTimeout : @5.0};
+    XCTAssertTrue([server startWithOptions:keepAliveOptions error:NULL]);
+
+    NSString* const getA = @"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    NSString* const getB = @"GET /f/b.txt HTTP/1.1\r\nHost: localhost\r\n\r\n";
+
+    NSArray<NSString*>* replies = SendRawRequestsOnOneConnection(server.port, @[ getA, getB, getA ]);
+    XCTAssertEqual(replies.count, (NSUInteger)3, @"three bodyless GETs must all be answered on one connection");
+
+    if (replies.count == 3) {
+        XCTAssertTrue([replies[0] containsString:@"ALPHA"], @"first reply: %@", replies[0]);
+        XCTAssertTrue([replies[1] containsString:@"BETA"], @"second reply — proves the connection was reused: %@", replies[1]);
+        XCTAssertTrue([replies[2] containsString:@"ALPHA"], @"third reply: %@", replies[2]);
+        XCTAssertTrue([replies[0] rangeOfString:@"Connection: keep-alive" options:NSCaseInsensitiveSearch].location != NSNotFound, @"the reply must announce reuse: %@", replies[0]);
+
+        // State must not leak across requests on one connection — a class this connection could not
+        // previously have, since it never served a second request. Serving b.txt after a.txt with
+        // the first request's body or validators would show up here.
+        XCTAssertFalse([replies[1] containsString:@"ALPHA"], @"the second reply must not carry the first's body");
+    }
+
+    // A HEAD followed by a GET: _virtualHEAD is per-request state, and inheriting it would suppress
+    // the following GET's body entirely.
+    NSArray<NSString*>* mixed = SendRawRequestsOnOneConnection(server.port, @[ @"HEAD /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n", getB ]);
+    XCTAssertEqual(mixed.count, (NSUInteger)2, @"a HEAD may be followed by a GET on the same connection");
+
+    if (mixed.count == 2) {
+        XCTAssertFalse([mixed[0] containsString:@"ALPHA"], @"a HEAD carries no body");
+        XCTAssertTrue([mixed[1] containsString:@"BETA"], @"the GET after a HEAD must still get its body — _virtualHEAD must not leak: %@", mixed[1]);
+    }
+
+    // A request that was REFUSED ends the connection: a refusal can happen before the body is read,
+    // so bytes may be left in flight that would otherwise be parsed as the next request line.
+    NSArray<NSString*>* refused = SendRawRequestsOnOneConnection(server.port, @[ @"GET /f/nope.txt HTTP/1.1\r\nHost: localhost\r\n\r\n", getA ]);
+    XCTAssertTrue(refused.count >= 1, @"the refusal itself is answered");
+    XCTAssertTrue([refused.firstObject hasPrefix:@"HTTP/1.1 404"], @"…as a 404: %@", refused.firstObject);
+    XCTAssertTrue([refused.firstObject rangeOfString:@"keep-alive" options:NSCaseInsensitiveSearch].location == NSNotFound, @"a refusal must not offer to keep the connection: %@", refused.firstObject);
+
+    // A request WITH a body is answered and the connection closes, whatever the body is. This is
+    // the restriction the whole design rests on.
+    NSArray<NSString*>* withBody = SendRawRequestsOnOneConnection(server.port, @[ @"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n", getB ]);
+    XCTAssertTrue(withBody.count >= 1, @"the request carrying framing is still answered");
+    XCTAssertTrue([withBody.firstObject rangeOfString:@"keep-alive" options:NSCaseInsensitiveSearch].location == NSNotFound, @"a request declaring Content-Length must not be reused: %@", withBody.firstObject);
+
+    // "Transfer-Encoding: identity" sets no content type, so -[WSKRequest hasBody] answers NO for
+    // it — keying reuse on that instead of on the raw header names would have made exactly the
+    // shape a TE.CL desync is built from eligible. It must not be.
+    NSArray<NSString*>* identity = SendRawRequestsOnOneConnection(server.port, @[ @"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: identity\r\n\r\n", getB ]);
+    XCTAssertTrue(identity.count >= 1);
+    XCTAssertTrue([identity.firstObject rangeOfString:@"keep-alive" options:NSCaseInsensitiveSearch].location == NSNotFound, @"a Transfer-Encoding of any kind must not be reused: %@", identity.firstObject);
+
+    // A client that asks to close is obeyed.
+    NSArray<NSString*>* asked = SendRawRequestsOnOneConnection(server.port, @[ @"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", getB ]);
+    XCTAssertTrue(asked.count >= 1);
+    XCTAssertTrue([asked.firstObject rangeOfString:@"keep-alive" options:NSCaseInsensitiveSearch].location == NSNotFound, @"Connection: close must be honoured: %@", asked.firstObject);
+
+    // HTTP/1.0 has no persistent connections by default and may be framed by connection close.
+    NSArray<NSString*>* old = SendRawRequestsOnOneConnection(server.port, @[ @"GET /f/a.txt HTTP/1.0\r\nHost: localhost\r\n\r\n", getB ]);
+    XCTAssertTrue(old.count >= 1);
+    XCTAssertTrue([old.firstObject rangeOfString:@"keep-alive" options:NSCaseInsensitiveSearch].location == NSNotFound, @"an HTTP/1.0 client must not be given a persistent connection: %@", old.firstObject);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// The option defaults to off, so every existing deployment keeps serving exactly one request per
+// connection until it opts in. Worth pinning: the whole feature is new machinery in the most
+// security-critical file in the library, and "the default did not change" is the property that
+// makes landing it safe.
+- (void)testConnectionKeepAliveIsOffByDefault {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    XCTAssertTrue([@"ALPHA" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addGETHandlerForBasePath:@"/f/" directoryPath:dir indexFilename:nil cacheAge:0 allowRangeRequests:YES];
+    NSDictionary* defaultOptions = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:defaultOptions error:NULL]);
+
+    NSString* single = SendRawRequest(server.port, @"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([single containsString:@"ALPHA"], @"the response is unchanged: %@", single);
+    XCTAssertTrue([single rangeOfString:@"Connection: Close" options:NSCaseInsensitiveSearch].location != NSNotFound, @"the default is still one request per connection: %@", single);
+
+    NSArray<NSString*>* replies = SendRawRequestsOnOneConnection(server.port, @[ @"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n", @"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n" ]);
+    XCTAssertEqual(replies.count, (NSUInteger)1, @"a second request on the same connection must go unanswered by default");
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// A connection held open for reuse is holding one of kWSKMaxConnections slots, so it has to be
+// given back. This is the half of keep-alive that matters most for a server measured in weeks: a
+// reused connection that is never reclaimed is a slot leak, and 128 of them are a permanent denial
+// of service with no error anywhere.
+//
+// The reclaim rides on the existing idle timer, which means the effective hold is rounded up to the
+// next tick — the test uses a short idle timeout so it measures in seconds rather than in the
+// 30-second default. What it pins is that the connection IS closed while idle, and that the
+// slowloris deadline for a request in progress was not weakened to achieve it.
+- (void)testConnectionKeepAliveReclaimsAnIdleConnection {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    XCTAssertTrue([@"ALPHA" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addGETHandlerForBasePath:@"/f/" directoryPath:dir indexFilename:nil cacheAge:0 allowRangeRequests:YES];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES, WSKOption_ConnectionKeepAliveTimeout : @1.0, WSKOption_ConnectionIdleTimeout : @1.0};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    int fd = ConnectToLocalhostPort(server.port);
+    XCTAssertTrue(fd >= 0);
+
+    const char* request = "GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    XCTAssertTrue(send(fd, request, strlen(request), 0) > 0);
+
+    // Drain the reply, then go quiet and let the reaper find it.
+    struct timeval tv = {5, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    // Drain the WHOLE reply — header block plus exactly Content-Length bytes. A single recv
+    // returns only what has arrived, so stopping there leaves the body in the socket and the
+    // "did the server close?" read below picks THAT up instead of EOF.
+    char buffer[8192];
+    NSMutableData* reply = [NSMutableData data];
+    NSData* const terminator = [@"\r\n\r\n" dataUsingEncoding:NSUTF8StringEncoding];
+    NSRange headerEnd = NSMakeRange(NSNotFound, 0);
+    NSInteger expected = 0;
+
+    while (true) {
+        headerEnd = [reply rangeOfData:terminator options:0 range:NSMakeRange(0, reply.length)];
+
+        if (headerEnd.location != NSNotFound) {
+            NSString* head = [[NSString alloc] initWithData:[reply subdataWithRange:NSMakeRange(0, NSMaxRange(headerEnd))] encoding:NSUTF8StringEncoding];
+            NSRange lengthRange = [head rangeOfString:@"Content-Length: " options:NSCaseInsensitiveSearch];
+            expected = (lengthRange.location == NSNotFound) ? 0 : [[head substringFromIndex:NSMaxRange(lengthRange)] integerValue];
+
+            if ((NSInteger)(reply.length - NSMaxRange(headerEnd)) >= expected) {
+                break;
+            }
+        }
+
+        ssize_t chunk = recv(fd, buffer, sizeof(buffer), 0);
+
+        if (chunk <= 0) {
+            break;
+        }
+
+        [reply appendBytes:buffer length:(NSUInteger)chunk];
+    }
+
+    XCTAssertTrue(reply.length > 0, @"the first request is answered");
+    XCTAssertTrue([[[NSString alloc] initWithData:reply encoding:NSUTF8StringEncoding] rangeOfString:@"keep-alive" options:NSCaseInsensitiveSearch].location != NSNotFound, @"…and the connection is offered for reuse");
+
+    // Now read again without sending anything. A reclaimed connection gives EOF; one that is never
+    // reclaimed sits here until the receive timeout above, which is what the assertion catches.
+    NSDate* const started = [NSDate date];
+    ssize_t const after = recv(fd, buffer, sizeof(buffer), 0);
+    NSTimeInterval const waited = -[started timeIntervalSinceNow];
+    close(fd);
+
+    XCTAssertEqual(after, (ssize_t)0, @"an idle kept-alive connection must be closed by the server, not held forever");
+    XCTAssertLessThan(waited, 4.5, @"…and reclaimed promptly rather than at the receive timeout (waited %.1fs)", waited);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// The companion to the reclaim test above, and the one that actually discriminates. That test
+// passes even with the keep-alive idle branch removed, because the pre-existing header-phase
+// deadline (kMaxHeaderPhaseTicks idle ticks, a slowloris defence) closes the connection anyway —
+// so it pins "nothing leaks" but says nothing about the configured timeout being honoured.
+//
+// This one sets a keep-alive longer than that deadline and shows the connection survives past it.
+// Without the branch, an idle reused connection is cut after two idle ticks no matter what
+// WSKOption_ConnectionKeepAliveTimeout says, and the option's documented meaning would be a lie.
+- (void)testConnectionKeepAliveHoldsForTheConfiguredTimeNotTheSlowlorisDeadline {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    XCTAssertTrue([@"ALPHA" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addGETHandlerForBasePath:@"/f/" directoryPath:dir indexFilename:nil cacheAge:0 allowRangeRequests:YES];
+    // Idle ticks of 1s, so the header-phase deadline would cut an idle connection at ~2s; a
+    // keep-alive of 8s must override that.
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES, WSKOption_ConnectionKeepAliveTimeout : @8.0, WSKOption_ConnectionIdleTimeout : @1.0};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    int fd = ConnectToLocalhostPort(server.port);
+    XCTAssertTrue(fd >= 0);
+    struct timeval tv = {5, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    NSString* (^exchange)(void) = ^NSString* {
+        const char* request = "GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n";
+
+        if (send(fd, request, strlen(request), 0) <= 0) {
+            return nil;
+        }
+
+        NSMutableData* reply = [NSMutableData data];
+        NSData* const terminator = [@"\r\n\r\n" dataUsingEncoding:NSUTF8StringEncoding];
+        char buffer[8192];
+
+        while (true) {
+            NSRange headerEnd = [reply rangeOfData:terminator options:0 range:NSMakeRange(0, reply.length)];
+
+            if (headerEnd.location != NSNotFound) {
+                NSString* head = [[NSString alloc] initWithData:[reply subdataWithRange:NSMakeRange(0, NSMaxRange(headerEnd))] encoding:NSUTF8StringEncoding];
+                NSRange lengthRange = [head rangeOfString:@"Content-Length: " options:NSCaseInsensitiveSearch];
+                NSInteger expected = (lengthRange.location == NSNotFound) ? 0 : [[head substringFromIndex:NSMaxRange(lengthRange)] integerValue];
+
+                if ((NSInteger)(reply.length - NSMaxRange(headerEnd)) >= expected) {
+                    break;
+                }
+            }
+
+            ssize_t chunk = recv(fd, buffer, sizeof(buffer), 0);
+
+            if (chunk <= 0) {
+                break;
+            }
+
+            [reply appendBytes:buffer length:(NSUInteger)chunk];
+        }
+
+        return [[NSString alloc] initWithData:reply encoding:NSUTF8StringEncoding];
+    };
+
+    XCTAssertTrue([exchange() containsString:@"ALPHA"], @"the first request is answered");
+
+    // Go quiet for longer than the header-phase deadline would tolerate, then use the connection.
+    [NSThread sleepForTimeInterval:3.0];
+
+    NSString* second = exchange();
+    XCTAssertTrue([second containsString:@"ALPHA"], @"the connection must survive an idle period shorter than the configured keep-alive: %@", second);
+
+    close(fd);
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// A pipelining client writes its next request before reading the previous reply, so the second
+// request's bytes arrive in the SAME socket read as the first's header block. Those bytes are
+// carried over rather than dropped — and the header reader has to notice it already holds a
+// complete block instead of issuing a read for bytes the client has no reason to send, which would
+// hang until the idle timeout. That hazard is the reason this is a refactor and not a one-line loop.
+- (void)testConnectionKeepAliveAnswersPipelinedRequestsInOrder {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    XCTAssertTrue([@"ALPHA" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([@"BETA" writeToFile:[dir stringByAppendingPathComponent:@"b.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addGETHandlerForBasePath:@"/f/" directoryPath:dir indexFilename:nil cacheAge:0 allowRangeRequests:YES];
+    // Hoisted: a dictionary literal's commas split XCTAssertTrue's macro arguments. Fourth time
+    // this project has hit that.
+    NSDictionary* keepAliveOptions = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES, WSKOption_ConnectionKeepAliveTimeout : @5.0};
+    XCTAssertTrue([server startWithOptions:keepAliveOptions error:NULL]);
+
+    // Both requests in a single write, so the second lands in the first's read.
+    NSArray<NSString*>* replies = SendRawRequestsOnOneConnection(server.port, @[ @"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\nGET /f/b.txt HTTP/1.1\r\nHost: localhost\r\n\r\n" ]);
+    XCTAssertTrue(replies.count >= 1, @"the first pipelined request is answered");
+    XCTAssertTrue([replies.firstObject containsString:@"ALPHA"], @"…and in order: %@", replies.firstObject);
+
+    // Then drain the second reply, which must have been produced from the carried-over bytes
+    // without waiting for anything further from the client.
+    NSArray<NSString*>* both = SendRawRequestsOnOneConnection(server.port, @[ @"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\nGET /f/b.txt HTTP/1.1\r\nHost: localhost\r\n\r\n", @"" ]);
+    XCTAssertEqual(both.count, (NSUInteger)2, @"a pipelined pair must produce two replies");
+
+    if (both.count == 2) {
+        XCTAssertTrue([both[0] containsString:@"ALPHA"], @"first: %@", both[0]);
+        XCTAssertTrue([both[1] containsString:@"BETA"], @"second, from carried-over bytes: %@", both[1]);
+    }
 
     [server stop];
     [fm removeItemAtPath:dir error:NULL];
