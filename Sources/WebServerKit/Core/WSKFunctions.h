@@ -193,6 +193,33 @@ NSString *_Nullable WSKResolvedPathForRelativePath(NSString *relativePath, NSStr
 NSString *_Nullable WSKNamedEntryPathForRelativePath(NSString *relativePath, NSString *directory, BOOL allowHiddenItems, BOOL *_Nullable outHidden);
 
 /**
+ *  The first subtree member a destructive verb must NOT be allowed to destroy, or nil if the whole
+ *  tree is safe to remove.
+ *
+ *  A recursive DELETE, or an overwrite, must refuse anything a DIRECT request would refuse — or the
+ *  same request means two different things depending on how it is spelled. That class has recurred
+ *  FOUR times in this project (eighth, tenth, thirteenth and fifteenth passes), most recently
+ *  measured at 60/60 destroyed, so the walk lives in one place now rather than once per server.
+ *
+ *  Two judgement calls are baked in, both load-bearing. Dot-names and their descendants are skipped
+ *  whatever `allowHiddenItems` says: a ".DS_Store" sits in every macOS folder and its empty
+ *  pathExtension is in no allow-list, so vetting them would make ordinary directories permanently
+ *  undeletable. And an extensionless file IS vetted, because a direct DELETE of it is already
+ *  refused.
+ */
+NSString *_Nullable WSKFirstUnvettableItemAtPath(NSString *absolutePath, BOOL isDirectory, NSArray<NSString *> *_Nullable allowedExtensions);
+
+/**
+ *  Do two paths name the same file on disk?
+ *
+ *  Compares file resource identifiers (inode + volume), so it also catches the case-variant pair
+ *  "File.txt"/"file.txt" that is ONE file on a case-insensitive volume. That is the whole of the
+ *  protection against a self-move: an unconditional "remove the destination, then move" with
+ *  `Overwrite: T` deleted the only copy of the file when the two paths resolved to it.
+ */
+BOOL WSKPathsNameTheSameFile(NSString *path1, NSString *path2);
+
+/**
  *  Maps a filesystem NSError onto the server-error status that describes it honestly.
  *
  *  RFC 4918 §11.5: 507 Insufficient Storage means the method could not be performed because

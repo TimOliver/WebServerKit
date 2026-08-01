@@ -87,6 +87,40 @@ and the Bonjour/`.local` name only, so without it every request is refused with 
 
 ## Recent Changes
 
+### Cleanup phase 2, continued: the four-times-recurring walk gets one home
+
+**The recursive-destroy vetting walk was two implementations, comments and all.** DAV's
+`-_firstUnvettableItemAtPath:isDirectory:` and an inline walk in the uploader's `deleteItem:` — and
+the DAV comment openly said it "mirrors `-[WSKWebUploader deleteItem:]`", a self-documented second
+copy of a security rule. Four separate audit lenses reported it independently, which is itself worth
+noting: nothing else in the inventory drew that much agreement.
+
+This is **the class that has recurred four times** (eighth, tenth, thirteenth and fifteenth passes):
+a recursive DELETE or an overwrite destroying files that a direct request refuses, most recently
+measured at 60/60. It is now `WSKFirstUnvettableItemAtPath`, called by both. **Both copies were
+wrong simultaneously the last time** — the `-skipDescendants` handling — which is the sharpest
+possible argument for one home: the fifteenth pass had to find and fix the identical bug twice.
+
+Both judgement calls move with it and are documented at the shared site: dot-names and their
+descendants are skipped whatever `allowHiddenItems` says (a `.DS_Store` sits in every macOS folder
+and its empty `pathExtension` is in no allow-list, so vetting them would make ordinary directories
+permanently undeletable), and an extensionless file IS vetted, because a direct DELETE of it is
+already refused.
+
+**Same-file detection is shared too** — `WSKPathsNameTheSameFile`, verified byte-identical in both
+servers first. It is the whole of the protection against a self-move deleting the only copy of a
+file, including the case-variant pair that is one file on a case-insensitive volume.
+
+**An inventory finding that resolved itself.** The survey flagged `WSKResolvedPathHasHiddenComponent`
+as a DEAD helper sitting beside eleven live inline spellings of the same rule — exactly the trap this
+file names ("an unused second implementation of a security rule sitting beside the live one is a trap
+for whoever needs that check next"). It is no longer dead: phase 1's fix to
+`WSKServableFileTypeAtPath` gave it its first caller. Recorded because the survey ran one commit
+earlier, which is a reminder that an inventory ages like any other finding.
+
+**Verified together.** 141 tests and 0 failures on a clean build with no new warnings, the trace
+corpus green, iOS and tvOS Debug clean. 94 lines left the two servers.
+
 ### Cleanup phase 2: the four resolver copies are one, and an oracle whose cause was not what the survey said
 
 **The largest duplication in the library is gone.** `-_namedEntryPathForRelativePath:hidden:` and

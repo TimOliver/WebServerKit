@@ -837,6 +837,61 @@ NSString *WSKServableFileTypeAtPath(NSString *path, NSString *directory, BOOL al
 // variable it already used — chosen over rewriting the downstream uses because it makes "I missed
 // one" structurally impossible, which is the failure mode that would matter most here.
 
+BOOL WSKPathsNameTheSameFile(NSString *path1, NSString *path2) {
+    if ([path1 isEqualToString:path2]) {
+        return YES;
+    }
+
+    id identifier1 = nil;
+    id identifier2 = nil;
+    return [[NSURL fileURLWithPath:path1] getResourceValue:&identifier1 forKey:NSURLFileResourceIdentifierKey error:NULL] &&
+           [[NSURL fileURLWithPath:path2] getResourceValue:&identifier2 forKey:NSURLFileResourceIdentifierKey error:NULL] &&
+           identifier1 && [(NSObject *)identifier1 isEqual:identifier2];
+}
+
+NSString *WSKFirstUnvettableItemAtPath(NSString *absolutePath, BOOL isDirectory, NSArray<NSString *> *allowedExtensions) {
+    if (allowedExtensions == nil) {
+        return nil;  // No restriction configured: nothing to vet against.
+    }
+
+    if (!isDirectory) {
+        NSString *const itemName = [absolutePath lastPathComponent];
+        return WSKNamePassesExtensionAllowList(itemName, allowedExtensions) ? nil : itemName;
+    }
+
+    NSDirectoryEnumerator<NSString *> *const enumerator = [[NSFileManager defaultManager] enumeratorAtPath:absolutePath];
+
+    for (NSString *subpath in enumerator) {
+        NSString *const subpathType = [enumerator fileAttributes][NSFileType];
+
+        if ([[subpath lastPathComponent] hasPrefix:@"."]) {
+            // -skipDescendants is defined for the most recently returned SUBDIRECTORY. Calling it
+            // for a dot-named FILE popped the enclosing level instead, so every entry after the
+            // first dot-name in that directory's readdir order was never vetted — and a
+            // ".DS_Store" sits in every Finder-touched folder, sorting early. Measured: with an
+            // allow-list of "txt", DELETE of a collection holding "sub/{.DS_Store,id_rsa}"
+            // answered 204 and destroyed id_rsa, 60/60, while the same file addressed directly is
+            // refused 403. The top level of the addressed collection is immune, which is exactly
+            // why the existing tests could not see it. Only a dot-named DIRECTORY may be skipped
+            // wholesale — that part is deliberate and still holds.
+            if ([subpathType isEqualToString:NSFileTypeDirectory]) {
+                [enumerator skipDescendants];
+            }
+
+            continue;
+        }
+
+        // An extensionless file ("README", "LICENSE") is vetted like any other: a direct DELETE of
+        // it is already refused, so letting a recursive delete destroy it would make the same
+        // request mean two different things.
+        if ([subpathType isEqualToString:NSFileTypeRegular] && !WSKNamePassesExtensionAllowList(subpath, allowedExtensions)) {
+            return subpath;
+        }
+    }
+
+    return nil;
+}
+
 NSString *WSKNamedEntryPathForRelativePath(NSString *relativePath, NSString *directory, BOOL allowHiddenItems, BOOL *outHidden) {
     if (WSKPathContainsNULByte(relativePath)) {
         return nil;
