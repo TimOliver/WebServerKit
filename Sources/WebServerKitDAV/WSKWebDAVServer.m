@@ -296,11 +296,13 @@ static BOOL _EntityTagMatchesList(BOOL resourceExists, NSString *currentTag, NSS
 }
 
 - (BOOL)_checkFileExtension:(NSString *)fileName {
-    if (_allowedFileExtensions && ![_allowedFileExtensions containsObject:[[fileName pathExtension] lowercaseString]]) {
-        return NO;
-    }
+    return WSKNamePassesExtensionAllowList(fileName, _allowedFileExtensions);
+}
 
-    return YES;
+// Both names an entry presents must satisfy the allow-list; see WSKEntryPassesExtensionAllowList.
+// `resolvedName` is nil for anything that is not a link, which reduces to the single-name rule.
+- (BOOL)_checkFileExtensionForName:(NSString *)namedName resolvedName:(nullable NSString *)resolvedName {
+    return WSKEntryPassesExtensionAllowList(namedName, resolvedName, _allowedFileExtensions);
 }
 
 // Whatever an operation is about to destroy has to be something the client could have destroyed
@@ -774,9 +776,14 @@ static NSString *const kDAVAllowedMethods = @"OPTIONS, HEAD, GET, PUT, DELETE, M
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
     }
 
-    NSString *const itemName = [absolutePath lastPathComponent];
+    // absolutePath is the RESOLVED location by now, so its leaf is the target's name. The name the
+    // client actually used has to be judged too, or a link is vetted by a different name here than
+    // in the listing that advertised it — measured as advertise-then-403 in one direction and
+    // hidden-then-200 in the other.
+    NSString *const itemName = [relativePath lastPathComponent];
+    NSString *const resolvedName = [absolutePath lastPathComponent];
 
-    if (isHidden || (!isDirectory && ![self _checkFileExtension:itemName])) {
+    if (isHidden || (!isDirectory && ![self _checkFileExtensionForName:itemName resolvedName:resolvedName])) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Downloading \"%@\" is not allowed", relativePath];
     }
 
@@ -1349,11 +1356,12 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
     if (escapedPath) {
         NSDictionary *const attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:itemPath error:NULL];
         // Classified by what a symlink points at, so the listing describes what is actually served.
-        NSString *const type = WSKServableFileTypeAtPath(itemPath, _uploadDirectory, _allowHiddenItems);
+        NSString *resolvedName = nil;
+        NSString *const type = WSKServableFileTypeAtPath(itemPath, _uploadDirectory, _allowHiddenItems, &resolvedName);
         BOOL isFile = [type isEqualToString:NSFileTypeRegular];
         BOOL isDirectory = [type isEqualToString:NSFileTypeDirectory];
 
-        if ((isFile && [self _checkFileExtension:itemPath]) || isDirectory) {
+        if ((isFile && [self _checkFileExtensionForName:[itemPath lastPathComponent] resolvedName:resolvedName]) || isDirectory) {
             [xmlString appendString:@"<D:response>"];
             [xmlString appendFormat:@"<D:href>%@</D:href>", escapedPath];
 

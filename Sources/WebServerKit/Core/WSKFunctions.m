@@ -485,6 +485,23 @@ NSString *WSKStringFromSockAddr(const struct sockaddr *addr, BOOL includeService
     return includeService ? [NSString stringWithFormat:@"%s:%s", hostBuffer, serviceBuffer] : (NSString *)[NSString stringWithUTF8String:hostBuffer];
 }
 
+BOOL WSKNamePassesExtensionAllowList(NSString *name, NSArray<NSString *> *allowedExtensions) {
+    return (allowedExtensions == nil) || [allowedExtensions containsObject:[[name pathExtension] lowercaseString]];
+}
+
+BOOL WSKEntryPassesExtensionAllowList(NSString *namedName, NSString *resolvedName, NSArray<NSString *> *allowedExtensions) {
+    if (!WSKNamePassesExtensionAllowList(namedName, allowedExtensions)) {
+        return NO;
+    }
+
+    // Only a link presents a second name, and only a differing one is worth asking about.
+    if ((resolvedName != nil) && ![resolvedName isEqualToString:namedName]) {
+        return WSKNamePassesExtensionAllowList(resolvedName, allowedExtensions);
+    }
+
+    return YES;
+}
+
 NSString *WSKHostNameWithoutRootLabel(NSString *host) {
     // Only one dot is stripped; "name.local.." remains malformed and is refused.
     return [host hasSuffix:@"."] ? [host substringToIndex:(host.length - 1)] : host;
@@ -751,7 +768,11 @@ NSString *WSKResolveWithinDirectory(NSString *path, NSString *directory, NSStrin
     return resolvedPath;
 }
 
-NSString *WSKServableFileTypeAtPath(NSString *path, NSString *directory, BOOL allowHiddenItems) {
+NSString *WSKServableFileTypeAtPath(NSString *path, NSString *directory, BOOL allowHiddenItems, NSString *__autoreleasing *outResolvedName) {
+    if (outResolvedName) {
+        *outResolvedName = nil;
+    }
+
     NSDictionary *const attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:NULL];
     NSString *const type = attributes[NSFileType];
 
@@ -778,6 +799,19 @@ NSString *WSKServableFileTypeAtPath(NSString *path, NSString *directory, BOOL al
 
     if (stat([path fileSystemRepresentation], &info) != 0) {
         return nil;  // Dangling, or a loop: there is nothing to advertise.
+    }
+
+    // Derived from the resolution this function ALREADY performed. A caller that resolved again to
+    // learn the target's name would be making a second observation of a filesystem that need not
+    // agree with the first — the two-observations class the eighth pass closed and this file names
+    // as the general form that will recur.
+    if (outResolvedName) {
+        char resolvedBuffer[PATH_MAX];
+
+        if (realpath([path fileSystemRepresentation], resolvedBuffer) != NULL) {
+            NSString *const resolved = [[NSFileManager defaultManager] stringWithFileSystemRepresentation:resolvedBuffer length:strlen(resolvedBuffer)];
+            *outResolvedName = [resolved lastPathComponent];
+        }
     }
 
     if ((info.st_mode & S_IFMT) == S_IFDIR) {

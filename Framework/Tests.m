@@ -5143,4 +5143,49 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     [fm removeItemAtPath:dir error:NULL];
 }
 
+
+// A symlink presents TWO names to the extension allow-list: the one the client used and the one the
+// bytes live under. They were judged inconsistently — listings vetted the alias, access vetted the
+// resolved target — so with ["txt"], "alias.txt -> real.bin" was advertised then refused 403 and
+// "alias.bin -> real.txt" was hidden then served 200. Both must now pass, which is the fail-closed
+// reading: judging the alias alone would make "alias.txt -> id_rsa" servable.
+- (void)testExtensionAllowListJudgesBothNamesASymlinkPresents {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    [@"binary" writeToFile:[dir stringByAppendingPathComponent:@"real.bin"] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    [@"text" writeToFile:[dir stringByAppendingPathComponent:@"real.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    [fm createSymbolicLinkAtPath:[dir stringByAppendingPathComponent:@"alias.txt"] withDestinationPath:[dir stringByAppendingPathComponent:@"real.bin"] error:NULL];
+    [fm createSymbolicLinkAtPath:[dir stringByAppendingPathComponent:@"alias.bin"] withDestinationPath:[dir stringByAppendingPathComponent:@"real.txt"] error:NULL];
+    // The case that must KEEP working: both names allow-listed.
+    [fm createSymbolicLinkAtPath:[dir stringByAppendingPathComponent:@"good.txt"] withDestinationPath:[dir stringByAppendingPathComponent:@"real.txt"] error:NULL];
+
+    WSKWebUploader* uploader = [[WSKWebUploader alloc] initWithUploadDirectory:dir];
+    uploader.allowedFileExtensions = @[ @"txt" ];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([uploader startWithOptions:options error:NULL]);
+
+    NSString* listing = SendRawRequest(uploader.port, @"GET /list?path=%2F HTTP/1.1\r\nHost: localhost\r\n\r\n");
+
+    // Each row: name, must the listing advertise it, must the handler serve it.
+    NSArray* rows = @[ @[ @"alias.txt", @NO ], @[ @"alias.bin", @NO ], @[ @"good.txt", @YES ], @[ @"real.txt", @YES ], @[ @"real.bin", @NO ] ];
+
+    for (NSArray* row in rows) {
+        NSString* name = row[0];
+        BOOL expected = [row[1] boolValue];
+        NSString* request = [NSString stringWithFormat:@"GET /download?path=%%2F%@ HTTP/1.1\r\nHost: localhost\r\n\r\n", name];
+        NSString* download = SendRawRequest(uploader.port, request);
+
+        BOOL const advertised = [listing containsString:name];
+        BOOL const served = [download containsString:@" 200"];
+        NSString* const detail = [NSString stringWithFormat:@"%@: advertised=%d served=%d expected=%d", name, advertised, served, expected];
+
+        // The property that matters most: the listing and the handler must never disagree.
+        XCTAssertEqual(advertised, served, @"listing must agree with the handler — %@", detail);
+        XCTAssertEqual(served, expected, @"wrong verdict — %@", detail);
+    }
+
+    [uploader stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 @end
