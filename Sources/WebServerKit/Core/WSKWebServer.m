@@ -192,6 +192,7 @@ static void _ExecuteMainThreadRunLoopSources(void) {
     dispatch_queue_t _stateQueue;
     dispatch_group_t _sourceGroup;
     NSMutableArray<WSKHandler *> *_handlers;
+    NSMutableSet<NSString *> *_registeredMethods;  // Which methods ANY handler claims; see -_noteRegisteredMethod:
     NSInteger _activeConnections;        // Accessed through _syncQueue only
     NSInteger _reservedConnections;      // Accepted sockets not yet counted in _activeConnections; through _syncQueue only
     BOOL _connected;                     // Accessed on main thread only
@@ -243,6 +244,7 @@ static void _ExecuteMainThreadRunLoopSources(void) {
         _stateQueue = dispatch_queue_create("gcdwebserver.state", DISPATCH_QUEUE_SERIAL);
         _sourceGroup = dispatch_group_create();
         _handlers = [[NSMutableArray alloc] init];
+        _registeredMethods = [[NSMutableSet alloc] init];
 #if TARGET_OS_IPHONE
         _backgroundTask = UIBackgroundTaskInvalid;
 #endif
@@ -436,6 +438,25 @@ static void _ExecuteMainThreadRunLoopSources(void) {
         result = type && CFStringGetLength(type) ? CFBridgingRelease(CFStringCreateCopy(kCFAllocatorDefault, type)) : nil;
     });
     return result;
+}
+
+// Records that SOME handler claims this method, which is what separates "this server does not do
+// that" from "not here". A request matching no handler answered 501 Not Implemented for both, so a
+// browser asking for /favicon.ico was told the server does not implement GET. 501 is also
+// heuristically cacheable (RFC 9111 4.2.2), so an intermediary may remember it for a path that
+// later gains a handler.
+//
+// Deliberately NOT a path-to-methods map, which is what a 405 with Allow would need: a handler is
+// an opaque match block, so the server cannot ask which methods a given path accepts without
+// changing the registration model. 405 stays unimplemented rather than guessed at.
+- (void)_noteRegisteredMethod:(NSString *)method {
+    if (method.length) {
+        [_registeredMethods addObject:method];
+    }
+}
+
+- (NSSet<NSString *> *)registeredMethods {
+    return [_registeredMethods copy];
 }
 
 - (void)addHandlerWithMatchBlock:(WSKMatchBlock)matchBlock processBlock:(WSKProcessBlock)processBlock {
@@ -1110,7 +1131,22 @@ static inline NSString *_EncodeBase64(NSString *string) {
 
     dispatch_sync(_stateQueue, ^{
         if (!self->_source4) {
-            [self _start:NULL];  // TODO: There's probably nothing we can do on failure
+            NSError *error = nil;
+
+            if (![self _start:&error]) {
+                // Previously "[self _start:NULL]" under a TODO saying nothing could be done. The
+                // sibling -_reconnectInForeground: was given this logging and this one was not —
+                // and THIS is the default path, since WSKOption_AutomaticallySuspendInBackground
+                // defaults to YES. So the fix landed on the opt-in configuration and left the
+                // ordinary one silent: exactly the "closed at one of the sites the rule applies
+                // to" shape, in the change that was meant to close it.
+                //
+                // Deliberately not a -webServerDidStop: call: -_stop already posts one, and adding
+                // a second here delivered two callbacks for one stop last time. -isRunning and
+                // -serverURL report stopped honestly, so nothing believes the server resumed; what
+                // was missing is any way to find out WHY.
+                WSK_LOG_ERROR(@"Failed restarting %@ on returning to the foreground: %@", [self class], error);
+            }
         }
     });
 }
@@ -1426,6 +1462,8 @@ static inline NSString *_EncodeBase64(NSString *string) {
 }
 
 - (void)addDefaultHandlerForMethod:(NSString *)method requestClass:(Class)aClass asyncProcessBlock:(WSKAsyncProcessBlock)block {
+    [self _noteRegisteredMethod:method];
+
     [self
         addHandlerWithMatchBlock:^WSKRequest *(NSString *requestMethod, NSURL *requestURL, NSDictionary<NSString *, NSString *> *requestHeaders, NSString *urlPath, NSDictionary<NSString *, NSString *> *urlQuery) {
             if (![requestMethod isEqualToString:method]) {
@@ -1447,6 +1485,8 @@ static inline NSString *_EncodeBase64(NSString *string) {
 }
 
 - (void)addHandlerForMethod:(NSString *)method path:(NSString *)path requestClass:(Class)aClass asyncProcessBlock:(WSKAsyncProcessBlock)block {
+    [self _noteRegisteredMethod:method];
+
     if ([path hasPrefix:@"/"] && [aClass isSubclassOfClass:[WSKRequest class]]) {
         [self
             addHandlerWithMatchBlock:^WSKRequest *(NSString *requestMethod, NSURL *requestURL, NSDictionary<NSString *, NSString *> *requestHeaders, NSString *urlPath, NSDictionary<NSString *, NSString *> *urlQuery) {
@@ -1476,6 +1516,8 @@ static inline NSString *_EncodeBase64(NSString *string) {
 }
 
 - (void)addHandlerForMethod:(NSString *)method pathRegex:(NSString *)regex requestClass:(Class)aClass asyncProcessBlock:(WSKAsyncProcessBlock)block {
+    [self _noteRegisteredMethod:method];
+
     NSRegularExpression *expression = [NSRegularExpression regularExpressionWithPattern:regex options:NSRegularExpressionCaseInsensitive error:NULL];
 
     if (expression && [aClass isSubclassOfClass:[WSKRequest class]]) {
@@ -1623,6 +1665,10 @@ static NSString *_EscapeHTMLString(NSString *string) {
 }
 
 - (void)addGETHandlerForBasePath:(NSString *)basePath directoryPath:(NSString *)directoryPath indexFilename:(NSString *)indexFilename cacheAge:(NSUInteger)cacheAge allowRangeRequests:(BOOL)allowRangeRequests allowHiddenItems:(BOOL)allowHiddenItems {
+    // Registers its own match block rather than going through -addHandlerForMethod:, so the method
+    // has to be recorded here too.
+    [self _noteRegisteredMethod:@"GET"];
+
     // The leading and trailing slashes used to be an undocumented precondition enforced by
     // WSK_DNOT_REACHED(): abort with no diagnostic in Debug, and in Release register
     // NOTHING and return, so every request 404'd with the host app given no clue why.
@@ -1730,11 +1776,25 @@ static NSString *_EscapeHTMLString(NSString *string) {
                 if (fileType) {
                     if ([fileType isEqualToString:NSFileTypeDirectory]) {
                         if (indexFilename) {
-                            NSString *indexPath = [filePath stringByAppendingPathComponent:indexFilename];
-                            NSString *indexType = [[[NSFileManager defaultManager] attributesOfItemAtPath:indexPath error:NULL] fileType];
+                            // Resolved and contained like every other path this handler acts on.
+                            // It used to be appended to an already-resolved directory and served
+                            // unchecked — so an indexFilename containing a separator or ".."
+                            // escaped the served root, since -attributesOfItemAtPath: follows
+                            // intermediate components and WSKFileResponse's O_NOFOLLOW guards only
+                            // the final one. Host-app configuration rather than client input, and
+                            // every in-tree caller passes nil, but the header states the
+                            // containment guarantee unconditionally.
+                            NSString *indexRelativePath = nil;
+                            NSString *const indexPath = WSKResolveWithinDirectory([filePath stringByAppendingPathComponent:indexFilename], directoryPath, &indexRelativePath);
 
-                            if ([indexType isEqualToString:NSFileTypeRegular]) {
-                                return [WSKFileResponse responseWithFile:indexPath];
+                            if (indexPath) {
+                                NSString *const indexType = [[[NSFileManager defaultManager] attributesOfItemAtPath:indexPath error:NULL] fileType];
+
+                                if ([indexType isEqualToString:NSFileTypeRegular]) {
+                                    return [WSKFileResponse responseWithFile:indexPath];
+                                }
+                            } else {
+                                WSK_LOG_WARNING(@"Refusing index file \"%@\" under \"%@\": it does not resolve inside the served directory", indexFilename, relativePath);
                             }
                         }
 
