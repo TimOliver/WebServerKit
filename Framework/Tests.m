@@ -2913,6 +2913,156 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     [fm removeItemAtPath:dir error:NULL];
 }
 
+// The uploader's /download built its response with +responseWithFile:isAttachment:, which passes
+// NSMakeRange(NSUIntegerMax, 0) — no range at all — so a "Range" header was ignored and the whole
+// file came back 200. The base-path handler and DAV's GET have both passed request.byteRange and
+// request.ifRange for several passes; this endpoint never did. For Shape A that means an
+// interrupted download of a multi-hundred-megabyte build cannot resume, and it is also why a
+// <video> cannot seek. Going through the ifRange: variant is what brings the If-Range protection
+// with it, so a resume against a REPLACED file is refused rather than spliced.
+- (void)testUploaderDownloadHonoursRangeRequests {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    XCTAssertTrue([@"0123456789" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    WSKWebUploader* server = [[WSKWebUploader alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* partial = SendRawRequest(server.port, @"GET /download?path=%2Fa.txt HTTP/1.1\r\nHost: localhost\r\nRange: bytes=2-5\r\n\r\n");
+    XCTAssertTrue([partial hasPrefix:@"HTTP/1.1 206"], @"a Range request must be answered with 206: %@", [partial substringToIndex:MIN((NSUInteger)40, partial.length)]);
+    XCTAssertTrue([partial containsString:@"Content-Range: bytes 2-5/10"], @"the 206 must describe which bytes it carries: %@", partial);
+    XCTAssertTrue([partial hasSuffix:@"2345"], @"the 206 must carry exactly the requested bytes: %@", partial);
+
+    // An open-ended range is how a resume is actually spelled.
+    NSString* resume = SendRawRequest(server.port, @"GET /download?path=%2Fa.txt HTTP/1.1\r\nHost: localhost\r\nRange: bytes=7-\r\n\r\n");
+    XCTAssertTrue([resume hasPrefix:@"HTTP/1.1 206"], @"an open-ended resume must be 206: %@", [resume substringToIndex:MIN((NSUInteger)40, resume.length)]);
+    XCTAssertTrue([resume hasSuffix:@"789"], @"the resume must carry the tail: %@", resume);
+
+    // Unsatisfiable is 416 with the total, not a silent whole-file 200.
+    NSString* beyond = SendRawRequest(server.port, @"GET /download?path=%2Fa.txt HTTP/1.1\r\nHost: localhost\r\nRange: bytes=999-\r\n\r\n");
+    XCTAssertTrue([beyond hasPrefix:@"HTTP/1.1 416"], @"an unsatisfiable range is 416: %@", [beyond substringToIndex:MIN((NSUInteger)40, beyond.length)]);
+
+    // And what must keep working: no Range header still serves the whole file as an attachment.
+    NSString* whole = SendRawRequest(server.port, @"GET /download?path=%2Fa.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([whole hasPrefix:@"HTTP/1.1 200"], @"an ordinary download is unchanged: %@", [whole substringToIndex:MIN((NSUInteger)40, whole.length)]);
+    XCTAssertTrue([whole containsString:@"attachment"], @"an ordinary download is still an attachment");
+    XCTAssertTrue([whole hasSuffix:@"0123456789"], @"an ordinary download still carries the whole file");
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// Rendering a shared file INLINE puts it in the server's own origin, and this UI's one-click
+// buttons delete and move files — so an uploaded .html or .svg served inline is stored XSS against
+// the share itself. That is the whole reason /download forces "attachment", and it is also why a
+// media-rich UI cannot simply drop the flag: <img src="/download?..."> triggers a save dialog
+// rather than rendering.
+//
+// /preview is the narrow, inert-only alternative: an allow-list of types a browser cannot execute,
+// plus nosniff so a .png full of markup cannot be sniffed into active content, plus a CSP that
+// denies everything even if a type ever slips through. SVG is deliberately excluded despite being
+// an image — it carries script, and it is the exact trap an "images are safe" allow-list springs.
+- (void)testUploaderPreviewServesInertMediaInlineAndRefusesActiveContent {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    // Deliberately ASCII rather than real PNG bytes: the type is derived from the EXTENSION, so
+    // the content is irrelevant to what is being tested, and binary would make the reply
+    // undecodable as a string and every assertion below read "(null)".
+    XCTAssertTrue([@"PIXELS" writeToFile:[dir stringByAppendingPathComponent:@"pic.png"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([@"<script>alert(1)</script>" writeToFile:[dir stringByAppendingPathComponent:@"evil.html"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([@"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>" writeToFile:[dir stringByAppendingPathComponent:@"evil.svg"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([fm createDirectoryAtPath:[dir stringByAppendingPathComponent:@".hidden"] withIntermediateDirectories:YES attributes:nil error:NULL]);
+    XCTAssertTrue([@"SECRET" writeToFile:[dir stringByAppendingPathComponent:@".hidden/secret.png"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    WSKWebUploader* server = [[WSKWebUploader alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* image = SendRawRequest(server.port, @"GET /preview?path=%2Fpic.png HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([image hasPrefix:@"HTTP/1.1 200"], @"an inert image must render: %@", [image substringToIndex:MIN((NSUInteger)40, image.length)]);
+    XCTAssertTrue([image containsString:@"Content-Disposition: inline"], @"the whole point is inline disposition: %@", image);
+    XCTAssertFalse([image containsString:@"attachment"], @"an inline preview must not also say attachment");
+    XCTAssertTrue([image containsString:@"X-Content-Type-Options: nosniff"], @"inline content must never be sniffable");
+    XCTAssertTrue([image containsString:@"Content-Type: image/png"], @"the type must be stated so nosniff has something to pin: %@", image);
+    XCTAssertTrue([image containsString:@"Content-Security-Policy:"], @"inline content gets a policy that denies everything");
+
+    // Active content is refused outright — including SVG, which is an image and is NOT inert.
+    for (NSString* active in @[ @"%2Fevil.html", @"%2Fevil.svg" ]) {
+        NSString* reply = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /preview?path=%@ HTTP/1.1\r\nHost: localhost\r\n\r\n", active]);
+        XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 403"], @"%@ must not be served inline: %@", active, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+        XCTAssertFalse([reply containsString:@"alert(1)"], @"%@ must not have its body reflected either", active);
+    }
+
+    // But /download still serves them, as attachments — refusing inline must not remove the file
+    // from the share, only from the inline surface.
+    NSString* downloaded = SendRawRequest(server.port, @"GET /download?path=%2Fevil.svg HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([downloaded hasPrefix:@"HTTP/1.1 200"], @"the file is still downloadable: %@", [downloaded substringToIndex:MIN((NSUInteger)40, downloaded.length)]);
+    XCTAssertTrue([downloaded containsString:@"attachment"], @"…as an attachment");
+
+    // Every refusal /download makes, /preview makes too: it is a second door to the same files.
+    XCTAssertTrue([SendRawRequest(server.port, @"GET /preview?path=%2F.hidden%2Fsecret.png HTTP/1.1\r\nHost: localhost\r\n\r\n") hasPrefix:@"HTTP/1.1 403"], @"a hidden path is refused on the preview surface too");
+    XCTAssertTrue([SendRawRequest(server.port, @"GET /preview?path=%2Fnope.png HTTP/1.1\r\nHost: localhost\r\n\r\n") hasPrefix:@"HTTP/1.1 404"], @"a missing file is still 404");
+
+    // Range works here too, because that is what a <video> needs to seek.
+    NSString* ranged = SendRawRequest(server.port, @"GET /preview?path=%2Fpic.png HTTP/1.1\r\nHost: localhost\r\nRange: bytes=1-3\r\n\r\n");
+    XCTAssertTrue([ranged hasPrefix:@"HTTP/1.1 206"], @"preview must honour Range: %@", [ranged substringToIndex:MIN((NSUInteger)40, ranged.length)]);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// Caching is opt-in, and the default must stay as it was. A share is mutable — files are uploaded,
+// moved and deleted through this very UI — so a max-age the caller did not ask for would hand a
+// browser a window in which it serves content the share no longer holds, with no request to notice
+// it. Left at 0, every response still says no-cache, which does NOT mean "do not store": the
+// browser keeps the body and revalidates with If-None-Match, so a thumbnail grid already costs 304s
+// rather than bodies. What max-age buys is removing the request itself, which is the caller's call.
+- (void)testUploaderFileCacheControlMaxAgeIsOptIn {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    XCTAssertTrue([@"PIXELS" writeToFile:[dir stringByAppendingPathComponent:@"pic.png"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    WSKWebUploader* server = [[WSKWebUploader alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    XCTAssertEqual(server.fileCacheControlMaxAge, (NSUInteger)0, @"the default must be no caching directive");
+
+    for (NSString* endpoint in @[ @"download", @"preview" ]) {
+        NSString* reply = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /%@?path=%%2Fpic.png HTTP/1.1\r\nHost: localhost\r\n\r\n", endpoint]);
+        XCTAssertTrue([reply containsString:@"Cache-Control: no-cache"], @"/%@ must revalidate by default: %@", endpoint, reply);
+    }
+
+    [server stop];
+
+    server.fileCacheControlMaxAge = 3600;
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    for (NSString* endpoint in @[ @"download", @"preview" ]) {
+        NSString* reply = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /%@?path=%%2Fpic.png HTTP/1.1\r\nHost: localhost\r\n\r\n", endpoint]);
+        XCTAssertTrue([reply containsString:@"max-age=3600"], @"/%@ must honour the configured age: %@", endpoint, reply);
+    }
+
+    // A revalidation still works and still answers 304, so a client that asks anyway is told the
+    // truth rather than handed the body again.
+    // CFHTTPMessage standardizes the field name, so it goes out as "Etag" rather than the "ETag"
+    // the source spells — match case-insensitively rather than pinning CF's choice.
+    NSString* first = SendRawRequest(server.port, @"GET /preview?path=%2Fpic.png HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSRange const tagRange = [first rangeOfString:@"etag: " options:NSCaseInsensitiveSearch];
+    XCTAssertNotEqual(tagRange.location, (NSUInteger)NSNotFound, @"a file response carries an entity tag: %@", first);
+
+    if (tagRange.location != NSNotFound) {
+        NSString* tail = [first substringFromIndex:NSMaxRange(tagRange)];
+        NSString* tag = [tail substringToIndex:[tail rangeOfString:@"\r\n"].location];
+        NSString* revalidated = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /preview?path=%%2Fpic.png HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: %@\r\n\r\n", tag]);
+        XCTAssertTrue([revalidated hasPrefix:@"HTTP/1.1 304"], @"an unchanged preview revalidates to 304: %@", [revalidated substringToIndex:MIN((NSUInteger)40, revalidated.length)]);
+    }
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 // RFC 4918 §9.3.1: MKCOL on a URL that already identifies a resource MUST answer 405. This
 // answered 500, because createDirectoryAtPath:withIntermediateDirectories:NO fails with
 // NSFileWriteFileExistsError and the error mapping recognises only the full-volume cases, so
