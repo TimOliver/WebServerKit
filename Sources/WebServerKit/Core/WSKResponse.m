@@ -295,18 +295,15 @@
     // untrusted input would split the response and inject headers of the attacker's
     // choosing. No caller in this library does that, but this is the chokepoint, and a host
     // app naming a header after request data should not be able to forge a response.
-    // RFC 9112 §5 field-name is 1*tchar, so an empty name is not a field-line at all — it
-    // serializes as ": value", which a recipient may drop, treat as a continuation, or refuse
-    // the whole message over. The request parser already refuses one; this is the same rule on
-    // the response side, which did not have it.
-    if (header.length == 0) {
-        WSK_LOG_ERROR(@"Ignoring additional response header with an empty name");
-        return;
-    }
-
-    NSRange controlCharacter = [header rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"\r\n:"]];
-
-    if (controlCharacter.location != NSNotFound) {
+    // RFC 9112 §5: field-name = 1*tchar. The previous guard quoted that rule and then enforced
+    // only the EMPTY spelling of it, which left every other violation reachable — most sharply a
+    // name beginning with a space, which serializes as an obs-fold continuation line and is
+    // therefore appended to the PRECEDING header's value (measured against the real Date header).
+    // An interior space, a tab and a non-ASCII name all went out verbatim too.
+    //
+    // WSKIsHeaderTokenString is the request parser's own rule, shared rather than restated: a
+    // second implementation of a rule beside the live one is what this file keeps getting wrong.
+    if (!WSKIsHeaderTokenString(header)) {
         WSK_LOG_ERROR(@"Ignoring additional response header with an invalid name \"%@\"", header);
         return;
     }

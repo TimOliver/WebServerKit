@@ -125,6 +125,20 @@ NSDate *_Nullable WSKParseISO8601(NSString *string);
 BOOL WSKPathContainsNULByte(NSString *_Nullable path);
 
 /**
+ *  Is this byte legal in an HTTP field-name or method? RFC 9112 §5: field-name = 1*tchar.
+ *
+ *  Shared so the request parser and the response header setter cannot drift. A second
+ *  implementation of this rule beside the live one is the trap this codebase keeps falling into.
+ */
+BOOL WSKIsHeaderTokenCharacter(unsigned char character);
+
+/**
+ *  Does this string consist only of tchar, with at least one character? The whole field-name rule,
+ *  in one place.
+ */
+BOOL WSKIsHeaderTokenString(NSString *_Nullable string);
+
+/**
  *  Maps a filesystem NSError onto the server-error status that describes it honestly.
  *
  *  RFC 4918 §11.5: 507 Insufficient Storage means the method could not be performed because

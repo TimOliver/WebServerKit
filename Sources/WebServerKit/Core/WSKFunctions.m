@@ -127,6 +127,13 @@ static NSDateFormatter *_dateFormatterRFC850 = nil;
 static NSDateFormatter *_dateFormatterAsctime = nil;
 static NSDateFormatter *_dateFormatterISO8601 = nil;
 static dispatch_queue_t _dateFormatterQueue = NULL;
+// Anything earlier than this is not a date any HTTP client meant to send; see _EnsureDateFormatters.
+static NSTimeInterval _earliestPlausibleDate = 0.0;
+
+// The longest legal HTTP-date is the RFC 850 form with the longest weekday:
+// "Wednesday, 06-Nov-94 08:49:37 GMT" — 33 characters. The cap is deliberately loose; its job is
+// only to keep rejection CONSTANT-TIME, not to validate.
+static const NSUInteger kMaxHTTPDateLength = 64;
 
 // Idempotent and safe from any thread: everything here is built exactly once, under
 // dispatch_once, and read-only thereafter (all use is serialized on _dateFormatterQueue).
@@ -168,6 +175,22 @@ static void _EnsureDateFormatters(void) {
         _dateFormatterISO8601.locale = [[NSLocale alloc] initWithLocaleIdentifier:@"en_US"];
 
         _dateFormatterQueue = dispatch_queue_create(NULL, DISPATCH_QUEUE_SERIAL);
+
+        // ICU is lenient about digit COUNT: it accepts 1-3 digits for a "yyyy" field and 1 for
+        // "yy", so "Sun Nov  6 08:49:37 94" parsed to the year 94 AD instead of failing. Any such
+        // date precedes every real mtime, which turned an If-Unmodified-Since into a permanent 412
+        // that no retry could ever satisfy — a validator that failed OPEN replaced by one that
+        // failed CLOSED, which is the worse direction. RFC 9110 §13.1.4 requires an unparseable
+        // date to be IGNORED. Anchoring the calendar year is cheaper and less brittle than
+        // tightening three ICU patterns, and it covers all three spellings rather than the two
+        // that were noticed.
+        NSDateComponents *const earliest = [[NSDateComponents alloc] init];
+        earliest.year = 1000;
+        earliest.month = 1;
+        earliest.day = 1;
+        NSCalendar *const gregorian = [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+        gregorian.timeZone = [NSTimeZone timeZoneForSecondsFromGMT:0];  // Non-null, unlike +timeZoneWithAbbreviation:, and NSCalendar.timeZone is non-null.
+        _earliestPlausibleDate = [[gregorian dateFromComponents:earliest] timeIntervalSinceReferenceDate];
     });
 }
 
@@ -273,7 +296,14 @@ NSString *WSKFormatRFC822(NSDate *date) {
 }
 
 NSDate *WSKParseRFC822(NSString *string) {
-    if (string.length == 0) {
+    // Length is checked BEFORE any formatter runs, and this is load-bearing for more than tidiness.
+    // Adding the two fallback formatters made rejecting a non-date linear in its length — three
+    // full-string ICU passes plus a whole-string double-space collapse that allocates a copy —
+    // measured at 74x baseline (1.48 ms) for a value at the 64 KB header cap. All of it runs inside
+    // the single process-wide serial queue that also serializes the Date header of EVERY response,
+    // so the cost is stolen from other connections, and If-Modified-Since is parsed for every
+    // request before any handler or authentication runs. No legal HTTP-date exceeds 33 characters.
+    if ((string.length == 0) || (string.length > kMaxHTTPDateLength)) {
         return nil;
     }
 
@@ -293,6 +323,14 @@ NSDate *WSKParseRFC822(NSString *string) {
             // variant parse without loosening the pattern itself.
             NSString *const collapsed = [string stringByReplacingOccurrencesOfString:@"  " withString:@" "];
             date = [_dateFormatterAsctime dateFromString:collapsed];
+        }
+
+        // ICU's tolerance of short year fields turns malformed input into a first- or
+        // second-century date rather than nil. Applied to all three spellings, not only the two
+        // where it was noticed, because "closed at one of the sites the rule applies to" is this
+        // codebase's most reliable defect shape.
+        if ((date != nil) && ([date timeIntervalSinceReferenceDate] < _earliestPlausibleDate)) {
+            date = nil;
         }
     });
     return date;
@@ -445,6 +483,53 @@ NSString *WSKStringFromSockAddr(const struct sockaddr *addr, BOOL includeService
     }
 
     return includeService ? [NSString stringWithFormat:@"%s:%s", hostBuffer, serviceBuffer] : (NSString *)[NSString stringWithUTF8String:hostBuffer];
+}
+
+BOOL WSKIsHeaderTokenCharacter(unsigned char character) {
+    if (((character >= 'a') && (character <= 'z')) || ((character >= 'A') && (character <= 'Z')) || ((character >= '0') && (character <= '9'))) {
+        return YES;
+    }
+
+    switch (character) {
+        case '!':
+        case '#':
+        case '$':
+        case '%':
+        case '&':
+        case '\'':
+        case '*':
+        case '+':
+        case '-':
+        case '.':
+        case '^':
+        case '_':
+        case '`':
+        case '|':
+        case '~':
+            return YES;
+        default:
+            return NO;
+    }
+}
+
+BOOL WSKIsHeaderTokenString(NSString *string) {
+    // 1*tchar: at least one character, every one of them a tchar. Compared over UTF-8 bytes so a
+    // non-ASCII name fails on its lead byte rather than being silently truncated somewhere later.
+    NSData *const bytes = [string dataUsingEncoding:NSUTF8StringEncoding];
+
+    if (bytes.length == 0) {
+        return NO;
+    }
+
+    unsigned char const *const buffer = bytes.bytes;
+
+    for (NSUInteger i = 0; i < bytes.length; i++) {
+        if (!WSKIsHeaderTokenCharacter(buffer[i])) {
+            return NO;
+        }
+    }
+
+    return YES;
 }
 
 WSKServerErrorHTTPStatusCode WSKServerErrorStatusCodeForError(NSError *error) {

@@ -277,7 +277,13 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
         // disagree far more often than "an unusual symlink" suggests — see that method.
         char resolvedBuffer[PATH_MAX];
 
-        if (realpath([_uploadDirectory fileSystemRepresentation], resolvedBuffer) != NULL) {
+        // -fileSystemRepresentation RAISES for an empty or NUL-bearing receiver, and this line was
+        // added without that guard — re-opening, three files from the comment explaining it, the
+        // exact class the WSKFileResponse fix had just closed. Fifth recurrence of this codebase's
+        // most repeated defect. Leaving _resolvedUploadDirectory nil is already handled: the reader
+        // falls back to _uploadDirectory.
+        if ((_uploadDirectory.length > 0) && !WSKPathContainsNULByte(_uploadDirectory) &&
+            (realpath([_uploadDirectory fileSystemRepresentation], resolvedBuffer) != NULL)) {
             _resolvedUploadDirectory = [[[NSFileManager defaultManager] stringWithFileSystemRepresentation:resolvedBuffer length:strlen(resolvedBuffer)] copy];
         }
         _serverSentEventsEnabled = YES;
