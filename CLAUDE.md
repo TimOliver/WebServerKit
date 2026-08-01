@@ -87,6 +87,32 @@ and the Bonjour/`.local` name only, so without it every request is refused with 
 
 ## Recent Changes
 
+### Cleanup phase 3, group B: the header-field and host-name rules go private
+
+Three more off the public surface — `WSKIsHeaderTokenCharacter`, `WSKIsHeaderTokenString` and
+`WSKHostNameWithoutRootLabel`. None has a caller outside the core target and none has a plausible
+host-app use: they exist because the request parser and the response serializer BOTH have to spell
+the same rule, which is why they were shared at all. Being shared between two files inside one
+target never required being public.
+
+The public `WSKFunctions.h` is now **21 declarations, down from 27**.
+
+**⚠️ One of the four approved for this batch was deliberately held back.** `WSKResolveWithinDirectory`
+was in the plan, and moving it would have left **three public doc comments naming a private symbol** —
+including the `@warning` on `WSKPathIsInsideDirectory` that the previous change had just rewritten to
+point at it as the resolve-once alternative. `WSKPathIsInsideDirectory` is used by both sibling
+targets, so it stays public until group C. Moving the resolver first would either strand those
+references or strip the only useful pointer out of a public warning, so it moves **with the rest of
+the resolver cluster** instead. Recorded because "do the approved thing" and "leave the docs
+coherent" genuinely conflicted here, and the smaller batch is the one that keeps both true.
+
+**Verified together.** 142 tests and 0 failures on a clean build with no new warnings, `swift build`
+clean, the trace corpus green, iOS and tvOS Debug clean.
+
+**Group C remains** — eleven functions the sibling targets genuinely use, which need the SPM target
+restructure so those targets can see `WSKPrivate.h`. That is the breaking change, and the last
+structural item.
+
 ### Cleanup phase 3, group A: three security-shaped functions leave the public header
 
 The public `WSKFunctions.h` had grown to **27 declarations**, and the memory note carried the reason

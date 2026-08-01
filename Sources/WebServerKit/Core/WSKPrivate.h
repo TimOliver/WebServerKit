@@ -349,4 +349,36 @@ NSString *_Nullable WSKResolvedPathRelativeToDirectory(NSString *path, NSString 
  */
 BOOL WSKResolvedPathHasHiddenComponent(NSString *path, NSString *directory);
 
+#pragma mark - Header-field and host-name internals
+
+// Also formerly public. No caller outside the core target and no plausible host-app use: these are
+// the rules the request parser and the response serializer BOTH have to spell the same way, which
+// is why they are shared at all. WSKResolveWithinDirectory stays public for now despite belonging
+// here, because three public doc comments name it as the resolve-once alternative — it moves with
+// the rest of the resolver cluster so those references never point at a private symbol.
+
+/**
+ *  Is this byte legal in an HTTP field-name or method? RFC 9112 §5: field-name = 1*tchar.
+ *
+ *  Shared so the request parser and the response header setter cannot drift. A second
+ *  implementation of this rule beside the live one is the trap this codebase keeps falling into.
+ */
+BOOL WSKIsHeaderTokenCharacter(unsigned char character);
+
+/**
+ *  Does this string consist only of tchar, with at least one character? The whole field-name rule,
+ *  in one place.
+ */
+BOOL WSKIsHeaderTokenString(NSString *_Nullable string);
+
+/**
+ *  Strips one trailing DNS root-label dot. "name.local." and "name.local" are the same host.
+ *
+ *  Shared because the two sides of the Host allow-list disagreed: the CHECK side stripped it from
+ *  the incoming header while the CONFIG side did not strip it from a WSKOption_AllowedHostNames
+ *  entry, so an entry written as a fully-qualified name — which is how DNS writes one — matched
+ *  nothing at all and every request answered 421.
+ */
+NSString *WSKHostNameWithoutRootLabel(NSString *host);
+
 NS_ASSUME_NONNULL_END

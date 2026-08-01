@@ -124,29 +124,8 @@ NSDate *_Nullable WSKParseISO8601(NSString *string);
  */
 BOOL WSKPathContainsNULByte(NSString *_Nullable path);
 
-/**
- *  Is this byte legal in an HTTP field-name or method? RFC 9112 §5: field-name = 1*tchar.
- *
- *  Shared so the request parser and the response header setter cannot drift. A second
- *  implementation of this rule beside the live one is the trap this codebase keeps falling into.
- */
-BOOL WSKIsHeaderTokenCharacter(unsigned char character);
 
-/**
- *  Does this string consist only of tchar, with at least one character? The whole field-name rule,
- *  in one place.
- */
-BOOL WSKIsHeaderTokenString(NSString *_Nullable string);
 
-/**
- *  Strips one trailing DNS root-label dot. "name.local." and "name.local" are the same host.
- *
- *  Shared because the two sides of the Host allow-list disagreed: the CHECK side stripped it from
- *  the incoming header while the CONFIG side did not strip it from a WSKOption_AllowedHostNames
- *  entry, so an entry written as a fully-qualified name — which is how DNS writes one — matched
- *  nothing at all and every request answered 421.
- */
-NSString *WSKHostNameWithoutRootLabel(NSString *host);
 
 /**
  *  Does a single name satisfy an extension allow-list? A nil list means "no restriction".
