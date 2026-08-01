@@ -35,7 +35,6 @@
 
 NSString *const WSKRequestAttribute_RegexCaptures = @"WSKRequestAttribute_RegexCaptures";
 
-#define kZlibErrorDomain @"ZlibErrorDomain"
 #define kGZipInitialBufferSize (256 * 1024)
 
 @interface WSKBodyDecoder : NSObject <WSKBodyWriter>
@@ -110,7 +109,7 @@ NSString *const WSKRequestAttribute_RegexCaptures = @"WSKRequestAttribute_RegexC
             WSK_LOG_ERROR(@"Trailing data after the end of the gzip request body");
 
             if (error) {
-                *error = [NSError errorWithDomain:kWSKErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: @"Trailing data after end of gzip request body"}];
+                *error = [NSError errorWithDomain:kWSKErrorDomain code:kWSKRequestBodyError_Malformed userInfo:@{NSLocalizedDescriptionKey: @"Trailing data after end of gzip request body"}];
             }
 
             return NO;
@@ -135,7 +134,7 @@ NSString *const WSKRequestAttribute_RegexCaptures = @"WSKRequestAttribute_RegexC
         WSK_LOG_ERROR(@"Refusing to inflate: the server is already holding its %lu byte in-memory limit across all connections", (unsigned long)kWSKMaxTotalInMemoryLength);
 
         if (error) {
-            *error = [NSError errorWithDomain:kWSKErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: @"Server is at its total in-memory capacity"}];
+            *error = [NSError errorWithDomain:kWSKErrorDomain code:kWSKRequestBodyError_ServerAtCapacity userInfo:@{NSLocalizedDescriptionKey: @"Server is at its total in-memory capacity"}];
         }
 
         return NO;
@@ -167,7 +166,7 @@ NSString *const WSKRequestAttribute_RegexCaptures = @"WSKRequestAttribute_RegexC
             WSK_LOG_ERROR(@"Decompressed request body exceeds the %lu byte limit", (unsigned long)WSKMaxDecompressedBodyLength());
 
             if (error) {
-                *error = [NSError errorWithDomain:kWSKErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: @"Decompressed request body exceeds maximum size"}];
+                *error = [NSError errorWithDomain:kWSKErrorDomain code:kWSKRequestBodyError_TooLarge userInfo:@{NSLocalizedDescriptionKey: @"Decompressed request body exceeds maximum size"}];
             }
 
             return NO;
@@ -194,7 +193,7 @@ NSString *const WSKRequestAttribute_RegexCaptures = @"WSKRequestAttribute_RegexC
                     WSK_LOG_ERROR(@"Trailing data after the end of the gzip request body");
 
                     if (error) {
-                        *error = [NSError errorWithDomain:kWSKErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: @"Trailing data after end of gzip request body"}];
+                        *error = [NSError errorWithDomain:kWSKErrorDomain code:kWSKRequestBodyError_Malformed userInfo:@{NSLocalizedDescriptionKey: @"Trailing data after end of gzip request body"}];
                     }
 
                     return NO;
@@ -222,7 +221,7 @@ NSString *const WSKRequestAttribute_RegexCaptures = @"WSKRequestAttribute_RegexC
             WSK_LOG_ERROR(@"Refusing to inflate further: the server is already holding its %lu byte in-memory limit across all connections", (unsigned long)kWSKMaxTotalInMemoryLength);
 
             if (error) {
-                *error = [NSError errorWithDomain:kWSKErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: @"Server is at its total in-memory capacity"}];
+                *error = [NSError errorWithDomain:kWSKErrorDomain code:kWSKRequestBodyError_ServerAtCapacity userInfo:@{NSLocalizedDescriptionKey: @"Server is at its total in-memory capacity"}];
             }
 
             return NO;
@@ -258,7 +257,7 @@ NSString *const WSKRequestAttribute_RegexCaptures = @"WSKRequestAttribute_RegexC
         [super close:NULL];
 
         if (error) {
-            *error = [NSError errorWithDomain:kWSKErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: @"Truncated gzip request body"}];
+            *error = [NSError errorWithDomain:kWSKErrorDomain code:kWSKRequestBodyError_Malformed userInfo:@{NSLocalizedDescriptionKey: @"Truncated gzip request body"}];
         }
 
         return NO;

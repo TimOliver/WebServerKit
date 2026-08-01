@@ -34,6 +34,7 @@
 #import <netinet/in.h>
 #import <sys/socket.h>
 #import <TargetConditionals.h>
+#import <zlib.h>  // Z_DATA_ERROR / Z_NEED_DICT, to tell the client's bad stream from our allocation failure
 #ifdef __WEBSERVERKIT_ENABLE_TESTING__
 #import <stdatomic.h>
 #endif
@@ -117,6 +118,7 @@ NS_ASSUME_NONNULL_END
     BOOL _clientIsHTTP10;          // The client spoke HTTP/1.0 (or older): no chunked framing, no interim 1xx
     BOOL _earlyChecksRun;          // Host allow-list and preflight are decided once, as early as the headers allow
     NSInteger _headerFailureStatus;  // Why the header block was rejected; 500 only if nothing more specific applies
+    NSInteger _bodyFailureStatus;    // Why the body was rejected; same idiom, because the body readers report only a BOOL
     NSTimeInterval _idleTimeout;   // Seconds between idle-timer ticks; 0 when idle timeouts are disabled
 
     // Connection reuse. Deliberately restricted to requests carrying NO body, which is what keeps
@@ -221,6 +223,60 @@ static CFStringRef _ReasonPhraseForStatusCode(NSInteger statusCode) {
         default:
             return NULL;  // CF's phrase is correct for this one.
     }
+}
+
+// What to tell a client whose request body we would not accept.
+//
+// Every failure here used to answer 500, because the fixed-length and chunked readers report
+// failure as a plain BOOL and the errors they carry were all `code:-1`. 500 is a claim that the
+// SERVER broke: it invites a retry of something that can never succeed (malformed chunk framing,
+// a corrupt gzip stream) and makes a client give up on something that could (a momentarily
+// exhausted budget). The codes exist so this can tell the truth.
+//
+// Only the zlib results that mean "the bytes you sent are not a valid stream" are the client's.
+// Z_DATA_ERROR and Z_NEED_DICT are; Z_MEM_ERROR is an allocation failure of OURS, and inflateInit2
+// reports through the same domain — so blanket-mapping this domain to 400 would tell a client its
+// request was malformed because the server ran out of memory.
+//
+// Anything unrecognised falls through to WSKServerErrorStatusCodeForError, which already maps a
+// full volume to 507 and everything else to 500, so the ENOSPC rule has ONE home rather than a
+// second copy here.
+static NSInteger _StatusForBodyError(NSError *error) {
+    if (error == nil) {
+        return kWSKHTTPStatusCode_InternalServerError;
+    }
+
+    if ([error.domain isEqualToString:kZlibErrorDomain]) {
+        if ((error.code == Z_DATA_ERROR) || (error.code == Z_NEED_DICT)) {
+            return kWSKHTTPStatusCode_BadRequest;
+        }
+
+        return kWSKHTTPStatusCode_InternalServerError;
+    }
+
+    if ([error.domain isEqualToString:kWSKErrorDomain]) {
+        WSKRequestBodyErrorCode const code = (WSKRequestBodyErrorCode)error.code;
+
+        if (code == kWSKRequestBodyError_Malformed) {
+            return kWSKHTTPStatusCode_BadRequest;
+        }
+
+        if (code == kWSKRequestBodyError_TooLarge) {
+            return kWSKHTTPStatusCode_RequestEntityTooLarge;
+        }
+
+        if (code == kWSKRequestBodyError_ServerAtCapacity) {
+            return kWSKHTTPStatusCode_ServiceUnavailable;
+        }
+    }
+
+    return WSKServerErrorStatusCodeForError(error);
+}
+
+// Records why the body was refused, for the abort that follows. Mirrors _headerFailureStatus:
+// the readers hand back a BOOL, so the reason has to be left where the abort can find it.
+- (void)_noteBodyFailure:(NSError *)error {
+    _bodyFailureStatus = _StatusForBodyError(error);
 }
 
 - (void)_initializeResponseHeadersWithStatusCode:(NSInteger)statusCode {
@@ -478,6 +534,8 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
     _willKeepAlive = NO;
     _clientIsHTTP10 = NO;
     _headerFailureStatus = kWSKHTTPStatusCode_InternalServerError;
+    _bodyFailureStatus = kWSKHTTPStatusCode_InternalServerError;
+    _chunkReservation = nil;  // Named in the reuse ivar block, so it is cleared here like the rest
     _headerPhaseTicks = 0;  // Or the second request inherits the first's deadline and is killed early.
 
 #ifdef __WEBSERVERKIT_ENABLE_TESTING__
@@ -650,19 +708,29 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
 
     if (![_request performOpen:&error]) {
         WSK_LOG_ERROR(@"Failed opening request body for socket %i: %@", _socket, error);
-        [self abortRequest:_request withStatusCode:kWSKHTTPStatusCode_InternalServerError];
+        // The error was populated and thrown away. It carries real information: a multipart body
+        // with no usable boundary is malformed (400), and an open(2) that fails ENOSPC is a full
+        // volume (507) — the same errno the very next call would have mapped correctly.
+        [self _noteBodyFailure:error];
+        [self abortRequest:_request withStatusCode:_bodyFailureStatus];
         return;
     }
 
     if (initialData.length) {
         if (![_request performWriteData:initialData error:&error]) {
             WSK_LOG_ERROR(@"Failed writing request body on socket %i: %@", _socket, error);
+            [self _noteBodyFailure:error];
+            NSError *closeError = nil;
 
-            if (![_request performClose:&error]) {
-                WSK_LOG_ERROR(@"Failed closing request body for socket %i: %@", _socket, error);
+            if (![_request performClose:&closeError]) {
+                // Deliberately does not overwrite the reason: the write failure is why the
+                // request is being refused, and closing a body that already failed to write is
+                // expected to fail too. Reusing one `error` variable here meant the close's
+                // error replaced the write's before anything could read it.
+                WSK_LOG_ERROR(@"Failed closing request body for socket %i: %@", _socket, closeError);
             }
 
-            [self abortRequest:_request withStatusCode:kWSKHTTPStatusCode_InternalServerError];
+            [self abortRequest:_request withStatusCode:_bodyFailureStatus];
             return;
         }
 
@@ -679,7 +747,7 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
                                   // chunk framing was malformed, or a size cap rejected it. Don't
                                   // hand the handler a partial body as if it were complete.
                                   [self->_request performClose:NULL];
-                                  [self abortRequest:self->_request withStatusCode:kWSKHTTPStatusCode_InternalServerError];
+                                  [self abortRequest:self->_request withStatusCode:self->_bodyFailureStatus];
                                   return;
                               }
 
@@ -687,7 +755,8 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
                                   [self _startProcessingRequest];
                               } else {
                                   WSK_LOG_ERROR(@"Failed closing request body for socket %i: %@", self->_socket, localError);
-                                  [self abortRequest:self->_request withStatusCode:kWSKHTTPStatusCode_InternalServerError];
+                                  [self _noteBodyFailure:localError];
+                                  [self abortRequest:self->_request withStatusCode:self->_bodyFailureStatus];
                               }
                           }];
     } else {
@@ -695,7 +764,8 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
             [self _startProcessingRequest];
         } else {
             WSK_LOG_ERROR(@"Failed closing request body for socket %i: %@", _socket, error);
-            [self abortRequest:_request withStatusCode:kWSKHTTPStatusCode_InternalServerError];
+            [self _noteBodyFailure:error];
+            [self abortRequest:_request withStatusCode:_bodyFailureStatus];
         }
     }
 }
@@ -705,7 +775,8 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
 
     if (![_request performOpen:&error]) {
         WSK_LOG_ERROR(@"Failed opening request body for socket %i: %@", _socket, error);
-        [self abortRequest:_request withStatusCode:kWSKHTTPStatusCode_InternalServerError];
+        [self _noteBodyFailure:error];
+        [self abortRequest:_request withStatusCode:_bodyFailureStatus];
         return;
     }
 
@@ -720,7 +791,7 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
                     // framing was malformed, or a size cap rejected it. Don't hand the
                     // handler a partial body as if it were complete.
                     [self->_request performClose:NULL];
-                    [self abortRequest:self->_request withStatusCode:kWSKHTTPStatusCode_InternalServerError];
+                    [self abortRequest:self->_request withStatusCode:self->_bodyFailureStatus];
                     return;
                 }
 
@@ -728,7 +799,8 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
                     [self _startProcessingRequest];
                 } else {
                     WSK_LOG_ERROR(@"Failed closing request body for socket %i: %@", self->_socket, localError);
-                    [self abortRequest:self->_request withStatusCode:kWSKHTTPStatusCode_InternalServerError];
+                    [self _noteBodyFailure:localError];
+                    [self abortRequest:self->_request withStatusCode:self->_bodyFailureStatus];
                 }
             }];
 }
@@ -1015,6 +1087,7 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
         _socket = socket;
         _connectionQueue = dispatch_queue_create("gcdwebserver.connection", DISPATCH_QUEUE_SERIAL);
         _headerFailureStatus = kWSKHTTPStatusCode_InternalServerError;
+        _bodyFailureStatus = kWSKHTTPStatusCode_InternalServerError;
         WSK_LOG_DEBUG(@"Did open connection on socket %i", _socket);
 
         _keepAliveTimeout = server.connectionKeepAliveTimeout;
@@ -1391,10 +1464,12 @@ typedef NS_ENUM(NSInteger, WSKHeaderBlockState) {
                         }
                     } else {
                         WSK_LOG_ERROR(@"Failed writing request body on socket %i: %@", self->_socket, error);
+                        [self _noteBodyFailure:error];
                         block(NO);
                     }
                 } else {
                     WSK_LOG_ERROR(@"Unexpected extra content reading request body on socket %i", self->_socket);
+                    self->_bodyFailureStatus = kWSKHTTPStatusCode_BadRequest;
                     block(NO);
                     WSK_DNOT_REACHED();
                 }
@@ -1474,6 +1549,7 @@ static inline NSUInteger _ScanHexNumber(const void *bytes, NSUInteger size) {
                     // cap its declared size. Legitimate chunked uploads use many smaller
                     // chunks; this only rejects a pathologically large single chunk.
                     WSK_LOG_ERROR(@"Chunk size %lu exceeds the %lu byte limit reading request body on socket %i", (unsigned long)length, (unsigned long)WSKMaxInMemoryBodyLength(), _socket);
+                    _bodyFailureStatus = kWSKHTTPStatusCode_RequestEntityTooLarge;
                     block(NO);
                     return;
                 }
@@ -1491,11 +1567,13 @@ static inline NSUInteger _ScanHexNumber(const void *bytes, NSUInteger size) {
                         [chunkData replaceBytesInRange:NSMakeRange(0, range.location + range.length + length + 2) withBytes:NULL length:0];
                     } else {
                         WSK_LOG_ERROR(@"Failed writing request body on socket %i: %@", _socket, error);
+                        [self _noteBodyFailure:error];
                         block(NO);
                         return;
                     }
                 } else {
                     WSK_LOG_ERROR(@"Missing terminating CRLF sequence for chunk reading request body on socket %i", _socket);
+                    _bodyFailureStatus = kWSKHTTPStatusCode_BadRequest;
                     block(NO);
                     return;
                 }
@@ -1512,6 +1590,7 @@ static inline NSUInteger _ScanHexNumber(const void *bytes, NSUInteger size) {
             }
         } else {
             WSK_LOG_ERROR(@"Invalid chunk length reading request body on socket %i", _socket);
+            _bodyFailureStatus = kWSKHTTPStatusCode_BadRequest;
             block(NO);
             return;
         }
@@ -1526,6 +1605,7 @@ static inline NSUInteger _ScanHexNumber(const void *bytes, NSUInteger size) {
     // plus framing slack: a legitimate in-flight chunk needs at most that much buffered.
     if (chunkData.length > WSKMaxInMemoryBodyLength() + kHeadersMaxLength) {
         WSK_LOG_ERROR(@"Chunked transfer framing exceeds the buffer limit reading request body on socket %i", _socket);
+        _bodyFailureStatus = kWSKHTTPStatusCode_RequestEntityTooLarge;
         block(NO);
         return;
     }
@@ -1535,6 +1615,7 @@ static inline NSUInteger _ScanHexNumber(const void *bytes, NSUInteger size) {
     // process-wide ceiling too, and give bytes back as the parser drains them.
     if (![_chunkReservation reserveBytes:chunkData.length]) {
         WSK_LOG_ERROR(@"Refusing chunked body on socket %i: the server is already holding its %lu byte in-memory limit across all connections", _socket, (unsigned long)kWSKMaxTotalInMemoryLength);
+        _bodyFailureStatus = kWSKHTTPStatusCode_ServiceUnavailable;
         block(NO);
         return;
     }

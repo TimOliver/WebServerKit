@@ -208,6 +208,28 @@ NS_ASSUME_NONNULL_BEGIN
 #define kWSKServerName @"WebServerKit"
 #define kWSKErrorDomain @"WSKErrorDomain"
 
+// Was #defined identically in WSKRequest.m and WSKResponse.m; the connection now needs it too, to
+// tell a zlib failure (the client's data) from one of ours.
+#define kZlibErrorDomain @"ZlibErrorDomain"
+
+/**
+ *  Why a request body could not be accepted.
+ *
+ *  Every error in this domain used to be `code:-1`, distinguished only by its localized
+ *  description — so the connection layer had nothing to key on and answered 500 for all of them.
+ *  A client told 500 has been told the SERVER broke, which invites a retry of something that can
+ *  never succeed (malformed framing), or gives up on something that could (a full disk, a
+ *  momentarily exhausted budget). These codes exist so the status can tell the truth; the
+ *  description stays for the log.
+ */
+typedef NS_ENUM(NSInteger, WSKRequestBodyErrorCode) {
+    kWSKRequestBodyError_Unspecified = -1,     // What every one of these errors used to be
+    kWSKRequestBodyError_Malformed = 1,        // The client's framing or encoding is wrong -> 400
+    kWSKRequestBodyError_TooLarge,             // A per-request size cap was exceeded -> 413
+    kWSKRequestBodyError_ServerAtCapacity,     // The process-wide in-memory ceiling is full -> 503
+    kWSKRequestBodyError_Internal,             // Ours, not the client's -> 500
+};
+
 static inline BOOL WSKIsValidByteRange(NSRange range) {
     return ((range.location != NSUIntegerMax) || (range.length > 0));
 }

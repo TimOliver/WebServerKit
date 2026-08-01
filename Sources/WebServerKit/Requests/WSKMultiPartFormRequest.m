@@ -88,6 +88,14 @@ typedef enum {
 } ParserState;
 
 @interface WSKMIMEStreamParser : NSObject
+// Why the last -appendBytes:length: or -close returned NO.
+//
+// The parser fails for seven unrelated reasons and used to report all of them as a bare NO, so the
+// request could only guess — and guessing "the client's data is malformed" turns a full temp
+// directory and a momentarily exhausted budget into 400, which tells a client never to try again.
+// That is the same mistake as answering 403 for ENOSPC, which this project fixed once already.
+@property (nonatomic, readonly) WSKRequestBodyErrorCode failureCode;
+@property (nonatomic, readonly, nullable) NSError *failureError;  // Set instead when an errno is the truth (a full disk)
 @end
 
 static NSData *_newlineData = nil;
@@ -167,6 +175,21 @@ static NSData *_dashNewlineData = nil;
     NSUInteger _depth;  // Nesting level; 0 for the top-level parser, +1 per multipart/mixed
     WSKMIMEStreamBudget *_budget;              // Shared with every sub-parser
     WSKMemoryReservation *_workingReservation;  // This parser's own working buffer
+    WSKRequestBodyErrorCode _failureCode;
+    NSError *_failureError;
+}
+
+// A sub-parser's failure is the whole body's failure, so the reason has to travel up with it.
+- (WSKRequestBodyErrorCode)failureCode {
+    if (_subParser && (_subParser.failureCode != kWSKRequestBodyError_Malformed)) {
+        return _subParser.failureCode;
+    }
+
+    return _failureCode ? _failureCode : kWSKRequestBodyError_Malformed;
+}
+
+- (NSError *)failureError {
+    return _failureError ? _failureError : _subParser.failureError;
 }
 
 + (void)initialize {
@@ -256,6 +279,7 @@ static NSData *_dashNewlineData = nil;
             // budget still reads zero. Real part headers are a few hundred bytes.
             if (range.location > kMultiPartMaxHeadersLength) {
                 WSK_LOG_ERROR(@"Headers of a part of 'multipart/form-data' exceed the %i byte limit", (int)kMultiPartMaxHeadersLength);
+                _failureCode = kWSKRequestBodyError_TooLarge;
                 return NO;
             }
 
@@ -321,6 +345,10 @@ static NSData *_dashNewlineData = nil;
                         // A full or unwritable temporary directory is an environment condition
                         // rather than an unreachable state.
                         WSK_LOG_ERROR(@"Failed creating temporary file for part of 'multipart/form-data': %s (%i)", strerror(errno), errno);
+                        // The environment, not the client. Carrying the errno is what lets a full
+                        // volume reach WSKServerErrorStatusCodeForError's 507 rather than being
+                        // reported as malformed input the client must never send again.
+                        _failureError = WSKMakePosixError(errno);
                         success = NO;
                     }
                 }
@@ -366,6 +394,7 @@ static NSData *_dashNewlineData = nil;
                         _subParser = nil;
                     } else if (_budget->partCount >= kMultiPartMaxParts) {
                         WSK_LOG_ERROR(@"'multipart/form-data' body exceeds the %i part limit", (int)kMultiPartMaxParts);
+                        _failureCode = kWSKRequestBodyError_TooLarge;
                         success = NO;
 
                         if (_tmpPath) {  // Drop the part already staged on disk rather than orphaning it
@@ -388,6 +417,7 @@ static NSData *_dashNewlineData = nil;
                             // environment condition, not an unreachable state, so fail the parse
                             // rather than abort in debug.
                             WSK_LOG_ERROR(@"Failed writing part of 'multipart/form-data' to disk");
+                            _failureError = WSKMakePosixError(errno ? errno : ENOSPC);
                             success = NO;
                             unlink([_tmpPath fileSystemRepresentation]);  // Remove the orphaned temp file; -dealloc can't (we clear _tmpPath below).
                         }
@@ -399,9 +429,11 @@ static NSData *_dashNewlineData = nil;
                         // individually-legal parts would otherwise grow without limit. File parts
                         // are drained to disk and so are governed by the part count instead.
                         WSK_LOG_ERROR(@"Multipart form arguments retained in memory exceed the %lu byte limit", (unsigned long)WSKMaxInMemoryBodyLength());
+                        _failureCode = kWSKRequestBodyError_TooLarge;
                         success = NO;
                     } else if (![_budget.reservation reserveBytes:(_budget->argumentBytes + dataLength)]) {
                         WSK_LOG_ERROR(@"Refusing multipart argument: the server is already holding its %lu byte in-memory limit across all connections", (unsigned long)kWSKMaxTotalInMemoryLength);
+                        _failureCode = kWSKRequestBodyError_ServerAtCapacity;
                         success = NO;
                     } else {
                         _budget->partCount += 1;
@@ -442,6 +474,7 @@ static NSData *_dashNewlineData = nil;
                     } else {
                         // As above: a short write means the temporary directory filled up.
                         WSK_LOG_ERROR(@"Failed streaming part of 'multipart/form-data' to disk: %s (%i)", strerror(errno), errno);
+                        _failureError = WSKMakePosixError(errno);
                         success = NO;
                     }
                 }
@@ -462,11 +495,13 @@ static NSData *_dashNewlineData = nil;
     // buffer without bound).
     if (_data.length + length > WSKMaxInMemoryBodyLength()) {
         WSK_LOG_ERROR(@"Multipart form data buffered in memory exceeds the %lu byte limit", (unsigned long)WSKMaxInMemoryBodyLength());
+        _failureCode = kWSKRequestBodyError_TooLarge;
         return NO;
     }
 
     if (![_workingReservation reserveBytes:(_data.length + length)]) {
         WSK_LOG_ERROR(@"Refusing multipart data: the server is already holding its %lu byte in-memory limit across all connections", (unsigned long)kWSKMaxTotalInMemoryLength);
+        _failureCode = kWSKRequestBodyError_ServerAtCapacity;
         return NO;
     }
 
@@ -506,6 +541,28 @@ static NSData *_dashNewlineData = nil;
     return self;
 }
 
+// Builds the error from the parser's own verdict rather than assuming the client's data was
+// malformed. Seven unrelated conditions come out of -appendBytes: as a bare NO — two per-request
+// size caps, two process-wide reservations, a part-count cap, a header cap, and a temp file that
+// could not be written. Reporting the last three as 400 tells a client never to retry something a
+// little free disk space or a moment's wait would fix.
+- (NSError *)_errorForParserFailure:(NSString *)description {
+    if (_parser == nil) {
+        // No parser to ask: either the boundary parameter was missing or unusable, or the body
+        // ended mid-part. Both are the client's data. Stated explicitly because messaging a nil
+        // parser would return a ZEROED code that matches no case and silently degrade to 500.
+        return [NSError errorWithDomain:kWSKErrorDomain code:kWSKRequestBodyError_Malformed userInfo:@{NSLocalizedDescriptionKey: description}];
+    }
+
+    NSError *const underlying = _parser.failureError;
+
+    if (underlying) {
+        return underlying;  // An errno is the truth; WSKServerErrorStatusCodeForError maps a full volume to 507.
+    }
+
+    return [NSError errorWithDomain:kWSKErrorDomain code:_parser.failureCode userInfo:@{NSLocalizedDescriptionKey: description}];
+}
+
 - (BOOL)open:(NSError **)error {
     NSString *const boundary = WSKExtractHeaderValueParameter(self.contentType, @"boundary");
 
@@ -513,7 +570,7 @@ static NSData *_dashNewlineData = nil;
 
     if (_parser == nil) {
         if (error) {
-            *error = [NSError errorWithDomain:kWSKErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: @"Failed starting to parse multipart form data"}];
+            *error = [self _errorForParserFailure:@"Failed starting to parse multipart form data"];
         }
 
         return NO;
@@ -525,7 +582,7 @@ static NSData *_dashNewlineData = nil;
 - (BOOL)writeData:(NSData *)data error:(NSError **)error {
     if (![_parser appendBytes:data.bytes length:data.length]) {
         if (error) {
-            *error = [NSError errorWithDomain:kWSKErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: @"Failed continuing to parse multipart form data"}];
+            *error = [self _errorForParserFailure:@"Failed continuing to parse multipart form data"];
         }
 
         return NO;
@@ -535,17 +592,23 @@ static NSData *_dashNewlineData = nil;
 }
 
 - (BOOL)close:(NSError **)error {
-    BOOL atEnd = [_parser isAtEnd];
-
-    _parser = nil;
+    BOOL const atEnd = [_parser isAtEnd];
 
     if (!atEnd) {
+        // Built BEFORE _parser is released: it is the only thing that knows why. Releasing first
+        // left the helper messaging nil and reporting every truncated body as generically
+        // malformed, losing a disk-full or capacity reason recorded during the parse.
+        NSError *const failure = [self _errorForParserFailure:@"Failed finishing to parse multipart form data"];
+        _parser = nil;
+
         if (error) {
-            *error = [NSError errorWithDomain:kWSKErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: @"Failed finishing to parse multipart form data"}];
+            *error = failure;
         }
 
         return NO;
     }
+
+    _parser = nil;
 
     return YES;
 }
