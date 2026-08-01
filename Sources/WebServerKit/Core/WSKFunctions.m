@@ -485,6 +485,11 @@ NSString *WSKStringFromSockAddr(const struct sockaddr *addr, BOOL includeService
     return includeService ? [NSString stringWithFormat:@"%s:%s", hostBuffer, serviceBuffer] : (NSString *)[NSString stringWithUTF8String:hostBuffer];
 }
 
+NSString *WSKHostNameWithoutRootLabel(NSString *host) {
+    // Only one dot is stripped; "name.local.." remains malformed and is refused.
+    return [host hasSuffix:@"."] ? [host substringToIndex:(host.length - 1)] : host;
+}
+
 BOOL WSKIsHeaderTokenCharacter(unsigned char character) {
     if (((character >= 'a') && (character <= 'z')) || ((character >= 'A') && (character <= 'Z')) || ((character >= '0') && (character <= '9'))) {
         return YES;
@@ -746,7 +751,7 @@ NSString *WSKResolveWithinDirectory(NSString *path, NSString *directory, NSStrin
     return resolvedPath;
 }
 
-NSString *WSKServableFileTypeAtPath(NSString *path, NSString *directory) {
+NSString *WSKServableFileTypeAtPath(NSString *path, NSString *directory, BOOL allowHiddenItems) {
     NSDictionary *const attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:NULL];
     NSString *const type = attributes[NSFileType];
 
@@ -757,6 +762,15 @@ NSString *WSKServableFileTypeAtPath(NSString *path, NSString *directory) {
     // Judge the link by what it points at, and only when that is something this server would
     // actually serve: inside the directory, and a regular file or a directory itself.
     if (!WSKResolvedPathIsWithinDirectory(path, directory)) {
+        return nil;
+    }
+
+    // Containment was tested and hiddenness was not, so a link whose own name carries no dot but
+    // which resolves inside a dot-directory was ADVERTISED by all three listings and then refused
+    // 403 by every handler — measured. "Advertise iff served" is the rule the sixth, eighth and
+    // fifteenth passes each restored in one direction or the other; this is the half that judged
+    // only containment.
+    if (!allowHiddenItems && WSKResolvedPathHasHiddenComponent(path, directory)) {
         return nil;
     }
 

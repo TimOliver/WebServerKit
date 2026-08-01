@@ -237,14 +237,6 @@ static BOOL _IsIPAddressLiteral(NSString *host) {
 // only defence against DNS rebinding: once a page on evil.example repoints its DNS here, the
 // browser treats it as same-origin, so CORS, Origin comparison and CSRF tokens are all
 // satisfied — but the browser still sends the name the page was loaded from. See
-// WSKOption_AllowedHostNames.
-// "name.local." and "name.local" are the same host: the trailing dot is the DNS root label,
-// which a user typing a fully-qualified name, a canonicalizing client library, or curl will
-// all send. Refusing it answered 421 for the server's own mDNS name and read as "the server
-// just doesn't work". Only one dot is stripped; "name.local.." remains malformed.
-static NSString *_WithoutRootLabel(NSString *host) {
-    return [host hasSuffix:@"."] ? [host substringToIndex:(host.length - 1)] : host;
-}
 
 - (WSKResponse *)_rejectIfHostNotAllowed {
     NSString *const hostHeader = _request.headers[@"Host"];
@@ -286,7 +278,7 @@ static NSString *_WithoutRootLabel(NSString *host) {
     // Strip the DNS root label from the *name*, not from the end of the whole value, so
     // "name.local.:8080" normalizes as well as "name.local.".
     BOOL const isBracketed = [normalized hasPrefix:@"["];
-    name = _WithoutRootLabel(name);
+    name = WSKHostNameWithoutRootLabel(name);
 
     // An allow-list entry may pin a port ("files.example:8080"), and such an entry is
     // deliberately honoured verbatim — including its port — so rebuild the canonical

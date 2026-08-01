@@ -139,6 +139,16 @@ BOOL WSKIsHeaderTokenCharacter(unsigned char character);
 BOOL WSKIsHeaderTokenString(NSString *_Nullable string);
 
 /**
+ *  Strips one trailing DNS root-label dot. "name.local." and "name.local" are the same host.
+ *
+ *  Shared because the two sides of the Host allow-list disagreed: the CHECK side stripped it from
+ *  the incoming header while the CONFIG side did not strip it from a WSKOption_AllowedHostNames
+ *  entry, so an entry written as a fully-qualified name — which is how DNS writes one — matched
+ *  nothing at all and every request answered 421.
+ */
+NSString *WSKHostNameWithoutRootLabel(NSString *host);
+
+/**
  *  Maps a filesystem NSError onto the server-error status that describes it honestly.
  *
  *  RFC 4918 §11.5: 507 Insufficient Storage means the method could not be performed because
@@ -251,7 +261,7 @@ NSString *_Nullable WSKResolveNamedEntryWithinDirectory(NSString *path, NSString
  *  advertised and then refused on access, which is the same disagreement with the sign flipped. A
  *  dangling link resolves to nothing and is likewise not classified.
  */
-NSString *_Nullable WSKServableFileTypeAtPath(NSString *path, NSString *directory);
+NSString *_Nullable WSKServableFileTypeAtPath(NSString *path, NSString *directory, BOOL allowHiddenItems);
 
 NSString *_Nullable WSKResolvedPathRelativeToDirectory(NSString *path, NSString *directory);
 

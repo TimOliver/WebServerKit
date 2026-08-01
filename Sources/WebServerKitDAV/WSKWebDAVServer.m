@@ -1349,7 +1349,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
     if (escapedPath) {
         NSDictionary *const attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:itemPath error:NULL];
         // Classified by what a symlink points at, so the listing describes what is actually served.
-        NSString *const type = WSKServableFileTypeAtPath(itemPath, _uploadDirectory);
+        NSString *const type = WSKServableFileTypeAtPath(itemPath, _uploadDirectory, _allowHiddenItems);
         BOOL isFile = [type isEqualToString:NSFileTypeRegular];
         BOOL isDirectory = [type isEqualToString:NSFileTypeDirectory];
 

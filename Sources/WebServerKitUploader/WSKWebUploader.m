@@ -1033,6 +1033,15 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
 }
 
 - (nullable NSString *)_resolvedPathForRelativePath:(NSString *)relativePath hidden:(BOOL *)outHidden {
+    // The refusal lives HERE, not only in the callers, so a verb added later cannot forget it —
+    // which is exactly where DAV's equivalent puts it. Every current caller pre-checks as well, so
+    // this changes no behaviour today; what it removes is the requirement that the next one
+    // remembers. WSKNormalizePath truncates at a NUL, and acting on the truncated prefix is how
+    // "POST /delete path=/Keep%00/nonexistent" once destroyed /Keep and answered success.
+    if (WSKPathContainsNULByte(relativePath)) {
+        return nil;
+    }
+
     NSString *const normalizedPath = WSKNormalizePath(relativePath);
     NSString *resolvedRelativePath = nil;
     NSString *const resolvedPath = WSKResolveWithinDirectory([_uploadDirectory stringByAppendingPathComponent:normalizedPath], _uploadDirectory, &resolvedRelativePath);
@@ -1211,7 +1220,7 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
             NSString *const itemPath = [absolutePath stringByAppendingPathComponent:item];
             NSDictionary *const attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:itemPath error:NULL];
             // Classified by what a symlink points at, so the listing describes what is served.
-            NSString *const type = WSKServableFileTypeAtPath(itemPath, _uploadDirectory);
+            NSString *const type = WSKServableFileTypeAtPath(itemPath, _uploadDirectory, _allowHiddenItems);
             // A symlink's own attributes report the length of its target PATH, not the file, so
             // ask again through the link for anything classified as a regular file.
             NSString *const rawType = attributes[NSFileType];
