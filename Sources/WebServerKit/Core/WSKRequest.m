@@ -355,6 +355,50 @@ static BOOL _ParseTransferEncoding(NSString *header, BOOL *outRejected) {
     return NO;
 }
 
+// Does "Accept-Encoding" actually permit gzip? (RFC 9110 §12.5.3.)
+//
+// This was a case-sensitive substring search for "gzip", which said YES to "gzip;q=0" — a client
+// explicitly refusing it — and to any token merely containing the letters, while saying NO to
+// "GZIP" and to "*". A token-exact parse costs the same and cannot be wrong in the direction that
+// sends a body a client cannot read. "x-gzip" is accepted as the synonym RFC 9110 §8.4.1 defines,
+// which is the spelling the request-decoding side twenty lines below already honours.
+static BOOL _AcceptEncodingAllowsGzip(NSString *header) {
+    if (header.length == 0) {
+        return NO;
+    }
+
+    BOOL allowed = NO;
+
+    for (NSString *element in [header componentsSeparatedByString:@","]) {
+        NSArray<NSString *> *const parts = [element componentsSeparatedByString:@";"];
+        NSString *const token = [[parts.firstObject stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]] lowercaseString];
+
+        if (!([token isEqualToString:@"gzip"] || [token isEqualToString:@"x-gzip"] || [token isEqualToString:@"*"])) {
+            continue;
+        }
+
+        // "q=0" means not acceptable. Any other quality, or none at all, means it is.
+        BOOL refused = NO;
+
+        for (NSUInteger i = 1; i < parts.count; i++) {
+            NSString *const parameter = [[parts[i] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]] lowercaseString];
+
+            if ([parameter hasPrefix:@"q="]) {
+                refused = ([[parameter substringFromIndex:2] doubleValue] <= 0.0);
+            }
+        }
+
+        // An explicit "gzip" beats a wildcard, so a later exact refusal must be able to win.
+        if ([token isEqualToString:@"*"]) {
+            allowed = allowed || !refused;
+        } else {
+            return !refused;
+        }
+    }
+
+    return allowed;
+}
+
 // Parse a "Content-Encoding" list (RFC 9110 §8.4). Returns NO when the coding cannot be undone,
 // in which case the caller MUST refuse the request.
 //
@@ -514,9 +558,7 @@ static BOOL _ParseContentEncoding(NSString *header, BOOL *outGZip) {
             }
         }
 
-        if ([_headers[@"Accept-Encoding"] rangeOfString:@"gzip"].location != NSNotFound) {
-            _acceptsGzipContentEncoding = YES;
-        }
+        _acceptsGzipContentEncoding = _AcceptEncodingAllowsGzip(_headers[@"Accept-Encoding"]);
 
         _decoders = [[NSMutableArray alloc] init];
         _attributes = [[NSMutableDictionary alloc] init];

@@ -99,6 +99,7 @@ NS_ASSUME_NONNULL_END
     NSDictionary<NSString *, NSString *> *_authenticationDigestAccounts;
     NSSet<NSString *> *_allowedHostNames;
     BOOL _shouldAutomaticallyMapHEADToGET;
+    NSSet<NSString *> *_registeredMethods;  // Methods SOME handler claims; decides 404 vs 501 for an unmatched request
 
     CFHTTPMessageRef _requestMessage;
     WSKRequest *_request;
@@ -1042,7 +1043,24 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
                             self->_request.localAddressData = self.localAddressData;
                             self->_request.remoteAddressData = self.remoteAddressData;
                             self->_request.virtualHEAD = self->_virtualHEAD;
-                            [self abortRequest:self->_request withStatusCode:kWSKHTTPStatusCode_NotImplemented];
+                            // 501 says "this server does not implement that method". It was the
+                            // answer for an unknown TARGET too, so a browser asking for
+                            // /favicon.ico was told the server does not implement GET — and 501 is
+                            // heuristically cacheable, so an intermediary may remember it for a
+                            // path that later gains a handler. If some handler claims the method,
+                            // the method is implemented and what is missing is the target: 404.
+                            //
+                            // 405 with Allow, which is what a KNOWN target with the wrong method
+                            // owes, is deliberately not attempted: a handler is an opaque match
+                            // block, so the server cannot ask which methods a path accepts without
+                            // changing the registration model. Guessing it would be worse.
+                            NSInteger unmatchedStatus = kWSKHTTPStatusCode_NotImplemented;
+
+                            if ([self->_registeredMethods containsObject:requestMethod]) {
+                                unmatchedStatus = kWSKHTTPStatusCode_NotFound;
+                            }
+
+                            [self abortRequest:self->_request withStatusCode:unmatchedStatus];
                         } else {
                             // The base request rejected these headers too — a framing conflict
                             // such as "Content-Length" together with a chunked "Transfer-Encoding"
@@ -1082,6 +1100,7 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
         _authenticationDigestAccounts = server.authenticationDigestAccounts;
         _allowedHostNames = server.allowedHostNames;
         _shouldAutomaticallyMapHEADToGET = server.shouldAutomaticallyMapHEADToGET;
+        _registeredMethods = server.registeredMethods;
         _localAddressData = localAddress;
         _remoteAddressData = remoteAddress;
         _socket = socket;

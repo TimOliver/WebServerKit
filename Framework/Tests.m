@@ -2988,6 +2988,113 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     [fm removeItemAtPath:dir error:NULL];
 }
 
+// An unmatched request always answered 501 Not Implemented — a statement about the METHOD — even
+// when the method was one the server implements perfectly well and only the target was unknown. A
+// browser asking for /favicon.ico was told the server does not implement GET. 501 is also
+// heuristically cacheable (RFC 9111 §4.2.2), so an intermediary may remember it for a path that
+// later gains a handler.
+//
+// The distinction the server CAN make is "does any handler claim this method". The one it cannot
+// is "which methods does this path accept", which is what a 405 with Allow would need — a handler
+// is an opaque match block. So 405 is deliberately not attempted, and this test pins the two
+// answers that are honest rather than a third that would be guessed.
+- (void)testUnmatchedRequestDistinguishesUnknownTargetFromUnimplementedMethod {
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addHandlerForMethod:@"GET"
+                           path:@"/ok"
+                   requestClass:[WSKRequest class]
+                   processBlock:^WSKResponse*(WSKRequest* request) {
+                       return [WSKDataResponse responseWithText:@"ok"];
+                   }];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    // GET is implemented, so an unknown target is 404 — not "this server does not do GET".
+    NSString* unknownTarget = SendRawRequest(server.port, @"GET /nope HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([unknownTarget hasPrefix:@"HTTP/1.1 404"], @"an unknown target under an implemented method is 404: %@", [unknownTarget substringToIndex:MIN((NSUInteger)40, unknownTarget.length)]);
+
+    // A method NO handler claims is genuinely not implemented, and 501 still says so.
+    NSString* unknownMethod = SendRawRequest(server.port, @"PROPFIND /ok HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
+    XCTAssertTrue([unknownMethod hasPrefix:@"HTTP/1.1 501"], @"a method no handler claims is still 501: %@", [unknownMethod substringToIndex:MIN((NSUInteger)40, unknownMethod.length)]);
+
+    // A HEAD is rewritten to GET before matching, so it inherits GET's implemented-ness.
+    NSString* head = SendRawRequest(server.port, @"HEAD /nope HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([head hasPrefix:@"HTTP/1.1 404"], @"a mapped HEAD follows GET: %@", [head substringToIndex:MIN((NSUInteger)40, head.length)]);
+
+    // And the handler that does exist is untouched.
+    XCTAssertTrue([SendRawRequest(server.port, @"GET /ok HTTP/1.1\r\nHost: localhost\r\n\r\n") hasPrefix:@"HTTP/1.1 200"], @"the registered handler still serves");
+
+    [server stop];
+}
+
+// "Accept-Encoding" was matched with a case-sensitive SUBSTRING search for "gzip", so a client that
+// wrote "gzip;q=0" — explicitly refusing it — was recorded as accepting, "GZIP" and "*" were
+// recorded as refusing, and any token merely containing the letters counted. The property is
+// public API that a host app is invited to gate compression on, so it has to mean what it says.
+- (void)testAcceptEncodingIsParsedAsTokensWithQualityValues {
+    NSDictionary<NSString*, NSNumber*>* const cases = @{
+        @"gzip" : @YES,
+        @"GZIP" : @YES,             // Tokens are case-insensitive
+        @"x-gzip" : @YES,           // RFC 9110 §8.4.1 synonym
+        @"*" : @YES,                // A wildcard permits it
+        @"deflate, gzip" : @YES,
+        @"gzip;q=0.5" : @YES,
+        @"gzip;q=0" : @NO,          // Explicitly not acceptable
+        @"gzip;q=0.0" : @NO,
+        @"*;q=0" : @NO,
+        @"deflate" : @NO,
+        @"xgzipy" : @NO,            // Not a gzip token at all
+        @"identity" : @NO,
+    };
+
+    for (NSString* header in cases) {
+        WSKRequest* request = [[WSKRequest alloc] initWithMethod:@"GET"
+                                                             url:[NSURL URLWithString:@"http://localhost/"]
+                                                         headers:@{@"Accept-Encoding" : header}
+                                                            path:@"/"
+                                                           query:@{}];
+        XCTAssertNotNil(request, @"header %@ should still build a request", header);
+        XCTAssertEqual(request.acceptsGzipContentEncoding, cases[header].boolValue, @"Accept-Encoding: %@", header);
+    }
+
+    // No header at all is not an acceptance.
+    WSKRequest* bare = [[WSKRequest alloc] initWithMethod:@"GET" url:[NSURL URLWithString:@"http://localhost/"] headers:@{} path:@"/" query:@{}];
+    XCTAssertFalse(bare.acceptsGzipContentEncoding, @"an absent Accept-Encoding is not an acceptance");
+}
+
+// The base-path handler resolves the requested directory and enforces containment on the result,
+// then appended the caller's indexFilename to it and served that WITHOUT resolving again — so a
+// name containing a separator or ".." escaped the served root, since -attributesOfItemAtPath:
+// follows intermediate components and WSKFileResponse's O_NOFOLLOW guards only the final one.
+// Host-app configuration rather than client input, but the header states the guarantee flatly.
+- (void)testIndexFilenameCannotEscapeTheServedDirectory {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* root = MakeTempDirectory();
+    NSString* served = [root stringByAppendingPathComponent:@"served"];
+    XCTAssertTrue([fm createDirectoryAtPath:served withIntermediateDirectories:YES attributes:nil error:NULL]);
+    XCTAssertTrue([@"INSIDE" writeToFile:[served stringByAppendingPathComponent:@"index.html"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([@"SECRET" writeToFile:[root stringByAppendingPathComponent:@"outside.html"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+
+    // An escaping index name must not be served, and the directory listing stands in for it.
+    WSKWebServer* escaping = [[WSKWebServer alloc] init];
+    [escaping addGETHandlerForBasePath:@"/f/" directoryPath:served indexFilename:@"../outside.html" cacheAge:0 allowRangeRequests:NO];
+    XCTAssertTrue([escaping startWithOptions:options error:NULL]);
+    NSString* escaped = SendRawRequest(escaping.port, @"GET /f/ HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertFalse([escaped containsString:@"SECRET"], @"an index filename must not reach outside the served directory: %@", escaped);
+    [escaping stop];
+
+    // And the ordinary case must keep working — this is where an over-refusal would hide.
+    WSKWebServer* ordinary = [[WSKWebServer alloc] init];
+    [ordinary addGETHandlerForBasePath:@"/f/" directoryPath:served indexFilename:@"index.html" cacheAge:0 allowRangeRequests:NO];
+    XCTAssertTrue([ordinary startWithOptions:options error:NULL]);
+    XCTAssertTrue([SendRawRequest(ordinary.port, @"GET /f/ HTTP/1.1\r\nHost: localhost\r\n\r\n") containsString:@"INSIDE"], @"an ordinary index file is still served");
+    [ordinary stop];
+
+    [fm removeItemAtPath:root error:NULL];
+}
+
 // Every way a request body could be refused answered 500. The fixed-length and chunked readers
 // report failure as a plain BOOL, and every error they carried was `code:-1` distinguished only by
 // its localized description, so the connection had nothing to key on.
@@ -3775,7 +3882,11 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
     // HEAD, so the method has been rewritten to GET before matching; no handler claims
     // "/nope", so this takes the 501 branch that builds its own request.
     NSString* reply = SendRawRequest(server.port, @"HEAD /nope HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 501"], @"expected 501 for an unclaimed path: %@", reply);
+    // 404 rather than the 501 this once asserted: a GET handler is registered above, and the HEAD
+    // was rewritten to GET before matching, so the METHOD is implemented and only the target is
+    // missing. The branch under test — the one that builds its own request — is the same either
+    // way; the status is incidental to what this test is actually about.
+    XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 404"], @"expected 404 for an unclaimed path on a server that does implement GET: %@", reply);
 
     XCTAssertNotNil(gAbortRequestPeer, @"the aborted request carried no peer address");
     XCTAssertTrue([gAbortRequestPeer hasPrefix:@"127.0.0.1"], @"peer address is wrong: %@", gAbortRequestPeer);
@@ -3952,8 +4063,14 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 
     // The catch-all matches GET only, exactly as the base path handler it replaces did, so no
     // other method's status is affected by it.
-    NSString* posted = SendRawRequest(server.port, [NSString stringWithFormat:@"POST /nope.txt HTTP/1.1\r\nHost: %@\r\nContent-Length: 0\r\n\r\n", host]);
-    XCTAssertFalse([posted hasPrefix:@"HTTP/1.1 404"], @"the catch-all must not claim non-GET methods: %@", [posted substringToIndex:MIN((NSUInteger)40, posted.length)]);
+    //
+    // This used to assert "not 404", which worked only while an unmatched request answered 501.
+    // Now that an unmatched request answers 404 when the method exists elsewhere — and the
+    // uploader does register POST handlers — that proxy cannot tell "the catch-all declined" from
+    // "the catch-all claimed it". Assert the property directly instead: a POST to a path the
+    // catch-all WOULD serve for a GET must not come back with that path's contents.
+    NSString* postedToRealAsset = SendRawRequest(server.port, [NSString stringWithFormat:@"POST /css/index.css HTTP/1.1\r\nHost: %@\r\nContent-Length: 0\r\n\r\n", host]);
+    XCTAssertFalse([postedToRealAsset hasPrefix:@"HTTP/1.1 200"], @"the catch-all must not serve a non-GET method: %@", [postedToRealAsset substringToIndex:MIN((NSUInteger)40, postedToRealAsset.length)]);
 
     // And it must sit behind every real handler, not in front of them.
     NSString* page = SendRawRequest(server.port, [NSString stringWithFormat:@"GET / HTTP/1.1\r\nHost: %@\r\n\r\n", host]);
