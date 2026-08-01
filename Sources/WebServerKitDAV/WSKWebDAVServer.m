@@ -325,43 +325,7 @@ static BOOL _EntityTagMatchesList(BOOL resourceExists, NSString *currentTag, NSS
 // make ordinary folders permanently undeletable. And an extensionless file ("README") is vetted
 // like any other, because addressing it directly is already refused.
 - (nullable NSString *)_firstUnvettableItemAtPath:(NSString *)absolutePath isDirectory:(BOOL)isDirectory {
-    if (_allowedFileExtensions == nil) {
-        return nil;
-    }
-
-    if (!isDirectory) {
-        NSString *const itemName = [absolutePath lastPathComponent];
-        return [self _checkFileExtension:itemName] ? nil : itemName;
-    }
-
-    NSDirectoryEnumerator<NSString *> *const enumerator = [[NSFileManager defaultManager] enumeratorAtPath:absolutePath];
-
-    for (NSString *subpath in enumerator) {
-        NSString *const subpathType = [enumerator fileAttributes][NSFileType];
-
-        if ([[subpath lastPathComponent] hasPrefix:@"."]) {
-            // -skipDescendants is defined for the most recently returned SUBDIRECTORY. Calling it
-            // for a dot-named FILE popped the enclosing level instead, so every entry after the
-            // first dot-name in that directory's readdir order was never vetted — and a
-            // ".DS_Store" sits in every Finder-touched folder, sorting early. Measured: with an
-            // allow-list of "txt", DELETE of a collection holding "sub/{.DS_Store,id_rsa}"
-            // answered 204 and destroyed id_rsa, 60/60, while the same file addressed directly
-            // is refused 403. The top level of the addressed collection is immune, which is
-            // exactly why the existing tests could not see it. Only a dot-named DIRECTORY may be
-            // skipped wholesale — that part is deliberate and still holds.
-            if ([subpathType isEqualToString:NSFileTypeDirectory]) {
-                [enumerator skipDescendants];
-            }
-
-            continue;
-        }
-
-        if ([subpathType isEqualToString:NSFileTypeRegular] && ![self _checkFileExtension:subpath]) {
-            return subpath;
-        }
-    }
-
-    return nil;
+    return WSKFirstUnvettableItemAtPath(absolutePath, isDirectory, _allowedFileExtensions);
 }
 
 // Hidden-item protection has to cover every component of the path, not only the leaf:
@@ -962,15 +926,7 @@ static NSString *const kDAVAllowedMethods = @"OPTIONS, HEAD, GET, PUT, DELETE, M
 // Whether two paths refer to the same underlying file — either identical strings, or
 // (on a case-insensitive volume) different spellings that resolve to a single inode.
 - (BOOL)_fileAtPath:(NSString *)path1 isSameAsPath:(NSString *)path2 {
-    if ([path1 isEqualToString:path2]) {
-        return YES;
-    }
-
-    id identifier1 = nil;
-    id identifier2 = nil;
-    return [[NSURL fileURLWithPath:path1] getResourceValue:&identifier1 forKey:NSURLFileResourceIdentifierKey error:NULL] &&
-           [[NSURL fileURLWithPath:path2] getResourceValue:&identifier2 forKey:NSURLFileResourceIdentifierKey error:NULL] &&
-           identifier1 && [(NSObject *)identifier1 isEqual:identifier2];
+    return WSKPathsNameTheSameFile(path1, path2);
 }
 
 - (WSKResponse *)performCOPY:(WSKRequest *)request isMove:(BOOL)isMove {

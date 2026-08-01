@@ -1034,15 +1034,7 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
 // volume), so it also catches the case-variant pair "File.txt"/"file.txt" that resolves
 // to one file on a case-insensitive volume. Same approach as WSKWebDAVServer's MOVE/COPY.
 - (BOOL)_fileAtPath:(NSString *)path1 isSameAsPath:(NSString *)path2 {
-    if ([path1 isEqualToString:path2]) {
-        return YES;
-    }
-
-    id identifier1 = nil;
-    id identifier2 = nil;
-    return [[NSURL fileURLWithPath:path1] getResourceValue:&identifier1 forKey:NSURLFileResourceIdentifierKey error:NULL] &&
-           [[NSURL fileURLWithPath:path2] getResourceValue:&identifier2 forKey:NSURLFileResourceIdentifierKey error:NULL] &&
-           identifier1 && [(NSObject *)identifier1 isEqual:identifier2];
+    return WSKPathsNameTheSameFile(path1, path2);
 }
 
 - (NSString *)_uniquePathForPath:(NSString *)path {
@@ -1557,45 +1549,18 @@ static NSString *_OriginAuthority(NSString *value) {
     BOOL removed;
 
     @synchronized(_fileOperationLock) {
-        // Deleting a directory removes its whole subtree, which must not become a way to
-        // destroy files that a direct delete would refuse. The extension check above only
-        // applies to files, so vet the contents before removing a directory.
-        if (isDirectory && _allowedFileExtensions) {
-            NSDirectoryEnumerator<NSString *> *const enumerator = [[NSFileManager defaultManager] enumeratorAtPath:absolutePath];
+        // Deleting a directory removes its whole subtree, which must not become a way to destroy
+        // files that a direct delete would refuse. The extension check above only applies to the
+        // item itself, so vet the contents first.
+        //
+        // Shared with WebDAV rather than spelled again here: this walk was a second implementation
+        // of the same rule, comments and all, and "a rule closed in one server and not the other"
+        // is the class that has recurred FOUR times in this project — including through this exact
+        // walk, where the -skipDescendants handling was wrong in both copies simultaneously.
+        NSString *const unvettable = WSKFirstUnvettableItemAtPath(absolutePath, isDirectory, _allowedFileExtensions);
 
-            for (NSString *subpath in enumerator) {
-                // Skip dot-names — and everything under them — whatever -allowHiddenItems
-                // says. They are incidental metadata rather than content the allow-list is
-                // meant to protect (a ".DS_Store" sits in every macOS folder, and its empty
-                // pathExtension is in no allow-list), so vetting them would make ordinary
-                // directories permanently undeletable. Note this cannot use the shared rule,
-                // which reports NO for everything once hidden items are allowed.
-                NSString *const subpathType = [enumerator fileAttributes][NSFileType];
-
-                if ([[subpath lastPathComponent] hasPrefix:@"."]) {
-                    // -skipDescendants is defined for the most recently returned SUBDIRECTORY.
-                    // Calling it for a dot-named FILE popped the enclosing level instead, so every
-                    // entry after the first dot-name in that directory's readdir order was never
-                    // vetted at all — and a ".DS_Store" sits in every Finder-touched folder. The
-                    // top level of the addressed collection is immune, which is exactly why the
-                    // existing fixtures could not see it: they put the unvettable file there.
-                    // Only a dot-named DIRECTORY may be skipped wholesale.
-                    if ([subpathType isEqualToString:NSFileTypeDirectory]) {
-                        [enumerator skipDescendants];
-                    }
-
-                    continue;
-                }
-
-                // An extensionless file ("README", "LICENSE") is vetted like any other: a
-                // direct DELETE of it is already refused, so letting a recursive delete
-                // destroy it would make the same request mean two different things. Refusing
-                // the folder is the honest answer — the client is told exactly which entry
-                // blocked it and can remove that first.
-                if ([subpathType isEqualToString:NSFileTypeRegular] && ![self _checkFileExtension:subpath]) {
-                    return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not allowed: it contains \"%@\"", relativePath, subpath];
-                }
-            }
+        if (unvettable) {
+            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not allowed: it contains \"%@\"", relativePath, unvettable];
         }
 
         // -removeItemAtPath: deletes as it walks and stops at the first member it cannot unlink,
