@@ -172,6 +172,27 @@ BOOL WSKNamePassesExtensionAllowList(NSString *name, NSArray<NSString *> *_Nulla
 BOOL WSKEntryPassesExtensionAllowList(NSString *namedName, NSString *_Nullable resolvedName, NSArray<NSString *> *_Nullable allowedExtensions);
 
 /**
+ *  Resolves a client-supplied relative path to an absolute one inside `directory`, FOLLOWING a
+ *  final symlink, or nil if it may not be acted on.
+ *
+ *  Refuses a NUL-bearing path, and refuses a path that resolves to the share root itself unless the
+ *  client named the root directly. `outHidden` reports whether the path is hidden by either the
+ *  spelling the client used or the one it resolved to; it is only computed when
+ *  `allowHiddenItems` is NO.
+ *
+ *  Both refusals live HERE, at the one point every path-taking verb passes through, so a verb added
+ *  later cannot forget them.
+ */
+NSString *_Nullable WSKResolvedPathForRelativePath(NSString *relativePath, NSString *directory, BOOL allowHiddenItems, BOOL *_Nullable outHidden);
+
+/**
+ *  As above, but resolves the PARENT and appends the raw leaf, so a final symlink is preserved
+ *  rather than followed — the entry the client named, which is what a destructive verb acts on.
+ *  Naming the root itself is refused: there is no final component to preserve.
+ */
+NSString *_Nullable WSKNamedEntryPathForRelativePath(NSString *relativePath, NSString *directory, BOOL allowHiddenItems, BOOL *_Nullable outHidden);
+
+/**
  *  Maps a filesystem NSError onto the server-error status that describes it honestly.
  *
  *  RFC 4918 §11.5: 507 Insufficient Storage means the method could not be performed because
