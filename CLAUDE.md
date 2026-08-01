@@ -87,6 +87,48 @@ and the Bonjour/`.local` name only, so without it every request is refused with 
 
 ## Recent Changes
 
+### Cleanup phase 3, group A: three security-shaped functions leave the public header
+
+The public `WSKFunctions.h` had grown to **27 declarations**, and the memory note carried the reason
+as "ten are public solely because the SPM sibling targets cannot see `WSKPrivate.h`". Measuring the
+actual usage split it three ways instead, which makes the work tractable in pieces rather than as
+one breaking change:
+
+- **eleven the siblings genuinely use** — the resolvers, the vetting walk, the allow-list predicates,
+  same-file detection. These are the ones that need the target-visibility change, and they are still
+  public.
+- **seven core-only utilities** — MIME type, URL escaping, primary IP, the header-token predicates,
+  the root-label helper. No build-graph work needed; some are plausibly legitimate public API, so
+  they are a judgement call rather than an obvious removal.
+- **three used nowhere outside `WSKFunctions.m`** — `WSKResolvedPathIsWithinDirectory`,
+  `WSKResolvedPathRelativeToDirectory`, `WSKResolvedPathHasHiddenComponent`. **This change.**
+
+**⚠️ A claim of mine was wrong and it would have changed the fix.** I first reported these three as
+having "zero callers anywhere", from a grep that excluded `WSKFunctions.m` — where all of them are in
+fact called. The honest statement is "no caller *outside* that file", which makes them internal
+helpers exposed publicly, not dead code. Delete was never the right answer; relocating is.
+
+**And `static` was not the right answer either**, for a reason only a full-repo grep surfaces:
+`WSKResolvedPathIsWithinDirectory` has **eleven assertions in `Framework/Tests.m`**, which test the
+containment predicate directly and are worth keeping. So all three move to `WSKPrivate.h`, which
+`Tests.m` already imports — off the public surface, still linkable by the suite.
+
+**Two documentation defects went with them.** The doc block describing
+`WSKResolvedPathRelativeToDirectory` was stranded above a *different* declaration (its own had none),
+which the inventory flagged as "a future editor fixes the wrong function to match the wrong comment".
+And `WSKPathIsInsideDirectory`'s `@warning` told callers to "pair it with
+WSKResolvedPathIsWithinDirectory() before acting on a path that came from a client" — the library's
+own documentation recommending the **two-observation pattern** that `WSKResolveWithinDirectory()`
+exists to replace, and that was measured serving content from outside the root in 24% of requests. It
+now points at the resolve-once function.
+
+**Verified together.** 142 tests and 0 failures on a clean build with no new warnings — including the
+eleven assertions that `static` would have broken — plus `swift build` clean (the sibling targets
+resolve headers through the symlink farm, so SPM is the check that matters for a header move), the
+trace corpus green, and iOS and tvOS Debug clean.
+
+**Groups B and C remain**, and C is the one carrying the target-visibility decision.
+
 ### The existence oracle closed at its real cause, and the fallback it lives in proved intact
 
 The oracle the fifteenth-pass inventory blamed on stat-before-resolve, and which reordering those
