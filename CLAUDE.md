@@ -829,10 +829,16 @@ exercise changes, not on suspicion.
   next request disagrees about — but **the pipelining probe has not been re-run in that mode**. ~7,000 mutated
   requests under ASan+UBSan: zero memory errors. 9,366 injected allocation failures: nothing,
   zero descriptor leaks.
-- **Conformance and real clients** — ⚠️ these figures PREDATE PR #70's status changes (MKCOL 405,
-  the PROPFIND finite-depth refusal, shallow COPY, `Allow` contents) and PR #71's new read surfaces,
-  and should be re-taken before being quoted as current: litmus `basic` 16/16, `http` 4/4, `locks` 3/3, `props`
-  29/30 (sole failure `propfind_invalid2`, settled); 2.3 GB through a real `mount_webdav` mount
+- **Conformance and real clients**, RE-TAKEN against tip after the #70/#71/#75 status changes and
+  unchanged: litmus `basic` 16/16, `http` 4/4, `locks` 3/3, `props`
+  29/30 (sole failure still `propfind_invalid2`, settled). The four changed behaviours were also
+  checked directly: MKCOL new 201 / existing **405**, PROPFIND with no Depth **403**, `Allow`
+  carrying PROPPATCH, and an unknown target **404**. And driven through macOS's own kernel WebDAV
+  client via `mount_webdav`: mkdir, 12 MB write, byte-identical read-back, list, rename,
+  read-after-rename, copy, delete, `mkdir -p` on a nested path — which walks ancestors and so
+  exercises the new 405 — write into it, recursive delete, clean unmount. All passed. (`cp` exits
+  non-zero on extended attributes, which WebDAV has no transport for; the bytes compare identical.)
+  Historic figures, not re-taken: 2.3 GB through a real `mount_webdav` mount
   byte-perfect across 33,269 mixed operations, 3,290 mount-vs-disk listing comparisons agreeing,
   34 hostile filenames including the NFC/NFD pair round-tripping; rclone `sync`/`check` agreeing
   both directions; the macOS client tolerates the dateless-PROPFIND window by falling back to
@@ -962,8 +968,15 @@ the appendix). Still open, roughly in order of weight:
 - **An unmatched request always answers 501**, conflating "unknown target" (404) and "wrong method
   for a known target" (405 + `Allow`). The bare server is affected; the uploader's catch-all GET
   handler already restores 404 for things like `/favicon.ico`.
-- **Ten of the audit's findings were never adversarially verified** (the skeptic fan-out was
-  capped at eight). They are leads, not findings, and must be re-measured before any is acted on.
+- ~~Ten of the audit's findings were never adversarially verified~~ — **done**. Four had already
+  been closed by #75; of the six that remained, **five were refuted** and one was real:
+  `Transfer-Encoding: identity` (the desync it implied is closed by construction, since reuse is
+  restricted to requests with no body framing); the completion-once BOOL races (host-app-only, and
+  two of three stated consequences false); `additionalHeaders` overriding framing headers (the
+  documented contract, with a `@warning` on the method itself); the SSE cached share root (both
+  halves attributed to the wrong method — file-presenter events never call it); and the unchecked
+  `dispatch_source_create` (its arguments are statically pinned, so NULL cannot occur). The
+  survivor was the weak-delegate swap, now fixed.
 
 Carried from earlier passes, never closed:
 - **PROPFIND publishes no `getetag`** — a just-written file has ZERO validators for a
@@ -1166,7 +1179,16 @@ alongside the two that must change — the first change made deliberately under 
    correspondence thirty lines away — it answers NO for `Transfer-Encoding: identity`, which DOES
    carry framing. Any framing, containment or authorization decision must read the primary source
    (here, the raw header names), never a convenience property derived from it elsewhere.
-9. **Messaging nil returns a ZEROED struct, so a struct-returning check on an absent value is
+9. **A check and the action it guards must observe the SAME object.** Every delegate callback
+   tested `-respondsToSelector:` and then hopped to the main queue and re-read the WEAK, MUTABLE
+   delegate — so a host app swapping one live delegate for another implementing a different subset
+   of these @optional methods raised unrecognized-selector, and nothing in `Sources/` catches an
+   NSException. Fourteen sites. Note which oracles are worthless here: setting the delegate to nil
+   and letting it deallocate are BOTH already safe (the weak read yields nil, the message is a
+   no-op), so a test using either passes against the unfixed tree. Re-read into a strong local and
+   re-check inside the block; do not capture strongly at check time, which would deliver into an
+   object the host app has released.
+10. **Messaging nil returns a ZEROED struct, so a struct-returning check on an absent value is
    silently wrong.** `[headers[@"Connection"] rangeOfString:@"close"].location != NSNotFound` was
    TRUE whenever the header was absent, because `{0, 0}.location` is 0. It failed safe, which is
    worse in one specific way: the feature it guarded never turned on, and every functional test

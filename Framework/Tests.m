@@ -377,6 +377,33 @@ static BOOL gAbortRequestSawVirtualHEAD = NO;
 @interface Tests : XCTestCase
 @end
 
+// Two delegates for the weak-delegate swap test below. The distinction that matters is that BOTH
+// conform to the protocol and BOTH are alive: WSKFullDelegate implements the optional callback,
+// WSKPartialDelegate does not. Every method in these protocols is @optional, so an object
+// implementing a subset is the designed-for case, not an abuse.
+@interface WSKFullDelegate : NSObject <WSKDelegate>
+@property (nonatomic) BOOL sawStart;
+@end
+
+@implementation WSKFullDelegate
+- (void)webServerDidStart:(WSKWebServer*)server {
+    _sawStart = YES;
+}
+@end
+
+@interface WSKPartialDelegate : NSObject <WSKDelegate>
+@property (nonatomic) BOOL sawConnect;
+@end
+
+@implementation WSKPartialDelegate
+// Deliberately implements a DIFFERENT optional method, so it conforms and is a plausible delegate
+// while not responding to -webServerDidStart:.
+- (void)webServerDidConnect:(WSKWebServer*)server {
+    _sawConnect = YES;
+}
+@end
+
+
 @implementation Tests
 
 - (void)testWebServer {
@@ -2986,6 +3013,79 @@ static NSString* QuotedParam(NSString* header, NSString* name) {
 
     [server stop];
     [fm removeItemAtPath:dir error:NULL];
+}
+
+
+
+// Every delegate callback checks -respondsToSelector: and then hops to the main queue, where it
+// reads the delegate AGAIN. The property is weak AND mutable, so those can be different objects —
+// and an @optional protocol makes partial implementations the designed-for case. A host app that
+// swaps one live delegate for another implementing a different subset therefore raises
+// unrecognized-selector, and nothing in Sources/ catches an NSException: the process dies.
+//
+// ⚠️ Two oracles that look right and are worthless, both measured: setting the delegate to NIL and
+// letting it DEALLOCATE are already safe, because the weak read yields nil and messaging nil is a
+// no-op. The test has to swap in a second LIVE object that conforms and omits the selector.
+//
+// ⚠️ Against the unfixed tree this does not fail — it TERMINATES the runner, which reports
+// "Executed 0 tests, with 0 failures". Read the executed count, as this project has had to four
+// times before.
+//
+// -startWithOptions: dispatch_syncs onto the state queue, so the respondsToSelector: check runs
+// while this thread is blocked and the block lands on a LATER main-queue turn. No concurrency is
+// needed to hit the window: straight-line code suffices.
+- (void)testDelegateSwappedBetweenCheckAndCallbackDoesNotRaise {
+    WSKFullDelegate* full = [[WSKFullDelegate alloc] init];
+    WSKPartialDelegate* partial = [[WSKPartialDelegate alloc] init];
+
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addHandlerForMethod:@"GET"
+                           path:@"/ok"
+                   requestClass:[WSKRequest class]
+                   processBlock:^WSKResponse*(WSKRequest* request) {
+                       return [WSKDataResponse responseWithText:@"ok"];
+                   }];
+    server.delegate = full;
+
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    // The check has run against `full` and the block is queued; swap before it lands.
+    server.delegate = partial;
+
+    // Let the queued callback run. Unfixed, this is where the process dies.
+    for (int i = 0; i < 20; i++) {
+        [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+    }
+
+    XCTAssertFalse(full.sawStart, @"the callback must not reach the delegate that was replaced");
+    XCTAssertTrue([server isRunning], @"the server is unaffected");
+
+    // And what must keep working: an UNCHANGED delegate still receives its callback. This is the
+    // half a re-check could silently break.
+    [server stop];
+
+    for (int i = 0; i < 20; i++) {
+        [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+    }
+
+    WSKFullDelegate* stable = [[WSKFullDelegate alloc] init];
+    WSKWebServer* second = [[WSKWebServer alloc] init];
+    [second addHandlerForMethod:@"GET"
+                           path:@"/ok"
+                   requestClass:[WSKRequest class]
+                   processBlock:^WSKResponse*(WSKRequest* request) {
+                       return [WSKDataResponse responseWithText:@"ok"];
+                   }];
+    second.delegate = stable;
+    XCTAssertTrue([second startWithOptions:options error:NULL]);
+
+    for (int i = 0; i < 20 && !stable.sawStart; i++) {
+        [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+    }
+
+    XCTAssertTrue(stable.sawStart, @"an unchanged delegate must still be called");
+    [second stop];
 }
 
 // An unmatched request always answered 501 Not Implemented — a statement about the METHOD — even
