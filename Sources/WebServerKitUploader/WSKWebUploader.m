@@ -1256,7 +1256,20 @@ static BOOL _MimeTypeIsInertMedia(NSString *mimeType) {
 
     if ([self.delegate respondsToSelector:@selector(webUploader:didDownloadFileAtPath:)]) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self.delegate webUploader:self didDownloadFileAtPath:absolutePath];
+            // Re-read and re-check inside the block. The property is weak AND mutable, so the
+            // object checked above need not be the one messaged here — a host app that swaps
+            // its delegate for another LIVE object implementing a different subset of these
+            // optional methods raises unrecognized-selector, and nothing in Sources/ catches an
+            // NSException. (Setting it to nil, or letting it deallocate, was always safe: the
+            // weak read yields nil and the message is a no-op.) The strong local also removes a
+            // second weak load between this check and the send. Deliberately NOT a strong
+            // capture at check time: that would keep a delegate the host app has released alive
+            // and deliver into an object mid-teardown.
+            id<WSKWebUploaderDelegate> const delegate = self.delegate;
+
+            if ([delegate respondsToSelector:@selector(webUploader:didDownloadFileAtPath:)]) {
+                [delegate webUploader:self didDownloadFileAtPath:absolutePath];
+            }
         });
     }
 
@@ -1441,7 +1454,20 @@ static NSString *_OriginAuthority(NSString *value) {
 
     if ([self.delegate respondsToSelector:@selector(webUploader:didUploadFileAtPath:)]) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self.delegate webUploader:self didUploadFileAtPath:absolutePath];
+            // Re-read and re-check inside the block. The property is weak AND mutable, so the
+            // object checked above need not be the one messaged here — a host app that swaps
+            // its delegate for another LIVE object implementing a different subset of these
+            // optional methods raises unrecognized-selector, and nothing in Sources/ catches an
+            // NSException. (Setting it to nil, or letting it deallocate, was always safe: the
+            // weak read yields nil and the message is a no-op.) The strong local also removes a
+            // second weak load between this check and the send. Deliberately NOT a strong
+            // capture at check time: that would keep a delegate the host app has released alive
+            // and deliver into an object mid-teardown.
+            id<WSKWebUploaderDelegate> const delegate = self.delegate;
+
+            if ([delegate respondsToSelector:@selector(webUploader:didUploadFileAtPath:)]) {
+                [delegate webUploader:self didUploadFileAtPath:absolutePath];
+            }
         });
     }
 
@@ -1558,7 +1584,20 @@ static NSString *_OriginAuthority(NSString *value) {
 
     if ([self.delegate respondsToSelector:@selector(webUploader:didMoveItemFromPath:toPath:)]) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self.delegate webUploader:self didMoveItemFromPath:oldAbsolutePath toPath:newAbsolutePath];
+            // Re-read and re-check inside the block. The property is weak AND mutable, so the
+            // object checked above need not be the one messaged here — a host app that swaps
+            // its delegate for another LIVE object implementing a different subset of these
+            // optional methods raises unrecognized-selector, and nothing in Sources/ catches an
+            // NSException. (Setting it to nil, or letting it deallocate, was always safe: the
+            // weak read yields nil and the message is a no-op.) The strong local also removes a
+            // second weak load between this check and the send. Deliberately NOT a strong
+            // capture at check time: that would keep a delegate the host app has released alive
+            // and deliver into an object mid-teardown.
+            id<WSKWebUploaderDelegate> const delegate = self.delegate;
+
+            if ([delegate respondsToSelector:@selector(webUploader:didMoveItemFromPath:toPath:)]) {
+                [delegate webUploader:self didMoveItemFromPath:oldAbsolutePath toPath:newAbsolutePath];
+            }
         });
     }
 
@@ -1665,7 +1704,20 @@ static NSString *_OriginAuthority(NSString *value) {
 
     if ([self.delegate respondsToSelector:@selector(webUploader:didDeleteItemAtPath:)]) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self.delegate webUploader:self didDeleteItemAtPath:absolutePath];
+            // Re-read and re-check inside the block. The property is weak AND mutable, so the
+            // object checked above need not be the one messaged here — a host app that swaps
+            // its delegate for another LIVE object implementing a different subset of these
+            // optional methods raises unrecognized-selector, and nothing in Sources/ catches an
+            // NSException. (Setting it to nil, or letting it deallocate, was always safe: the
+            // weak read yields nil and the message is a no-op.) The strong local also removes a
+            // second weak load between this check and the send. Deliberately NOT a strong
+            // capture at check time: that would keep a delegate the host app has released alive
+            // and deliver into an object mid-teardown.
+            id<WSKWebUploaderDelegate> const delegate = self.delegate;
+
+            if ([delegate respondsToSelector:@selector(webUploader:didDeleteItemAtPath:)]) {
+                [delegate webUploader:self didDeleteItemAtPath:absolutePath];
+            }
         });
     }
 
@@ -1739,7 +1791,20 @@ static NSString *_OriginAuthority(NSString *value) {
 
     if ([self.delegate respondsToSelector:@selector(webUploader:didCreateDirectoryAtPath:)]) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self.delegate webUploader:self didCreateDirectoryAtPath:absolutePath];
+            // Re-read and re-check inside the block. The property is weak AND mutable, so the
+            // object checked above need not be the one messaged here — a host app that swaps
+            // its delegate for another LIVE object implementing a different subset of these
+            // optional methods raises unrecognized-selector, and nothing in Sources/ catches an
+            // NSException. (Setting it to nil, or letting it deallocate, was always safe: the
+            // weak read yields nil and the message is a no-op.) The strong local also removes a
+            // second weak load between this check and the send. Deliberately NOT a strong
+            // capture at check time: that would keep a delegate the host app has released alive
+            // and deliver into an object mid-teardown.
+            id<WSKWebUploaderDelegate> const delegate = self.delegate;
+
+            if ([delegate respondsToSelector:@selector(webUploader:didCreateDirectoryAtPath:)]) {
+                [delegate webUploader:self didCreateDirectoryAtPath:absolutePath];
+            }
         });
     }
 

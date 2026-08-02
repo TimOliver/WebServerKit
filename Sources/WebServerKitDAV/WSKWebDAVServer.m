@@ -679,7 +679,20 @@ static WSKResponse *_MethodNotAllowed(NSString *format, ...) {
 
     if ([self.delegate respondsToSelector:@selector(davServer:didDownloadFileAtPath:)]) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self.delegate davServer:self didDownloadFileAtPath:absolutePath];
+            // Re-read and re-check inside the block. The property is weak AND mutable, so the
+            // object checked above need not be the one messaged here — a host app that swaps
+            // its delegate for another LIVE object implementing a different subset of these
+            // optional methods raises unrecognized-selector, and nothing in Sources/ catches an
+            // NSException. (Setting it to nil, or letting it deallocate, was always safe: the
+            // weak read yields nil and the message is a no-op.) The strong local also removes a
+            // second weak load between this check and the send. Deliberately NOT a strong
+            // capture at check time: that would keep a delegate the host app has released alive
+            // and deliver into an object mid-teardown.
+            id<WSKWebDAVServerDelegate> const delegate = self.delegate;
+
+            if ([delegate respondsToSelector:@selector(davServer:didDownloadFileAtPath:)]) {
+                [delegate davServer:self didDownloadFileAtPath:absolutePath];
+            }
         });
     }
 
@@ -780,7 +793,20 @@ static WSKResponse *_MethodNotAllowed(NSString *format, ...) {
 
     if ([self.delegate respondsToSelector:@selector(davServer:didUploadFileAtPath:)]) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self.delegate davServer:self didUploadFileAtPath:absolutePath];
+            // Re-read and re-check inside the block. The property is weak AND mutable, so the
+            // object checked above need not be the one messaged here — a host app that swaps
+            // its delegate for another LIVE object implementing a different subset of these
+            // optional methods raises unrecognized-selector, and nothing in Sources/ catches an
+            // NSException. (Setting it to nil, or letting it deallocate, was always safe: the
+            // weak read yields nil and the message is a no-op.) The strong local also removes a
+            // second weak load between this check and the send. Deliberately NOT a strong
+            // capture at check time: that would keep a delegate the host app has released alive
+            // and deliver into an object mid-teardown.
+            id<WSKWebDAVServerDelegate> const delegate = self.delegate;
+
+            if ([delegate respondsToSelector:@selector(davServer:didUploadFileAtPath:)]) {
+                [delegate davServer:self didUploadFileAtPath:absolutePath];
+            }
         });
     }
 
@@ -865,7 +891,20 @@ static WSKResponse *_MethodNotAllowed(NSString *format, ...) {
 
     if ([self.delegate respondsToSelector:@selector(davServer:didDeleteItemAtPath:)]) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self.delegate davServer:self didDeleteItemAtPath:absolutePath];
+            // Re-read and re-check inside the block. The property is weak AND mutable, so the
+            // object checked above need not be the one messaged here — a host app that swaps
+            // its delegate for another LIVE object implementing a different subset of these
+            // optional methods raises unrecognized-selector, and nothing in Sources/ catches an
+            // NSException. (Setting it to nil, or letting it deallocate, was always safe: the
+            // weak read yields nil and the message is a no-op.) The strong local also removes a
+            // second weak load between this check and the send. Deliberately NOT a strong
+            // capture at check time: that would keep a delegate the host app has released alive
+            // and deliver into an object mid-teardown.
+            id<WSKWebDAVServerDelegate> const delegate = self.delegate;
+
+            if ([delegate respondsToSelector:@selector(davServer:didDeleteItemAtPath:)]) {
+                [delegate davServer:self didDeleteItemAtPath:absolutePath];
+            }
         });
     }
 
@@ -957,7 +996,20 @@ static WSKResponse *_MethodNotAllowed(NSString *format, ...) {
 
     if ([self.delegate respondsToSelector:@selector(davServer:didCreateDirectoryAtPath:)]) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self.delegate davServer:self didCreateDirectoryAtPath:absolutePath];
+            // Re-read and re-check inside the block. The property is weak AND mutable, so the
+            // object checked above need not be the one messaged here — a host app that swaps
+            // its delegate for another LIVE object implementing a different subset of these
+            // optional methods raises unrecognized-selector, and nothing in Sources/ catches an
+            // NSException. (Setting it to nil, or letting it deallocate, was always safe: the
+            // weak read yields nil and the message is a no-op.) The strong local also removes a
+            // second weak load between this check and the send. Deliberately NOT a strong
+            // capture at check time: that would keep a delegate the host app has released alive
+            // and deliver into an object mid-teardown.
+            id<WSKWebDAVServerDelegate> const delegate = self.delegate;
+
+            if ([delegate respondsToSelector:@selector(davServer:didCreateDirectoryAtPath:)]) {
+                [delegate davServer:self didCreateDirectoryAtPath:absolutePath];
+            }
         });
     }
 
@@ -1232,13 +1284,39 @@ static WSKResponse *_MethodNotAllowed(NSString *format, ...) {
     if (isMove) {
         if ([self.delegate respondsToSelector:@selector(davServer:didMoveItemFromPath:toPath:)]) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                [self.delegate davServer:self didMoveItemFromPath:srcAbsolutePath toPath:dstAbsolutePath];
+                // Re-read and re-check inside the block. The property is weak AND mutable, so the
+                // object checked above need not be the one messaged here — a host app that swaps
+                // its delegate for another LIVE object implementing a different subset of these
+                // optional methods raises unrecognized-selector, and nothing in Sources/ catches an
+                // NSException. (Setting it to nil, or letting it deallocate, was always safe: the
+                // weak read yields nil and the message is a no-op.) The strong local also removes a
+                // second weak load between this check and the send. Deliberately NOT a strong
+                // capture at check time: that would keep a delegate the host app has released alive
+                // and deliver into an object mid-teardown.
+                id<WSKWebDAVServerDelegate> const delegate = self.delegate;
+
+                if ([delegate respondsToSelector:@selector(davServer:didMoveItemFromPath:toPath:)]) {
+                    [delegate davServer:self didMoveItemFromPath:srcAbsolutePath toPath:dstAbsolutePath];
+                }
             });
         }
     } else {
         if ([self.delegate respondsToSelector:@selector(davServer:didCopyItemFromPath:toPath:)]) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                [self.delegate davServer:self didCopyItemFromPath:srcAbsolutePath toPath:dstAbsolutePath];
+                // Re-read and re-check inside the block. The property is weak AND mutable, so the
+                // object checked above need not be the one messaged here — a host app that swaps
+                // its delegate for another LIVE object implementing a different subset of these
+                // optional methods raises unrecognized-selector, and nothing in Sources/ catches an
+                // NSException. (Setting it to nil, or letting it deallocate, was always safe: the
+                // weak read yields nil and the message is a no-op.) The strong local also removes a
+                // second weak load between this check and the send. Deliberately NOT a strong
+                // capture at check time: that would keep a delegate the host app has released alive
+                // and deliver into an object mid-teardown.
+                id<WSKWebDAVServerDelegate> const delegate = self.delegate;
+
+                if ([delegate respondsToSelector:@selector(davServer:didCopyItemFromPath:toPath:)]) {
+                    [delegate davServer:self didCopyItemFromPath:srcAbsolutePath toPath:dstAbsolutePath];
+                }
             });
         }
     }

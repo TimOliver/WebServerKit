@@ -542,7 +542,20 @@ static void _DNSServiceCallBack(DNSServiceRef sdRef, DNSServiceFlags flags, uint
         // that queue — and doing so from inside it would deadlock.
         if ([server.delegate respondsToSelector:@selector(webServerDidUpdateNATPortMapping:)]) {
             dispatch_async(dispatch_get_main_queue(), ^{
-                [server.delegate webServerDidUpdateNATPortMapping:server];
+                // Re-read and re-check inside the block. The property is weak AND mutable, so the
+                // object checked above need not be the one messaged here — a host app that swaps
+                // its delegate for another LIVE object implementing a different subset of these
+                // optional methods raises unrecognized-selector, and nothing in Sources/ catches an
+                // NSException. (Setting it to nil, or letting it deallocate, was always safe: the
+                // weak read yields nil and the message is a no-op.) The strong local also removes a
+                // second weak load between this check and the send. Deliberately NOT a strong
+                // capture at check time: that would keep a delegate the host app has released alive
+                // and deliver into an object mid-teardown.
+                id<WSKDelegate> const delegate = server.delegate;
+
+                if ([delegate respondsToSelector:@selector(webServerDidUpdateNATPortMapping:)]) {
+                    [delegate webServerDidUpdateNATPortMapping:server];
+                }
             });
         }
     }
@@ -1021,7 +1034,20 @@ static inline NSString *_EncodeBase64(NSString *string) {
 
     if ([_delegate respondsToSelector:@selector(webServerDidStart:)]) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self->_delegate webServerDidStart:self];
+            // Re-read and re-check inside the block. The property is weak AND mutable, so the
+            // object checked above need not be the one messaged here — a host app that swaps
+            // its delegate for another LIVE object implementing a different subset of these
+            // optional methods raises unrecognized-selector, and nothing in Sources/ catches an
+            // NSException. (Setting it to nil, or letting it deallocate, was always safe: the
+            // weak read yields nil and the message is a no-op.) The strong local also removes a
+            // second weak load between this check and the send. Deliberately NOT a strong
+            // capture at check time: that would keep a delegate the host app has released alive
+            // and deliver into an object mid-teardown.
+            id<WSKDelegate> const delegate = self->_delegate;
+
+            if ([delegate respondsToSelector:@selector(webServerDidStart:)]) {
+                [delegate webServerDidStart:self];
+            }
         });
     }
 
@@ -1102,7 +1128,20 @@ static inline NSString *_EncodeBase64(NSString *string) {
 
     if ([_delegate respondsToSelector:@selector(webServerDidStop:)]) {
         dispatch_async(dispatch_get_main_queue(), ^{
-            [self->_delegate webServerDidStop:self];
+            // Re-read and re-check inside the block. The property is weak AND mutable, so the
+            // object checked above need not be the one messaged here — a host app that swaps
+            // its delegate for another LIVE object implementing a different subset of these
+            // optional methods raises unrecognized-selector, and nothing in Sources/ catches an
+            // NSException. (Setting it to nil, or letting it deallocate, was always safe: the
+            // weak read yields nil and the message is a no-op.) The strong local also removes a
+            // second weak load between this check and the send. Deliberately NOT a strong
+            // capture at check time: that would keep a delegate the host app has released alive
+            // and deliver into an object mid-teardown.
+            id<WSKDelegate> const delegate = self->_delegate;
+
+            if ([delegate respondsToSelector:@selector(webServerDidStop:)]) {
+                [delegate webServerDidStop:self];
+            }
         });
     }
 }
