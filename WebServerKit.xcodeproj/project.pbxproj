@@ -94,7 +94,17 @@
 		CEE28D521AE00A7A00F4023C /* WebServerKit.h in Headers */ = {isa = PBXBuildFile; fileRef = CEE28CF31AE0051F00F4023C /* WebServerKit.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		E221128F1690B6470048D2B2 /* main.m in Sources */ = {isa = PBXBuildFile; fileRef = E221128E1690B6470048D2B2 /* main.m */; };
 		E240392B1BA09207000B7089 /* WebServerKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CEE28CD11AE004D800F4023C /* WebServerKit.framework */; };
-		E24039321BA092B7000B7089 /* Tests.m in Sources */ = {isa = PBXBuildFile; fileRef = E24039311BA092B7000B7089 /* Tests.m */; };
+		1A2E9ED2B65932B2BA463F9E /* TestsSupport.m in Sources */ = {isa = PBXBuildFile; fileRef = 30F4DED3B7501D0B7F41FADA /* TestsSupport.m */; };
+		72848A56C785AD567E884E67 /* WSKConnectionTests.m in Sources */ = {isa = PBXBuildFile; fileRef = F8FCD6396D4C3FDA2D78C391 /* WSKConnectionTests.m */; };
+		1522ECE9EFB9BC8282A3B9F9 /* WSKPathContainmentTests.m in Sources */ = {isa = PBXBuildFile; fileRef = A9D8E21D1D62F9F3149D174B /* WSKPathContainmentTests.m */; };
+		3AA48006BF15AB5C11746755 /* WSKWebDAVTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 3AF8883D91A9830CA9A06234 /* WSKWebDAVTests.m */; };
+		CB947B1344428D12A1FFDF1F /* WSKUploaderTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 2E7C1C59C8804BA29DE296C0 /* WSKUploaderTests.m */; };
+		4E57DC3FD9149B0225316B25 /* WSKServerSentEventsTests.m in Sources */ = {isa = PBXBuildFile; fileRef = F3DA3F76B10780DEA46C25F5 /* WSKServerSentEventsTests.m */; };
+		81AA50D50E7B6DC33347BB36 /* WSKRequestBodyTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 3F4FB19C0C28BEF1B9BA00BE /* WSKRequestBodyTests.m */; };
+		04D7705658FD667CFDF90AB8 /* WSKResponseTests.m in Sources */ = {isa = PBXBuildFile; fileRef = D9F1F816D28B53333D744D60 /* WSKResponseTests.m */; };
+		87E0CA09884495DBC83A7E2E /* WSKValidatorTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 979E92C25597917D9E7BBD68 /* WSKValidatorTests.m */; };
+		3F58133A05C5E53C5D947644 /* WSKAuthenticationTests.m in Sources */ = {isa = PBXBuildFile; fileRef = DDC26F9BEC8E5C7079116D15 /* WSKAuthenticationTests.m */; };
+		99CC889C44DDC26F25049A98 /* WSKServerLifecycleTests.m in Sources */ = {isa = PBXBuildFile; fileRef = FEAE431E90FB4145A4AFCD2E /* WSKServerLifecycleTests.m */; };
 		E24A3C0721E2879F00C58878 /* WebServerKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CEE28CEF1AE0051F00F4023C /* WebServerKit.framework */; };
 		E24A3C0821E287A300C58878 /* WebServerKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E2DDD18B1BE69404002CE867 /* WebServerKit.framework */; };
 		E24A3C0E21E28D3C00C58878 /* WebServerKit.framework in Copy Frameworks */ = {isa = PBXBuildFile; fileRef = CEE28CEF1AE0051F00F4023C /* WebServerKit.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
@@ -268,7 +278,18 @@
 		CEE28CF31AE0051F00F4023C /* WebServerKit.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = WebServerKit.h; sourceTree = "<group>"; };
 		E221128E1690B6470048D2B2 /* main.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = main.m; sourceTree = "<group>"; };
 		E24039251BA09207000B7089 /* Tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = Tests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		E24039311BA092B7000B7089 /* Tests.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = Tests.m; sourceTree = "<group>"; };
+		30F4DED3B7501D0B7F41FADA /* TestsSupport.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = TestsSupport.m; sourceTree = "<group>"; };
+		F8FCD6396D4C3FDA2D78C391 /* WSKConnectionTests.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = WSKConnectionTests.m; sourceTree = "<group>"; };
+		A9D8E21D1D62F9F3149D174B /* WSKPathContainmentTests.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = WSKPathContainmentTests.m; sourceTree = "<group>"; };
+		3AF8883D91A9830CA9A06234 /* WSKWebDAVTests.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = WSKWebDAVTests.m; sourceTree = "<group>"; };
+		2E7C1C59C8804BA29DE296C0 /* WSKUploaderTests.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = WSKUploaderTests.m; sourceTree = "<group>"; };
+		F3DA3F76B10780DEA46C25F5 /* WSKServerSentEventsTests.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = WSKServerSentEventsTests.m; sourceTree = "<group>"; };
+		3F4FB19C0C28BEF1B9BA00BE /* WSKRequestBodyTests.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = WSKRequestBodyTests.m; sourceTree = "<group>"; };
+		D9F1F816D28B53333D744D60 /* WSKResponseTests.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = WSKResponseTests.m; sourceTree = "<group>"; };
+		979E92C25597917D9E7BBD68 /* WSKValidatorTests.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = WSKValidatorTests.m; sourceTree = "<group>"; };
+		DDC26F9BEC8E5C7079116D15 /* WSKAuthenticationTests.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = WSKAuthenticationTests.m; sourceTree = "<group>"; };
+		FEAE431E90FB4145A4AFCD2E /* WSKServerLifecycleTests.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = WSKServerLifecycleTests.m; sourceTree = "<group>"; };
+		EF30CCB6CE581FB5899D5603 /* TestsSupport.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = TestsSupport.h; sourceTree = "<group>"; };
 		E24A3C4021E2940600C58878 /* module.modulemap */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.module-map"; path = module.modulemap; sourceTree = "<group>"; };
 		E28BAE1618F99C810095C089 /* WSKWebServer.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = WSKWebServer.h; sourceTree = "<group>"; };
 		E28BAE1718F99C810095C089 /* WSKWebServer.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = WSKWebServer.m; sourceTree = "<group>"; };
@@ -429,7 +450,18 @@
 				E24A3C4021E2940600C58878 /* module.modulemap */,
 				CEE28CF31AE0051F00F4023C /* WebServerKit.h */,
 				CEE28CF21AE0051F00F4023C /* Info.plist */,
-				E24039311BA092B7000B7089 /* Tests.m */,
+				30F4DED3B7501D0B7F41FADA /* TestsSupport.m */,
+				F8FCD6396D4C3FDA2D78C391 /* WSKConnectionTests.m */,
+				A9D8E21D1D62F9F3149D174B /* WSKPathContainmentTests.m */,
+				3AF8883D91A9830CA9A06234 /* WSKWebDAVTests.m */,
+				2E7C1C59C8804BA29DE296C0 /* WSKUploaderTests.m */,
+				F3DA3F76B10780DEA46C25F5 /* WSKServerSentEventsTests.m */,
+				3F4FB19C0C28BEF1B9BA00BE /* WSKRequestBodyTests.m */,
+				D9F1F816D28B53333D744D60 /* WSKResponseTests.m */,
+				979E92C25597917D9E7BBD68 /* WSKValidatorTests.m */,
+				DDC26F9BEC8E5C7079116D15 /* WSKAuthenticationTests.m */,
+				FEAE431E90FB4145A4AFCD2E /* WSKServerLifecycleTests.m */,
+				EF30CCB6CE581FB5899D5603 /* TestsSupport.h */,
 			);
 			path = Framework;
 			sourceTree = "<group>";
@@ -941,7 +973,17 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				E24039321BA092B7000B7089 /* Tests.m in Sources */,
+				1A2E9ED2B65932B2BA463F9E /* TestsSupport.m in Sources */,
+				72848A56C785AD567E884E67 /* WSKConnectionTests.m in Sources */,
+				1522ECE9EFB9BC8282A3B9F9 /* WSKPathContainmentTests.m in Sources */,
+				3AA48006BF15AB5C11746755 /* WSKWebDAVTests.m in Sources */,
+				CB947B1344428D12A1FFDF1F /* WSKUploaderTests.m in Sources */,
+				4E57DC3FD9149B0225316B25 /* WSKServerSentEventsTests.m in Sources */,
+				81AA50D50E7B6DC33347BB36 /* WSKRequestBodyTests.m in Sources */,
+				04D7705658FD667CFDF90AB8 /* WSKResponseTests.m in Sources */,
+				87E0CA09884495DBC83A7E2E /* WSKValidatorTests.m in Sources */,
+				3F58133A05C5E53C5D947644 /* WSKAuthenticationTests.m in Sources */,
+				99CC889C44DDC26F25049A98 /* WSKServerLifecycleTests.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
