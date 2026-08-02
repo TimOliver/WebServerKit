@@ -802,10 +802,24 @@ exercise changes, not on suspicion.
   descriptors, the budget driven to its ceiling and abandoned 150 times with `SO_LINGER {1,0}`
   and still 0 at rest. An RSS creep of ~15 B/request was chased and proved allocator behaviour
   (`leaks(1)` zero; live bytes fell between samples; a legitimate-traffic control showed the
-  same slope). **PR #72's connection reuse (`_keepAliveTimeout`, `_carryOverData`,
-  `kMaxRequestsPerConnection`) has NOT been soaked and should be, with keep-alive ENABLED, before
-  the next release.** Re-run when the connection or response layer changes (PR #48 did; the full re-run
+  same slope). Re-run when the connection or response layer changes (PR #48 did; the full re-run
   has since exercised it).
+- **Connection reuse has now been soaked too, and it holds.** Six hours with keep-alive ENABLED
+  against a keep-alive-OFF control in the same process, so a divergence would point at reuse
+  rather than at load: **85,210,679 requests, 14.4 TB**, 12 workers mixing bodyless-GET bursts,
+  ranges, pipelined pairs, abortive mid-transfer deaths, bodies (which must close), and the
+  400/404/501 refusal paths, with the served file atomically replaced every 750 ms. Descriptors
+  ended at **exactly baseline** (peak +38 in flight); `reservedInMemoryByteCount` was **0 at
+  rest** and nonzero in only 47 of 392 samples, never above 22 bytes; **0 unexpected statuses**
+  across all 85 M; both servers still serving at the end.
+
+  **⚠️ `task_info`'s `resident_size` is the WRONG metric and nearly produced a false alarm.** It
+  grew 8.6 MB → 3,005 MB over the run and looked like a leak. `leaks(1)` against the live process
+  reports **0 leaks, 0 bytes, 17.6 MB of malloc'd nodes**, and the **physical footprint is 40.3 MB
+  (peak 54.7)** at the same instant the harness reported 1,957 MB. The gap is file-backed,
+  reclaimable page cache for the 512 KB file being served tens of millions of times.
+  `phys_footprint` is what macOS uses for memory pressure and jetsam; measure that, or `leaks`,
+  and do not report `resident_size` growth as accumulation.
 - **Torn writes do not happen** — 240 concurrent 128 KiB + 90 concurrent 4 MiB PUTs, zero mixed
   files (the body always lands in a temp file first). **Atomic replacement under load is safe**
   — 915 `rename(2)` replacements, 47.7 GB, zero splices, with the oracle provably sensitive
@@ -1103,6 +1117,16 @@ alongside the two that must change — the first change made deliberately under 
   passes); driving each entry point rather than grepping for the guard.
 - **Measure and kill hypotheses instead of filing them** ("does a PUT through a dangling link
   escape?" — measured no, recorded as a negative result).
+- **A load harness needs its own oracle debugged before its numbers mean anything.** Building the
+  keep-alive soak produced four harness bugs and only the fourth was subtle: no `SO_NOSIGPIPE`, so
+  it killed itself at three minutes (the trap this file already records the suite hitting); a
+  strong global written from twelve threads, SIGSEGV; a desync theory that was simply wrong (fixed
+  it, the numbers did not move — that is what told me it was wrong); and finally, an
+  `-abortRequest:` reply is a bare status line with **no `Content-Length`**, so a reader that
+  returns without consuming those bytes makes every later request in a keep-alive burst re-parse
+  the same stale header. That last one reported **32% of 750,000 requests as unexpected statuses**
+  — entirely the harness. After it: zero. **Do not start a long unattended run until the oracle
+  reads zero on the paths you already understand.**
 - **A second-opinion agent is differently blind, not more reliable.** An independent audit of tip
   produced 23 findings and never ran the code (its sandbox blocked `xcodebuild`, which it said
   plainly). After verification and adversarial review: 5 solid, 3 already-documented deliberate
