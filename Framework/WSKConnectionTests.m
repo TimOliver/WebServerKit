@@ -292,19 +292,37 @@
 
     // Dribble one header byte every 0.25 s (< the 0.5 s tick) on a background queue so
     // socket I/O keeps "progressing" and only the header-phase deadline can close us.
+    //
+    // ⚠️ The dribbler MUST be waited for before the descriptor is closed. It used to run
+    // detached for up to 10 s while the test closed `fd` and returned — so a later test's
+    // connect() could be handed the same descriptor NUMBER and the still-running dribbler would
+    // write a stray byte into SOMEONE ELSE'S connection. That corrupted the next request on the
+    // wire, and the server correctly answered 400 "malformed request line". It surfaced as an
+    // intermittent failure in an unrelated keep-alive test, which is the worst possible place to
+    // go looking. This is a use-after-close on a recycled descriptor — the same class this
+    // project fixed in the server itself, here in the suite that guards it.
+    dispatch_semaphore_t const dribbleDone = dispatch_semaphore_create(0);
+    __block BOOL stopDribbling = NO;
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        for (int i = 0; i < 40; i++) {  // up to ~10 s of dribbling; stops early on EPIPE
+        for (int i = 0; (i < 40) && !stopDribbling; i++) {  // up to ~10 s; stops early on EPIPE
             usleep(250 * 1000);
             const char space = ' ';
+
             if (send(fd, &space, 1, 0) < 0) {
                 break;
             }
         }
+
+        dispatch_semaphore_signal(dribbleDone);
     });
 
     BOOL sawEOF = NO;
-    ReadToEOF(fd, &sawEOF);  // returns when the server closes the connection (or the 5 s recv timeout)
+    ReadToEOF(fd, &sawEOF);  // returns when the server closes the connection (or the recv timeout)
     XCTAssertTrue(sawEOF, @"header-phase deadline did not close a slowloris dribbling under one tick");
+
+    stopDribbling = YES;
+    long const dribbleFinished = dispatch_semaphore_wait(dribbleDone, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15 * NSEC_PER_SEC)));
+    XCTAssertEqual(dribbleFinished, (long)0, @"the dribbler must finish before its descriptor is closed and reused");
     close(fd);
     [server stop];
 }
