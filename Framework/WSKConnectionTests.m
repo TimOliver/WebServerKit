@@ -724,6 +724,154 @@
     [fm removeItemAtPath:dir error:NULL];
 }
 
+// The reaper that reclaims an IDLE reused connection must not fire on one that is busy. A request
+// arriving in the previous request's final read is served without a single further byte being read,
+// and the "has the next request started arriving?" test was a read-count comparison — which such a
+// request can never satisfy, because its bytes were counted against the request before it. So the
+// connection was still marked idle while its response was streaming, and the keep-alive deadline
+// cut the body off mid-transfer under a Content-Length it then never reached.
+//
+// That is the worst shape a bug can take here: a complete, well-formed, WRONG response. The
+// deployment this library is aimed at pulls multi-hundred-megabyte builds, so a body that stops
+// early and claims not to have is an IPA that installs and crashes.
+- (void)testPipelinedRequestIsNotReclaimedWhileItsResponseIsStillStreaming {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    NSUInteger const bigLength = 8 * 1024 * 1024;
+    XCTAssertTrue([@"ALPHA" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([[NSMutableData dataWithLength:bigLength] writeToFile:[dir stringByAppendingPathComponent:@"big.bin"] atomically:YES]);
+
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addGETHandlerForBasePath:@"/f/" directoryPath:dir indexFilename:nil cacheAge:0 allowRangeRequests:YES];
+    // A short keep-alive and a matching tick, so the reaper's deadline lands about one second in —
+    // comfortably inside the paced transfer below, which takes roughly 2.5 s.
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES, WSKOption_ConnectionKeepAliveTimeout : @0.5, WSKOption_ConnectionIdleTimeout : @0.5};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* const first = @"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    NSString* const second = @"GET /f/big.bin HTTP/1.1\r\nHost: localhost\r\n\r\n";
+
+    // PIPELINED: both requests in one write, so the second is served entirely from carried-over
+    // bytes and the connection performs no read at all while answering it.
+    int fd = ConnectToLocalhostPort(server.port);
+    XCTAssertTrue(fd >= 0);
+    NSString* const both = [first stringByAppendingString:second];
+    XCTAssertEqual(send(fd, both.UTF8String, strlen(both.UTF8String), 0), (ssize_t)strlen(both.UTF8String));
+    NSUInteger const pipelinedBytes = DrainToEOFAtPace(fd, 32 * 1024, 10000);
+    close(fd);
+
+    // SEQUENTIAL CONTROL: the same two requests, but the second written after the first reply is
+    // read, so its bytes DO arrive as a socket read. This exercises everything the pipelined case
+    // does except the carried-over path, and it must pass whether or not the bug is present — if it
+    // fails too, the test is measuring the ordinary response-phase idle rule and proves nothing.
+    fd = ConnectToLocalhostPort(server.port);
+    XCTAssertTrue(fd >= 0);
+    XCTAssertEqual(send(fd, first.UTF8String, strlen(first.UTF8String), 0), (ssize_t)strlen(first.UTF8String));
+    char reply[4096];
+    XCTAssertTrue(recv(fd, reply, sizeof(reply), 0) > 0, @"the first reply must arrive before the second request is sent");
+    XCTAssertEqual(send(fd, second.UTF8String, strlen(second.UTF8String), 0), (ssize_t)strlen(second.UTF8String));
+    NSUInteger const sequentialBytes = DrainToEOFAtPace(fd, 32 * 1024, 10000);
+    close(fd);
+
+    XCTAssertGreaterThan(sequentialBytes, bigLength, @"CONTROL FAILED: a sequential reused connection lost bytes too, so this test is measuring the ordinary idle rule rather than the keep-alive reaper");
+    XCTAssertGreaterThan(pipelinedBytes, bigLength, @"a pipelined response was cut short at %lu of %lu bytes: the connection was treated as idle while it was streaming", (unsigned long)pipelinedBytes, (unsigned long)bigLength);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// Everything past the header block was required to fit inside Content-Length, and anything more was
+// answered 400. TCP makes no such promise: a client that writes a body-bearing request and whatever
+// follows it in one segment lands both in one read. Refusing that is honouring a guess about
+// segmentation, and it made the verdict depend on how the client happened to split its writes —
+// the same split-dependence class this project already has an oracle for.
+//
+// The trailing bytes are still never INTERPRETED: a request carrying body framing is not eligible
+// for reuse, so the connection closes after it and the remainder is dropped exactly as before.
+// Nothing here widens what may be framed on a reused connection.
+- (void)testRequestWithBytesTrailingItsBodyIsServedRatherThanRefused {
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addHandlerForMethod:@"POST"
+                           path:@"/echo"
+                   requestClass:[WSKDataRequest class]
+                   processBlock:^WSKResponse*(WSKRequest* request) {
+                       return [WSKDataResponse responseWithData:[(WSKDataRequest*)request data] contentType:@"text/plain"];
+                   }];
+    [server addHandlerForMethod:@"GET"
+                           path:@"/ok"
+                   requestClass:[WSKRequest class]
+                   processBlock:^WSKResponse*(WSKRequest* request) {
+                       return [WSKDataResponse responseWithText:@"OK"];
+                   }];
+
+    // DEFAULT configuration — no keep-alive. This is not a reuse defect: the check predates
+    // connection reuse entirely, and a single write is all it takes to reach it.
+    NSDictionary* defaultOptions = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};  // Hoisted: the commas would split the macro's arguments
+    XCTAssertTrue([server startWithOptions:defaultOptions error:NULL]);
+    NSString* const trailing = @"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\nBODYGET /ok HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    NSString* reply = SendRawRequest(server.port, trailing);
+    XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 200"], @"a request whose body is followed by more bytes in the same read must still be served: %@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+    XCTAssertTrue([reply containsString:@"BODY"], @"the body must be exactly Content-Length bytes, with the trailing bytes excluded: %@", reply);
+    [server stop];
+
+    // And with reuse enabled, where a pipelining client produces the same shape deliberately.
+    NSDictionary* keepAliveOptions = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES, WSKOption_ConnectionKeepAliveTimeout : @5.0};
+    XCTAssertTrue([server startWithOptions:keepAliveOptions error:NULL]);
+    NSArray<NSString*>* replies = SendRawRequestsOnOneConnection(server.port, @[ [@"GET /ok HTTP/1.1\r\nHost: localhost\r\n\r\n" stringByAppendingString:trailing], @"" ]);
+    XCTAssertTrue(replies.count >= 1);
+    XCTAssertTrue([replies.firstObject hasPrefix:@"HTTP/1.1 200"], @"first: %@", replies.firstObject);
+    XCTAssertFalse([replies.firstObject containsString:@"400"], @"a pipelined body-bearing request must not be refused: %@", replies.firstObject);
+    [server stop];
+}
+
+// -open and -close are the documented connection-lifecycle pair: -open is "called when the
+// connection is opened" and may return NO to REJECT it, which is only meaningful once per
+// connection. A host app pairing them — allocate in one, release in the other — is following the
+// header. Reuse called -close once per REQUEST, so two requests on one connection produced one
+// open and two closes, and the second release had nothing left to release.
+//
+// The same sequence pins the other half: a persistent connection ending because the client went
+// away is the designed end of one, not a failure, and must not manufacture a response for a
+// request that does not exist.
+- (void)testReusedConnectionOpensAndClosesOnceAndInventsNoResponseAtTheEnd {
+    gConnectionEvents = [NSMutableArray array];
+
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addHandlerForMethod:@"GET"
+                           path:@"/ok"
+                   requestClass:[WSKRequest class]
+                   processBlock:^WSKResponse*(WSKRequest* request) {
+                       return [WSKDataResponse responseWithText:@"OK"];
+                   }];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES, WSKOption_ConnectionKeepAliveTimeout : @5.0, WSKOption_ConnectionClass : [LifecycleProbeConnection class]};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSArray<NSString*>* replies = SendRawRequestsOnOneConnection(server.port, @[ @"GET /ok HTTP/1.1\r\nHost: localhost\r\n\r\nGET /ok HTTP/1.1\r\nHost: localhost\r\n\r\n", @"" ]);
+    XCTAssertEqual(replies.count, (NSUInteger)2, @"both requests must be answered before the pairing is judged");
+
+    [server stop];  // A full barrier over every connection queue, so the events are complete and stable.
+
+    NSArray<NSString*>* events = [gConnectionEvents copy];
+    XCTAssertEqual([events componentsJoinedByString:@" "].length > 0, YES);
+    NSUInteger opens = 0, closes = 0, aborts = 0;
+
+    for (NSString* event in events) {
+        if ([event isEqualToString:@"open"]) {
+            opens += 1;
+        } else if ([event isEqualToString:@"close"]) {
+            closes += 1;
+        } else if ([event hasPrefix:@"abort"]) {
+            aborts += 1;
+        }
+    }
+
+    XCTAssertEqual(opens, (NSUInteger)1, @"one connection, so one -open: %@", events);
+    XCTAssertEqual(closes, opens, @"-close must pair with -open, not run once per request: %@", events);
+    XCTAssertEqual(aborts, (NSUInteger)0, @"a client closing a persistent connection is its designed end, not a request to refuse: %@", events);
+
+    gConnectionEvents = nil;
+}
+
 - (void)testAbortedRequestCarriesItsAddressesAndHEADFlag {
     gAbortRequestPeer = nil;
     gAbortRequestSawVirtualHEAD = NO;

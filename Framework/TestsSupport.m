@@ -47,6 +47,37 @@ int ConnectToLocalhostPort(NSUInteger port) {
     return fd;
 }
 
+// Drains to EOF at a deliberate pace: read a chunk, pause, repeat. Counting the bytes is all the
+// caller wants, so nothing is accumulated.
+//
+// The pacing is the whole point and a plain sleep will not do. A client that simply stops reading
+// stalls the server's pending write, and the ordinary response-phase idle rule reclaims it after
+// two tickless — correctly. Pacing keeps bytes moving on every tick, so that rule can never fire,
+// while the transfer still spans several ticks. Anything that cuts the response short under those
+// conditions is a deadline being applied where it does not belong.
+NSUInteger DrainToEOFAtPace(int fd, NSUInteger chunkSize, useconds_t pauseMicroseconds) {
+    void* const buffer = malloc(chunkSize);
+    NSUInteger total = 0;
+
+    if (buffer == NULL) {
+        return 0;
+    }
+
+    while (1) {
+        ssize_t const got = recv(fd, buffer, chunkSize, 0);
+
+        if (got <= 0) {
+            break;  // 0 is EOF; negative is the reset a reclaimed connection produces, or the timeout
+        }
+
+        total += (NSUInteger)got;
+        usleep(pauseMicroseconds);
+    }
+
+    free(buffer);
+    return total;
+}
+
 // Reads until the peer closes the connection (EOF) or the receive timeout fires.
 // Returns the accumulated bytes; *sawEOF reports whether EOF was actually seen.
 NSData* ReadToEOF(int fd, BOOL* sawEOF) {
@@ -379,6 +410,37 @@ BOOL gAbortRequestSawVirtualHEAD = NO;
     gAbortRequestPeer = request.remoteAddressString;
     gAbortRequestSawVirtualHEAD = request.isVirtualHEAD;
     [super abortRequest:request withStatusCode:statusCode];
+}
+
+@end
+
+
+NSMutableArray<NSString*>* gConnectionEvents = nil;
+
+@implementation LifecycleProbeConnection
+
+// Appended to from the connection queue, read from the test thread only after the server has
+// stopped, which is a full barrier over every connection queue.
+- (BOOL)open {
+    BOOL const opened = [super open];
+    @synchronized(gConnectionEvents) {
+        [gConnectionEvents addObject:@"open"];
+    }
+    return opened;
+}
+
+- (void)abortRequest:(WSKRequest*)request withStatusCode:(NSInteger)statusCode {
+    @synchronized(gConnectionEvents) {
+        [gConnectionEvents addObject:[NSString stringWithFormat:@"abort %i", (int)statusCode]];
+    }
+    [super abortRequest:request withStatusCode:statusCode];
+}
+
+- (void)close {
+    @synchronized(gConnectionEvents) {
+        [gConnectionEvents addObject:@"close"];
+    }
+    [super close];
 }
 
 @end

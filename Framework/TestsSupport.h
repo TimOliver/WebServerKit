@@ -17,6 +17,7 @@
 extern NSData* SSEData(NSString* string);
 extern int ConnectToLocalhostPort(NSUInteger port);
 extern NSData* ReadToEOF(int fd, BOOL* sawEOF);
+extern NSUInteger DrainToEOFAtPace(int fd, NSUInteger chunkSize, useconds_t pauseMicroseconds);
 extern NSData* GZipDecompress(NSData* input);
 extern NSData* DrainResponseBody(WSKResponse* response);
 extern NSData* GZipCompress(NSData* input);
@@ -35,6 +36,17 @@ extern NSString* gAbortRequestPeer;
 extern BOOL gAbortRequestSawVirtualHEAD;
 
 @interface AbortProbeConnection : WSKConnection
+@end
+
+// Observes the documented -open/-close subclassing pair, plus every -abortRequest: status. Both
+// hooks are declared once-per-CONNECTION ("called when the connection is opened", and -open may
+// return NO to reject it), so a host app that allocates in one and releases in the other is
+// following the header. Connection reuse has to leave that pairing intact, and it must not
+// manufacture a response when a persistent connection simply ends — the events are recorded in
+// order so a test can assert on the whole sequence rather than a count.
+extern NSMutableArray<NSString*>* gConnectionEvents;
+
+@interface LifecycleProbeConnection : WSKConnection
 @end
 
 // Two delegates for the weak-delegate swap test. What matters is that BOTH conform and BOTH are
