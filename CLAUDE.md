@@ -501,6 +501,35 @@ the same rule spelled two ways in two places.
   built from, and gating on `hasBody` would have made it the one eligible shape.
   Measured 0.515 → 0.377 ms/request (26.7%) on loopback, where the handshake is nearly free; on
   a real link it is about one RTT per request.
+- **A request served from `_carryOverData` is NOT idle, and the reaper must be told so at the point
+  the carry-over is consumed.** "Has the next request started arriving?" was a read-count
+  comparison, which a pipelined request can never satisfy — its bytes were counted against the
+  request BEFORE it, so no read happens and the count never rises. The connection therefore stayed
+  marked idle while its response streamed, and the keep-alive deadline cut the body off mid-transfer
+  under a `Content-Length` it then never reached: measured **15,867,384 of 16,777,216 bytes** at the
+  default idle timeout, and 3,622,183 of 8,388,608 in the regression test. A complete, well-formed,
+  WRONG response — the same shape as the in-place-rewrite splice, and the reason
+  `testPipelinedRequestIsNotReclaimedWhileItsResponseIsStillStreaming` carries a SEQUENTIAL control
+  that must pass on both trees: without it the test cannot tell this apart from the ordinary
+  response-phase idle rule.
+- **Bytes past the header block are TRIMMED to `Content-Length`, never refused.** Requiring
+  `extraData.length <= contentLength` honoured a guess about segmentation — TCP may deliver a body
+  and whatever follows it in one read — and answered 400. It was **reachable in the DEFAULT
+  configuration** (no keep-alive needed, one write is enough) and predates connection reuse
+  entirely; the split-invariance oracle found it, not reading. The remainder is DROPPED, never
+  interpreted: a request carrying body framing is not eligible for reuse, so the connection closes
+  after it and nothing is framed by a length the next request could disagree about.
+- **`-open` and `-close` are once per CONNECTION**, which is what their headers say and what a host
+  app pairing them relies on. Reuse briefly called `-close` per REQUEST, giving one open and N
+  closes. The per-request work — the access-log line and the trace recording — lives in
+  `-_flushRequestRecordAndLog` instead, called as each response completes, with `-close` flushing
+  only the request that has not been flushed yet. That guard is why `_requestLogged` is deliberately
+  NOT cleared in `-_resetForNextRequest` (which runs whether or not another request ever comes) but
+  where the next header block actually arrives.
+- **A persistent connection ending because the client went away is its designed end, not a
+  failure** — no `ERROR` log line, and no response. It used to write a 500 into a socket that was
+  already gone, putting a fabricated server error in the access log for every well-behaved
+  keep-alive client. Genuine read ERRORS still log as errors; only the EOF case changed.
 
 ### Limits and budgets
 
@@ -802,9 +831,12 @@ exercise changes, not on suspicion.
   descriptors, the budget driven to its ceiling and abandoned 150 times with `SO_LINGER {1,0}`
   and still 0 at rest. An RSS creep of ~15 B/request was chased and proved allocator behaviour
   (`leaks(1)` zero; live bytes fell between samples; a legitimate-traffic control showed the
-  same slope). **PR #72's connection reuse (`_keepAliveTimeout`, `_carryOverData`,
-  `kMaxRequestsPerConnection`) has NOT been soaked and should be, with keep-alive ENABLED, before
-  the next release.** Re-run when the connection or response layer changes (PR #48 did; the full re-run
+  same slope). PR #72's connection reuse HAS since been soaked with keep-alive ENABLED — 6.01 h,
+  85,210,679 requests, 14.4 TB, descriptors at baseline and `reservedInMemoryByteCount` 0 at rest.
+  **But that soak did not PIPELINE** (its client read one response per write), so it never touched
+  `_carryOverData`, which is the path the narrow audit then found three defects in. **A pipelining
+  soak is the outstanding debt, and it should run against the fixed tree before the next release.**
+  Re-run when the connection or response layer changes (PR #48 did; the full re-run
   has since exercised it).
 - **Torn writes do not happen** — 240 concurrent 128 KiB + 90 concurrent 4 MiB PUTs, zero mixed
   files (the body always lands in a temp file first). **Atomic replacement under load is safe**
@@ -826,7 +858,18 @@ exercise changes, not on suspicion.
   one request per connection, `Connection: Close`, leftover bytes dropped) — verified LIVE by
   pipelining. With `WSKOption_ConnectionKeepAliveTimeout` set, that premise is preserved by
   restricting reuse to requests carrying NO body framing, so nothing can be framed by a length the
-  next request disagrees about — but **the pipelining probe has not been re-run in that mode**. ~7,000 mutated
+  next request disagrees about. That mode HAS now been probed: the split-invariance oracle replayed
+  ten pipelined byte-streams — bodyless runs, a body between two GETs, a bad chunk, `Connection:
+  close` mid-stream, an HTTP/1.0 request mid-stream — at every single-byte split offset and
+  byte-at-a-time, 1,355 segmentations, run against BOTH trees with the same oracle: **14 status
+  disagreements before, 4 and 6 in two runs after**. Read the BASELINES, not the counts — the
+  counts are RST timing and move in both directions between runs (one shape went 1→0, another
+  0→4), while the baselines changed exactly where they should: `200,400,close` → `200,200,close`
+  and `400,close` → `200,close`, with "GET then bad chunk then GET" correctly still baselining at
+  `400`. A genuinely malformed body is still refused; only the spurious refusal went. What remains
+  is the RST-lost-response shape (`200,200,close` becoming `200,error`: the reply was produced, the
+  client never got to read it), not a difference in what the server DECIDED. That is evidence
+  against desync, not proof of its absence. ~7,000 mutated
   requests under ASan+UBSan: zero memory errors. 9,366 injected allocation failures: nothing,
   zero descriptor leaks.
 - **Conformance and real clients**, RE-TAKEN against tip after the #70/#71/#75 status changes and
@@ -943,31 +986,21 @@ and the two `Allow` gaps, which the draft had merged into one bullet):
 - A symlinked share receives no `NSFilePresenter` events at all.
 
 From the outside audit (an independent agent, 23 findings, 5 solid after adversarial review — see
-the appendix). Still open, roughly in order of weight:
-- **Request-body failures all collapse into 500.** The body-read protocol reports failure as a
-  plain BOOL, so malformed chunking, gzip corruption, a multipart rejection, a decompression-limit
-  hit, aggregate-memory exhaustion and a disk-write failure are indistinguishable at the
-  connection layer — where 400, 413, 503 and 507 are each owed. This file already admits ONE
-  instance of it (the budget-exhaustion 500 under "Limits and budgets"); the audit's contribution
-  is that the class is much wider. Needs a typed failure reason threaded through the body-read
-  path, which is why it was not taken with the rest.
-- **`-_willEnterForeground:` still calls `[self _start:NULL]` under a TODO saying nothing can be
-  done on failure.** Its sibling `-_reconnectInForeground:` got the error handling; this is the
-  DEFAULT path (`suspendInBackground` defaults to YES), so the fix landed on the opt-in
-  configuration. The signature shape, again. Note the consequence claim is NOT that the app
-  believes it resumed — `-isRunning` and `-serverURL` report honestly; what is lost is the
-  diagnostic and the `NSError`.
-- **`indexFilename` is appended to a resolved directory without re-resolving containment**, so a
-  value containing a separator or `..` escapes the served root (`O_NOFOLLOW` guards only the
-  final component). Host-app reachable only — no client input reaches it, and every in-tree
-  caller passes nil — but it is a hole in a guarantee the public header states unconditionally.
-- **`acceptsGzipContentEncoding` is parsed by case-sensitive substring** (`gzip;q=0` reads as
-  YES, `GZIP` and `*` as NO) **and is read by nothing in the library** — a public-API honesty bug
-  rather than a live serving defect, and the token-exact spelling it should use is 120 lines above
-  it in the same file.
-- **An unmatched request always answers 501**, conflating "unknown target" (404) and "wrong method
-  for a known target" (405 + `Allow`). The bare server is affected; the uploader's catch-all GET
-  handler already restores 404 for things like `/favicon.ico`.
+the appendix). **All five are now CLOSED** — by #74 (typed body-failure statuses) and #75 (the
+audit tail). They are struck here rather than deleted because this list asserted them as open for
+six days after the code stopped agreeing, which is this file's own signature failure and worth
+leaving visible:
+- ~~Request-body failures all collapse into 500~~ — `_StatusForBodyError` maps a typed
+  `WSKRequestBodyErrorCode` to 400/413/503/500 (#74). Verified at tip.
+- ~~`-_willEnterForeground:` calls `[self _start:NULL]`~~ — it passes `&error` and logs (#75).
+- ~~`indexFilename` escapes the served root~~ — it goes through `WSKResolveWithinDirectory` and is
+  refused with a warning when it lands outside (#75).
+- ~~`acceptsGzipContentEncoding` parsed by case-sensitive substring~~ — `_AcceptEncodingAllowsGzip`
+  now parses tokens and q-values (#75).
+- ~~An unmatched request always answers 501~~ — it consults `_registeredMethods` and answers 404
+  when some handler implements the method (#75). **405 with `Allow` remains deliberately
+  unattempted**: a handler is an opaque match block, so the server cannot ask which methods a path
+  accepts without changing the registration model.
 - ~~Ten of the audit's findings were never adversarially verified~~ — **done**. Four had already
   been closed by #75; of the six that remained, **five were refuted** and one was real:
   `Transfer-Encoding: identity` (the desync it implied is closed by construction, since reuse is
@@ -977,6 +1010,23 @@ the appendix). Still open, roughly in order of weight:
   halves attributed to the wrong method — file-presenter events never call it); and the unchecked
   `dispatch_source_create` (its arguments are statically pinned, so NULL cannot occur). The
   survivor was the weak-delegate swap, now fixed.
+
+From the narrow audit of #72's 1,024 new lines (two lenses and the split-invariance oracle
+converged on the same area; four defects fixed, one left open):
+- **No lingering close, so a client can lose the last response to a RST.** When the server closes
+  with unread bytes still in its receive buffer — which is exactly what pipelining past a
+  non-reusable request produces — Darwin sends RST rather than FIN, and the client's unread receive
+  buffer is discarded with it. Measured as `200,error` where `200,200,error` was owed, in a minority
+  of segmentations. RFC 9112 §9.6's remedy is `shutdown(SHUT_WR)` then drain-before-close. NOT taken
+  in that batch: it holds a connection slot open longer on a server with a 128-slot cap, so it needs
+  its own bounded design rather than being tacked onto a fix for something else. **Pre-existing and
+  unchanged by the fixes** — 48 differing segmentations before, 47 after, on the same shape.
+- **The split-invariance oracle needed refining before its verdict meant anything.** It compared
+  the connection's manner of ending as if it were a status, so it reported 228 disagreements of
+  which every single one was FIN-vs-RST, at the same rate on both trees. It now compares statuses
+  and counts endings separately. Its `HEAD then GET -> desync` baseline is likewise the oracle's own
+  bug — its client consumes `Content-Length` bytes after a HEAD response, which has none. A RED
+  signal from an unvalidated oracle is worth exactly as much as a green one.
 
 Carried from earlier passes, never closed:
 - **PROPFIND publishes no `getetag`** — a just-written file has ZERO validators for a

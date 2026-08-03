@@ -74,6 +74,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)readNextBodyChunk:(NSMutableData *)chunkData completionBlock:(ReadBodyCompletionBlock)block;
 @end
 
+@interface WSKConnection (Logging)
+- (void)_flushRequestRecordAndLog;
+@end
+
 @interface WSKConnection (Write)
 - (void)writeData:(NSData *)data withCompletionBlock:(WriteDataCompletionBlock)block;
 - (void)writeHeadersWithCompletionBlock:(WriteHeadersCompletionBlock)block;
@@ -134,6 +138,7 @@ NS_ASSUME_NONNULL_END
     NSUInteger _requestsServed;         // Bounds how long one client can hold a connection slot
     NSUInteger _readBytesWhenIdleBegan;  // Read count when the last response finished; the next request can only arrive as reads
     NSMutableData *_carryOverData;      // Bytes of the NEXT request that arrived in this request's last read
+    BOOL _requestLogged;                // This request's access line and recording are already flushed
     WSKMemoryReservation *_chunkReservation;  // This connection's chunked framing buffer
 
 #ifdef __WEBSERVERKIT_ENABLE_TESTING__
@@ -538,6 +543,11 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
     _bodyFailureStatus = kWSKHTTPStatusCode_InternalServerError;
     _chunkReservation = nil;  // Named in the reuse ivar block, so it is cleared here like the rest
     _headerPhaseTicks = 0;  // Or the second request inherits the first's deadline and is killed early.
+    // _requestLogged is deliberately NOT cleared here, and this note exists so the omission reads
+    // as a decision rather than the leak this method exists to prevent. It is cleared where the
+    // next request's header block actually ARRIVES: this reset runs whether or not another request
+    // ever comes, so clearing it here would leave the connection believing it still owed a log line
+    // for the request it just finished, and -close would write a second, emptied-out one.
 
 #ifdef __WEBSERVERKIT_ENABLE_TESTING__
     _requestPath = nil;
@@ -554,8 +564,12 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
         return;
     }
 
-    [self close];  // Flush this request's log line and any recording while its state is still live.
-    _opened = NO;  // -dealloc must not close it a second time.
+    // Flush this request's log line and any recording while its state is still live. NOT -close:
+    // that is the connection-level subclassing hook, documented as the partner of -open ("called
+    // when the connection is opened", and able to REJECT it by returning NO), so it is meaningful
+    // only once per connection. Calling it per request gave a host app pairing the two — allocate
+    // in one, release in the other — one open and N closes.
+    [self _flushRequestRecordAndLog];
     _requestsServed += 1;
     [self _resetForNextRequest];
     // Snapshot the READ count, not read+written. The response that just went out moved bytes, so
@@ -904,10 +918,24 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
     if (_carryOverData.length > 0) {
         [headersData appendData:_carryOverData];
         _carryOverData = nil;
+        // The next request is already in hand, so this connection is NOT idle and the keep-alive
+        // reaper below must not judge it. Nothing else can clear the flag on this path: the idle
+        // check clears it by noticing _totalBytesRead RISE, and a request served entirely from
+        // carried-over bytes issues no read at all, because those bytes were counted against the
+        // request before it. Left set, the reaper ran against a response that was still streaming
+        // and cut the body off mid-transfer — under a Content-Length it then never reached.
+        _awaitingNextRequest = NO;
+        _headerPhaseTicks = 0;  // A fresh header-phase budget, exactly as the idle check hands out
     }
     [self readHeaders:headersData
         withCompletionBlock:^(NSData *extraData) {
             if (extraData) {
+                // A header block arrived, so there is a new request to account for. Cleared HERE
+                // rather than in -_resetForNextRequest because the reset runs whether or not
+                // another request ever comes: a persistent connection whose client simply goes
+                // away must leave the last real request marked as flushed, or -close logs a second
+                // line for a request it has already reset away.
+                self->_requestLogged = NO;
                 // An HTTP/1.0 client cannot parse a chunked body or an interim 1xx response,
                 // so remember which dialect it speaks before framing anything back at it.
                 NSString *const requestVersion = CFBridgingRelease(CFHTTPMessageCopyVersion(self->_requestMessage));
@@ -984,35 +1012,48 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
                                 return;
                             }
 
-                            if (self->_request.usesChunkedTransferEncoding || (extraData.length <= self->_request.contentLength)) {
-                                NSString *const expectHeader = requestHeaders[@"Expect"];
+                            // Everything past the header block, trimmed to the body this request
+                            // declared. More than that is not an error: a client may write its
+                            // body and whatever follows it in one segment, and TCP is free to
+                            // deliver the two in a single read regardless. Refusing it with 400
+                            // made the verdict depend on how the client happened to split its
+                            // writes — the split-dependence class this project has an oracle for
+                            // — and it refused ordinary pipelining outright.
+                            //
+                            // The remainder is DROPPED, never interpreted. A request carrying body
+                            // framing is not eligible for reuse, so this connection closes after
+                            // it; that is what keeps "nothing can be framed by a length the next
+                            // request disagrees about" structurally true rather than parsed-for.
+                            NSData *bodyData = extraData;
 
-                                if (expectHeader && !self->_clientIsHTTP10) {
-                                    if ([expectHeader caseInsensitiveCompare:@"100-continue"] == NSOrderedSame) {  // TODO: Actually validate request before continuing
-                                        [self writeData:_continueData
-                                            withCompletionBlock:^(BOOL success) {
-                                                if (success) {
-                                                    [self _readRequestBodyWithInitialData:extraData];
-                                                } else {
-                                                    // Without this the request is left neither answered nor
-                                                    // aborted, and the connection just unwinds silently.
-                                                    [self abortRequest:self->_request withStatusCode:kWSKHTTPStatusCode_InternalServerError];
-                                                }
-                                            }];
-                                    } else {
-                                        WSK_LOG_ERROR(@"Unsupported 'Expect' / 'Content-Length' header combination on socket %i", self->_socket);
-                                        [self abortRequest:self->_request withStatusCode:kWSKHTTPStatusCode_ExpectationFailed];
-                                    }
+                            if (!self->_request.usesChunkedTransferEncoding && (extraData.length > self->_request.contentLength)) {
+                                bodyData = [extraData subdataWithRange:NSMakeRange(0, self->_request.contentLength)];
+                            }
+
+                            NSString *const expectHeader = requestHeaders[@"Expect"];
+
+                            if (expectHeader && !self->_clientIsHTTP10) {
+                                if ([expectHeader caseInsensitiveCompare:@"100-continue"] == NSOrderedSame) {  // TODO: Actually validate request before continuing
+                                    [self writeData:_continueData
+                                        withCompletionBlock:^(BOOL success) {
+                                            if (success) {
+                                                [self _readRequestBodyWithInitialData:bodyData];
+                                            } else {
+                                                // Without this the request is left neither answered nor
+                                                // aborted, and the connection just unwinds silently.
+                                                [self abortRequest:self->_request withStatusCode:kWSKHTTPStatusCode_InternalServerError];
+                                            }
+                                        }];
                                 } else {
-                                    // An HTTP/1.0 client has no concept of an interim response: it would
-                                    // read "100 Continue" as the final one and then mis-parse the real
-                                    // response as the body. It is not waiting for one either, so ignore
-                                    // any Expect it sent and just read the body.
-                                    [self _readRequestBodyWithInitialData:extraData];
+                                    WSK_LOG_ERROR(@"Unsupported 'Expect' / 'Content-Length' header combination on socket %i", self->_socket);
+                                    [self abortRequest:self->_request withStatusCode:kWSKHTTPStatusCode_ExpectationFailed];
                                 }
                             } else {
-                                WSK_LOG_ERROR(@"Unexpected 'Content-Length' header value on socket %i", self->_socket);
-                                [self abortRequest:self->_request withStatusCode:kWSKHTTPStatusCode_BadRequest];
+                                // An HTTP/1.0 client has no concept of an interim response: it would
+                                // read "100 Continue" as the final one and then mis-parse the real
+                                // response as the body. It is not waiting for one either, so ignore
+                                // any Expect it sent and just read the body.
+                                [self _readRequestBodyWithInitialData:bodyData];
                             }
                         } else {
                             // No body to read, so anything past the header block belongs to the
@@ -1078,6 +1119,14 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
                     WSK_LOG_ERROR(@"Failed decoding request target on socket %i", self->_socket);
                     [self abortRequest:nil withStatusCode:kWSKHTTPStatusCode_BadRequest];
                 }
+            } else if (self->_awaitingNextRequest && (self->_totalBytesRead == self->_readBytesWhenIdleBegan)) {
+                // A persistent connection whose client went away without beginning another
+                // request. That is how one is SUPPOSED to end — there is no request to refuse,
+                // and nobody left to read an answer — so it unwinds silently. It used to take
+                // the branch below and write a 500 into a socket that was already gone, which
+                // put a fabricated server error in the access log for every well-behaved
+                // keep-alive client.
+                WSK_LOG_DEBUG(@"Client closed idle keep-alive connection on socket %i", self->_socket);
             } else {
                 // A header block we could not read is the client's problem far more often
                 // than ours — it is malformed, or it is larger than kHeadersMaxLength.
@@ -1207,7 +1256,12 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
                     [self didReadBytes:((char *)data.bytes + originalLength) length:(data.length - originalLength)];
                     block(YES);
                 } else {
-                    if (self->_totalBytesRead > 0) {
+                    if (self->_awaitingNextRequest) {
+                        // The designed end of a persistent connection, not a failure: the client
+                        // finished with it and closed. Logging that at ERROR made every correct
+                        // keep-alive client look like a fault.
+                        WSK_LOG_DEBUG(@"Client closed idle keep-alive connection on socket %i", self->_socket);
+                    } else if (self->_totalBytesRead > 0) {
                         WSK_LOG_ERROR(@"No more data available on socket %i", self->_socket);
                     } else {
                         WSK_LOG_WARNING(@"No data received from socket %i", self->_socket);
@@ -2095,7 +2149,11 @@ static inline BOOL _CompareResources(NSString *responseETag, NSString *requestET
     WSK_LOG_DEBUG(@"Connection aborted with status code %i on socket %i", (int)statusCode, _socket);
 }
 
-- (void)close {
+// One request's worth of bookkeeping: move its recording into place and write its access-log line.
+// Split out of -close, which is a once-per-CONNECTION hook, because a reused connection owes one of
+// these per REQUEST — and the last request on such a connection reaches only -close.
+- (void)_flushRequestRecordAndLog {
+    _requestLogged = YES;  // Cleared when the next request's header block arrives, so -close cannot double-log
 #ifdef __WEBSERVERKIT_ENABLE_TESTING__
 
     if (_requestPath) {
@@ -2140,6 +2198,15 @@ static inline BOOL _CompareResources(NSString *responseETag, NSString *requestET
         WSK_LOG_VERBOSE(@"[%@] %@ %i \"%@ %@\" (%lu | %lu)", self.localAddressString, self.remoteAddressString, (int)_statusCode, _virtualHEAD ? @"HEAD" : _request.method, _request.path, (unsigned long)_totalBytesRead, (unsigned long)_totalBytesWritten);
     } else {
         WSK_LOG_VERBOSE(@"[%@] %@ %i \"(invalid request)\" (%lu | %lu)", self.localAddressString, self.remoteAddressString, (int)_statusCode, (unsigned long)_totalBytesRead, (unsigned long)_totalBytesWritten);
+    }
+}
+
+- (void)close {
+    // The connection is ending. Only the request still un-flushed is owed anything here: on a
+    // reused connection every earlier one was flushed as its response completed, and flushing again
+    // would log a second, emptied-out line for a request that has already been reset away.
+    if (!_requestLogged) {
+        [self _flushRequestRecordAndLog];
     }
 }
 
