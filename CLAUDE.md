@@ -1059,12 +1059,19 @@ than the record and are restated below; three are now fixed.
   actively contradict each other about the same resource. A just-written file has zero validators
   12/12, because the mtime seal correctly withholds `getlastmodified` and `getetag` does not exist
   at all. The obvious fix was measured as failing CI; needs care.
-- **MOVE/COPY of a collection relocates/duplicates members the allow-list refuses individually** —
-  confirmed at tip. With `allowedFileExtensions = @["txt"]`, every DIRECT operation on
-  `Coll/sub/secret.pem` is 403, a recursive DELETE of the collection is 403, and a MOVE onto an
-  EXISTING destination is 403 — but MOVE and COPY of the collection to a NEW destination both
-  answer 201 and relocate/duplicate it. The vetting helper already has one home
-  (`WSKFirstUnvettableItemAtPath`); this is the two verbs it was never called from.
+- ~~MOVE/COPY of a collection relocates/duplicates members the allow-list refuses individually~~ —
+  **fixed, at all three sites**. Measured before: with `allowedFileExtensions = @["txt"]`, every
+  DIRECT operation on `Coll/sub/secret.pem` was 403, a recursive DELETE was 403, an overwrite was
+  403 — and MOVE and COPY of the collection to a NEW destination both answered 201 and carried the
+  file with them. Both extension checks were gated behind `!srcIsDirectory`, so a collection source
+  skipped every allow-list rule. The uploader's `/move` had the identical `!isDirectory &&` gate and
+  was fixed with it, because closing this in one server and not the other is precisely how this
+  class keeps recurring. COPY is vetted too even though it destroys nothing: duplicating a file the
+  client may not read is still acting on it.
+  **Accepted cost, pinned by the test:** a collection holding anything outside the allow-list is now
+  unmovable, not merely undeletable — the same cost already accepted for DELETE, and the
+  inconsistency was the defect. The test asserts the permitted half in both directions, so no later
+  fix can degrade to "refuse every collection operation".
 - **403 where a 404 belongs when a parent collection is absent** — the record MERGED two cases that
   measurement separates. The WRITE verbs (PUT, MKCOL, MOVE/COPY destination) already answer **409
   Conflict**, which is RFC 4918-mandated and byte-identical to `rclone serve webdav`; nothing is

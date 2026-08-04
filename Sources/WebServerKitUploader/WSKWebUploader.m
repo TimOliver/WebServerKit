@@ -1544,6 +1544,22 @@ static NSString *_OriginAuthority(NSString *value) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Moving from item name \"%@\" is not allowed", oldItemName];
     }
 
+    // A DIRECTORY source skips the check above entirely, so moving a folder was a spelling that
+    // relocated everything inside it whatever the allow-list said — including files this endpoint
+    // refuses to move when they are named directly. Same walk, same shared home, as the DELETE
+    // above and as WebDAV's MOVE/COPY: a recursive operation must not do what a direct request
+    // refuses, which is the class this project has now re-found at five separate verbs.
+    //
+    // Nothing is destroyed here (/move has no overwrite path — it routes through
+    // -_uniquePathForPath:), but relocating a file the client may not touch is still acting on it.
+    if (isDirectory) {
+        NSString *const unvettable = WSKFirstUnvettableItemAtPath(oldAbsolutePath, YES, _allowedFileExtensions);
+
+        if (unvettable) {
+            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Moving \"%@\" is not allowed: it contains \"%@\"", oldRelativePath, unvettable];
+        }
+    }
+
     // Resolving a unique destination name and performing the move must be atomic
     // against concurrent requests, otherwise two moves targeting the same name
     // can resolve the same "unique" path and the second move fails.

@@ -1049,6 +1049,68 @@
     XCTAssertEqual(WSKServerErrorStatusCodeForError(nil), kWSKHTTPStatusCode_InternalServerError);
 }
 
+// The recursive-vetting class, at the last two verbs it never reached. With an allow-list set,
+// DELETE of a collection is refused when it would destroy something a direct request refuses, and
+// so is an overwrite -- but MOVE and COPY to a NEW destination were never vetted at all, so a
+// collection carrying a file the client may not touch could be relocated or duplicated wholesale.
+// Measured before this: every DIRECT operation on Coll/sub/secret.pem 403, recursive DELETE 403,
+// MOVE onto an EXISTING destination 403 -- and MOVE and COPY to a new destination 201.
+//
+// The victim is deliberately ONE LEVEL DOWN. The top level of the addressed collection is immune
+// to the -skipDescendants bug this class keeps recurring through, which is why three earlier tests
+// passed against unfixed code.
+//
+// The cost is real and is asserted below rather than discovered later: a collection holding
+// anything outside the allow-list becomes unmovable, not just undeletable. That is the same cost
+// already accepted for DELETE, and consistency with it is the argument -- a client told it may not
+// move a file must not be able to move it by naming its parent.
+- (void)testCollectionMoveAndCopyAreVettedLikeTheDeleteThatWouldDestroyTheSameFiles {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    NSString* coll = [dir stringByAppendingPathComponent:@"Coll"];
+    XCTAssertTrue([fm createDirectoryAtPath:[coll stringByAppendingPathComponent:@"sub"] withIntermediateDirectories:YES attributes:nil error:NULL]);
+    XCTAssertTrue([@"k" writeToFile:[coll stringByAppendingPathComponent:@"sub/secret.pem"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([@"t" writeToFile:[coll stringByAppendingPathComponent:@"ok.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    // A second collection holding ONLY allow-listed content: the half that must keep working.
+    NSString* clean = [dir stringByAppendingPathComponent:@"Clean"];
+    XCTAssertTrue([fm createDirectoryAtPath:[clean stringByAppendingPathComponent:@"sub"] withIntermediateDirectories:YES attributes:nil error:NULL]);
+    XCTAssertTrue([@"t" writeToFile:[clean stringByAppendingPathComponent:@"sub/fine.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    server.allowedFileExtensions = @[ @"txt" ];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};  // Hoisted: commas split the macro
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    // Control: the direct spelling is already refused, which is what makes the collection spelling
+    // an inconsistency rather than a policy choice.
+    NSString* direct = SendRawRequest(server.port, @"MOVE /Coll/sub/secret.pem HTTP/1.1\r\nHost: localhost\r\nDestination: /taken.pem\r\nOverwrite: T\r\n\r\n");
+    XCTAssertTrue([direct hasPrefix:@"HTTP/1.1 403"], @"CONTROL: a direct MOVE of the file must already be refused: %@", direct);
+
+    NSString* moved = SendRawRequest(server.port, @"MOVE /Coll HTTP/1.1\r\nHost: localhost\r\nDestination: /Moved\r\nOverwrite: T\r\n\r\n");
+    XCTAssertTrue([moved hasPrefix:@"HTTP/1.1 403"], @"MOVE of a collection must be vetted like the DELETE that would destroy the same files: %@", moved);
+    XCTAssertTrue([fm fileExistsAtPath:[coll stringByAppendingPathComponent:@"sub/secret.pem"]], @"a refused MOVE must leave the file where it was");
+    XCTAssertFalse([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"Moved"]], @"a refused MOVE must not create the destination");
+
+    NSString* copied = SendRawRequest(server.port, @"COPY /Coll HTTP/1.1\r\nHost: localhost\r\nDestination: /Copied\r\nOverwrite: T\r\n\r\n");
+    XCTAssertTrue([copied hasPrefix:@"HTTP/1.1 403"], @"COPY of a collection must be vetted too -- it duplicates what a direct request may not read: %@", copied);
+    XCTAssertFalse([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"Copied"]], @"a refused COPY must leave nothing behind");
+
+    // The half that must keep working, or the fix is "refuse every collection operation".
+    NSString* okMove = SendRawRequest(server.port, @"MOVE /Clean HTTP/1.1\r\nHost: localhost\r\nDestination: /CleanMoved\r\nOverwrite: T\r\n\r\n");
+    XCTAssertTrue([okMove hasPrefix:@"HTTP/1.1 201"] || [okMove hasPrefix:@"HTTP/1.1 204"], @"a collection holding only allow-listed content must still move: %@", okMove);
+    XCTAssertTrue([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"CleanMoved/sub/fine.txt"]], @"the permitted move must actually have happened");
+
+    NSString* okCopy = SendRawRequest(server.port, @"COPY /CleanMoved HTTP/1.1\r\nHost: localhost\r\nDestination: /CleanCopy\r\nOverwrite: T\r\n\r\n");
+    XCTAssertTrue([okCopy hasPrefix:@"HTTP/1.1 201"] || [okCopy hasPrefix:@"HTTP/1.1 204"], @"and must still copy: %@", okCopy);
+
+    // And a plain allow-listed FILE is unaffected in both directions.
+    NSString* fileMove = SendRawRequest(server.port, @"MOVE /Coll/ok.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /ok2.txt\r\nOverwrite: T\r\n\r\n");
+    XCTAssertTrue([fileMove hasPrefix:@"HTTP/1.1 201"] || [fileMove hasPrefix:@"HTTP/1.1 204"], @"an allow-listed file must still move: %@", fileMove);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 // COPY, DELETE and PROPFIND all validate the Depth token and answer 400 for a value they cannot
 // honour. MOVE reads the header not at all -- measured, every spelling including "banana" answered
 // 201 and did a full recursive relocation. MOVE and COPY share performCOPY:isMove:, and the

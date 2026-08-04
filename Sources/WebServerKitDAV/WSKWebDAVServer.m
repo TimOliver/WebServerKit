@@ -1163,6 +1163,28 @@ static WSKResponse *_MethodNotAllowed(NSString *format, ...) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_PreconditionFailed message:@"Destination \"%@\" already exists", dstRelativePath];
     }
 
+    // The SOURCE has to clear the same bar as a DELETE of it would, and for the same reason: a
+    // client told it may not touch "Coll/sub/secret.pem" must not be able to relocate or duplicate
+    // that file by naming its PARENT. Both extension checks above are gated behind
+    // !srcIsDirectory, so a collection source skipped every allow-list rule — measured, MOVE and
+    // COPY of such a collection to a new destination both answered 201 and carried the file with
+    // them, while the direct spelling, a recursive DELETE, and an overwrite were all 403.
+    //
+    // This is the fourth and fifth site of the class this codebase keeps re-finding: a recursive
+    // operation doing what a direct request refuses. Note it is deliberately vetted for COPY too,
+    // which destroys nothing — duplicating a file the client may not read is still acting on it.
+    //
+    // The COST, accepted and pinned by the test: a collection holding anything outside the
+    // allow-list becomes unmovable, not merely undeletable. That is exactly the cost already
+    // accepted for DELETE, and the inconsistency was the defect.
+    if (srcIsDirectory) {
+        NSString *const unvettable = [self _firstUnvettableItemAtPath:srcAbsolutePath isDirectory:YES];
+
+        if (unvettable) {
+            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"%@ \"%@\" is not allowed: it contains \"%@\"", isMove ? @"Moving" : @"Copying", srcRelativePath, unvettable];
+        }
+    }
+
     // An overwrite destroys the destination just as a DELETE would, so it has to clear the same
     // bar. The two extension checks above cannot stand in for this: both are skipped when the
     // source is a collection, and the destination form only ever judges a *name*, which says
