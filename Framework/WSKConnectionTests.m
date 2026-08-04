@@ -849,10 +849,37 @@
     NSArray<NSString*>* replies = SendRawRequestsOnOneConnection(server.port, @[ @"GET /ok HTTP/1.1\r\nHost: localhost\r\n\r\nGET /ok HTTP/1.1\r\nHost: localhost\r\n\r\n", @"" ]);
     XCTAssertEqual(replies.count, (NSUInteger)2, @"both requests must be answered before the pairing is judged");
 
-    [server stop];  // A full barrier over every connection queue, so the events are complete and stable.
+    [server stop];
 
-    NSArray<NSString*>* events = [gConnectionEvents copy];
-    XCTAssertEqual([events componentsJoinedByString:@" "].length > 0, YES);
+    // -stop is NOT a barrier for connection teardown: it waits on _sourceGroup, which covers the
+    // LISTENING sources' cancel handlers, and never on _activeConnections. -close now runs from
+    // -dealloc for the last request on a connection, so its timing is tied to when the last block
+    // holding the connection unwinds, not to -stop. Asserting straight after it passed on this
+    // machine 6/6 in isolation and under CPU load, and failed on CI with closes=0 — the race, won
+    // locally and lost there. Wait for the event instead of assuming the ordering.
+    //
+    // This cannot mask the defect it is guarding: the unfixed code calls -close once per REQUEST,
+    // so `closes` reaches 2 before -stop is even called and the poll returns immediately with the
+    // wrong value still in hand.
+    NSDate* const deadline = [NSDate dateWithTimeIntervalSinceNow:10.0];
+
+    while ([deadline timeIntervalSinceNow] > 0) {
+        @synchronized(gConnectionEvents) {
+            if ([gConnectionEvents containsObject:@"close"]) {
+                break;
+            }
+        }
+
+        [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+    }
+
+    NSArray<NSString*>* events = nil;
+
+    @synchronized(gConnectionEvents) {
+        events = [gConnectionEvents copy];
+    }
+
+    XCTAssertTrue([events containsObject:@"close"], @"the connection never closed within 10 s: %@", events);
     NSUInteger opens = 0, closes = 0, aborts = 0;
 
     for (NSString* event in events) {
