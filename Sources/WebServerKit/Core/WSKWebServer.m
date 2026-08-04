@@ -1526,6 +1526,20 @@ static inline NSString *_EncodeBase64(NSString *string) {
 - (void)addHandlerForMethod:(NSString *)method path:(NSString *)path requestClass:(Class)aClass asyncProcessBlock:(WSKAsyncProcessBlock)block {
     [self _noteRegisteredMethod:method];
 
+    // The leading slash was an undocumented precondition enforced by WSK_DNOT_REACHED(): abort
+    // with no diagnostic in Debug, register NOTHING in Release. Identical to what
+    // -addGETHandlerForBasePath: was given normalization for, one method away — so leaving it was
+    // a rule closed at one of the two sites it occurs at. A missing slash is a spelling, not an
+    // error; an EMPTY path is genuinely unusable and is refused loudly instead.
+    if (path.length == 0) {
+        WSK_LOG_ERROR(@"Refusing to add a handler for %@: the path is empty", method);
+        return;
+    }
+
+    if (![path hasPrefix:@"/"]) {
+        path = [@"/" stringByAppendingString:path];
+    }
+
     if ([path hasPrefix:@"/"] && [aClass isSubclassOfClass:[WSKRequest class]]) {
         [self
             addHandlerWithMatchBlock:^WSKRequest *(NSString *requestMethod, NSURL *requestURL, NSDictionary<NSString *, NSString *> *requestHeaders, NSString *urlPath, NSDictionary<NSString *, NSString *> *urlQuery) {
@@ -1557,7 +1571,17 @@ static inline NSString *_EncodeBase64(NSString *string) {
 - (void)addHandlerForMethod:(NSString *)method pathRegex:(NSString *)regex requestClass:(Class)aClass asyncProcessBlock:(WSKAsyncProcessBlock)block {
     [self _noteRegisteredMethod:method];
 
-    NSRegularExpression *expression = [NSRegularExpression regularExpressionWithPattern:regex options:NSRegularExpressionCaseInsensitive error:NULL];
+    NSError *regexError = nil;
+    NSRegularExpression *expression = [NSRegularExpression regularExpressionWithPattern:regex options:NSRegularExpressionCaseInsensitive error:&regexError];
+
+    // A pattern that will not compile is the same shape as an unusable path above — a bad string
+    // argument, which may well have come from configuration — so say which pattern and why rather
+    // than aborting with no diagnostic. The error was being discarded, which is the whole of what
+    // a host app needed to fix it.
+    if (expression == nil) {
+        WSK_LOG_ERROR(@"Refusing to add a handler for %@: the path regex \"%@\" is invalid: %@", method, regex, regexError.localizedDescription);
+        return;
+    }
 
     if (expression && [aClass isSubclassOfClass:[WSKRequest class]]) {
         [self

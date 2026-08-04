@@ -157,4 +157,50 @@
     [fm removeItemAtPath:dir error:NULL];
 }
 
+// A path with no leading slash aborted in Debug with no diagnostic and registered NOTHING in
+// Release -- so a host app got either a crash it could not read or a server that 404'd everything
+// with no clue why. This is the identical shape -addGETHandlerForBasePath: was given normalization
+// for one method away; leaving it here is recurring defect shape #2, a class closed at one of the
+// sites it occurs at.
+//
+// Like the other host-app process-kills, the unfixed signal is a DEAD RUNNER reporting
+// "Executed 0 tests, with 0 failures", not a red assertion.
+- (void)testHandlerRegistrationNormalizesAMissingLeadingSlashInsteadOfAborting {
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addHandlerForMethod:@"GET"
+                           path:@"noslash"
+                   requestClass:[WSKRequest class]
+                   processBlock:^WSKResponse*(WSKRequest* request) {
+                       return [WSKDataResponse responseWithText:@"REACHED"];
+                   }];
+    // An unusable path must be refused loudly rather than aborting -- and must not register a
+    // handler that then shadows everything, which is why this is asserted rather than assumed.
+    [server addHandlerForMethod:@"GET"
+                           path:@""
+                   requestClass:[WSKRequest class]
+                   processBlock:^WSKResponse*(WSKRequest* request) {
+                       return [WSKDataResponse responseWithText:@"EMPTY"];
+                   }];
+    // A regex that cannot compile is the same shape: an unusable string argument, not a
+    // programming error worth killing the process over.
+    [server addHandlerForMethod:@"GET"
+                      pathRegex:@"[unterminated"
+                   requestClass:[WSKRequest class]
+                   processBlock:^WSKResponse*(WSKRequest* request) {
+                       return [WSKDataResponse responseWithText:@"REGEX"];
+                   }];
+
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};  // Hoisted: commas split the macro
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* reply = SendRawRequest(server.port, @"GET /noslash HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([reply containsString:@"REACHED"], @"a missing leading slash is a spelling, not an error: %@", reply);
+
+    // And the refused registrations really did register nothing, rather than claiming some path.
+    NSString* other = SendRawRequest(server.port, @"GET /anything-else HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([other hasPrefix:@"HTTP/1.1 404"], @"a refused registration must not shadow other paths: %@", other);
+
+    [server stop];
+}
+
 @end
