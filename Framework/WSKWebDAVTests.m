@@ -1049,4 +1049,53 @@
     XCTAssertEqual(WSKServerErrorStatusCodeForError(nil), kWSKHTTPStatusCode_InternalServerError);
 }
 
+// COPY, DELETE and PROPFIND all validate the Depth token and answer 400 for a value they cannot
+// honour. MOVE reads the header not at all -- measured, every spelling including "banana" answered
+// 201 and did a full recursive relocation. MOVE and COPY share performCOPY:isMove:, and the
+// validation sits inside an `if (!isMove)`, so this is recurring defect shape #2 once more: the
+// rule is present at three of the four verbs it applies to.
+//
+// Deliberately NOT taken here: RFC 4918 section 9.9.2 says a client MUST NOT send any Depth but
+// infinity on a MOVE of a COLLECTION, so a strict server would refuse "0" there too. COPY and
+// DELETE both accept "0" on a plain file for the good reason that it means the same as infinity
+// when there are no internal members, and inventing an asymmetry MOVE alone enforces would refuse
+// requests real clients send. Matching COPY exactly is the fix; the stricter rule is a separate
+// judgement with its own client risk.
+- (void)testMoveValidatesItsDepthHeaderLikeEveryOtherVerb {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};  // Hoisted: commas split the macro
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    // Values MOVE must refuse, because every sibling verb refuses them.
+    for (NSString* bad in @[ @"banana", @"2", @"0,", @"infinite" ]) {
+        XCTAssertTrue([@"x" writeToFile:[dir stringByAppendingPathComponent:@"m.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+        NSString* request = [NSString stringWithFormat:@"MOVE /m.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /moved.txt\r\nOverwrite: T\r\nDepth: %@\r\n\r\n", bad];
+        NSString* reply = SendRawRequest(server.port, request);
+        XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 400"], @"MOVE with Depth: %@ must be refused as COPY refuses it: %@", bad, [reply substringToIndex:MIN((NSUInteger)32, reply.length)]);
+        // "Refuse rather than half-succeed": the refusal must also have moved nothing.
+        XCTAssertTrue([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"m.txt"]], @"a refused MOVE must leave the source in place (Depth: %@)", bad);
+        XCTAssertFalse([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"moved.txt"]], @"a refused MOVE must not create the destination (Depth: %@)", bad);
+        [fm removeItemAtPath:[dir stringByAppendingPathComponent:@"m.txt"] error:NULL];
+    }
+
+    // And the spellings that MUST keep working, so the fix cannot be "refuse Depth on MOVE".
+    for (NSString* good in @[ @"infinity", @"0", @"Infinity" ]) {
+        XCTAssertTrue([@"x" writeToFile:[dir stringByAppendingPathComponent:@"k.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+        NSString* request = [NSString stringWithFormat:@"MOVE /k.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /kept.txt\r\nOverwrite: T\r\nDepth: %@\r\n\r\n", good];
+        NSString* reply = SendRawRequest(server.port, request);
+        XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 201"] || [reply hasPrefix:@"HTTP/1.1 204"], @"MOVE with Depth: %@ must still succeed: %@", good, [reply substringToIndex:MIN((NSUInteger)32, reply.length)]);
+        [fm removeItemAtPath:[dir stringByAppendingPathComponent:@"kept.txt"] error:NULL];
+    }
+
+    // No Depth header at all is the ordinary case and means infinity.
+    XCTAssertTrue([@"x" writeToFile:[dir stringByAppendingPathComponent:@"n.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    NSString* plain = SendRawRequest(server.port, @"MOVE /n.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /plain.txt\r\nOverwrite: T\r\n\r\n");
+    XCTAssertTrue([plain hasPrefix:@"HTTP/1.1 201"] || [plain hasPrefix:@"HTTP/1.1 204"], @"MOVE with no Depth must still succeed: %@", plain);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 @end

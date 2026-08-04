@@ -115,12 +115,17 @@
 
 - (NSString *)text {
     if (_text == nil) {
-        if ([self.contentType hasPrefix:@"text/"]) {
-            NSString *const charset = WSKExtractHeaderValueParameter(self.contentType, @"charset");
-            _text = [[NSString alloc] initWithData:self.data encoding:WSKStringEncodingFromCharset(charset)];
-        } else {
-            WSK_DNOT_REACHED();
+        // Returns nil rather than asserting. WSK_DNOT_REACHED() is abort() in Debug, so the one
+        // case this property's `nullable` declaration tells a host app to check for was the one
+        // case that killed the process — and a Content-Type is client input, which makes it
+        // remote-triggerable rather than API misuse. Nothing here is unreachable: a bare POST
+        // sends no Content-Type at all.
+        if (![self.contentType hasPrefix:@"text/"]) {
+            return nil;
         }
+
+        NSString *const charset = WSKExtractHeaderValueParameter(self.contentType, @"charset");
+        _text = [[NSString alloc] initWithData:self.data encoding:WSKStringEncodingFromCharset(charset)];
     }
 
     return _text;
@@ -130,11 +135,14 @@
     if (_jsonObject == nil) {
         NSString *const mimeType = WSKTruncateHeaderValue(self.contentType);
 
-        if ([mimeType isEqualToString:@"application/json"] || [mimeType isEqualToString:@"text/json"] || [mimeType isEqualToString:@"text/javascript"]) {
-            _jsonObject = [NSJSONSerialization JSONObjectWithData:_data options:0 error:NULL];
-        } else {
-            WSK_DNOT_REACHED();
+        // Same reasoning as -text above: nil is what the header promises, and the content type
+        // that decides this comes off the wire. -JSONObjectWithData: already returns nil for a
+        // body that is not valid JSON, which is the other half of the documented contract.
+        if (![mimeType isEqualToString:@"application/json"] && ![mimeType isEqualToString:@"text/json"] && ![mimeType isEqualToString:@"text/javascript"]) {
+            return nil;
         }
+
+        _jsonObject = [NSJSONSerialization JSONObjectWithData:_data options:0 error:NULL];
     }
 
     return _jsonObject;

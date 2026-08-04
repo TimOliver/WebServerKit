@@ -515,4 +515,49 @@
     XCTAssertEqual(WSKReservedMemoryLength(), (NSUInteger)0, @"reservations leaked after their holders were released");
 }
 
+// Both properties are declared nullable and documented as returning nil when the body cannot be
+// interpreted -- and both called WSK_DNOT_REACHED(), which is abort() in Debug. So the one case the
+// header tells a host app to check for was the one case that killed the process instead.
+//
+// Against the unfixed tree this does not "fail": it takes the whole runner down and the output
+// reads "Executed 0 tests, with 0 failures". Read the executed count, never the failure count --
+// four of batch A's six fixes had exactly this signature.
+- (void)testDataRequestTextAndJSONReturnNilRatherThanAbortingOnTheDocumentedCase {
+    NSDictionary* octetStream = @{@"Content-Type" : @"application/octet-stream", @"Content-Length" : @"4"};
+    WSKDataRequest* binary = OpenBodyRequest([WSKDataRequest class], octetStream);
+    XCTAssertNotNil(binary);
+    XCTAssertTrue([binary writeData:[@"data" dataUsingEncoding:NSUTF8StringEncoding] error:NULL]);
+    XCTAssertTrue([binary close:NULL]);
+
+    // Not text/*, so -text has nothing to decode: the header says nil, so nil it must be.
+    XCTAssertNil(binary.text, @"-text must honour its nullable declaration for a non-text content type");
+    // Not a JSON type either.
+    XCTAssertNil(binary.jsonObject, @"-jsonObject must honour its nullable declaration for a non-JSON content type");
+
+    // A request with NO Content-Type at all -- the shape a bare POST produces.
+    WSKDataRequest* untyped = OpenBodyRequest([WSKDataRequest class], @{@"Content-Length" : @"2"});
+
+    if (untyped) {
+        XCTAssertTrue([untyped writeData:[@"hi" dataUsingEncoding:NSUTF8StringEncoding] error:NULL]);
+        XCTAssertTrue([untyped close:NULL]);
+        XCTAssertNil(untyped.text, @"-text must return nil when there is no content type to judge");
+        XCTAssertNil(untyped.jsonObject, @"-jsonObject must return nil when there is no content type to judge");
+    }
+
+    // The positive half: the cases that MUST keep working, so the fix cannot be "always return nil".
+    NSDictionary* jsonHeaders = @{@"Content-Type" : @"application/json", @"Content-Length" : @"13"};
+    WSKDataRequest* json = OpenBodyRequest([WSKDataRequest class], jsonHeaders);
+    XCTAssertNotNil(json);
+    XCTAssertTrue([json writeData:[@"{\"ok\":true}xx" dataUsingEncoding:NSUTF8StringEncoding] error:NULL]);
+    XCTAssertTrue([json close:NULL]);
+    XCTAssertNil(json.jsonObject, @"malformed JSON is also a documented nil, not an abort");
+
+    NSDictionary* textHeaders = @{@"Content-Type" : @"text/plain; charset=utf-8", @"Content-Length" : @"5"};
+    WSKDataRequest* text = OpenBodyRequest([WSKDataRequest class], textHeaders);
+    XCTAssertNotNil(text);
+    XCTAssertTrue([text writeData:[@"hello" dataUsingEncoding:NSUTF8StringEncoding] error:NULL]);
+    XCTAssertTrue([text close:NULL]);
+    XCTAssertEqualObjects(text.text, @"hello", @"a genuine text/* body must still decode");
+}
+
 @end

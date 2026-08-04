@@ -833,11 +833,16 @@ exercise changes, not on suspicion.
   (`leaks(1)` zero; live bytes fell between samples; a legitimate-traffic control showed the
   same slope). PR #72's connection reuse HAS since been soaked with keep-alive ENABLED — 6.01 h,
   85,210,679 requests, 14.4 TB, descriptors at baseline and `reservedInMemoryByteCount` 0 at rest.
-  **But that soak did not PIPELINE** (its client read one response per write), so it never touched
-  `_carryOverData`, which is the path the narrow audit then found three defects in. **A pipelining
-  soak is the outstanding debt, and it should run against the fixed tree before the next release.**
-  Re-run when the connection or response layer changes (PR #48 did; the full re-run
-  has since exercised it).
+  But that soak did not PIPELINE (its client read one response per write), so it never touched
+  `_carryOverData`. **A pipelining soak has since run against the fixed tree**: 4.01 h, 748,020
+  requests, 1.01 TB, **312,820 replies served from carried-over bytes**, descriptors +0 at rest,
+  `reservedInMemoryByteCount` 0 with peak 0, zero unexpected statuses, still serving. Its
+  short-body tripwire was PROVEN SENSITIVE first — 119 against the pre-fix framework, 0 at tip —
+  which took two harness fixes to achieve and is the whole reason the 0 means anything (see
+  Lessons). Unexplained and NOT waved away: 32,875 connect failures where the previous soak had
+  zero, most likely listen-backlog saturation under 12 workers holding reused connections, partly
+  competing suite runs — cause not established. Re-run when the connection or response layer
+  changes (PR #48 did; the full re-run has since exercised it).
 - **Torn writes do not happen** — 240 concurrent 128 KiB + 90 concurrent 4 MiB PUTs, zero mixed
   files (the body always lands in a temp file first). **Atomic replacement under load is safe**
   — 915 `rename(2)` replacements, 47.7 GB, zero splices, with the oracle provably sensitive
@@ -1028,13 +1033,62 @@ converged on the same area; four defects fixed, one left open):
   bug — its client consumes `Content-Length` bytes after a HEAD response, which has none. A RED
   signal from an unvalidated oracle is worth exactly as much as a green one.
 
-Carried from earlier passes, never closed:
-- **PROPFIND publishes no `getetag`** — a just-written file has ZERO validators for a
-  PROPFIND-driven client. The obvious fix was measured as failing CI; needs care.
-- **MOVE/COPY of a collection relocates/duplicates members the allow-list refuses
-  individually** — the class closed for DELETE and the overwrite, at the two verbs it did not
-  reach. (Verify at tip before working on it; no entry records closing it.)
-- **MOVE has no Depth check at all.**
+Carried from earlier passes. **All nine were re-measured at tip by driving the code (not reading
+it), and all nine reproduced — nine skeptics, none refuted.** That is far above this project's
+usual ~1-in-3 survival rate, and the reason is worth noting: these are the project's OWN recorded
+items, not an outside reader's guesses. Aged findings still need re-measuring, but the base rate
+for a self-recorded backlog is much better than for an external audit. Three came back MORE precise
+than the record and are restated below; three are now fixed.
+
+- ~~`addHandlerForMethod:path:` aborts for a missing leading slash~~ — **fixed**: normalized like
+  its sibling, empty path refused loudly, and the regex variant now reports the `NSError` it was
+  discarding. Measured unfixed: SIGABRT/exit 134 in Debug at 5/5 entry points, and a silent 404 in
+  Release.
+- ~~`WSKDataRequest.text`/`.jsonObject` abort~~ — **fixed**: they return nil, as their `nullable`
+  headers always promised. Worth recording WHY this was more than an API-honesty bug: the
+  Content-Type that selects the branch is CLIENT input, so it was remotely triggerable, not host-app
+  misuse — which is the line the "genuine API-misuse assertions stay abort-in-Debug" decision draws.
+- ~~MOVE has no Depth check at all~~ — **fixed**: MOVE and COPY share `performCOPY:isMove:` and the
+  validation sat inside `if (!isMove)`, so every spelling — `banana`, `2`, `0,` — answered 201 and
+  performed a full recursive relocation while COPY, DELETE and PROPFIND all answered 400.
+  Deliberately NOT made stricter than COPY: RFC 4918 §9.9.2 forbids a non-infinity Depth on a MOVE
+  of a collection, but COPY and DELETE both accept `0` on a plain file because it means the same
+  thing there, and an asymmetry only MOVE enforces would refuse what real clients send.
+- **PROPFIND publishes no `getetag`** — confirmed at tip on EVERY path (allprop, no-body, Depth:1,
+  propname), and an explicit `<D:getetag/>` is answered in a **404 propstat**, so PROPFIND and GET
+  actively contradict each other about the same resource. A just-written file has zero validators
+  12/12, because the mtime seal correctly withholds `getlastmodified` and `getetag` does not exist
+  at all. The obvious fix was measured as failing CI; needs care.
+- **MOVE/COPY of a collection relocates/duplicates members the allow-list refuses individually** —
+  confirmed at tip. With `allowedFileExtensions = @["txt"]`, every DIRECT operation on
+  `Coll/sub/secret.pem` is 403, a recursive DELETE of the collection is 403, and a MOVE onto an
+  EXISTING destination is 403 — but MOVE and COPY of the collection to a NEW destination both
+  answer 201 and relocate/duplicate it. The vetting helper already has one home
+  (`WSKFirstUnvettableItemAtPath`); this is the two verbs it was never called from.
+- **403 where a 404 belongs when a parent collection is absent** — the record MERGED two cases that
+  measurement separates. The WRITE verbs (PUT, MKCOL, MOVE/COPY destination) already answer **409
+  Conflict**, which is RFC 4918-mandated and byte-identical to `rclone serve webdav`; nothing is
+  owed there and it must not be "fixed" to 404. It is the READ/property verbs (GET, HEAD, PROPFIND,
+  PROPPATCH, LOCK, UNLOCK, and DELETE one level deeper) that answer 403 where 404 is owed, and
+  `rclone copy dav:/a/b` CRITICALs on it. Cause: `_RealPath` tolerates exactly ONE missing trailing
+  component; two or more returns nil and every DAV verb maps nil to 403. **The obvious fix is
+  MEASURED WRONG** — mirroring the write verbs' `fileExistsAtPath:` parent precheck onto the read
+  verbs reopens the existence oracle `testUnresolvableEntriesFailClosedWithoutBreakingCreation`
+  closed, because that predicate answers YES/NO for paths OUTSIDE the share. The real fix has to
+  live inside `_RealPath` and distinguish "does not exist yet, entirely inside the share" from
+  "exists but cannot be resolved / escapes". That is a dedicated measured pass, per this file's own
+  rule about that function. Any regression test must use a TWO-or-more-missing-component path: a
+  one-level path already answers 404, so a test written against it passes on unfixed code.
+- **A symlinked share receives no `NSFilePresenter` events at all** — confirmed, 0 events vs 4 on
+  the identical real-path control, 3 runs each. The mismatch is NOT in
+  `-presentedSubitemDidChangeAtURL:`'s comparison, which is already correct — do not "fix" it there.
+- **The SSE prefix test has no separator boundary** — the record conflates TWO different prefix
+  tests. `-presentedSubitemDidChangeAtURL:` already HAS the boundary and measured clean;
+  `-_relativePathForAbsolutePath:` genuinely has none. Fix the second, leave the first alone.
+- **`_resolvedUploadDirectory` is captured once** — confirmed, but ONLY for the
+  symlinked-share-repointed trigger; the other half of the recorded claim did not reproduce. Once
+  the realpath changes under a live uploader, every SSE event from `/create`, `/upload`, `/delete`
+  and `/move` names the share root, 5/5.
 - A header-time refusal can lose its error-page body to a TCP reset (the status is never lost).
 - Phase 2's low-value structural tail: the URI-to-path derivation, and the limits/constants.
 
@@ -1116,6 +1170,20 @@ alongside the two that must change — the first change made deliberately under 
 - **A green oracle you have not proved sensitive proves nothing** — prove it by injecting the
   defect (the leak test, the splice oracle, the full-volume probe, the SPM consumer were each
   proven this way; the SPM consumer's first sensitivity attempt measured a cached 0.15 s build).
+  **An oracle can also be un-sensitive because its CONFIGURATION closes the window**, which looks
+  identical to a pass: the pipelining soak's short-body tripwire read 0 against the PRE-FIX
+  framework, because at a realistic 10 s keep-alive and 30 s tick a loopback response finishes long
+  before the reaper can fire. Only pacing the reads — bytes moving every tick, transfer spanning
+  several — opened the window, and then it read 119. Ask what configuration the defect NEEDS, not
+  just whether the check is present. The same harness first counted 190 "truncations" at tip that
+  were the server CORRECTLY refusing a torn read of a file its own writer thread replaces every
+  750 ms: an oracle that cannot tell correct behaviour from the defect is as useless as one that
+  cannot fire.
+- **A RED signal from an unvalidated oracle is worth exactly as much as a green one.** The
+  split-invariance fuzzer reported 228 disagreements and VERDICT: SPLIT-DEPENDENT, of which every
+  one was FIN-vs-RST at the same rate on both trees, and its `HEAD then GET -> desync` baseline was
+  its own client consuming `Content-Length` bytes after a HEAD response, which has none. Validate
+  an oracle before acting on its alarm, not only before trusting its silence.
 - **A workflow that infers "clean" from an empty results array cannot tell "nothing found" from
   "nothing checked"** — the twelfth pass reported CLEAN with every verifier dead (fourteen
   findings pending). Report coverage counters explicitly ("8 lenses, 22 skeptics, none dead").
@@ -1124,7 +1192,18 @@ alongside the two that must change — the first change made deliberately under 
   by grepping main for the code and `git merge-base --is-ancestor`; do not stack PRs here); a CI
   run reporting success for a pre-rebase SHA; `Run-Tests.sh` builds into `./build` while ad-hoc
   probes load from DerivedData, so a probe after a swap-build-restore reports the PREVIOUS build.
-  Always rebuild explicitly before believing a probe.
+  Always rebuild explicitly before believing a probe. **And a STALE LOG FILE reads exactly like a
+  passing run**: a `pgrep` that matched nothing broke an `&&` chain at the failed `kill`, so
+  `Run-Tests.sh` never executed — and the `grep` that followed read a log of the same name from
+  four days earlier and reported "149 tests, TEST SUCCEEDED, 8 corpus suites". The tell was the
+  COUNT: 149 where 165 was expected. Write to a fresh filename or `rm` it first, check the file's
+  timestamp, and treat a test total that does not match what you expect as a stop signal rather
+  than a curiosity. `Run-Tests.sh` also stops at the first test failure, so a run that fails a test
+  never reaches the trace corpus at all — "the suite ran" is not "the corpus ran".
+- **`Run-Tests.sh` and a running soak must not overlap.** The soak's 12 workers reproduce the
+  documented flake (`testConnectionClosesSlowlorisHeaderDribble` failed in-suite, then passed 3/3
+  in isolation WITH the soak still running). Pause the soak with `SIGSTOP`/`SIGCONT` rather than
+  killing it — the whole process, server included, freezes together.
 - **Check warnings against a clean `-derivedDataPath` or the count means nothing** — an
   incremental build recompiles nothing and reports zero (five warnings accumulated this way; the
   GNU `?:` class recurred and was caught only by the clean build).

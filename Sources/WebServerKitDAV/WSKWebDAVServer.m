@@ -1031,13 +1031,23 @@ static WSKResponse *_MethodNotAllowed(NSString *format, ...) {
     // a cheap thing to duplicate by accident.
     BOOL shallowCopy = NO;
 
+    // Validated for BOTH verbs. This check used to live inside the `if (!isMove)` below, so MOVE
+    // read the header not at all: every spelling — including "banana" and "0," — answered 201 and
+    // performed a full recursive relocation, while COPY, DELETE and PROPFIND all answered 400 for
+    // the same values. One rule present at three of the four verbs it applies to is this
+    // codebase's signature defect shape.
+    //
+    // Deliberately NOT stricter: RFC 4918 §9.9.2 says a client MUST NOT send any Depth but
+    // infinity on a MOVE of a COLLECTION, so "0" there could be refused too. COPY and DELETE
+    // both accept "0" on a plain file because it means the same as infinity with no internal
+    // members, and an asymmetry only MOVE enforces would refuse requests real clients send.
+    NSString *const depthHeader = request.headers[@"Depth"];
+
+    if (depthHeader && !_HeaderTokenIs(depthHeader, @"infinity") && !_HeaderTokenIs(depthHeader, @"0")) {
+        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"Unsupported 'Depth' header: %@", depthHeader];
+    }
+
     if (!isMove) {
-        NSString *const depthHeader = request.headers[@"Depth"];
-
-        if (depthHeader && !_HeaderTokenIs(depthHeader, @"infinity") && !_HeaderTokenIs(depthHeader, @"0")) {
-            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"Unsupported 'Depth' header: %@", depthHeader];
-        }
-
         shallowCopy = _HeaderTokenIs(depthHeader, @"0");
     }
 
