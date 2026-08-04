@@ -1223,6 +1223,17 @@ alongside the two that must change — the first change made deliberately under 
   fail-on-CI otherwise).
 - **Substring assertions**: `retry: 30000` has `retry: 3000` as a PREFIX — the fourth such
   misfire in two passes. Match the longer marker first or include its terminator.
+- **`-stop` is NOT a barrier for connection teardown** — it waits on `_sourceGroup`, which covers
+  the LISTENING sources' cancel handlers, and never on `_activeConnections`. A test that asserts on
+  anything a connection does as it unwinds (`-close`, the access-log line, a recording being moved)
+  must WAIT for the event, not read state straight after `-stop`. This was learned by writing a
+  test whose comment claimed `-stop` was "a full barrier over every connection queue": it passed
+  6/6 in isolation locally and 3/3 under saturating CPU load, and failed on CI with `closes=0`.
+  Local load does not reproduce it — the race is won or lost on machine, not on load — so the only
+  safe form is a bounded poll for the event. When adding one, check it still discriminates: the
+  defect here made `-close` run once per REQUEST, so the wrong value is already present before
+  `-stop` and a poll returns immediately with it (verified by restoring the old call and watching
+  the test fail 2 != 1).
 - **Two timing tests flake under load** (`testConnectionIdleTimeoutSparesSlowHandler`,
   `testConnectionClosesSlowlorisHeaderDribble` — observed failing at load average 169, 3/3 in
   isolation). Never read a `Run-Tests.sh` verdict while a fleet is building; re-run a failure
