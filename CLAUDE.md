@@ -138,8 +138,10 @@ What an operator or host app MUST do (or know) to deploy this correctly.
 - **The one-stream-per-browser SSE relay depends on the Web Locks API and BroadcastChannel**;
   where either is missing the client falls back to per-tab streams — and with them the
   six-connections-per-origin browser deadlock risk for 6+ tabs on such browsers.
-- **`_resolvedUploadDirectory` is captured once** — a deployment that changes the share's realpath
-  while running silently reverts the SSE event-path fix (known-open item).
+- **A share reached through a symlink is supported for live updates**, but only since the
+  `-presentedItemURL` fix — before it, such a deployment received no external-change events at all
+  and the uploader's live-update feature was simply absent there. A share whose realpath changes
+  while running is also handled now (the derivation re-resolves on a miss).
 - **Keep advertising DAV class 2**: Finder refuses to write to a share that does not advertise it;
   that is the sole reason the LOCK stub exists.
 - **iOS Files app integration** requires `UIFileSharingEnabled` and
@@ -687,8 +689,20 @@ data held in memory; bodies streamed to disk (uploads, WebDAV PUT) are deliberat
   so a prefix comparison mixing the two fails for EVERY share under `NSTemporaryDirectory()`,
   which made every change event name the share root (`path":"//"`) and live updates silently do
   nothing for every subfolder, in the uploader's ordinary deployment. This mismatch has bitten
-  in at least two different methods; treat any new prefix comparison as suspect. (Caveat:
-  `_resolvedUploadDirectory` is captured once — see Still open.)
+  in THREE different methods now; treat any new prefix comparison as suspect. Two further rules
+  the third one taught:
+  **`-presentedItemURL` must hand out the RESOLVED root**, because `NSFileCoordinator` matches a
+  presenter against the canonical path of the changed item — registering under a symlinked
+  spelling produced not fewer events but ZERO, against 8 on a same-process real-path control, i.e.
+  the whole external-change feature absent for a deployment whose share is a link. It deliberately
+  reads the ONCE-captured `_resolvedUploadDirectory` and must not re-resolve per call:
+  `NSFilePresenter` requires this URL to stay put while registered.
+  **`-_relativePathForAbsolutePath:` re-resolves on a miss**, so a share whose realpath changes
+  under a live server (a symlinked share repointed — how an atomic publish swaps one) does not
+  silently revert every event to naming the root. That result is NOT cached back, for the reason
+  directly above. Its prefix test also compares against `root + "/"`; a bare `hasPrefix:` mapped
+  the sibling `…/Share2/x.txt` into a share at `…/Share` as `/2/x.txt` (not reachable from the
+  network — every caller's path is already resolved inside the share — but wrong in the function).
 - **`-bonjourName` reads `_registrationService`** — the service actually registered, which
   carries an auto-rename. `CFNetServiceCreateCopy` taken right after registration is *initiated*
   freezes the configured name (registration is asynchronous; flags 0 means auto-rename is ON),
@@ -985,10 +999,9 @@ and the two `Allow` gaps, which the draft had merged into one bullet):
   returning nil.
 - `addHandlerForMethod:path:` aborts in Debug and registers nothing in Release for a missing
   leading slash — the identical shape batch A fixed one method away.
-- The SSE prefix test has no separator boundary.
-- `_resolvedUploadDirectory` is captured once, so the SSE-path fix silently reverts if the
-  share's realpath changes during the run.
-- A symlinked share receives no `NSFilePresenter` events at all.
+  (The three SSE/file-presenter items this list also carried — the missing separator boundary,
+  `_resolvedUploadDirectory` being captured once, and a symlinked share receiving no
+  `NSFilePresenter` events — are now closed; see the restated entries further down.)
 
 From the outside audit (an independent agent, 23 findings, 5 solid after adversarial review — see
 the appendix). **All five are now CLOSED** — by #74 (typed body-failure statuses) and #75 (the
@@ -1086,16 +1099,27 @@ than the record and are restated below; three are now fixed.
   "exists but cannot be resolved / escapes". That is a dedicated measured pass, per this file's own
   rule about that function. Any regression test must use a TWO-or-more-missing-component path: a
   one-level path already answers 404, so a test written against it passes on unfixed code.
-- **A symlinked share receives no `NSFilePresenter` events at all** — confirmed, 0 events vs 4 on
-  the identical real-path control, 3 runs each. The mismatch is NOT in
-  `-presentedSubitemDidChangeAtURL:`'s comparison, which is already correct — do not "fix" it there.
-- **The SSE prefix test has no separator boundary** — the record conflates TWO different prefix
-  tests. `-presentedSubitemDidChangeAtURL:` already HAS the boundary and measured clean;
-  `-_relativePathForAbsolutePath:` genuinely has none. Fix the second, leave the first alone.
-- **`_resolvedUploadDirectory` is captured once** — confirmed, but ONLY for the
-  symlinked-share-repointed trigger; the other half of the recorded claim did not reproduce. Once
-  the realpath changes under a live uploader, every SSE event from `/create`, `/upload`, `/delete`
-  and `/move` names the share root, 5/5.
+- ~~A symlinked share receives no `NSFilePresenter` events at all~~ — **fixed**, and the record's
+  own advice was what stood in the way: it said the mismatch is not in
+  `-presentedSubitemDidChangeAtURL:`, which is true and correct, but that ruled out the one method
+  it names without naming the one at fault. It was `-presentedItemURL` handing `NSFileCoordinator`
+  the *standardized* path, so the presenter registered for a spelling no change is ever reported
+  against. Re-measured before the fix at 0 events against 8 on a same-process real-path control;
+  after, 8 and 8. Note the asymmetry that hid it for three passes: the two methods that already
+  had the rule are handed a realpath'd argument and resolve their own root to match it, whereas
+  this one is the method that hands a root OUT, so nothing downstream could compensate.
+- ~~The SSE prefix test has no separator boundary~~ — **fixed** in
+  `-_relativePathForAbsolutePath:`; `-presentedSubitemDidChangeAtURL:` already had it and was left
+  alone, as the record instructed. Measured: a share at `…/Share` answered `/2/x.txt` for
+  `…/Share2/x.txt`, slicing a directory name in half. **Honest limit, recorded because the fix
+  reads more important than it is:** every current caller hands over a path already resolved
+  INSIDE the share, so this was NOT reachable from the network. It is the function being wrong,
+  not the server.
+- ~~`_resolvedUploadDirectory` is captured once~~ — **fixed** by re-resolving on a miss, last and
+  only when both cached roots fail, so the common path pays nothing. Deliberately NOT written back
+  to the ivar: those callers run on concurrent connection queues, and `-presentedItemURL` needs
+  that value to stay put for as long as the presenter is registered. Re-measured before the fix:
+  after a repoint, `/Sub` became `/`.
 - A header-time refusal can lose its error-page body to a TCP reset (the status is never lost).
 - Phase 2's low-value structural tail: the URI-to-path derivation, and the limits/constants.
 

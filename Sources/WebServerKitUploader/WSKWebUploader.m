@@ -795,7 +795,23 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
 #pragma mark - NSFilePresenter
 
 - (NSURL *)presentedItemURL {
-    return [NSURL fileURLWithPath:_uploadDirectory];
+    // The RESOLVED path, not the standardized one. NSFileCoordinator matches a presenter against
+    // the canonical path of the item that changed, so registering under a spelling that reaches
+    // the share through a symlink registers for a path no change is ever reported against: a
+    // symlinked share received NOT FEWER events but ZERO, against 8 on an identical real-path
+    // control in the same process. That is the uploader's entire external-change feature silently
+    // absent for a deployment whose share is a link — which is an ordinary way to publish one.
+    //
+    // This is the SAME rule as -_relativePathForAbsolutePath: and -presentedSubitemDidChangeAtURL:
+    // (compare resolved against resolved), at the third site that did not have it. Note the
+    // asymmetry that hid it: those two are handed a realpath'd argument and had to resolve their
+    // OWN root to match it, whereas this method is the one that hands a root OUT, so nothing
+    // downstream could compensate.
+    //
+    // Stability matters here in a way it does not there: NSFilePresenter requires this URL not to
+    // change while registered, so it deliberately reads the ONCE-captured _resolvedUploadDirectory
+    // and must not re-resolve per call.
+    return [NSURL fileURLWithPath:(_resolvedUploadDirectory ? _resolvedUploadDirectory : _uploadDirectory)];
 }
 
 - (NSOperationQueue *)presentedItemOperationQueue {
@@ -1031,8 +1047,44 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
     // same rule at the site that did not have it, which is this codebase's signature defect.
     NSString *const resolvedRoot = _resolvedUploadDirectory ? _resolvedUploadDirectory : _uploadDirectory;
 
-    for (NSString *const root in @[ _uploadDirectory, resolvedRoot ]) {
-        if ((root.length == 0) || ![absolutePath hasPrefix:root]) {
+    // _resolvedUploadDirectory is captured ONCE, at init. If the share's realpath changes under a
+    // live server — a symlinked share repointed at a new directory, which is exactly how an
+    // atomic publish swaps one — both roots above are stale and every event collapses to "/"
+    // again, silently reverting the fix this method exists for (measured: 5/5 events naming the
+    // root after a repoint). Re-resolving here, LAST and only on a miss, costs one realpath(3)
+    // on a path that would otherwise be answered wrongly, and nothing on the common path.
+    //
+    // Deliberately NOT written back to _resolvedUploadDirectory: these callers run on concurrent
+    // connection queues, and -presentedItemURL requires that value to stay put for as long as the
+    // presenter is registered.
+    NSString *freshRoot = nil;
+    char resolvedBuffer[PATH_MAX];
+
+    if ((_uploadDirectory.length > 0) && !WSKPathContainsNULByte(_uploadDirectory) &&
+        (realpath([_uploadDirectory fileSystemRepresentation], resolvedBuffer) != NULL)) {
+        freshRoot = [[NSFileManager defaultManager] stringWithFileSystemRepresentation:resolvedBuffer length:strlen(resolvedBuffer)];
+    }
+
+    for (NSString *const root in @[ _uploadDirectory, resolvedRoot, freshRoot ? freshRoot : @"" ]) {
+        if (root.length == 0) {
+            continue;
+        }
+
+        // The prefix test needs a SEPARATOR BOUNDARY, or a sibling directory whose name merely
+        // begins with the share's is mapped INTO the share: with a share at ".../Share", the path
+        // ".../Share2/x.txt" answered "/2/x.txt" — a client-facing path naming a file that is not
+        // in the share at all, assembled by slicing a name in half. -presentedSubitemDidChangeAtURL:
+        // has always compared against root + "/" for this reason; this is the same rule at the
+        // sibling site that did not have it.
+        //
+        // Honest limit: every current caller hands over a path already resolved INSIDE the share,
+        // so this was not reachable from the network — it is the function being wrong, not the
+        // server. It is fixed because the next caller is the one that would not know.
+        if ([absolutePath isEqualToString:root]) {
+            return @"/";
+        }
+
+        if (![absolutePath hasPrefix:[root hasSuffix:@"/"] ? root : [root stringByAppendingString:@"/"]]) {
             continue;
         }
 
