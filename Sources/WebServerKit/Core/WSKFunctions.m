@@ -724,8 +724,26 @@ static NSString *_RealPath(NSString *path) {
 
     char buffer[PATH_MAX];
     NSFileManager *const fileManager = [NSFileManager defaultManager];
+    char const *const representation = [path fileSystemRepresentation];
 
-    if (realpath([path fileSystemRepresentation], buffer)) {
+    // Nothing at or beyond PATH_MAX can name a filesystem entry: realpath(3), lstat(2) and every
+    // other path call answer ENAMETOOLONG, so such a path can neither exist nor be created. Refuse
+    // it here rather than letting the walk below discover it one component at a time.
+    //
+    // This is a BOUND, not an optimization. The walk below is driven by client input — the request
+    // target is capped only by the header block — and without this guard a 16,000-component path
+    // cost 2,259 ms of CPU against 15 ms before the walk existed, a 153x amplification measured on
+    // an otherwise idle server. With a 128-connection cap and no rate limiting that is a denial of
+    // service, on the deployment shape whose whole priority is running for weeks.
+    //
+    // Fail CLOSED (nil, so callers answer 403), which is also what an over-long path answered
+    // before the walk existed. It reveals nothing: the verdict depends only on the length the
+    // client sent, never on what the filesystem holds.
+    if (strlen(representation) >= PATH_MAX) {
+        return nil;
+    }
+
+    if (realpath(representation, buffer)) {
         return [fileManager stringWithFileSystemRepresentation:buffer length:strlen(buffer)];
     }
 
@@ -783,17 +801,31 @@ static NSString *_RealPath(NSString *path) {
             return nil;
         }
 
-        [missingComponents insertObject:leaf atIndex:0];
+        // APPENDED, not inserted at index 0, and joined in a single pass below. Both spellings of
+        // the obvious version are quadratic in the component count — -insertObject:atIndex:0 shifts
+        // the whole array on every component, and -stringByAppendingPathComponent: in a loop copies
+        // the whole prefix on every component — and together they are what turned a deep path into
+        // a CPU amplifier. Bounded now by PATH_MAX above AND linear here; measured worst case
+        // inside the bound is ~10 ms at 400 components, against ~0.9 ms before the walk existed.
+        [missingComponents addObject:leaf];
 
         if (realpath([parent fileSystemRepresentation], buffer)) {
-            NSString *resolved = [fileManager stringWithFileSystemRepresentation:buffer length:strlen(buffer)];
+            NSString *const resolvedParent = [fileManager stringWithFileSystemRepresentation:buffer length:strlen(buffer)];
 
-            if (resolved == nil) {
+            if (resolvedParent == nil) {
                 return nil;
             }
 
-            for (NSString *const component in missingComponents) {
-                resolved = [resolved stringByAppendingPathComponent:component];
+            NSMutableString *const resolved = [resolvedParent mutableCopy];
+
+            // Collected leaf-first, so walk back out. "/" is the one parent that already ends in a
+            // separator, hence the suffix test rather than an unconditional append.
+            for (NSString *const component in [missingComponents reverseObjectEnumerator]) {
+                if (![resolved hasSuffix:@"/"]) {
+                    [resolved appendString:@"/"];
+                }
+
+                [resolved appendString:component];
             }
 
             return resolved;

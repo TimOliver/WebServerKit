@@ -241,7 +241,17 @@ the same rule spelled two ways in two places.
   earlier spelling of the record listed them. The walk does not weaken containment: an escaping
   path still resolves to a location outside the root and is refused by the caller's containment
   test whether or not anything exists there, and a component that EXISTS but will not resolve
-  still fails closed at each step. The rejected fix — a `-fileExistsAtPath:` parent precheck in
+  still fails closed at each step. **The walk is BOUNDED by `PATH_MAX`, and that bound is load-
+  bearing rather than tidiness**: the request target is client input capped only by the header
+  block, and the walk does work per missing component, so the first version — which also built its
+  result quadratically — cost **2,259 ms of CPU for a 16,000-component path against 15 ms before
+  the walk existed**, a 153× amplifier on a server with a 128-connection cap and no rate limiting.
+  Nothing at or beyond `PATH_MAX` can name a filesystem entry (`ENAMETOOLONG`), so it is refused
+  before the walk starts, fail-closed and independent of anything on disk. Collect components by
+  APPENDING and join once; `insertObject:atIndex:0` and `stringByAppendingPathComponent:` in a loop
+  are each quadratic. Measured worst case inside the bound is ~10 ms at 400 components against
+  ~0.9 ms on the old code — linear, accepted, and the lever if that ever matters is a component
+  cap well below `PATH_MAX`. The rejected fix — a `-fileExistsAtPath:` parent precheck in
   each read verb — is what reopens the existence oracle, because that predicate answers for paths
   outside the share. `WSKResolvedPathIsWithinDirectory` now answers YES for a deep not-yet-existing
   path inside the share, which is simply true: it reports CONTAINMENT, not existence. Its test
@@ -923,6 +933,18 @@ exercise changes, not on suspicion.
   against desync, not proof of its absence. ~7,000 mutated
   requests under ASan+UBSan: zero memory errors. 9,366 injected allocation failures: nothing,
   zero descriptor leaks.
+- **The seventeenth pass's own changes were audited adversarially before the branch was handed
+  over**, and the technique that found the defect was NOT the one aimed at correctness. A paired
+  existence-oracle fuzzer (same request against an absent and a present target outside the share,
+  over generated paths × depths × 12 verbs) read **940 disagreements out of 2,880 pairs against
+  `main` and 0 at tip** — sensitivity proven, no new finding. What did find something was an
+  AMPLIFICATION probe asking what a deep path now COSTS: 2,259 ms, i.e. the correctness fix had
+  introduced a denial of service. Ask what a fix costs, not only whether it is right; the
+  ~1-new-defect-per-5-fixed rate is real and it lands in exactly what the fix touched.
+  `rclone copy dav:/nodir/deeper` was driven against both trees as the closing check —
+  `CRITICAL … 403 Forbidden` before, `directory not found` after — and a real `mount_webdav` mount
+  did mkdir, a 12 MB write, byte-identical read-back, list, rename, read-after-rename, `mkdir -p`
+  on a nested path, copy, recursive delete and a clean unmount.
 - **Conformance and real clients**, RE-TAKEN against tip after the #70/#71/#75 status changes and
   unchanged: litmus `basic` 16/16, `http` 4/4, `locks` 3/3, `props`
   29/30 (sole failure still `propfind_invalid2`, settled). The four changed behaviours were also

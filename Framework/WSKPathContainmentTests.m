@@ -1157,4 +1157,52 @@
     [fm removeItemAtPath:root error:NULL];
 }
 
+// The walk-up that fixed 403-where-404-belongs is driven by CLIENT INPUT: the request target is
+// bounded only by the header block, and the walk does work per missing component. The first version
+// did that work quadratically -- -insertObject:atIndex:0 shifting the array and
+// -stringByAppendingPathComponent: copying the prefix, once per component -- so a 16,000-component
+// request line cost 2,259 ms of CPU against 15 ms before the walk existed. A 153x amplifier on a
+// server with a 128-connection cap and no rate limiting, found by an amplification probe rather
+// than by reading, and exactly the "one new defect per five fixed, clustered in what the fix
+// touched" shape this project keeps measuring.
+//
+// The bound is PATH_MAX: nothing at or beyond it can name a filesystem entry, since realpath(3) and
+// lstat(2) both answer ENAMETOOLONG, so the walk is pointless there and refuses immediately.
+//
+// Asserted through STATUS, not wall-clock, deliberately. This suite already has two timing tests
+// that flake when the machine is loaded, and a third would be a liability; the status is exact and
+// the cost follows from it.
+- (void)testOverlongPathsAreRefusedWithoutWalking {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* share = MakeTempDirectory();
+    WSKWebDAVServer* dav = [[WSKWebDAVServer alloc] initWithUploadDirectory:share];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([dav startWithOptions:options error:NULL]);
+
+    // Comfortably past PATH_MAX: refused outright, and the refusal must not depend on the share's
+    // contents, so it is the fail-closed 403 rather than a 404 derived from a walk.
+    NSMutableString* overlong = [NSMutableString string];
+    for (NSUInteger i = 0; i < 4000; i++) {
+        [overlong appendString:@"/a"];
+    }
+    NSString* reply = SendRawRequest(dav.port, [NSString stringWithFormat:@"GET %@ HTTP/1.1\r\nHost: localhost\r\n\r\n", overlong]);
+    XCTAssertEqualObjects([reply substringWithRange:NSMakeRange(9, 3)], @"403", @"an over-long path must be refused without walking it");
+
+    // Just INSIDE the bound the walk must still do its job, or the guard has silently undone the
+    // fix it is protecting. 200 components is 400 bytes, well under PATH_MAX.
+    NSMutableString* deepButLegal = [NSMutableString string];
+    for (NSUInteger i = 0; i < 200; i++) {
+        [deepButLegal appendString:@"/a"];
+    }
+    NSString* deepReply = SendRawRequest(dav.port, [NSString stringWithFormat:@"GET %@ HTTP/1.1\r\nHost: localhost\r\n\r\n", deepButLegal]);
+    XCTAssertEqualObjects([deepReply substringWithRange:NSMakeRange(9, 3)], @"404", @"a deep but legal absent path must still answer 404");
+
+    // And the ordinary shallow cases the fix is actually for.
+    NSString* shallow = SendRawRequest(dav.port, @"GET /nodir/gone.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertEqualObjects([shallow substringWithRange:NSMakeRange(9, 3)], @"404");
+
+    [dav stop];
+    [fm removeItemAtPath:share error:NULL];
+}
+
 @end
