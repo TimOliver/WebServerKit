@@ -945,6 +945,26 @@ exercise changes, not on suspicion.
   `CRITICAL … 403 Forbidden` before, `directory not found` after — and a real `mount_webdav` mount
   did mkdir, a 12 MB write, byte-identical read-back, list, rename, read-after-rename, `mkdir -p`
   on a nested path, copy, recursive delete and a clean unmount.
+- **A whole-behaviour differential of the seventeenth pass against `main`** — 480 cells (15 verbs ×
+  32 hostile targets: dangling and looping links, a link to the share root, a link to a subdirectory,
+  dot-names, `%2e%2e`, `%23`, unicode, spaces, absent paths at three depths), recording for every
+  cell BOTH the status and the resulting state of the share and of the directory outside it. 71
+  status differences, every one falling into a bucket the branch intended (26 collection allow-list
+  refusals, 18+8 escaping-link write refusals, 11 absent-path 403→404, 8 mixed), and — the number
+  that matters — **0 cells where the status matched but the filesystem effect differed**. That is
+  the shape a status-only differential cannot see and the one this project keeps being bitten by.
+  The one cell needing a ruling rather than a fix is the symlink-vetting entry under Still open.
+- **Concurrency and accumulation against the reordered write verbs**: 6 workers × 400 requests
+  racing a component that flips between a real directory and a symlink out of the share. No 500 or
+  dropped response that `main` does not also produce, nothing created outside that `main` does not
+  also create, `reservedInMemoryByteCount` 0 at rest and descriptors BELOW baseline. The one
+  difference was staging residue, which is the widened TOCTOU recorded under Settled decisions.
+  **Three rounds of adversarial audit were run against this branch and the yield fell off exactly
+  as the record predicts**: round 1 (paired oracle fuzzer + amplification probe) found a real
+  denial of service; round 2 (whole-behaviour differential vs `main`) found one behaviour change
+  needing an owner ruling and no defect; round 3 (concurrency + accumulation) found no new class,
+  only a quantified widening of a documented one. Repeating a technique finds nothing; each round
+  had to change lens to find anything at all.
 - **Conformance and real clients**, RE-TAKEN against tip after the #70/#71/#75 status changes and
   unchanged: litmus `basic` 16/16, `http` 4/4, `locks` 3/3, `props`
   29/30 (sole failure still `propfind_invalid2`, settled). The four changed behaviours were also
@@ -980,7 +1000,20 @@ has happened.
 - **The `//` status disagreement** (501 from the base-path handler, 404 from WebDAV) stays. Both
   refuse; only the status differs. Cosmetic.
 - **The directory-rename TOCTOU** (a real directory renamed between resolution and use) is not
-  closed: an `openat(2)` component walk or `O_NOFOLLOW_ANY` would also refuse the benign
+  closed, and the seventeenth pass MEASURABLY WIDENED it — recorded because the trade was made
+  deliberately and someone will otherwise re-find it as a regression. Driving 6 workers against a
+  path whose middle component flips between a real directory and a symlink out of the share, a PUT
+  lands its body outside on BOTH trees (this is the class, unchanged), but the STAGING residue left
+  outside went from 7–13 per run on `main` to 77–84 at tip, three runs each, isolated to PUT.
+  Cause: closing the write-verb existence oracle required moving the containment test AHEAD of the
+  parent-exists check, which puts one more syscall inside the resolve→write window. The two
+  properties are in direct conflict and the trade is deliberate: the oracle is an information leak
+  reachable by ANY client with no race at all, while this needs an attacker who can already rename
+  directories inside the share, and the residue is race-induced only — the 480-cell differential
+  shows no staging residue anywhere without the race. If the balance ever changes, the fix is the
+  one already adjudicated below, not re-ordering the checks back.
+  Closing it properly still means an `openat(2)` component walk or `O_NOFOLLOW_ANY`, which would
+  also refuse the benign
   intermediate symlinks that work today and are pinned by `testHiddenItemsAreRefusedThroughSymlinksToo`
   (`testBasePathHandlerRefusesSymlinkEscape` pins the ESCAPE; its positive assertion is a plain file,
   so it does not cover the benign-symlink case).
@@ -1172,6 +1205,28 @@ than the record and are restated below; three are now fixed.
   to the ivar: those callers run on concurrent connection queues, and `-presentedItemURL` needs
   that value to stay put for as long as the presenter is registered. Re-measured before the fix:
   after a repoint, `/Sub` became `/`.
+- **The allow-list vetting walk judges a symlink's TARGET, not the alias — needs an owner ruling,
+  not a fix.** With `allowedFileExtensions` set and `link -> Vault` where `Vault/sub/secret.pem` is
+  not allow-listed, all three destructive verbs answer 403 for `/link`, although acting on the link
+  touches nothing inside `Vault`. Measured on both trees, which is what makes the shape clear:
+
+  | request | main | tip |
+  |---|---|---|
+  | `DELETE /link` | 403 | 403 |
+  | `MOVE /link` | 201, link moved | 403 |
+  | `COPY /link` | 201, link copied | 403 |
+  | `MOVE /Vault` | 201, **`secret.pem` moved with it** | 403 |
+
+  DELETE was ALREADY 403 on main, so the seventeenth pass did not invent this — it made MOVE/COPY
+  consistent with DELETE while closing the real defect in the last row. But consistent with what is
+  the question: **"symlinks are aliases" is a recorded OWNER decision** ("a destructive verb acts on
+  the entry the client NAMED"), and vetting the target contradicts it. It is fail-CLOSED
+  (over-refusal, no exposure) and invisible in the DEFAULT configuration, because
+  `WSKFirstUnvettableItemAtPath` returns nil when no allow-list is set.
+  **Do not "just fix" it by deriving directory-ness from `lstat`**: that reclassifies a
+  symlink-to-directory as a file, which then puts it through `_checkFileExtension:` — and a link
+  named `latest` with no extension fails that, so it answers 403 again for a different reason. Any
+  fix has to settle the allow-list-vs-alias interaction first.
 - A header-time refusal can lose its error-page body to a TCP reset (the status is never lost).
 - Phase 2's low-value structural tail: the URI-to-path derivation, and the limits/constants.
 
