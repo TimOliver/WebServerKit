@@ -743,24 +743,64 @@ static NSString *_RealPath(NSString *path) {
     // effect beyond closing the oracle: a dangling link and a symlink loop answer 403 rather than
     // 404. Neither was ever served, and a PUT through a dangling link answered 500 before, so no
     // working operation is lost — only the status changes, in the honest direction.
-    struct stat entryInfo;
+    //
+    // The walk climbs until an ancestor resolves rather than trying the immediate parent ONCE.
+    // Tolerating exactly one missing component made "absent" and "refused" the same answer as soon
+    // as a client named a path two levels past anything real: GET, HEAD, PROPFIND and PROPPATCH
+    // all answered 403 for "/nodir/gone.txt" where 404 is owed, and DELETE did the same one level
+    // deeper (it resolves the parent itself, so it got one extra level for free). Measured across
+    // an 11-verb × 7-path matrix. `rclone copy dav:/a/b` treats that 403 as fatal and gives up,
+    // the same way MKCOL's 500 used to break tree-building clients.
+    //
+    // This does NOT reopen the existence oracle that the lstat above closes, and the distinction is
+    // the whole reason the fix lives here rather than in the verbs. The rejected alternative — a
+    // -fileExistsAtPath: parent precheck in each read verb — answers YES/NO for paths OUTSIDE the
+    // share, which is precisely the oracle. Here, an escaping path still resolves to a location
+    // outside the root and is then refused by the CONTAINMENT test in the caller, whether or not
+    // anything exists there; and a component that exists but will not resolve still fails closed at
+    // the top of each iteration. Verdicts for "/esc/gone.txt" and for both arms of
+    // testUnresolvableEntriesFailClosedWithoutBreakingCreation are unchanged at 403.
+    //
+    // The write verbs are deliberately untouched by this. PUT, MKCOL and a MOVE/COPY destination
+    // answer 409 Conflict for a missing ancestor — RFC 4918 §9.7.1, byte-identical to
+    // `rclone serve webdav` — from their own parent precheck, which this only lets them reach.
+    // 409 is correct there and must not become 404.
+    NSMutableArray<NSString *> *const missingComponents = [NSMutableArray array];
+    NSString *cursor = path;
 
-    if (lstat([path fileSystemRepresentation], &entryInfo) == 0) {
-        return nil;
+    while (YES) {
+        struct stat entryInfo;
+
+        if (lstat([cursor fileSystemRepresentation], &entryInfo) == 0) {
+            return nil;
+        }
+
+        NSString *const parent = [cursor stringByDeletingLastPathComponent];
+        NSString *const leaf = [cursor lastPathComponent];
+
+        // Terminates: every iteration strictly shortens the path, and "/" is its own parent.
+        if ((parent.length == 0) || (leaf.length == 0) || [parent isEqualToString:cursor]) {
+            return nil;
+        }
+
+        [missingComponents insertObject:leaf atIndex:0];
+
+        if (realpath([parent fileSystemRepresentation], buffer)) {
+            NSString *resolved = [fileManager stringWithFileSystemRepresentation:buffer length:strlen(buffer)];
+
+            if (resolved == nil) {
+                return nil;
+            }
+
+            for (NSString *const component in missingComponents) {
+                resolved = [resolved stringByAppendingPathComponent:component];
+            }
+
+            return resolved;
+        }
+
+        cursor = parent;
     }
-
-    NSString *const parent = [path stringByDeletingLastPathComponent];
-
-    if ((parent.length == 0) || [parent isEqualToString:path]) {
-        return nil;
-    }
-
-    if (realpath([parent fileSystemRepresentation], buffer)) {
-        NSString *const resolvedParent = [fileManager stringWithFileSystemRepresentation:buffer length:strlen(buffer)];
-        return resolvedParent ? [resolvedParent stringByAppendingPathComponent:[path lastPathComponent]] : nil;
-    }
-
-    return nil;
 }
 
 NSString *WSKResolveWithinDirectory(NSString *path, NSString *directory, NSString *__autoreleasing *outRelativePath) {

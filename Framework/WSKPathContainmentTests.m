@@ -689,7 +689,20 @@
 
     // Unresolvable input fails closed.
     XCTAssertFalse(WSKResolvedPathIsWithinDirectory(@"", dir));
-    XCTAssertFalse(WSKResolvedPathIsWithinDirectory([dir stringByAppendingPathComponent:@"Nope/deeper/x.txt"], dir));
+
+    // A path several not-yet-existing components deep is WITHIN the directory, because it is: this
+    // predicate answers containment, not existence. It used to answer NO purely because _RealPath
+    // tolerated exactly one missing component, and this assertion pinned that cutoff as if it were
+    // a rule — note the line above asserting YES for "Sub/new.txt", one level shallower, which is
+    // the same question. That arbitrary boundary is what made GET, HEAD, PROPFIND, PROPPATCH and
+    // DELETE answer 403 where 404 was owed.
+    XCTAssertTrue(WSKResolvedPathIsWithinDirectory([dir stringByAppendingPathComponent:@"Nope/deeper/x.txt"], dir));
+
+    // What must NOT change: depth does not launder an escape. The same two-missing-component shape
+    // through a link that leaves the directory is still refused, and so is one whose ancestor
+    // escapes before the missing components even begin.
+    XCTAssertFalse(WSKResolvedPathIsWithinDirectory([dir stringByAppendingPathComponent:@"Escape/nope/deeper/x.txt"], dir));
+    XCTAssertFalse(WSKResolvedPathIsWithinDirectory([outside stringByAppendingPathComponent:@"nope/deeper/x.txt"], dir));
 
     [fm removeItemAtPath:outside error:NULL];
     [fm removeItemAtPath:dir error:NULL];
@@ -1039,6 +1052,81 @@
         NSString* status = (reply.length > 12) ? [reply substringWithRange:NSMakeRange(9, 3)] : reply;
         XCTAssertEqualObjects(status, row[1], @"the not-yet-exists fallback must keep working: %@ -> %@", [row[0] substringToIndex:MIN((NSUInteger)24, [row[0] length])], status);
     }
+
+    [dav stop];
+    [fm removeItemAtPath:root error:NULL];
+}
+
+// A path naming components that do not exist must answer "not found", not "forbidden". _RealPath
+// tolerated exactly ONE missing trailing component; two or more returned nil and every WebDAV verb
+// maps nil to 403. So the moment a client named a path two levels past anything real, "absent" and
+// "refused" became the same answer -- and `rclone copy dav:/a/b` treats that 403 as fatal, the same
+// way MKCOL's 500 used to break tree-building clients.
+//
+// Measured across the whole verb x depth matrix before the fix: GET, HEAD, PROPFIND and PROPPATCH
+// answered 403 for every 2+-missing-component path, and DELETE did the same one level deeper (it
+// resolves the parent itself, so it got one extra level for free). LOCK and UNLOCK answer 405 here
+// and are NOT part of this class, though an earlier version of the record listed them.
+//
+// Three things this test pins that a narrower one would not:
+//   - the WRITE verbs must keep answering 409 Conflict for a missing ancestor (RFC 4918 §9.7.1,
+//     byte-identical to `rclone serve webdav`). Turning those into 404 would be a regression, and
+//     it is the obvious way to overshoot this fix.
+//   - a path through an escaping symlink must STILL be 403 at every depth, existence-independent.
+//     The rejected fix -- a -fileExistsAtPath: parent precheck in each read verb -- reopens the
+//     existence oracle precisely because that predicate answers for paths outside the share.
+//   - the depth must be TWO OR MORE. A one-missing-component path already answered 404 before the
+//     fix, so a test written against "/gone.txt" alone passes on unfixed code.
+- (void)testAbsentPathsAnswerNotFoundRatherThanForbidden {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* root = MakeTempDirectory();
+    NSString* share = [root stringByAppendingPathComponent:@"share"];
+    NSString* outside = [root stringByAppendingPathComponent:@"outside"];
+    [fm createDirectoryAtPath:[share stringByAppendingPathComponent:@"sub"] withIntermediateDirectories:YES attributes:nil error:NULL];
+    [fm createDirectoryAtPath:outside withIntermediateDirectories:YES attributes:nil error:NULL];
+    [@"in" writeToFile:[share stringByAppendingPathComponent:@"real.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    [fm createSymbolicLinkAtPath:[share stringByAppendingPathComponent:@"esc"] withDestinationPath:outside error:NULL];
+
+    WSKWebDAVServer* dav = [[WSKWebDAVServer alloc] initWithUploadDirectory:share];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([dav startWithOptions:options error:NULL]);
+
+    // {request, expected status, what it is}. Every read/property verb is driven at two and three
+    // missing components; the destructive and creating verbs are driven for their own reasons.
+    NSArray* cases = @[
+        @[ @"GET /nodir/gone.txt HTTP/1.1\r\nHost: localhost\r\n\r\n", @"404", @"GET, 2 missing" ],
+        @[ @"GET /nodir/deeper/gone.txt HTTP/1.1\r\nHost: localhost\r\n\r\n", @"404", @"GET, 3 missing" ],
+        @[ @"GET /sub/nodir/gone.txt HTTP/1.1\r\nHost: localhost\r\n\r\n", @"404", @"GET, 2 missing under a real dir" ],
+        @[ @"HEAD /nodir/gone.txt HTTP/1.1\r\nHost: localhost\r\n\r\n", @"404", @"HEAD, 2 missing" ],
+        @[ @"PROPFIND /nodir/gone.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\n\r\n", @"404", @"PROPFIND, 2 missing" ],
+        @[ @"PROPPATCH /nodir/gone.txt HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n", @"404", @"PROPPATCH, 2 missing" ],
+        @[ @"DELETE /nodir/deeper/gone.txt HTTP/1.1\r\nHost: localhost\r\n\r\n", @"404", @"DELETE, 3 missing" ],
+
+        // Must NOT become 404: a missing ancestor is a conflict for a verb that would create.
+        @[ @"PUT /nodir/gone.txt HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\nhi", @"409", @"PUT with an absent parent" ],
+        @[ @"MKCOL /nodir/deeper HTTP/1.1\r\nHost: localhost\r\n\r\n", @"409", @"MKCOL with an absent parent" ],
+        @[ @"COPY /real.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /nodir/gone.txt\r\nOverwrite: T\r\n\r\n", @"409", @"COPY to an absent parent" ],
+        @[ @"MOVE /real.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /nodir/gone.txt\r\nOverwrite: T\r\n\r\n", @"409", @"MOVE to an absent parent" ],
+
+        // Must NOT become 404: depth does not launder an escape, and the answer may not depend on
+        // what exists out there.
+        @[ @"GET /esc/gone.txt HTTP/1.1\r\nHost: localhost\r\n\r\n", @"403", @"GET through an escaping link" ],
+        @[ @"GET /esc/nodir/deeper/gone.txt HTTP/1.1\r\nHost: localhost\r\n\r\n", @"403", @"GET through an escaping link, 3 missing" ],
+        @[ @"PUT /esc/gone.txt HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\nhi", @"403", @"PUT through an escaping link" ],
+
+        // The shallow case, which already worked, so a later change cannot quietly lose it.
+        @[ @"GET /gone.txt HTTP/1.1\r\nHost: localhost\r\n\r\n", @"404", @"GET, 1 missing" ],
+        @[ @"GET /real.txt HTTP/1.1\r\nHost: localhost\r\n\r\n", @"200", @"GET, exists" ],
+    ];
+
+    for (NSArray* row in cases) {
+        NSString* reply = SendRawRequest(dav.port, row[0]);
+        NSString* status = (reply.length > 12) ? [reply substringWithRange:NSMakeRange(9, 3)] : reply;
+        XCTAssertEqualObjects(status, row[1], @"%@", row[2]);
+    }
+
+    // Nothing above may have written outside the share.
+    XCTAssertEqualObjects([fm contentsOfDirectoryAtPath:outside error:NULL], @[], @"a refused request landed a file outside the share");
 
     [dav stop];
     [fm removeItemAtPath:root error:NULL];

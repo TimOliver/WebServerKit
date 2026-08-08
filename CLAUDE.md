@@ -230,9 +230,24 @@ the same rule spelled two ways in two places.
   directory that cannot be listed is refused; a read-only NON-empty directory is refused. The
   test pins both directions.
 - **`_RealPath` is the most security-critical function in the library; any edit needs its own
-  measured pass.** When `realpath(3)` fails it resolves the PARENT and appends the raw leaf —
-  the branch that lets `PUT`/`MKCOL` to a not-yet-existing name resolve at all, and also the
-  branch a dangling symlink takes. An entry that exists and cannot be resolved fails CLOSED
+  measured pass.** When `realpath(3)` fails it WALKS UP until an ancestor resolves and appends the
+  missing components — the branch that lets `PUT`/`MKCOL` to a not-yet-existing name resolve at
+  all, and also the branch a dangling symlink takes. It used to try the immediate parent exactly
+  ONCE, which made "absent" and "refused" the same answer as soon as a client named a path two
+  levels past anything real: GET, HEAD, PROPFIND and PROPPATCH answered 403 where 404 was owed, and
+  DELETE the same one level deeper (it resolves the parent itself, so it got one level for free).
+  Measured on an 11-verb × 7-path matrix before and after; `rclone copy dav:/a/b` treats that 403
+  as fatal. **LOCK and UNLOCK are NOT part of this class** — they answer 405 at tip, though an
+  earlier spelling of the record listed them. The walk does not weaken containment: an escaping
+  path still resolves to a location outside the root and is refused by the caller's containment
+  test whether or not anything exists there, and a component that EXISTS but will not resolve
+  still fails closed at each step. The rejected fix — a `-fileExistsAtPath:` parent precheck in
+  each read verb — is what reopens the existence oracle, because that predicate answers for paths
+  outside the share. `WSKResolvedPathIsWithinDirectory` now answers YES for a deep not-yet-existing
+  path inside the share, which is simply true: it reports CONTAINMENT, not existence. Its test
+  previously pinned the one-level cutoff as though it were a rule, two lines below asserting YES
+  for the one-level-shallower spelling of the same question.
+  An entry that exists and cannot be resolved fails CLOSED
   (403), so an escaping symlink answers 403 whether its target exists or not — previously
   403-vs-404, an existence oracle for paths outside the share. Dangling links inside the share
   and symlink loops also answer 403 (neither was ever served). The regression test asserts the
@@ -993,8 +1008,8 @@ contact roughly one time in three.
 From the sixteenth pass (all pre-existing; it counted thirteen confirmed findings left and
 enumerated nine of them — three have since been closed and are struck from this list: MKCOL's 500,
 and the two `Allow` gaps, which the draft had merged into one bullet):
-- **403 where a 404 belongs when a parent collection is absent** (breaks rclone the same way
-  MKCOL's 500 did).
+- ~~403 where a 404 belongs when a parent collection is absent~~ — **fixed**; see the restated
+  entry further down for the measured matrix and the two corrections to the record.
 - `WSKDataRequest.text`/`.jsonObject` abort for exactly the case their header documents as
   returning nil.
 - `addHandlerForMethod:path:` aborts in Debug and registers nothing in Release for a missing
@@ -1085,20 +1100,21 @@ than the record and are restated below; three are now fixed.
   unmovable, not merely undeletable — the same cost already accepted for DELETE, and the
   inconsistency was the defect. The test asserts the permitted half in both directions, so no later
   fix can degrade to "refuse every collection operation".
-- **403 where a 404 belongs when a parent collection is absent** — the record MERGED two cases that
-  measurement separates. The WRITE verbs (PUT, MKCOL, MOVE/COPY destination) already answer **409
-  Conflict**, which is RFC 4918-mandated and byte-identical to `rclone serve webdav`; nothing is
-  owed there and it must not be "fixed" to 404. It is the READ/property verbs (GET, HEAD, PROPFIND,
-  PROPPATCH, LOCK, UNLOCK, and DELETE one level deeper) that answer 403 where 404 is owed, and
-  `rclone copy dav:/a/b` CRITICALs on it. Cause: `_RealPath` tolerates exactly ONE missing trailing
-  component; two or more returns nil and every DAV verb maps nil to 403. **The obvious fix is
-  MEASURED WRONG** — mirroring the write verbs' `fileExistsAtPath:` parent precheck onto the read
-  verbs reopens the existence oracle `testUnresolvableEntriesFailClosedWithoutBreakingCreation`
-  closed, because that predicate answers YES/NO for paths OUTSIDE the share. The real fix has to
-  live inside `_RealPath` and distinguish "does not exist yet, entirely inside the share" from
-  "exists but cannot be resolved / escapes". That is a dedicated measured pass, per this file's own
-  rule about that function. Any regression test must use a TWO-or-more-missing-component path: a
-  one-level path already answers 404, so a test written against it passes on unfixed code.
+- ~~403 where a 404 belongs when a parent collection is absent~~ — **fixed inside `_RealPath`**,
+  which walks up until an ancestor resolves instead of trying the parent once (see the invariant
+  above for the measured matrix). The record's guidance held up on every point that mattered: the
+  write verbs' 409 is RFC-mandated and unchanged, the `-fileExistsAtPath:` precheck really would
+  have reopened the oracle, and the regression test really does need a TWO-or-more-missing
+  component path — the one-level spelling already answered 404 and would have passed on unfixed
+  code. Two corrections to it: **LOCK and UNLOCK are not in this class** (405 at tip), and the
+  cheap textual predicate `WSKResolvedPathIsWithinDirectory` changes answer for a deep
+  not-yet-existing path inside the share, from NO to YES, which is correct — it reports
+  containment, not existence.
+  **What the fix did NOT close, found while measuring it and now recorded as its own item below:**
+  the write verbs run their `-fileExistsAtPath:` parent precheck AHEAD of containment, so through
+  an escaping symlink `PUT /esc/nodir/x` answered 409 and `PUT /esc/there/x` answered 403 —
+  differing only in whether a directory exists OUTSIDE the share. That is the same existence
+  oracle, on the verbs the read-verb fix never covered.
 - ~~A symlinked share receives no `NSFilePresenter` events at all~~ — **fixed**, and the record's
   own advice was what stood in the way: it said the mismatch is not in
   `-presentedSubitemDidChangeAtURL:`, which is true and correct, but that ruled out the one method
@@ -1120,6 +1136,19 @@ than the record and are restated below; three are now fixed.
   to the ivar: those callers run on concurrent connection queues, and `-presentedItemURL` needs
   that value to stay put for as long as the presenter is registered. Re-measured before the fix:
   after a repoint, `/Sub` became `/`.
+- **The DAV write verbs leak existence OUTSIDE the share through their parent precheck.** Found
+  while measuring the `_RealPath` fix, not by reading. PUT, MKCOL and the MOVE/COPY destination run
+  `-fileExistsAtPath:` on the destination's parent BEFORE resolving and testing containment, and
+  that predicate follows symlinks — so through an escaping link, `PUT /esc/nodir/x` answers **409**
+  and `PUT /esc/there/x` answers **403**, differing only in whether `there` exists outside the
+  share. Same class as the oracle `testUnresolvableEntriesFailClosedWithoutBreakingCreation`
+  closed for the read verbs; this is the half it never covered, and it predates that fix.
+  The ordering was deliberate and is documented in all three sites as "checked after the
+  parent-exists test so a genuinely missing collection still reports 409 rather than 403" — which
+  was TRUE while `_RealPath` tolerated only one missing component, because resolving first would
+  have turned legitimate 409s into 403s. The walk removes that constraint, so the correct order
+  (resolve, test containment, THEN test the RESOLVED parent) is now available. Do not fix this by
+  keeping the precheck and special-casing symlinks.
 - A header-time refusal can lose its error-page body to a TCP reset (the status is never lost).
 - Phase 2's low-value structural tail: the URI-to-path derivation, and the limits/constants.
 
