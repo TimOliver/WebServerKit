@@ -729,13 +729,21 @@ static WSKResponse *_MethodNotAllowed(NSString *format, ...) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Operating on the root directory is not allowed"];
     }
 
-    if (![[NSFileManager defaultManager] fileExistsAtPath:[absolutePath stringByDeletingLastPathComponent] isDirectory:&isDirectory] || !isDirectory) {
-        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Conflict message:@"Missing intermediate collection(s) for \"%@\"", relativePath];
-    }
-
-    // Checked after the parent-exists test above so a genuinely missing collection still
-    // reports 409 rather than 403. The destination itself need not exist: the resolver
-    // falls back to resolving the parent, so intermediate symlinks are still caught.
+    // Resolve and test containment BEFORE asking whether the parent exists. `-fileExistsAtPath:`
+    // follows symlinks, so asking it first answers a question about the filesystem OUTSIDE the
+    // share: through an escaping link, `PUT /esc/nodir/x` answered 409 and `PUT /esc/there/x`
+    // answered 403, differing only in whether `there` exists out there. That is the same existence
+    // oracle testUnresolvableEntriesFailClosedWithoutBreakingCreation closed for the read verbs,
+    // left open on the write verbs it never covered — five measured sites: this one, MKCOL, the
+    // COPY and MOVE destinations, and the COPY/MOVE source (404-vs-403 rather than 409-vs-403).
+    //
+    // The old order was deliberate, and its comment ("checked after the parent-exists test so a
+    // genuinely missing collection still reports 409 rather than 403") was TRUE at the time:
+    // _RealPath tolerated exactly one missing component, so resolving first turned every
+    // legitimately-missing-ancestor 409 into a 403. Now that it walks up until an ancestor
+    // resolves, a path inside the share resolves whatever its depth, and the parent test can run
+    // where it belongs — against the RESOLVED parent, which is the location that will actually be
+    // written to. An escape is reported as an escape; a genuine missing collection still gets 409.
     BOOL isHidden = NO;
     NSString *const resolvedPath = [self _resolvedPathForRelativePath:relativePath hidden:&isHidden];
 
@@ -744,6 +752,10 @@ static WSKResponse *_MethodNotAllowed(NSString *format, ...) {
     }
 
     absolutePath = resolvedPath;
+
+    if (![[NSFileManager defaultManager] fileExistsAtPath:[absolutePath stringByDeletingLastPathComponent] isDirectory:&isDirectory] || !isDirectory) {
+        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Conflict message:@"Missing intermediate collection(s) for \"%@\"", relativePath];
+    }
 
     BOOL existing = [[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory];
 
@@ -924,11 +936,9 @@ static WSKResponse *_MethodNotAllowed(NSString *format, ...) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Operating on the root directory is not allowed"];
     }
 
-    if (![[NSFileManager defaultManager] fileExistsAtPath:[absolutePath stringByDeletingLastPathComponent] isDirectory:&isDirectory] || !isDirectory) {
-        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Conflict message:@"Missing intermediate collection(s) for \"%@\"", relativePath];
-    }
-
-    // After the parent-exists test, so a missing collection still reports 409 not 403.
+    // Resolve and test containment first, then test the RESOLVED parent — see the long note in
+    // -performPUT: for why the old order leaked whether a path exists outside the share, and why
+    // it was nevertheless correct until _RealPath learned to walk up.
     BOOL isHidden = NO;
     NSString *const resolvedPath = [self _resolvedPathForRelativePath:relativePath hidden:&isHidden];
 
@@ -937,6 +947,10 @@ static WSKResponse *_MethodNotAllowed(NSString *format, ...) {
     }
 
     absolutePath = resolvedPath;
+
+    if (![[NSFileManager defaultManager] fileExistsAtPath:[absolutePath stringByDeletingLastPathComponent] isDirectory:&isDirectory] || !isDirectory) {
+        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Conflict message:@"Missing intermediate collection(s) for \"%@\"", relativePath];
+    }
 
     if (isHidden) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Creating \"%@\" is not allowed", relativePath];
@@ -1104,6 +1118,24 @@ static WSKResponse *_MethodNotAllowed(NSString *format, ...) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Operating on the root directory is not allowed"];
     }
 
+    // Both endpoints must resolve inside the share, and that is established BEFORE either
+    // existence question is asked. `-fileExistsAtPath:` follows symlinks, so asking it first
+    // answers about the filesystem OUTSIDE the share — the existence oracle described at length in
+    // -performPUT:, here on both the destination's parent AND the source. The two existence tests
+    // keep their original order relative to each other, so a request that is wrong in both ways
+    // still reports the same status it always did.
+    BOOL srcIsHidden = NO;
+    BOOL dstIsHidden = NO;
+    NSString *const resolvedSrcPath = [self _namedEntryPathForRelativePath:srcRelativePath hidden:&srcIsHidden];
+    NSString *const resolvedDstPath = [self _namedEntryPathForRelativePath:dstRelativePath hidden:&dstIsHidden];
+
+    if ((resolvedSrcPath == nil) || (resolvedDstPath == nil)) {
+        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"%@ \"%@\" to \"%@\" is not allowed", isMove ? @"Moving" : @"Copying", srcRelativePath, dstRelativePath];
+    }
+
+    srcAbsolutePath = resolvedSrcPath;
+    dstAbsolutePath = resolvedDstPath;
+
     BOOL isDirectory;
 
     if (![[NSFileManager defaultManager] fileExistsAtPath:[dstAbsolutePath stringByDeletingLastPathComponent] isDirectory:&isDirectory] || !isDirectory) {
@@ -1119,22 +1151,6 @@ static WSKResponse *_MethodNotAllowed(NSString *format, ...) {
     if (![[NSFileManager defaultManager] fileExistsAtPath:srcAbsolutePath isDirectory:&srcIsDirectory]) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", srcRelativePath];
     }
-
-    // Both endpoints must resolve inside the share. Checked after the destination's
-    // parent and the source's existence are established above, so those errors keep
-    // their own status codes; the destination itself need not exist, since the resolver
-    // falls back to its parent.
-    BOOL srcIsHidden = NO;
-    BOOL dstIsHidden = NO;
-    NSString *const resolvedSrcPath = [self _namedEntryPathForRelativePath:srcRelativePath hidden:&srcIsHidden];
-    NSString *const resolvedDstPath = [self _namedEntryPathForRelativePath:dstRelativePath hidden:&dstIsHidden];
-
-    if ((resolvedSrcPath == nil) || (resolvedDstPath == nil)) {
-        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"%@ \"%@\" to \"%@\" is not allowed", isMove ? @"Moving" : @"Copying", srcRelativePath, dstRelativePath];
-    }
-
-    srcAbsolutePath = resolvedSrcPath;
-    dstAbsolutePath = resolvedDstPath;
 
     NSString *const srcName = [srcAbsolutePath lastPathComponent];
 

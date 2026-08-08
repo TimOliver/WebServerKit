@@ -1086,6 +1086,10 @@
     [fm createDirectoryAtPath:outside withIntermediateDirectories:YES attributes:nil error:NULL];
     [@"in" writeToFile:[share stringByAppendingPathComponent:@"real.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
     [fm createSymbolicLinkAtPath:[share stringByAppendingPathComponent:@"esc"] withDestinationPath:outside error:NULL];
+    // "there" and the file inside it exist outside the share; "nodir" and "absent.txt" do not. The
+    // paired cases below differ only in that, so any status difference between a pair IS the leak.
+    [fm createDirectoryAtPath:[outside stringByAppendingPathComponent:@"there"] withIntermediateDirectories:YES attributes:nil error:NULL];
+    [@"out" writeToFile:[outside stringByAppendingPathComponent:@"there/present.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
 
     WSKWebDAVServer* dav = [[WSKWebDAVServer alloc] initWithUploadDirectory:share];
     NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
@@ -1114,6 +1118,25 @@
         @[ @"GET /esc/nodir/deeper/gone.txt HTTP/1.1\r\nHost: localhost\r\n\r\n", @"403", @"GET through an escaping link, 3 missing" ],
         @[ @"PUT /esc/gone.txt HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\nhi", @"403", @"PUT through an escaping link" ],
 
+        // The write verbs asked -fileExistsAtPath: about the destination's parent BEFORE testing
+        // containment, and that predicate follows symlinks -- so the status told the client whether
+        // a directory exists OUTSIDE the share. Each pair below differs ONLY in that: "there"
+        // exists out there and "nodir" does not. Measured before the fix at 409 vs 403 for PUT.
+        // Asserting the literal 403 rather than merely "the two agree", so a future change cannot
+        // satisfy this by making both of them leak the same wrong answer.
+        @[ @"PUT /esc/nodir/x.txt HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\nhi", @"403", @"PUT via link, parent ABSENT outside" ],
+        @[ @"PUT /esc/there/x.txt HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\n\r\nhi", @"403", @"PUT via link, parent PRESENT outside" ],
+        @[ @"MKCOL /esc/nodir/d HTTP/1.1\r\nHost: localhost\r\n\r\n", @"403", @"MKCOL via link, parent ABSENT outside" ],
+        @[ @"MKCOL /esc/there/d HTTP/1.1\r\nHost: localhost\r\n\r\n", @"403", @"MKCOL via link, parent PRESENT outside" ],
+        @[ @"COPY /real.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /esc/nodir/x.txt\r\nOverwrite: T\r\n\r\n", @"403", @"COPY dest via link, parent ABSENT outside" ],
+        @[ @"COPY /real.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /esc/there/x.txt\r\nOverwrite: T\r\n\r\n", @"403", @"COPY dest via link, parent PRESENT outside" ],
+        @[ @"MOVE /real.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /esc/nodir/x.txt\r\nOverwrite: T\r\n\r\n", @"403", @"MOVE dest via link, parent ABSENT outside" ],
+        @[ @"MOVE /real.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /esc/there/x.txt\r\nOverwrite: T\r\n\r\n", @"403", @"MOVE dest via link, parent PRESENT outside" ],
+        // Same question about the SOURCE: a source reached through the link must be refused
+        // identically whether or not it is really there.
+        @[ @"COPY /esc/there/absent.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /d.txt\r\nOverwrite: T\r\n\r\n", @"403", @"COPY source via link, absent" ],
+        @[ @"COPY /esc/there/present.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /d.txt\r\nOverwrite: T\r\n\r\n", @"403", @"COPY source via link, present" ],
+
         // The shallow case, which already worked, so a later change cannot quietly lose it.
         @[ @"GET /gone.txt HTTP/1.1\r\nHost: localhost\r\n\r\n", @"404", @"GET, 1 missing" ],
         @[ @"GET /real.txt HTTP/1.1\r\nHost: localhost\r\n\r\n", @"200", @"GET, exists" ],
@@ -1126,7 +1149,9 @@
     }
 
     // Nothing above may have written outside the share.
-    XCTAssertEqualObjects([fm contentsOfDirectoryAtPath:outside error:NULL], @[], @"a refused request landed a file outside the share");
+    XCTAssertEqualObjects([fm contentsOfDirectoryAtPath:outside error:NULL], @[ @"there" ], @"a refused request landed something outside the share");
+    XCTAssertEqualObjects([fm contentsOfDirectoryAtPath:[outside stringByAppendingPathComponent:@"there"] error:NULL], @[ @"present.txt" ], @"a refused request wrote through the escaping link");
+    XCTAssertTrue([fm fileExistsAtPath:[share stringByAppendingPathComponent:@"real.txt"]], @"a refused MOVE removed the source");
 
     [dav stop];
     [fm removeItemAtPath:root error:NULL];

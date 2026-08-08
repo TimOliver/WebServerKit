@@ -254,6 +254,23 @@ the same rule spelled two ways in two places.
   FIVE operations that must survive (PUT new path 201, PUT in subfolder 201, MKCOL 201, PUT over
   existing 204, GET 200) alongside the two that change. MOVE to a new name was measured in the probe
   and never made it into the test — the probe table in the old record listed six.
+- **Resolve and test containment BEFORE asking the filesystem any question about the path.**
+  `-fileExistsAtPath:` FOLLOWS SYMLINKS, so a precheck that runs ahead of containment answers a
+  question about the filesystem OUTSIDE the share, and the status carries the answer back. Measured
+  at five sites, all in the write verbs, all pre-existing: `PUT /esc/nodir/x` answered 409 while
+  `PUT /esc/there/x` answered 403, differing only in whether `there` existed out there — and the
+  same pair for MKCOL, the COPY destination, the MOVE destination, and 404-vs-403 for a COPY
+  SOURCE reached through the link. Same class as the oracle
+  `testUnresolvableEntriesFailClosedWithoutBreakingCreation` closed for the read verbs; this was
+  the half it never covered.
+  **The old order was deliberate and its comment was true when written** ("checked after the
+  parent-exists test so a genuinely missing collection still reports 409 rather than 403"): while
+  `_RealPath` tolerated one missing component, resolving first turned legitimate 409s into 403s.
+  The walk-up removed that constraint and the correct order became available — which is why this
+  is recorded here rather than as a defect someone should have seen. **The two existence tests in
+  COPY/MOVE keep their original order relative to each other**, so a request wrong in both ways
+  reports the status it always did. Do not "fix" a future instance by keeping the precheck and
+  special-casing symlinks; move it after resolution and run it on the RESOLVED path.
 - **Hidden means where the bytes live.** `WSKResolvedPathHasHiddenComponent()` tests the resolved
   path relative to the RESOLVED ROOT — relative deliberately, because the root itself may live
   under a dot-directory (`NSTemporaryDirectory()` under a sandboxed app routinely does) and an
@@ -1110,11 +1127,8 @@ than the record and are restated below; three are now fixed.
   cheap textual predicate `WSKResolvedPathIsWithinDirectory` changes answer for a deep
   not-yet-existing path inside the share, from NO to YES, which is correct — it reports
   containment, not existence.
-  **What the fix did NOT close, found while measuring it and now recorded as its own item below:**
-  the write verbs run their `-fileExistsAtPath:` parent precheck AHEAD of containment, so through
-  an escaping symlink `PUT /esc/nodir/x` answered 409 and `PUT /esc/there/x` answered 403 —
-  differing only in whether a directory exists OUTSIDE the share. That is the same existence
-  oracle, on the verbs the read-verb fix never covered.
+  **A second oracle was found while measuring this one, and is also closed** — see the
+  resolve-before-you-ask rule under Path resolution.
 - ~~A symlinked share receives no `NSFilePresenter` events at all~~ — **fixed**, and the record's
   own advice was what stood in the way: it said the mismatch is not in
   `-presentedSubitemDidChangeAtURL:`, which is true and correct, but that ruled out the one method
@@ -1136,19 +1150,6 @@ than the record and are restated below; three are now fixed.
   to the ivar: those callers run on concurrent connection queues, and `-presentedItemURL` needs
   that value to stay put for as long as the presenter is registered. Re-measured before the fix:
   after a repoint, `/Sub` became `/`.
-- **The DAV write verbs leak existence OUTSIDE the share through their parent precheck.** Found
-  while measuring the `_RealPath` fix, not by reading. PUT, MKCOL and the MOVE/COPY destination run
-  `-fileExistsAtPath:` on the destination's parent BEFORE resolving and testing containment, and
-  that predicate follows symlinks — so through an escaping link, `PUT /esc/nodir/x` answers **409**
-  and `PUT /esc/there/x` answers **403**, differing only in whether `there` exists outside the
-  share. Same class as the oracle `testUnresolvableEntriesFailClosedWithoutBreakingCreation`
-  closed for the read verbs; this is the half it never covered, and it predates that fix.
-  The ordering was deliberate and is documented in all three sites as "checked after the
-  parent-exists test so a genuinely missing collection still reports 409 rather than 403" — which
-  was TRUE while `_RealPath` tolerated only one missing component, because resolving first would
-  have turned legitimate 409s into 403s. The walk removes that constraint, so the correct order
-  (resolve, test containment, THEN test the RESOLVED parent) is now available. Do not fix this by
-  keeping the precheck and special-casing symlinks.
 - A header-time refusal can lose its error-page body to a TCP reset (the status is never lost).
 - Phase 2's low-value structural tail: the URI-to-path derivation, and the limits/constants.
 
@@ -1394,6 +1395,13 @@ alongside the two that must change — the first change made deliberately under 
    worse in one specific way: the feature it guarded never turned on, and every functional test
    passed while it did nothing. Guard the nil explicitly before any `NSRange`, `NSRect` or
    `NSSize` returned from a possibly-nil receiver.
+11. **A status that differs by what the filesystem holds is an answer about the filesystem.** Any
+   predicate consulted BEFORE containment leaks across the share boundary if it follows symlinks,
+   and `-fileExistsAtPath:` does. The tell is two refusals with different statuses on the same
+   path shape: 409-vs-403 and 404-vs-403 were both this. Ask the question after resolution, on the
+   RESOLVED path. Note the trap that kept it alive: the ordering was correct when written, and its
+   comment said so — a rule can be right and become wrong because a function underneath it got
+   better. Re-read the justification of an ordering whenever you change what it depends on.
 
 ## Appendix: audit history
 
