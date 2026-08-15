@@ -5,6 +5,28 @@
 
 #import "TestsSupport.h"
 
+// The uploader declares its NSFilePresenter conformance in a class extension inside its own .m, so
+// the selector is invisible here. Re-declaring the conformance — and nothing else — is enough to
+// override the callback and message super; it adds no implementation and changes no behaviour.
+@interface WSKWebUploader (TestVisibleFilePresenter) <NSFilePresenter>
+@end
+
+// Counts -presentedSubitemDidChangeAtURL: without changing what it does. A plain subclass rather
+// than a swizzle: this stays confined to the uploaders these tests construct instead of altering
+// the class for the whole test process.
+@interface PresenterCountingUploader : WSKWebUploader
+@property (nonatomic) NSUInteger presenterEventCount;
+@end
+
+@implementation PresenterCountingUploader
+
+- (void)presentedSubitemDidChangeAtURL:(NSURL*)url {
+    self.presenterEventCount += 1;
+    [super presentedSubitemDidChangeAtURL:url];
+}
+
+@end
+
 @interface WSKServerSentEventsTests : XCTestCase
 @end
 
@@ -367,6 +389,130 @@
     XCTAssertEqualObjects(relative, @"/Sub", @"an event for a subfolder must name it, not collapse to \"/\"");
 
     [fm removeItemAtPath:dir error:NULL];
+}
+
+// The prefix test that derives a client-facing path needs a separator boundary. Without one, a
+// SIBLING directory whose name merely begins with the share's is mapped INTO the share: a share at
+// ".../Share" answered "/2/x.txt" for ".../Share2/x.txt", slicing a directory name in half to
+// manufacture a path naming a file the share does not contain.
+//
+// Reachability, stated rather than implied: every current caller hands over a path already resolved
+// INSIDE the share, so this was not reachable from the network. It is the function being wrong, and
+// the sibling method -presentedSubitemDidChangeAtURL: has always had the boundary — the same rule
+// spelled two ways in two places, which is this codebase's signature defect shape.
+- (void)testRelativePathDerivationRequiresASeparatorBoundary {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* parent = MakeTempDirectory();
+    NSString* share = [parent stringByAppendingPathComponent:@"Share"];
+    NSString* sibling = [parent stringByAppendingPathComponent:@"Share2"];
+    [fm createDirectoryAtPath:share withIntermediateDirectories:YES attributes:nil error:NULL];
+    [fm createDirectoryAtPath:sibling withIntermediateDirectories:YES attributes:nil error:NULL];
+
+    WSKWebUploader* server = [[WSKWebUploader alloc] initWithUploadDirectory:share];
+
+    char buffer[PATH_MAX];
+    XCTAssertTrue(realpath([sibling fileSystemRepresentation], buffer) != NULL);
+    NSString* resolvedSibling = [fm stringWithFileSystemRepresentation:buffer length:strlen(buffer)];
+
+    NSString* outside = [self relativePathFrom:server forAbsolute:[resolvedSibling stringByAppendingPathComponent:@"x.txt"]];
+    XCTAssertEqualObjects(outside, @"/", @"a path outside the share must not be mapped into it (got %@)", outside);
+
+    // The permitted half, so no later fix can degrade this into "answer / for everything".
+    XCTAssertTrue(realpath([share fileSystemRepresentation], buffer) != NULL);
+    NSString* resolvedShare = [fm stringWithFileSystemRepresentation:buffer length:strlen(buffer)];
+    XCTAssertEqualObjects([self relativePathFrom:server forAbsolute:[resolvedShare stringByAppendingPathComponent:@"Sub/x.txt"]], @"/Sub/x.txt");
+    XCTAssertEqualObjects([self relativePathFrom:server forAbsolute:resolvedShare], @"/");
+
+    [fm removeItemAtPath:parent error:NULL];
+}
+
+// _resolvedUploadDirectory is captured once at init, so a share whose realpath changes under a live
+// server left every SSE event naming the share root — silently reverting the very fix the method
+// above exists for. A symlinked share repointed at a new directory is exactly how an atomic publish
+// swaps one, so this is not a contrived trigger.
+- (void)testSSEEventPathsSurviveTheShareBeingRepointed {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* parent = MakeTempDirectory();
+    NSString* targetA = [parent stringByAppendingPathComponent:@"A"];
+    NSString* targetB = [parent stringByAppendingPathComponent:@"B"];
+    NSString* link = [parent stringByAppendingPathComponent:@"share"];
+    [fm createDirectoryAtPath:[targetA stringByAppendingPathComponent:@"Sub"] withIntermediateDirectories:YES attributes:nil error:NULL];
+    [fm createDirectoryAtPath:[targetB stringByAppendingPathComponent:@"Sub"] withIntermediateDirectories:YES attributes:nil error:NULL];
+    XCTAssertTrue([fm createSymbolicLinkAtPath:link withDestinationPath:targetA error:NULL]);
+
+    WSKWebUploader* server = [[WSKWebUploader alloc] initWithUploadDirectory:link];
+
+    char buffer[PATH_MAX];
+    XCTAssertTrue(realpath([targetA fileSystemRepresentation], buffer) != NULL);
+    NSString* resolvedA = [fm stringWithFileSystemRepresentation:buffer length:strlen(buffer)];
+    // Control: the pre-repoint answer must be right, or the assertion below proves nothing.
+    XCTAssertEqualObjects([self relativePathFrom:server forAbsolute:[resolvedA stringByAppendingPathComponent:@"Sub"]], @"/Sub");
+
+    [fm removeItemAtPath:link error:NULL];
+    XCTAssertTrue([fm createSymbolicLinkAtPath:link withDestinationPath:targetB error:NULL]);
+
+    XCTAssertTrue(realpath([targetB fileSystemRepresentation], buffer) != NULL);
+    NSString* resolvedB = [fm stringWithFileSystemRepresentation:buffer length:strlen(buffer)];
+    NSString* after = [self relativePathFrom:server forAbsolute:[resolvedB stringByAppendingPathComponent:@"Sub"]];
+    XCTAssertEqualObjects(after, @"/Sub", @"an event under the repointed share must still name its subfolder (got %@)", after);
+
+    [fm removeItemAtPath:parent error:NULL];
+}
+
+// -presentedItemURL handed NSFileCoordinator the standardized path, so a share reached through a
+// symlink registered for a path no change is ever reported against and the uploader's whole
+// external-change feature was absent — not degraded, absent.
+//
+// The real-path control is load-bearing twice over: it proves the probe can see anything at all
+// (the first version of this test read _pendingChangedPaths and scored zero on the control too,
+// because the 100 ms coalescing timer drains that set and the writes were uncoordinated), and it
+// gives the symlinked case a number to match rather than a bar to clear.
+- (NSUInteger)countPresenterEventsForShare:(NSString*)share {
+    PresenterCountingUploader* server = [[PresenterCountingUploader alloc] initWithUploadDirectory:share];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    // Let the presenter registration settle before touching anything.
+    [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.5]];
+
+    // Coordinated writes, because that is what NSFilePresenter subitem notifications are built
+    // around and what a real external client (Finder) performs. A nil presenter means these are
+    // somebody else's writes, so the uploader is entitled to hear about them.
+    NSFileCoordinator* coordinator = [[NSFileCoordinator alloc] initWithFilePresenter:nil];
+    for (int i = 0; i < 4; i++) {
+        NSString* file = [share stringByAppendingPathComponent:[NSString stringWithFormat:@"external-%d.txt", i]];
+        NSURL* url = [NSURL fileURLWithPath:file];
+        [coordinator coordinateWritingItemAtURL:url options:0 error:NULL byAccessor:^(NSURL* writeURL) {
+            [[NSString stringWithFormat:@"content %d", i] writeToURL:writeURL atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        }];
+    }
+
+    NSDate* deadline = [NSDate dateWithTimeIntervalSinceNow:5.0];
+    while (([deadline timeIntervalSinceNow] > 0) && (server.presenterEventCount == 0)) {
+        [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+    }
+    NSUInteger count = server.presenterEventCount;
+    [server stop];
+    return count;
+}
+
+- (void)testSymlinkedShareStillReceivesFilePresenterEvents {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* parent = MakeTempDirectory();
+    NSString* real = [parent stringByAppendingPathComponent:@"Real"];
+    NSString* target = [parent stringByAppendingPathComponent:@"Target"];
+    NSString* link = [parent stringByAppendingPathComponent:@"Link"];
+    [fm createDirectoryAtPath:real withIntermediateDirectories:YES attributes:nil error:NULL];
+    [fm createDirectoryAtPath:target withIntermediateDirectories:YES attributes:nil error:NULL];
+    XCTAssertTrue([fm createSymbolicLinkAtPath:link withDestinationPath:target error:NULL]);
+
+    NSUInteger control = [self countPresenterEventsForShare:real];
+    NSUInteger linked = [self countPresenterEventsForShare:link];
+
+    XCTAssertGreaterThan(control, (NSUInteger)0, @"the real-path control saw no events — this test is measuring nothing");
+    XCTAssertGreaterThan(linked, (NSUInteger)0, @"a symlinked share received no file-presenter events at all (control saw %lu)", (unsigned long)control);
+
+    [fm removeItemAtPath:parent error:NULL];
 }
 
 @end

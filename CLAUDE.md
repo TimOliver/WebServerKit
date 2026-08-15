@@ -138,8 +138,10 @@ What an operator or host app MUST do (or know) to deploy this correctly.
 - **The one-stream-per-browser SSE relay depends on the Web Locks API and BroadcastChannel**;
   where either is missing the client falls back to per-tab streams — and with them the
   six-connections-per-origin browser deadlock risk for 6+ tabs on such browsers.
-- **`_resolvedUploadDirectory` is captured once** — a deployment that changes the share's realpath
-  while running silently reverts the SSE event-path fix (known-open item).
+- **A share reached through a symlink is supported for live updates**, but only since the
+  `-presentedItemURL` fix — before it, such a deployment received no external-change events at all
+  and the uploader's live-update feature was simply absent there. A share whose realpath changes
+  while running is also handled now (the derivation re-resolves on a miss).
 - **Keep advertising DAV class 2**: Finder refuses to write to a share that does not advertise it;
   that is the sole reason the LOCK stub exists.
 - **iOS Files app integration** requires `UIFileSharingEnabled` and
@@ -228,15 +230,57 @@ the same rule spelled two ways in two places.
   directory that cannot be listed is refused; a read-only NON-empty directory is refused. The
   test pins both directions.
 - **`_RealPath` is the most security-critical function in the library; any edit needs its own
-  measured pass.** When `realpath(3)` fails it resolves the PARENT and appends the raw leaf —
-  the branch that lets `PUT`/`MKCOL` to a not-yet-existing name resolve at all, and also the
-  branch a dangling symlink takes. An entry that exists and cannot be resolved fails CLOSED
+  measured pass.** When `realpath(3)` fails it WALKS UP until an ancestor resolves and appends the
+  missing components — the branch that lets `PUT`/`MKCOL` to a not-yet-existing name resolve at
+  all, and also the branch a dangling symlink takes. It used to try the immediate parent exactly
+  ONCE, which made "absent" and "refused" the same answer as soon as a client named a path two
+  levels past anything real: GET, HEAD, PROPFIND and PROPPATCH answered 403 where 404 was owed, and
+  DELETE the same one level deeper (it resolves the parent itself, so it got one level for free).
+  Measured on an 11-verb × 7-path matrix before and after; `rclone copy dav:/a/b` treats that 403
+  as fatal. **LOCK and UNLOCK are NOT part of this class** — they answer 405 at tip, though an
+  earlier spelling of the record listed them. The walk does not weaken containment: an escaping
+  path still resolves to a location outside the root and is refused by the caller's containment
+  test whether or not anything exists there, and a component that EXISTS but will not resolve
+  still fails closed at each step. **The walk is BOUNDED by `PATH_MAX`, and that bound is load-
+  bearing rather than tidiness**: the request target is client input capped only by the header
+  block, and the walk does work per missing component, so the first version — which also built its
+  result quadratically — cost **2,259 ms of CPU for a 16,000-component path against 15 ms before
+  the walk existed**, a 153× amplifier on a server with a 128-connection cap and no rate limiting.
+  Nothing at or beyond `PATH_MAX` can name a filesystem entry (`ENAMETOOLONG`), so it is refused
+  before the walk starts, fail-closed and independent of anything on disk. Collect components by
+  APPENDING and join once; `insertObject:atIndex:0` and `stringByAppendingPathComponent:` in a loop
+  are each quadratic. Measured worst case inside the bound is ~10 ms at 400 components against
+  ~0.9 ms on the old code — linear, accepted, and the lever if that ever matters is a component
+  cap well below `PATH_MAX`. The rejected fix — a `-fileExistsAtPath:` parent precheck in
+  each read verb — is what reopens the existence oracle, because that predicate answers for paths
+  outside the share. `WSKResolvedPathIsWithinDirectory` now answers YES for a deep not-yet-existing
+  path inside the share, which is simply true: it reports CONTAINMENT, not existence. Its test
+  previously pinned the one-level cutoff as though it were a rule, two lines below asserting YES
+  for the one-level-shallower spelling of the same question.
+  An entry that exists and cannot be resolved fails CLOSED
   (403), so an escaping symlink answers 403 whether its target exists or not — previously
   403-vs-404, an existence oracle for paths outside the share. Dangling links inside the share
   and symlink loops also answer 403 (neither was ever served). The regression test asserts the
   FIVE operations that must survive (PUT new path 201, PUT in subfolder 201, MKCOL 201, PUT over
   existing 204, GET 200) alongside the two that change. MOVE to a new name was measured in the probe
   and never made it into the test — the probe table in the old record listed six.
+- **Resolve and test containment BEFORE asking the filesystem any question about the path.**
+  `-fileExistsAtPath:` FOLLOWS SYMLINKS, so a precheck that runs ahead of containment answers a
+  question about the filesystem OUTSIDE the share, and the status carries the answer back. Measured
+  at five sites, all in the write verbs, all pre-existing: `PUT /esc/nodir/x` answered 409 while
+  `PUT /esc/there/x` answered 403, differing only in whether `there` existed out there — and the
+  same pair for MKCOL, the COPY destination, the MOVE destination, and 404-vs-403 for a COPY
+  SOURCE reached through the link. Same class as the oracle
+  `testUnresolvableEntriesFailClosedWithoutBreakingCreation` closed for the read verbs; this was
+  the half it never covered.
+  **The old order was deliberate and its comment was true when written** ("checked after the
+  parent-exists test so a genuinely missing collection still reports 409 rather than 403"): while
+  `_RealPath` tolerated one missing component, resolving first turned legitimate 409s into 403s.
+  The walk-up removed that constraint and the correct order became available — which is why this
+  is recorded here rather than as a defect someone should have seen. **The two existence tests in
+  COPY/MOVE keep their original order relative to each other**, so a request wrong in both ways
+  reports the status it always did. Do not "fix" a future instance by keeping the precheck and
+  special-casing symlinks; move it after resolution and run it on the RESOLVED path.
 - **Hidden means where the bytes live.** `WSKResolvedPathHasHiddenComponent()` tests the resolved
   path relative to the RESOLVED ROOT — relative deliberately, because the root itself may live
   under a dot-directory (`NSTemporaryDirectory()` under a sandboxed app routinely does) and an
@@ -687,8 +731,20 @@ data held in memory; bodies streamed to disk (uploads, WebDAV PUT) are deliberat
   so a prefix comparison mixing the two fails for EVERY share under `NSTemporaryDirectory()`,
   which made every change event name the share root (`path":"//"`) and live updates silently do
   nothing for every subfolder, in the uploader's ordinary deployment. This mismatch has bitten
-  in at least two different methods; treat any new prefix comparison as suspect. (Caveat:
-  `_resolvedUploadDirectory` is captured once — see Still open.)
+  in THREE different methods now; treat any new prefix comparison as suspect. Two further rules
+  the third one taught:
+  **`-presentedItemURL` must hand out the RESOLVED root**, because `NSFileCoordinator` matches a
+  presenter against the canonical path of the changed item — registering under a symlinked
+  spelling produced not fewer events but ZERO, against 8 on a same-process real-path control, i.e.
+  the whole external-change feature absent for a deployment whose share is a link. It deliberately
+  reads the ONCE-captured `_resolvedUploadDirectory` and must not re-resolve per call:
+  `NSFilePresenter` requires this URL to stay put while registered.
+  **`-_relativePathForAbsolutePath:` re-resolves on a miss**, so a share whose realpath changes
+  under a live server (a symlinked share repointed — how an atomic publish swaps one) does not
+  silently revert every event to naming the root. That result is NOT cached back, for the reason
+  directly above. Its prefix test also compares against `root + "/"`; a bare `hasPrefix:` mapped
+  the sibling `…/Share2/x.txt` into a share at `…/Share` as `/2/x.txt` (not reachable from the
+  network — every caller's path is already resolved inside the share — but wrong in the function).
 - **`-bonjourName` reads `_registrationService`** — the service actually registered, which
   carries an auto-rename. `CFNetServiceCreateCopy` taken right after registration is *initiated*
   freezes the configured name (registration is asynchronous; flags 0 means auto-rename is ON),
@@ -832,7 +888,10 @@ exercise changes, not on suspicion.
   and still 0 at rest. An RSS creep of ~15 B/request was chased and proved allocator behaviour
   (`leaks(1)` zero; live bytes fell between samples; a legitimate-traffic control showed the
   same slope). PR #72's connection reuse HAS since been soaked with keep-alive ENABLED — 6.01 h,
-  85,210,679 requests, 14.4 TB, descriptors at baseline and `reservedInMemoryByteCount` 0 at rest.
+  85,210,679 requests, 14.4 TB, descriptors at baseline and `reservedInMemoryByteCount` 0 at rest
+  (run against a keep-alive-OFF control in the same process, so a divergence would have pointed at
+  reuse rather than at load; peak +38 descriptors in flight, budget nonzero in 47 of 392 samples
+  and never above 22 bytes).
   But that soak did not PIPELINE (its client read one response per write), so it never touched
   `_carryOverData`. **A pipelining soak has since run against the fixed tree**: 4.01 h, 748,020
   requests, 1.01 TB, **312,820 replies served from carried-over bytes**, descriptors +0 at rest,
@@ -843,6 +902,14 @@ exercise changes, not on suspicion.
   zero, most likely listen-backlog saturation under 12 workers holding reused connections, partly
   competing suite runs — cause not established. Re-run when the connection or response layer
   changes (PR #48 did; the full re-run has since exercised it).
+
+  **`task_info`'s `resident_size` is the WRONG metric for that judgement and nearly produced a
+  false alarm.** It grew 8.6 MB → 3,005 MB over the keep-alive soak and looked like a leak.
+  `leaks(1)` against the live process reported **0 leaks, 0 bytes, 17.6 MB of malloc'd nodes**,
+  and the **physical footprint was 40.3 MB (peak 54.7)** at the same instant the harness reported
+  1,957 MB. The gap is file-backed, reclaimable page cache for the 512 KB file being served tens
+  of millions of times. `phys_footprint` is what macOS uses for memory pressure and jetsam;
+  measure that, or `leaks`, and never report `resident_size` growth as accumulation.
 - **Torn writes do not happen** — 240 concurrent 128 KiB + 90 concurrent 4 MiB PUTs, zero mixed
   files (the body always lands in a temp file first). **Atomic replacement under load is safe**
   — 915 `rename(2)` replacements, 47.7 GB, zero splices, with the oracle provably sensitive
@@ -877,6 +944,38 @@ exercise changes, not on suspicion.
   against desync, not proof of its absence. ~7,000 mutated
   requests under ASan+UBSan: zero memory errors. 9,366 injected allocation failures: nothing,
   zero descriptor leaks.
+- **The seventeenth pass's own changes were audited adversarially before the branch was handed
+  over**, and the technique that found the defect was NOT the one aimed at correctness. A paired
+  existence-oracle fuzzer (same request against an absent and a present target outside the share,
+  over generated paths × depths × 12 verbs) read **940 disagreements out of 2,880 pairs against
+  `main` and 0 at tip** — sensitivity proven, no new finding. What did find something was an
+  AMPLIFICATION probe asking what a deep path now COSTS: 2,259 ms, i.e. the correctness fix had
+  introduced a denial of service. Ask what a fix costs, not only whether it is right; the
+  ~1-new-defect-per-5-fixed rate is real and it lands in exactly what the fix touched.
+  `rclone copy dav:/nodir/deeper` was driven against both trees as the closing check —
+  `CRITICAL … 403 Forbidden` before, `directory not found` after — and a real `mount_webdav` mount
+  did mkdir, a 12 MB write, byte-identical read-back, list, rename, read-after-rename, `mkdir -p`
+  on a nested path, copy, recursive delete and a clean unmount.
+- **A whole-behaviour differential of the seventeenth pass against `main`** — 480 cells (15 verbs ×
+  32 hostile targets: dangling and looping links, a link to the share root, a link to a subdirectory,
+  dot-names, `%2e%2e`, `%23`, unicode, spaces, absent paths at three depths), recording for every
+  cell BOTH the status and the resulting state of the share and of the directory outside it. 71
+  status differences, every one falling into a bucket the branch intended (26 collection allow-list
+  refusals, 18+8 escaping-link write refusals, 11 absent-path 403→404, 8 mixed), and — the number
+  that matters — **0 cells where the status matched but the filesystem effect differed**. That is
+  the shape a status-only differential cannot see and the one this project keeps being bitten by.
+  The one cell needing a ruling rather than a fix is the symlink-vetting entry under Still open.
+- **Concurrency and accumulation against the reordered write verbs**: 6 workers × 400 requests
+  racing a component that flips between a real directory and a symlink out of the share. No 500 or
+  dropped response that `main` does not also produce, nothing created outside that `main` does not
+  also create, `reservedInMemoryByteCount` 0 at rest and descriptors BELOW baseline. The one
+  difference was staging residue, which is the widened TOCTOU recorded under Settled decisions.
+  **Three rounds of adversarial audit were run against this branch and the yield fell off exactly
+  as the record predicts**: round 1 (paired oracle fuzzer + amplification probe) found a real
+  denial of service; round 2 (whole-behaviour differential vs `main`) found one behaviour change
+  needing an owner ruling and no defect; round 3 (concurrency + accumulation) found no new class,
+  only a quantified widening of a documented one. Repeating a technique finds nothing; each round
+  had to change lens to find anything at all.
 - **Conformance and real clients**, RE-TAKEN against tip after the #70/#71/#75 status changes and
   unchanged: litmus `basic` 16/16, `http` 4/4, `locks` 3/3, `props`
   29/30 (sole failure still `propfind_invalid2`, settled). The four changed behaviours were also
@@ -912,7 +1011,20 @@ has happened.
 - **The `//` status disagreement** (501 from the base-path handler, 404 from WebDAV) stays. Both
   refuse; only the status differs. Cosmetic.
 - **The directory-rename TOCTOU** (a real directory renamed between resolution and use) is not
-  closed: an `openat(2)` component walk or `O_NOFOLLOW_ANY` would also refuse the benign
+  closed, and the seventeenth pass MEASURABLY WIDENED it — recorded because the trade was made
+  deliberately and someone will otherwise re-find it as a regression. Driving 6 workers against a
+  path whose middle component flips between a real directory and a symlink out of the share, a PUT
+  lands its body outside on BOTH trees (this is the class, unchanged), but the STAGING residue left
+  outside went from 7–13 per run on `main` to 77–84 at tip, three runs each, isolated to PUT.
+  Cause: closing the write-verb existence oracle required moving the containment test AHEAD of the
+  parent-exists check, which puts one more syscall inside the resolve→write window. The two
+  properties are in direct conflict and the trade is deliberate: the oracle is an information leak
+  reachable by ANY client with no race at all, while this needs an attacker who can already rename
+  directories inside the share, and the residue is race-induced only — the 480-cell differential
+  shows no staging residue anywhere without the race. If the balance ever changes, the fix is the
+  one already adjudicated below, not re-ordering the checks back.
+  Closing it properly still means an `openat(2)` component walk or `O_NOFOLLOW_ANY`, which would
+  also refuse the benign
   intermediate symlinks that work today and are pinned by `testHiddenItemsAreRefusedThroughSymlinksToo`
   (`testBasePathHandlerRefusesSymlinkEscape` pins the ESCAPE; its positive assertion is a plain file,
   so it does not cover the benign-symlink case).
@@ -979,16 +1091,15 @@ contact roughly one time in three.
 From the sixteenth pass (all pre-existing; it counted thirteen confirmed findings left and
 enumerated nine of them — three have since been closed and are struck from this list: MKCOL's 500,
 and the two `Allow` gaps, which the draft had merged into one bullet):
-- **403 where a 404 belongs when a parent collection is absent** (breaks rclone the same way
-  MKCOL's 500 did).
+- ~~403 where a 404 belongs when a parent collection is absent~~ — **fixed**; see the restated
+  entry further down for the measured matrix and the two corrections to the record.
 - `WSKDataRequest.text`/`.jsonObject` abort for exactly the case their header documents as
   returning nil.
 - `addHandlerForMethod:path:` aborts in Debug and registers nothing in Release for a missing
   leading slash — the identical shape batch A fixed one method away.
-- The SSE prefix test has no separator boundary.
-- `_resolvedUploadDirectory` is captured once, so the SSE-path fix silently reverts if the
-  share's realpath changes during the run.
-- A symlinked share receives no `NSFilePresenter` events at all.
+  (The three SSE/file-presenter items this list also carried — the missing separator boundary,
+  `_resolvedUploadDirectory` being captured once, and a symlinked share receiving no
+  `NSFilePresenter` events — are now closed; see the restated entries further down.)
 
 From the outside audit (an independent agent, 23 findings, 5 solid after adversarial review — see
 the appendix). **All five are now CLOSED** — by #74 (typed body-failure statuses) and #75 (the
@@ -1059,36 +1170,74 @@ than the record and are restated below; three are now fixed.
   actively contradict each other about the same resource. A just-written file has zero validators
   12/12, because the mtime seal correctly withholds `getlastmodified` and `getetag` does not exist
   at all. The obvious fix was measured as failing CI; needs care.
-- **MOVE/COPY of a collection relocates/duplicates members the allow-list refuses individually** —
-  confirmed at tip. With `allowedFileExtensions = @["txt"]`, every DIRECT operation on
-  `Coll/sub/secret.pem` is 403, a recursive DELETE of the collection is 403, and a MOVE onto an
-  EXISTING destination is 403 — but MOVE and COPY of the collection to a NEW destination both
-  answer 201 and relocate/duplicate it. The vetting helper already has one home
-  (`WSKFirstUnvettableItemAtPath`); this is the two verbs it was never called from.
-- **403 where a 404 belongs when a parent collection is absent** — the record MERGED two cases that
-  measurement separates. The WRITE verbs (PUT, MKCOL, MOVE/COPY destination) already answer **409
-  Conflict**, which is RFC 4918-mandated and byte-identical to `rclone serve webdav`; nothing is
-  owed there and it must not be "fixed" to 404. It is the READ/property verbs (GET, HEAD, PROPFIND,
-  PROPPATCH, LOCK, UNLOCK, and DELETE one level deeper) that answer 403 where 404 is owed, and
-  `rclone copy dav:/a/b` CRITICALs on it. Cause: `_RealPath` tolerates exactly ONE missing trailing
-  component; two or more returns nil and every DAV verb maps nil to 403. **The obvious fix is
-  MEASURED WRONG** — mirroring the write verbs' `fileExistsAtPath:` parent precheck onto the read
-  verbs reopens the existence oracle `testUnresolvableEntriesFailClosedWithoutBreakingCreation`
-  closed, because that predicate answers YES/NO for paths OUTSIDE the share. The real fix has to
-  live inside `_RealPath` and distinguish "does not exist yet, entirely inside the share" from
-  "exists but cannot be resolved / escapes". That is a dedicated measured pass, per this file's own
-  rule about that function. Any regression test must use a TWO-or-more-missing-component path: a
-  one-level path already answers 404, so a test written against it passes on unfixed code.
-- **A symlinked share receives no `NSFilePresenter` events at all** — confirmed, 0 events vs 4 on
-  the identical real-path control, 3 runs each. The mismatch is NOT in
-  `-presentedSubitemDidChangeAtURL:`'s comparison, which is already correct — do not "fix" it there.
-- **The SSE prefix test has no separator boundary** — the record conflates TWO different prefix
-  tests. `-presentedSubitemDidChangeAtURL:` already HAS the boundary and measured clean;
-  `-_relativePathForAbsolutePath:` genuinely has none. Fix the second, leave the first alone.
-- **`_resolvedUploadDirectory` is captured once** — confirmed, but ONLY for the
-  symlinked-share-repointed trigger; the other half of the recorded claim did not reproduce. Once
-  the realpath changes under a live uploader, every SSE event from `/create`, `/upload`, `/delete`
-  and `/move` names the share root, 5/5.
+- ~~MOVE/COPY of a collection relocates/duplicates members the allow-list refuses individually~~ —
+  **fixed, at all three sites**. Measured before: with `allowedFileExtensions = @["txt"]`, every
+  DIRECT operation on `Coll/sub/secret.pem` was 403, a recursive DELETE was 403, an overwrite was
+  403 — and MOVE and COPY of the collection to a NEW destination both answered 201 and carried the
+  file with them. Both extension checks were gated behind `!srcIsDirectory`, so a collection source
+  skipped every allow-list rule. The uploader's `/move` had the identical `!isDirectory &&` gate and
+  was fixed with it, because closing this in one server and not the other is precisely how this
+  class keeps recurring. COPY is vetted too even though it destroys nothing: duplicating a file the
+  client may not read is still acting on it.
+  **Accepted cost, pinned by the test:** a collection holding anything outside the allow-list is now
+  unmovable, not merely undeletable — the same cost already accepted for DELETE, and the
+  inconsistency was the defect. The test asserts the permitted half in both directions, so no later
+  fix can degrade to "refuse every collection operation".
+- ~~403 where a 404 belongs when a parent collection is absent~~ — **fixed inside `_RealPath`**,
+  which walks up until an ancestor resolves instead of trying the parent once (see the invariant
+  above for the measured matrix). The record's guidance held up on every point that mattered: the
+  write verbs' 409 is RFC-mandated and unchanged, the `-fileExistsAtPath:` precheck really would
+  have reopened the oracle, and the regression test really does need a TWO-or-more-missing
+  component path — the one-level spelling already answered 404 and would have passed on unfixed
+  code. Two corrections to it: **LOCK and UNLOCK are not in this class** (405 at tip), and the
+  cheap textual predicate `WSKResolvedPathIsWithinDirectory` changes answer for a deep
+  not-yet-existing path inside the share, from NO to YES, which is correct — it reports
+  containment, not existence.
+  **A second oracle was found while measuring this one, and is also closed** — see the
+  resolve-before-you-ask rule under Path resolution.
+- ~~A symlinked share receives no `NSFilePresenter` events at all~~ — **fixed**, and the record's
+  own advice was what stood in the way: it said the mismatch is not in
+  `-presentedSubitemDidChangeAtURL:`, which is true and correct, but that ruled out the one method
+  it names without naming the one at fault. It was `-presentedItemURL` handing `NSFileCoordinator`
+  the *standardized* path, so the presenter registered for a spelling no change is ever reported
+  against. Re-measured before the fix at 0 events against 8 on a same-process real-path control;
+  after, 8 and 8. Note the asymmetry that hid it for three passes: the two methods that already
+  had the rule are handed a realpath'd argument and resolve their own root to match it, whereas
+  this one is the method that hands a root OUT, so nothing downstream could compensate.
+- ~~The SSE prefix test has no separator boundary~~ — **fixed** in
+  `-_relativePathForAbsolutePath:`; `-presentedSubitemDidChangeAtURL:` already had it and was left
+  alone, as the record instructed. Measured: a share at `…/Share` answered `/2/x.txt` for
+  `…/Share2/x.txt`, slicing a directory name in half. **Honest limit, recorded because the fix
+  reads more important than it is:** every current caller hands over a path already resolved
+  INSIDE the share, so this was NOT reachable from the network. It is the function being wrong,
+  not the server.
+- ~~`_resolvedUploadDirectory` is captured once~~ — **fixed** by re-resolving on a miss, last and
+  only when both cached roots fail, so the common path pays nothing. Deliberately NOT written back
+  to the ivar: those callers run on concurrent connection queues, and `-presentedItemURL` needs
+  that value to stay put for as long as the presenter is registered. Re-measured before the fix:
+  after a repoint, `/Sub` became `/`.
+- **The allow-list vetting walk judges a symlink's TARGET, not the alias — needs an owner ruling,
+  not a fix.** With `allowedFileExtensions` set and `link -> Vault` where `Vault/sub/secret.pem` is
+  not allow-listed, all three destructive verbs answer 403 for `/link`, although acting on the link
+  touches nothing inside `Vault`. Measured on both trees, which is what makes the shape clear:
+
+  | request | main | tip |
+  |---|---|---|
+  | `DELETE /link` | 403 | 403 |
+  | `MOVE /link` | 201, link moved | 403 |
+  | `COPY /link` | 201, link copied | 403 |
+  | `MOVE /Vault` | 201, **`secret.pem` moved with it** | 403 |
+
+  DELETE was ALREADY 403 on main, so the seventeenth pass did not invent this — it made MOVE/COPY
+  consistent with DELETE while closing the real defect in the last row. But consistent with what is
+  the question: **"symlinks are aliases" is a recorded OWNER decision** ("a destructive verb acts on
+  the entry the client NAMED"), and vetting the target contradicts it. It is fail-CLOSED
+  (over-refusal, no exposure) and invisible in the DEFAULT configuration, because
+  `WSKFirstUnvettableItemAtPath` returns nil when no allow-list is set.
+  **Do not "just fix" it by deriving directory-ness from `lstat`**: that reclassifies a
+  symlink-to-directory as a file, which then puts it through `_checkFileExtension:` — and a link
+  named `latest` with no extension fails that, so it answers 403 again for a different reason. Any
+  fix has to settle the allow-list-vs-alias interaction first.
 - A header-time refusal can lose its error-page body to a TCP reset (the status is never lost).
 - Phase 2's low-value structural tail: the URI-to-path derivation, and the limits/constants.
 
@@ -1256,6 +1405,16 @@ alongside the two that must change — the first change made deliberately under 
   passes); driving each entry point rather than grepping for the guard.
 - **Measure and kill hypotheses instead of filing them** ("does a PUT through a dangling link
   escape?" — measured no, recorded as a negative result).
+- **A load harness needs its own oracle debugged before its numbers mean anything.** Building the
+  keep-alive soak produced four harness bugs and only the fourth was subtle: no `SO_NOSIGPIPE`, so
+  it killed itself at three minutes (the trap this file already records the suite hitting); a
+  strong global written from twelve threads, SIGSEGV; a desync theory that was simply wrong (fixed
+  it, the numbers did not move — that is what told me it was wrong); and finally, an
+  `-abortRequest:` reply is a bare status line with **no `Content-Length`**, so a reader that
+  returns without consuming those bytes makes every later request in a keep-alive burst re-parse
+  the same stale header. That last one reported **32% of 750,000 requests as unexpected statuses**
+  — entirely the harness. After it: zero. **Do not start a long unattended run until the oracle
+  reads zero on the paths you already understand.**
 - **A second-opinion agent is differently blind, not more reliable.** An independent audit of tip
   produced 23 findings and never ran the code (its sandbox blocked `xcodebuild`, which it said
   plainly). After verification and adversarial review: 5 solid, 3 already-documented deliberate
@@ -1334,6 +1493,13 @@ alongside the two that must change — the first change made deliberately under 
    worse in one specific way: the feature it guarded never turned on, and every functional test
    passed while it did nothing. Guard the nil explicitly before any `NSRange`, `NSRect` or
    `NSSize` returned from a possibly-nil receiver.
+11. **A status that differs by what the filesystem holds is an answer about the filesystem.** Any
+   predicate consulted BEFORE containment leaks across the share boundary if it follows symlinks,
+   and `-fileExistsAtPath:` does. The tell is two refusals with different statuses on the same
+   path shape: 409-vs-403 and 404-vs-403 were both this. Ask the question after resolution, on the
+   RESOLVED path. Note the trap that kept it alive: the ordering was correct when written, and its
+   comment said so — a rule can be right and become wrong because a function underneath it got
+   better. Re-read the justification of an ordering whenever you change what it depends on.
 
 ## Appendix: audit history
 
