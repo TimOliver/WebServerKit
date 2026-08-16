@@ -90,10 +90,9 @@ typedef enum {
 @interface WSKMIMEStreamParser : NSObject
 // Why the last -appendBytes:length: or -close returned NO.
 //
-// The parser fails for seven unrelated reasons and used to report all of them as a bare NO, so the
-// request could only guess — and guessing "the client's data is malformed" turns a full temp
-// directory and a momentarily exhausted budget into 400, which tells a client never to try again.
-// That is the same mistake as answering 403 for ENOSPC, which this project fixed once already.
+// The parser fails for seven unrelated reasons; reporting them all as a bare NO leaves the
+// request guessing — and guessing "the client's data is malformed" turns a full temp
+// directory or a momentarily exhausted budget into 400, telling a client never to try again.
 @property (nonatomic, readonly) WSKRequestBodyErrorCode failureCode;
 @property (nonatomic, readonly, nullable) NSError *failureError;  // Set instead when an errno is the truth (a full disk)
 @end
@@ -213,9 +212,7 @@ static NSData *_dashNewlineData = nil;
     // [super init] and the fd sentinel are established BEFORE any failure return. Under ARC a
     // nil-returning initializer still deallocates its receiver, so -dealloc runs — and on a
     // zeroed object `_tmpFile` is 0, making its `close(_tmpFile)` a close(0) of a descriptor
-    // this object never owned. Measured: one unauthenticated POST /upload with a non-ASCII
-    // boundary closed the process's descriptor 0, and once freed that slot is handed to the next
-    // accept(), so a later malformed request tears down a live connection mid-serve.
+    // this object never owned, tearing down whatever live connection was recycled onto it.
     if (!(self = [super init])) {
         return nil;
     }

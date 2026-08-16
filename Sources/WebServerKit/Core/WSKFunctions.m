@@ -118,11 +118,9 @@ NSUInteger WSKReservedMemoryLength(void) {
 @end
 
 static NSDateFormatter *_dateFormatterRFC822 = nil;
-// RFC 9110 s5.6.7 requires a recipient to accept all three HTTP-date formats. Only
-// IMF-fixdate was handled, so If-Modified-Since / If-Unmodified-Since / If-Range carrying
-// either obsolete spelling parsed to nil and the precondition was treated as ABSENT — a
-// conditional request failing OPEN, which is the wrong direction for a validator. Only
-// ever parsed with, never formatted: senders must emit IMF-fixdate.
+// RFC 9110 s5.6.7 requires a recipient to accept all three HTTP-date formats — a spelling
+// that parses to nil makes the precondition ABSENT, a validator failing open. The two
+// obsolete forms are only ever parsed with, never formatted: senders must emit IMF-fixdate.
 static NSDateFormatter *_dateFormatterRFC850 = nil;
 static NSDateFormatter *_dateFormatterAsctime = nil;
 static NSDateFormatter *_dateFormatterISO8601 = nil;
@@ -138,13 +136,13 @@ static const NSUInteger kMaxHTTPDateLength = 64;
 // Idempotent and safe from any thread: everything here is built exactly once, under
 // dispatch_once, and read-only thereafter (all use is serialized on _dateFormatterQueue).
 //
-// It is called lazily from every function that touches a formatter, not only from
-// +[WSKWebServer initialize]. Previously it ran ONLY from there, so the public
-// WSKFormatRFC822 / WSKParseRFC822 / WSKFormatISO8601 / WSKParseISO8601 dispatch_sync'd on
-// a NULL queue — an immediate crash — for any host app that called one before touching the
-// server class at all. There is no longer a main-thread requirement: NSDateFormatter has
-// been safe to construct off the main thread for many OS releases, and dispatch_once
-// removes the race the old assertion was standing in for.
+// It MUST be called lazily from every function that touches a formatter, not only from
+// +[WSKWebServer initialize]: initialized only from there, the four public date functions
+// dispatch_sync on a NULL queue — an immediate crash — for a host app that calls one before
+// touching the server class. (No in-suite test can pin this; the suite has always
+// initialized the class by the time any test runs. The oracle is out-of-process.)
+// There is no main-thread requirement: NSDateFormatter is safe to construct off the main
+// thread, and dispatch_once removes the race the old assertion stood in for.
 static void _EnsureDateFormatters(void) {
     static dispatch_once_t onceToken;
 
@@ -176,14 +174,12 @@ static void _EnsureDateFormatters(void) {
 
         _dateFormatterQueue = dispatch_queue_create(NULL, DISPATCH_QUEUE_SERIAL);
 
-        // ICU is lenient about digit COUNT: it accepts 1-3 digits for a "yyyy" field and 1 for
-        // "yy", so "Sun Nov  6 08:49:37 94" parsed to the year 94 AD instead of failing. Any such
-        // date precedes every real mtime, which turned an If-Unmodified-Since into a permanent 412
-        // that no retry could ever satisfy — a validator that failed OPEN replaced by one that
-        // failed CLOSED, which is the worse direction. RFC 9110 §13.1.4 requires an unparseable
-        // date to be IGNORED. Anchoring the calendar year is cheaper and less brittle than
-        // tightening three ICU patterns, and it covers all three spellings rather than the two
-        // that were noticed.
+        // ICU is lenient about digit COUNT: it accepts 1-3 digits for a "yyyy" field and 1
+        // for "yy", so "…94" parses to the year 94 AD instead of failing — a date preceding
+        // every real mtime, turning If-Unmodified-Since into a permanent 412 no retry can
+        // satisfy. RFC 9110 §13.1.4 requires an unparseable date to be IGNORED (fail open).
+        // Anchoring the calendar year is cheaper and less brittle than tightening three ICU
+        // patterns, and it covers all three spellings.
         NSDateComponents *const earliest = [[NSDateComponents alloc] init];
         earliest.year = 1000;
         earliest.month = 1;
@@ -229,12 +225,10 @@ NSString *WSKExtractHeaderValueParameter(NSString *value, NSString *name) {
         return nil;
     }
 
-    // The parameter name must match at a token boundary. A plain substring search finds
+    // The parameter name must match at a token boundary: a plain substring search finds
     // "name=" inside "filename=" and "nonce=" inside "cnonce=", returning the wrong
-    // parameter whenever a client happens to order them that way — which RFC 2617 clients
-    // sending "qop"/"cnonce" do routinely, and which a multipart body may choose freely.
-    // Scanning up to the name also used to fail outright when it appeared first, since
-    // -scanUpToString: reports failure if it has nothing to skip.
+    // parameter whenever the client orders them that way — which RFC 2617 clients sending
+    // "qop"/"cnonce" do routinely, and which a multipart body may choose freely.
     NSCharacterSet *const boundaryCharacters = [NSCharacterSet characterSetWithCharactersInString:@" \t;,"];
     NSString *const token = [name stringByAppendingString:@"="];
     NSUInteger searchLocation = 0;
@@ -256,12 +250,11 @@ NSString *WSKExtractHeaderValueParameter(NSString *value, NSString *name) {
             if ([scanner scanString:@"\"" intoString:NULL]) {
                 [scanner scanUpToString:@"\"" intoString:&parameter];
             } else {
-                // Unquoted values end at whitespace or ";", so "name=upload; filename=a.txt"
-                // does not yield a trailing ";". Deliberately NOT at ",": RFC 2046 allows a
-                // comma in a multipart boundary, and terminating there truncated
-                // "boundary=ab,cd" to "ab" and broke every upload from such a client. The
-                // comma still delimits when *preceding* a name (see boundaryCharacters), which
-                // is all the comma-separated Authorization parameters need.
+                // Unquoted values end at whitespace or ";" — deliberately NOT at ",":
+                // RFC 2046 allows a comma in a multipart boundary, so terminating there
+                // truncates "boundary=ab,cd" to "ab". The comma still delimits when
+                // *preceding* a name (see boundaryCharacters), which is all the
+                // comma-separated Authorization parameters need.
                 [scanner scanUpToCharactersFromSet:[NSCharacterSet characterSetWithCharactersInString:@" \t;"] intoString:&parameter];
             }
 
@@ -296,13 +289,11 @@ NSString *WSKFormatRFC822(NSDate *date) {
 }
 
 NSDate *WSKParseRFC822(NSString *string) {
-    // Length is checked BEFORE any formatter runs, and this is load-bearing for more than tidiness.
-    // Adding the two fallback formatters made rejecting a non-date linear in its length — three
-    // full-string ICU passes plus a whole-string double-space collapse that allocates a copy —
-    // measured at 74x baseline (1.48 ms) for a value at the 64 KB header cap. All of it runs inside
-    // the single process-wide serial queue that also serializes the Date header of EVERY response,
-    // so the cost is stolen from other connections, and If-Modified-Since is parsed for every
-    // request before any handler or authentication runs. No legal HTTP-date exceeds 33 characters.
+    // Length is checked BEFORE any formatter runs, and this is load-bearing: rejecting a
+    // non-date is otherwise linear in its length (three ICU passes plus a double-space
+    // collapse), all inside the single process-wide serial queue that also serializes every
+    // response's Date header — and If-Modified-Since is parsed for every request, before any
+    // handler or authentication. No legal HTTP-date exceeds 33 characters.
     if ((string.length == 0) || (string.length > kMaxHTTPDateLength)) {
         return nil;
     }
@@ -326,9 +317,7 @@ NSDate *WSKParseRFC822(NSString *string) {
         }
 
         // ICU's tolerance of short year fields turns malformed input into a first- or
-        // second-century date rather than nil. Applied to all three spellings, not only the two
-        // where it was noticed, because "closed at one of the sites the rule applies to" is this
-        // codebase's most reliable defect shape.
+        // second-century date rather than nil. Applied to all three spellings, never a subset.
         if ((date != nil) && ([date timeIntervalSinceReferenceDate] < _earliestPlausibleDate)) {
             date = nil;
         }
@@ -390,10 +379,9 @@ NSString *WSKGetMimeTypeForExtension(NSString *extension, NSDictionary<NSString 
 
         if (mimeType == nil) {
             // UniformTypeIdentifiers is available unconditionally at the deployment floors
-            // this library ships against, so there is no availability check and no
-            // CoreServices fallback. That fallback used the UTTypeCreatePreferredIdentifierForTag
-            // family, which is deprecated on every current OS, and its @available clause had
-            // to name each platform by hand — omitting tvOS there was a live bug once.
+            // this library ships against: no availability check, no CoreServices fallback —
+            // a fallback's @available clause has to name each platform by hand, and omitting
+            // one is a silent per-platform bug.
             UTType *const type = [UTType typeWithFilenameExtension:extension];
             mimeType = type.preferredMIMEType;
         }
@@ -462,11 +450,9 @@ NSString *WSKStringFromSockAddr(const struct sockaddr *addr, BOOL includeService
     char serviceBuffer[NI_MAXSERV];
 
     // sa_len is read below before getnameinfo can fail, so a NULL address is a SEGV rather
-    // than an error return. It is reachable: a WSKRequest built by a WSKMatchBlock has no
-    // address data until the connection populates it AFTER the block returns, so a block
-    // that inspects the request it just built — which is the block's entire job — crashed
-    // the process. Same "" the getnameinfo failure below returns, so callers need no new
-    // case.
+    // than an error return — and it is reachable: a WSKRequest built by a WSKMatchBlock has
+    // no address data until the connection populates it AFTER the block returns. Same "" the
+    // getnameinfo failure below returns, so callers need no new case.
     if (addr == NULL) {
         return @"";
     }
@@ -730,15 +716,11 @@ static NSString *_RealPath(NSString *path) {
     // other path call answer ENAMETOOLONG, so such a path can neither exist nor be created. Refuse
     // it here rather than letting the walk below discover it one component at a time.
     //
-    // This is a BOUND, not an optimization. The walk below is driven by client input — the request
-    // target is capped only by the header block — and without this guard a 16,000-component path
-    // cost 2,259 ms of CPU against 15 ms before the walk existed, a 153x amplification measured on
-    // an otherwise idle server. With a 128-connection cap and no rate limiting that is a denial of
-    // service, on the deployment shape whose whole priority is running for weeks.
-    //
-    // Fail CLOSED (nil, so callers answer 403), which is also what an over-long path answered
-    // before the walk existed. It reveals nothing: the verdict depends only on the length the
-    // client sent, never on what the filesystem holds.
+    // This is a BOUND, not an optimization: the walk below does work per missing component and is
+    // driven by client input capped only by the header block, so without this guard a deep path is
+    // a CPU amplifier — a denial of service on a server with a 128-connection cap and no rate
+    // limiting. Fail CLOSED (nil, so callers answer 403). It reveals nothing: the verdict depends
+    // only on the length the client sent, never on what the filesystem holds.
     if (strlen(representation) >= PATH_MAX) {
         return nil;
     }
@@ -753,36 +735,28 @@ static NSString *_RealPath(NSString *path) {
     //
     // An entry that EXISTS and still fails realpath is a different thing: a dangling symlink, a
     // loop, or a component that cannot be traversed. Treating one as "a new path inside the share"
-    // resolved it to a location inside, and the answer then depended on whether the link's target
-    // existed — 403 when it did, 404 when it did not — which is an existence oracle for the
-    // filesystem OUTSIDE the share, reachable through any escaping link in the served content.
+    // makes the answer depend on whether the link's target exists — 403 when it does, 404 when it
+    // does not — an existence oracle for the filesystem OUTSIDE the share, reachable through any
+    // escaping link in the served content. Fail closed: the entry is there and cannot be resolved,
+    // so it cannot be acted on. A dangling link and a symlink loop answer 403 rather than 404;
+    // neither was ever served, so no working operation is lost.
     //
-    // Fail closed: the entry is there and cannot be resolved, so it cannot be acted on. Measured
-    // effect beyond closing the oracle: a dangling link and a symlink loop answer 403 rather than
-    // 404. Neither was ever served, and a PUT through a dangling link answered 500 before, so no
-    // working operation is lost — only the status changes, in the honest direction.
+    // The walk climbs until an ancestor resolves rather than trying the immediate parent ONCE:
+    // tolerating exactly one missing component makes "absent" and "refused" the same answer as
+    // soon as a client names a path two levels past anything real — 403 where 404 is owed, which
+    // clients like `rclone copy` treat as fatal.
     //
-    // The walk climbs until an ancestor resolves rather than trying the immediate parent ONCE.
-    // Tolerating exactly one missing component made "absent" and "refused" the same answer as soon
-    // as a client named a path two levels past anything real: GET, HEAD, PROPFIND and PROPPATCH
-    // all answered 403 for "/nodir/gone.txt" where 404 is owed, and DELETE did the same one level
-    // deeper (it resolves the parent itself, so it got one extra level for free). Measured across
-    // an 11-verb × 7-path matrix. `rclone copy dav:/a/b` treats that 403 as fatal and gives up,
-    // the same way MKCOL's 500 used to break tree-building clients.
-    //
-    // This does NOT reopen the existence oracle that the lstat above closes, and the distinction is
-    // the whole reason the fix lives here rather than in the verbs. The rejected alternative — a
+    // This does NOT reopen the existence oracle the lstat above closes, and the distinction is the
+    // whole reason the fix lives here rather than in the verbs. The rejected alternative — a
     // -fileExistsAtPath: parent precheck in each read verb — answers YES/NO for paths OUTSIDE the
     // share, which is precisely the oracle. Here, an escaping path still resolves to a location
     // outside the root and is then refused by the CONTAINMENT test in the caller, whether or not
-    // anything exists there; and a component that exists but will not resolve still fails closed at
-    // the top of each iteration. Verdicts for "/esc/gone.txt" and for both arms of
-    // testUnresolvableEntriesFailClosedWithoutBreakingCreation are unchanged at 403.
+    // anything exists there; and a component that exists but will not resolve still fails closed
+    // at the top of each iteration.
     //
     // The write verbs are deliberately untouched by this. PUT, MKCOL and a MOVE/COPY destination
-    // answer 409 Conflict for a missing ancestor — RFC 4918 §9.7.1, byte-identical to
-    // `rclone serve webdav` — from their own parent precheck, which this only lets them reach.
-    // 409 is correct there and must not become 404.
+    // answer 409 Conflict for a missing ancestor — RFC 4918 §9.7.1 — from their own parent
+    // precheck, which this only lets them reach. 409 is correct there and must not become 404.
     NSMutableArray<NSString *> *const missingComponents = [NSMutableArray array];
     NSString *cursor = path;
 
@@ -802,11 +776,10 @@ static NSString *_RealPath(NSString *path) {
         }
 
         // APPENDED, not inserted at index 0, and joined in a single pass below. Both spellings of
-        // the obvious version are quadratic in the component count — -insertObject:atIndex:0 shifts
-        // the whole array on every component, and -stringByAppendingPathComponent: in a loop copies
-        // the whole prefix on every component — and together they are what turned a deep path into
-        // a CPU amplifier. Bounded now by PATH_MAX above AND linear here; measured worst case
-        // inside the bound is ~10 ms at 400 components, against ~0.9 ms before the walk existed.
+        // the obvious version are quadratic in the component count — -insertObject:atIndex:0
+        // shifts the whole array on every component, and -stringByAppendingPathComponent: in a
+        // loop copies the whole prefix on every component. Bounded by PATH_MAX above AND linear
+        // here; if that ever matters, the lever is a component cap well below PATH_MAX.
         [missingComponents addObject:leaf];
 
         if (realpath([parent fileSystemRepresentation], buffer)) {
@@ -878,11 +851,9 @@ NSString *WSKServableFileTypeAtPath(NSString *path, NSString *directory, BOOL al
         return nil;
     }
 
-    // Containment was tested and hiddenness was not, so a link whose own name carries no dot but
-    // which resolves inside a dot-directory was ADVERTISED by all three listings and then refused
-    // 403 by every handler — measured. "Advertise iff served" is the rule the sixth, eighth and
-    // fifteenth passes each restored in one direction or the other; this is the half that judged
-    // only containment.
+    // Hiddenness as well as containment: a link whose own name carries no dot but which resolves
+    // inside a dot-directory would otherwise be ADVERTISED by all three listings and then refused
+    // 403 by every handler. "Advertise iff served" is the rule, in both directions.
     if (!allowHiddenItems && WSKResolvedPathHasHiddenComponent(path, directory)) {
         return nil;
     }
@@ -893,10 +864,8 @@ NSString *WSKServableFileTypeAtPath(NSString *path, NSString *directory, BOOL al
         return nil;  // Dangling, or a loop: there is nothing to advertise.
     }
 
-    // Derived from the resolution this function ALREADY performed. A caller that resolved again to
-    // learn the target's name would be making a second observation of a filesystem that need not
-    // agree with the first — the two-observations class the eighth pass closed and this file names
-    // as the general form that will recur.
+    // Derived here and handed out precisely so no caller resolves a second time: two observations
+    // of a filesystem that need not agree is the class behind the retargeted-symlink escapes.
     if (outResolvedName) {
         char resolvedBuffer[PATH_MAX];
 
@@ -917,17 +886,12 @@ NSString *WSKServableFileTypeAtPath(NSString *path, NSString *directory, BOOL al
     return nil;
 }
 
-// The two path resolvers every path-taking verb in this library goes through.
-//
-// These were FOUR near-verbatim copies — one pair per server — and the copies drifting is this
-// codebase's single most reliable defect class: the NUL guard, the hidden-item rule, recursive
-// delete vetting, If-Range and the overwrite vetting were each closed in one server and left open
-// in another. The copies were verified line-for-line identical before being merged here, so this
-// move cannot change behaviour; what it removes is the possibility of the next divergence.
-//
-// Each server keeps a three-line method wrapping these, so every call site binds the result to the
-// variable it already used — chosen over rewriting the downstream uses because it makes "I missed
-// one" structurally impossible, which is the failure mode that would matter most here.
+// The two path resolvers every path-taking verb in this library goes through. ONE implementation,
+// deliberately: these were four near-verbatim copies, and copies drifting — a rule closed in one
+// server and left open in another — is this codebase's single most reliable defect class. Each
+// server keeps a three-line method wrapping these so every call site binds the result to the
+// variable it already used, which makes "I missed one" structurally impossible. Do not inline
+// the wrappers away, and do not add a resolver copy.
 
 BOOL WSKPathsNameTheSameFile(NSString *path1, NSString *path2) {
     if ([path1 isEqualToString:path2]) {
@@ -958,14 +922,10 @@ NSString *WSKFirstUnvettableItemAtPath(NSString *absolutePath, BOOL isDirectory,
 
         if ([[subpath lastPathComponent] hasPrefix:@"."]) {
             // -skipDescendants is defined for the most recently returned SUBDIRECTORY. Calling it
-            // for a dot-named FILE popped the enclosing level instead, so every entry after the
-            // first dot-name in that directory's readdir order was never vetted — and a
-            // ".DS_Store" sits in every Finder-touched folder, sorting early. Measured: with an
-            // allow-list of "txt", DELETE of a collection holding "sub/{.DS_Store,id_rsa}"
-            // answered 204 and destroyed id_rsa, 60/60, while the same file addressed directly is
-            // refused 403. The top level of the addressed collection is immune, which is exactly
-            // why the existing tests could not see it. Only a dot-named DIRECTORY may be skipped
-            // wholesale — that part is deliberate and still holds.
+            // for a dot-named FILE pops the enclosing level instead, switching the allow-list off
+            // for everything after the first dot-name in readdir order — and a ".DS_Store" sits
+            // in every Finder-touched folder, sorting early. Only a dot-named DIRECTORY may be
+            // skipped wholesale.
             if ([subpathType isEqualToString:NSFileTypeDirectory]) {
                 [enumerator skipDescendants];
             }
@@ -1028,16 +988,10 @@ NSString *WSKNamedEntryPathForRelativePath(NSString *relativePath, NSString *dir
 }
 
 NSString *WSKResolvedPathForRelativePath(NSString *relativePath, NSString *directory, BOOL allowHiddenItems, BOOL *outHidden) {
-    // WSKNormalizePath truncates at an embedded NUL — deliberately, because the filesystem's
-    // C-string APIs do and the mismatch is otherwise exploitable. But truncating does not make
-    // the request mean what the client wrote, and acting on the prefix is how
-    // "DELETE /Victim\0/does-not-exist" answered 204 and destroyed /Victim, and how a MOVE with a
-    // NUL-bearing Destination replaced a whole directory with the moved file. The uploader has
-    // refused this since the eighth pass; this server was never swept for it.
-    //
-    // Refused here, at the one point every path-taking verb goes through, so a verb added later
-    // cannot forget it. Normalization keeps truncating as the second line, so the
-    // "secret.dat\0.png" extension-allow-list bypass stays closed.
+    // Refusal is the FIRST line against an embedded NUL, and it lives here — the one point every
+    // path-taking verb goes through — so a verb added later cannot forget it (acting on the
+    // truncated prefix is how "DELETE /Victim\0/x" destroys /Victim). WSKNormalizePath keeps
+    // truncating as the second line, so the "secret.dat\0.png" allow-list bypass stays closed.
     if (WSKPathContainsNULByte(relativePath)) {
         return nil;
     }
@@ -1055,16 +1009,12 @@ NSString *WSKResolvedPathForRelativePath(NSString *relativePath, NSString *direc
     }
 
     // A symlink that resolves to the share root itself is never what the client meant, and
-    // acting on it is catastrophic: every "not the root directory" guard in this file is
-    // evaluated on the path the client *typed*, then this resolved path is substituted for it,
-    // so "DELETE /self" passed a guard about "/self" and then removed the whole share. Measured:
-    // one unauthenticated request destroyed every file served, through DAV DELETE, DAV
-    // COPY/MOVE and the uploader's /delete alike, each answering 204 or 200.
-    //
-    // Refused here rather than re-checked at each destructive call site, so a site added later
-    // cannot forget it. Asking for the root *directly* is still allowed — listing it and
-    // uploading into it are ordinary operations — because that is the client naming the root
-    // rather than a link quietly landing on it.
+    // acting on it is catastrophic: every "not the root directory" guard is evaluated on the
+    // path the client *typed*, then this resolved path is substituted for it — so "DELETE /self"
+    // passes a guard about "/self" and then removes the whole share. Refused here, in the
+    // resolver, so a destructive call site added later cannot forget it. Asking for the root
+    // *directly* is still allowed — that is the client naming the root, not a link quietly
+    // landing on it.
     BOOL const askedForRoot = (normalizedPath.length == 0) || [normalizedPath isEqualToString:@"/"];
 
     if ((resolvedRelativePath.length == 0) && !askedForRoot) {
@@ -1184,10 +1134,9 @@ NSString *WSKEntityTagForFileInfo(const struct stat *info) {
 }
 
 // FAT truncates mtime into two-second buckets, so a timestamp one second old there can still take
-// another write without moving. Measured: msdos/FAT16/FAT32 2s, exFAT 10ms, HFS+ 1s, APFS ns.
-// Unrecognised types fail CLOSED at two seconds — smbfs and nfs can be backed by FAT and cannot be
-// probed from here, and the cost of being wrong in that direction is one extra second of caching
-// rather than a spliced representation.
+// another write without moving. Unrecognised types fail CLOSED at two seconds — smbfs and nfs can
+// be backed by FAT and cannot be probed from here, and the cost of being wrong that way is one
+// extra second of caching rather than a spliced representation. Do not "optimize" this to one.
 static time_t _ModificationTimeGranularity(int descriptor) {
     struct statfs info;
 
@@ -1227,14 +1176,12 @@ static BOOL _ItemIsRemovable(NSString *path) {
     if ((info.st_mode & S_IFMT) == S_IFDIR) {
         // A directory's own write permission is only needed to unlink its CHILDREN. Removing the
         // directory itself is rmdir(2), which needs write permission on its PARENT — so an EMPTY
-        // directory is removable whatever its own mode says. Requiring W_OK unconditionally made
-        // `chmod 555` on an empty directory render its whole ancestry permanently undeletable, and
-        // both unzip and `ditto -x -k` preserve mode 0555, so that arrives through ordinary archive
-        // extraction with no attacker and in the default configuration.
+        // directory is removable whatever its own mode says. Requiring W_OK unconditionally makes
+        // a 0555 directory render its ancestry permanently undeletable, and unzip and `ditto -x`
+        // both preserve 0555, so that arrives through ordinary archive extraction.
         //
-        // A directory that cannot be listed at all is refused: its children cannot be unlinked, and
-        // whether it has any cannot be established. That is the rare case (mode 0300); the common
-        // one is 0555, which is readable, so emptiness can be checked directly.
+        // A directory that cannot be listed at all is refused: its children cannot be unlinked,
+        // and whether it has any cannot be established.
         if (access([path fileSystemRepresentation], R_OK | X_OK) != 0) {
             return NO;
         }

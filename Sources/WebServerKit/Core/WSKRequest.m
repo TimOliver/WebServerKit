@@ -103,7 +103,6 @@ NSString *const WSKRequestAttribute_RegexCaptures = @"WSKRequestAttribute_RegexC
     // after the member or a second concatenated member. Refuse rather than discard:
     // silently dropping them hands the handler less data than the client sent while
     // still answering with a success status, and the client has no way to tell.
-    // (This was a WSK_DCHECK, which aborts a Debug build on a remote request.)
     if (_finished) {
         if (data.length) {
             WSK_LOG_ERROR(@"Trailing data after the end of the gzip request body");
@@ -175,20 +174,15 @@ NSString *const WSKRequestAttribute_RegexCaptures = @"WSKRequestAttribute_RegexC
         // End the pass when zlib has finished the member, when it left output room (so it had
         // nothing more to write), OR when it has consumed all the input it was given. That last
         // clause matters: when the inflated output exactly fills the buffer, avail_out is 0 even
-        // though zlib is done with this input, so the loop grew the buffer and called inflate()
-        // again with avail_in == 0 — which can make no progress and returns Z_BUF_ERROR, refusing
-        // a perfectly valid body. It bit only at exact multiples of the initial buffer size
-        // (256 KiB * 2^k) and only when the trailer arrived in a later read, so a streaming client
-        // chunking at 256 KiB, 512 KiB or 1 MiB was refused while 64 KiB and 128 KiB worked.
+        // though zlib is done with this input — growing the buffer and calling inflate() again
+        // with avail_in == 0 returns Z_BUF_ERROR, refusing a perfectly valid body.
         if ((result == Z_STREAM_END) || (_stream.avail_out > 0) || (_stream.avail_in == 0)) {
             if (result == Z_STREAM_END) {
-                // Trailing bytes that arrive in the SAME read as the end of the member are the
-                // same error as trailing bytes in a later one, which the `_finished` guard above
-                // already refuses. Without this the verdict depends on how the client happened to
-                // split its writes: an identical two-member body answered 200 with the second
-                // member silently dropped when sent in one write, and 500 when split at the
-                // member boundary. The client chose which, and the handler was handed less data
-                // than was sent while the status said success.
+                // Trailing bytes arriving in the SAME read as the end of the member are the
+                // same error as trailing bytes in a later one, which the `_finished` guard
+                // above already refuses. Without this the verdict depends on how the client
+                // happened to split its writes — the invariant is that the same bytes get the
+                // same answer whatever the segmentation.
                 if (_stream.avail_in > 0) {
                     WSK_LOG_ERROR(@"Trailing data after the end of the gzip request body");
 
@@ -235,10 +229,8 @@ NSString *const WSKRequestAttribute_RegexCaptures = @"WSKRequestAttribute_RegexC
 
     // Release the working buffer's charge now that the downstream writer has taken
     // whatever it intends to keep and charged that itself. The reservation must track
-    // the buffer we are *holding*, not the running total we have inflated: charging
-    // `_totalDecoded` parked the whole process-wide budget for the remaining life of
-    // the request on memory that had already been handed on and freed, so one cheap
-    // request could lock every other connection out of every in-memory path.
+    // the buffer we are *holding*, not the running total we have inflated — charging
+    // the total parks the process-wide budget on memory already handed on and freed.
     [_reservation reserveBytes:0];
     return success;
 }
@@ -246,10 +238,9 @@ NSString *const WSKRequestAttribute_RegexCaptures = @"WSKRequestAttribute_RegexC
 - (BOOL)close:(NSError **)error {
     // A body that satisfied its Content-Length but stopped part-way through the gzip
     // stream arrives here with _finished == NO. Reporting success would hand the
-    // handler a truncated body that looks complete — on WebDAV PUT that silently
-    // replaces the target with the partial content — so refuse instead. Close the
+    // handler a truncated body that looks complete, so refuse instead. Close the
     // downstream writer regardless, or its descriptor and staging file outlive the
-    // refused transaction. (This was a WSK_DCHECK, i.e. an abort in Debug builds.)
+    // refused transaction.
     inflateEnd(&_stream);
 
     if (!_finished) {
@@ -268,12 +259,10 @@ NSString *const WSKRequestAttribute_RegexCaptures = @"WSKRequestAttribute_RegexC
 
 @end
 
-// Parse an unsigned header value strictly: ASCII digits only, at least one, no overflow.
-// Used for "Content-Length" and for the two halves of a "Range".
-// -integerValue accepts "5abc" as 5, silently clamps an over-large value to NSIntegerMax
-// and tolerates a leading sign, so the framing the server uses could differ from what the
-// header literally says. NSUIntegerMax itself is refused because it is the "no body"
-// sentinel for _contentLength.
+// Parse an unsigned header value strictly: ASCII digits only, at least one, no overflow —
+// a lenient parse ("5abc", " 5", clamped overflow) lets the framing the server uses differ
+// from what the header literally says. Used for "Content-Length" and both halves of a
+// "Range". NSUIntegerMax itself is refused: it is the "no body" sentinel for _contentLength.
 static BOOL _ParseUnsignedHeaderValue(NSString *header, NSUInteger *outLength) {
     if (header.length == 0) {
         return NO;
@@ -306,14 +295,10 @@ static BOOL _ParseUnsignedHeaderValue(NSString *header, NSUInteger *outLength) {
 }
 
 // Parse a "Transfer-Encoding" list (RFC 7230 §3.3.1). Returns YES when the body uses
-// chunked framing; sets *outRejected when the framing cannot be honoured at all.
-//
-// This used to be an exact string comparison against "chunked", which quietly answered
-// "this message has no body" for every legal spelling that isn't the bare token —
-// "chunked;a=b", "gzip, chunked", "identity, chunked". The server then replied 200 while
-// silently discarding the body, and WebDAV PUT (which unlinks the destination before
-// writing) destroyed the target file outright. Anything we cannot frame or decode must be
-// refused instead, so the caller never mistakes an unread body for an empty one.
+// chunked framing; sets *outRejected when the framing cannot be honoured at all. A real
+// list parse, not a string comparison: legal spellings like "chunked;a=b" and
+// "gzip, chunked" must be refused rather than read as "no body" — the caller must never
+// mistake an unread body for an empty one.
 static BOOL _ParseTransferEncoding(NSString *header, BOOL *outRejected) {
     *outRejected = NO;
     NSMutableArray<NSString *> *const codings = [[NSMutableArray alloc] init];
@@ -355,13 +340,10 @@ static BOOL _ParseTransferEncoding(NSString *header, BOOL *outRejected) {
     return NO;
 }
 
-// Does "Accept-Encoding" actually permit gzip? (RFC 9110 §12.5.3.)
-//
-// This was a case-sensitive substring search for "gzip", which said YES to "gzip;q=0" — a client
-// explicitly refusing it — and to any token merely containing the letters, while saying NO to
-// "GZIP" and to "*". A token-exact parse costs the same and cannot be wrong in the direction that
-// sends a body a client cannot read. "x-gzip" is accepted as the synonym RFC 9110 §8.4.1 defines,
-// which is the spelling the request-decoding side twenty lines below already honours.
+// Does "Accept-Encoding" actually permit gzip? (RFC 9110 §12.5.3.) A token-exact parse
+// with q-values: a substring search says YES to "gzip;q=0" — a client explicitly refusing
+// it — which is wrong in the direction that sends a body the client cannot read. "x-gzip"
+// is the RFC 9110 §8.4.1 synonym the request-decoding side below already honours.
 static BOOL _AcceptEncodingAllowsGzip(NSString *header) {
     if (header.length == 0) {
         return NO;
@@ -399,19 +381,13 @@ static BOOL _AcceptEncodingAllowsGzip(NSString *header) {
     return allowed;
 }
 
-// Parse a "Content-Encoding" list (RFC 9110 §8.4). Returns NO when the coding cannot be undone,
-// in which case the caller MUST refuse the request.
-//
-// The installer above used to test for the exact token "gzip" and had no else branch, so every
-// other coding silently left the raw sink in place and the still-ENCODED octets were stored as
-// the entity — answered 201/204, with nothing to say the bytes on disk are not the bytes the
-// client sent. That is the same defect _ParseTransferEncoding exists to prevent, and its comment
-// already states the rule: storing the still-encoded bytes as if they were the body is worse
-// than refusing.
-//
-// "x-gzip" is decoded rather than refused: RFC 9110 §8.4.1 makes it equivalent to "gzip", so
-// treating it as unknown would trade a silent-corruption bug for an interop one. More than one
-// coding is refused because only a single gzip member can be undone here.
+// Parse a "Content-Encoding" list (RFC 9110 §8.4). Returns NO when the coding cannot be
+// undone, in which case the caller MUST refuse the request — storing still-ENCODED octets
+// as the entity answers 201/204 with nothing to say the bytes on disk are not the bytes
+// the client sent. "x-gzip" is decoded rather than refused: RFC 9110 §8.4.1 makes it
+// equivalent to "gzip", so treating it as unknown trades a silent-corruption bug for an
+// interop one. More than one coding is refused because only a single gzip member can be
+// undone here.
 static BOOL _ParseContentEncoding(NSString *header, BOOL *outGZip) {
     *outGZip = NO;
 
@@ -528,10 +504,8 @@ static BOOL _ParseContentEncoding(NSString *header, BOOL *outGZip) {
                     components = [(NSString *)[components firstObject] componentsSeparatedByString:@"-"];
 
                     if (components.count == 2) {
-                        // Both halves are parsed strictly, the same way Content-Length is:
-                        // -integerValue read "0x10" as 0, " 5"/"+5"/"5abc" as 5 and clamped an
-                        // over-large value to NSIntegerMax, so the range the server served
-                        // could differ from the one the header literally asked for.
+                        // Both halves are parsed strictly, the same way Content-Length is,
+                        // so the range served cannot differ from the one the header asked for.
                         NSString *const startString = components[0];
                         NSString *const endString = components[1];
                         NSUInteger startValue = 0;

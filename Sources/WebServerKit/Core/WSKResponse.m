@@ -291,17 +291,13 @@
 - (void)setValue:(NSString *)value forAdditionalHeader:(NSString *)header {
     // CFHTTPMessageSetHeaderFieldValue drops a header whose *value* contains CR or LF, but
     // it happily serializes those characters in a header *name* — so a name assembled from
-    // untrusted input would split the response and inject headers of the attacker's
-    // choosing. No caller in this library does that, but this is the chokepoint, and a host
-    // app naming a header after request data should not be able to forge a response.
-    // RFC 9112 §5: field-name = 1*tchar. The previous guard quoted that rule and then enforced
-    // only the EMPTY spelling of it, which left every other violation reachable — most sharply a
-    // name beginning with a space, which serializes as an obs-fold continuation line and is
-    // therefore appended to the PRECEDING header's value (measured against the real Date header).
-    // An interior space, a tab and a non-ASCII name all went out verbatim too.
-    //
-    // WSKIsHeaderTokenString is the request parser's own rule, shared rather than restated: a
-    // second implementation of a rule beside the live one is what this file keeps getting wrong.
+    // untrusted input would split the response and inject headers of the attacker's choosing.
+    // No caller in this library does that, but this is the chokepoint, and a host app naming a
+    // header after request data should not be able to forge a response. RFC 9112 §5:
+    // field-name = 1*tchar, and it must be the FULL predicate — a name beginning with a space
+    // serializes as an obs-fold continuation line, silently appended to the PRECEDING header's
+    // value. WSKIsHeaderTokenString is the request parser's own rule, shared rather than
+    // restated.
     if (!WSKIsHeaderTokenString(header)) {
         WSK_LOG_ERROR(@"Ignoring additional response header with an invalid name \"%@\"", header);
         return;
