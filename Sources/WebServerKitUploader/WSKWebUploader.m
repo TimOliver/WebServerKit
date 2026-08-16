@@ -309,11 +309,9 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
         // Registered FIRST so that it is matched LAST — handlers are inserted at index 0, so
         // registration order is reverse match order. A GET that nothing else claims answers 404
         // rather than the 501 the server returns when no handler matches at all, which is a
-        // statement about the *method* and wrong here. Serving the bundle root used to supply
-        // this incidentally: every unmatched GET fell through to a missing-file 404. Scoping the
-        // asset handlers below took that away, so "/favicon.ico" — which browsers request
-        // unprompted — began answering "Not Implemented". Matches GET only, which is exactly
-        // what the base path handler did, so no other method's status changes.
+        // statement about the *method* and wrong here ("/favicon.ico", which browsers request
+        // unprompted, must not answer "Not Implemented"). Matches GET only, so no other
+        // method's status changes.
         [self addHandlerWithMatchBlock:^WSKRequest *(NSString *requestMethod, NSURL *requestURL, NSDictionary<NSString *, NSString *> *requestHeaders, NSString *urlPath, NSDictionary<NSString *, NSString *> *urlQuery) {
             if (![requestMethod isEqualToString:@"GET"]) {
                 return nil;
@@ -438,10 +436,10 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
         };
 
         [self addHandlerForMethod:@"GET" path:@"/" requestClass:[WSKRequest class] processBlock:servePage];
-        // Convenience only — "/index.html" is the obvious thing to type, and it used to work
-        // when the bundle root was served. It is *not* what keeps the raw template unreachable:
-        // that is the scoped asset handlers above, because an exact path like this one is not a
-        // containment boundary ("/./index.html" does not match it).
+        // Convenience only — "/index.html" is the obvious thing to type. It is *not* what keeps
+        // the raw template unreachable: that is the scoped asset handlers above, because an
+        // exact path like this one is not a containment boundary ("/./index.html" does not
+        // match it).
         [self addHandlerForMethod:@"GET" path:@"/index.html" requestClass:[WSKRequest class] processBlock:servePage];
 
         // File listing
@@ -1047,12 +1045,12 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
     // same rule at the site that did not have it, which is this codebase's signature defect.
     NSString *const resolvedRoot = _resolvedUploadDirectory ? _resolvedUploadDirectory : _uploadDirectory;
 
-    // _resolvedUploadDirectory is captured ONCE, at init. If the share's realpath changes under a
-    // live server — a symlinked share repointed at a new directory, which is exactly how an
+    // _resolvedUploadDirectory is captured ONCE, at init. If the share's realpath changes under
+    // a live server — a symlinked share repointed at a new directory, which is exactly how an
     // atomic publish swaps one — both roots above are stale and every event collapses to "/"
-    // again, silently reverting the fix this method exists for (measured: 5/5 events naming the
-    // root after a repoint). Re-resolving here, LAST and only on a miss, costs one realpath(3)
-    // on a path that would otherwise be answered wrongly, and nothing on the common path.
+    // again, silently reverting the fix this method exists for. Re-resolving here, LAST and
+    // only on a miss, costs one realpath(3) on a path that would otherwise be answered wrongly,
+    // and nothing on the common path.
     //
     // Deliberately NOT written back to _resolvedUploadDirectory: these callers run on concurrent
     // connection queues, and -presentedItemURL requires that value to stay put for as long as the
@@ -1143,12 +1141,11 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
     NSString *const normalizedPath = WSKNormalizePath(relativePath);
     BOOL isDirectory = NO;
 
-    // Containment is confirmed BEFORE the item is stat'ed. Answering 404-vs-403 from a path that
-    // has not been vetted yet makes the status an existence oracle for the whole filesystem: a
-    // symlink pointing out of the share answered 403 when its target existed and 404 when it did
-    // not, so a client could probe for files it can never read. DAV has enforced and documented
-    // this ordering since the eighth pass; these two endpoints inverted it, and -deleteItem: in
-    // this same file gets it right — the rule disagreed with itself inside one server.
+    // Containment is confirmed BEFORE the item is stat'ed. Answering 404-vs-403 from a path
+    // that has not been vetted yet makes the status an existence oracle for the whole
+    // filesystem: a symlink pointing out of the share answers 403 when its target exists and
+    // 404 when it does not, so a client can probe for files it can never read. Same ordering
+    // as DAV and as -deleteItem: in this same file.
     BOOL isHidden = NO;
     NSString *const resolvedPath = [self _resolvedPathForRelativePath:relativePath hidden:&isHidden];
 
@@ -1263,12 +1260,8 @@ static BOOL _MimeTypeIsInertMedia(NSString *mimeType) {
     NSString *const relativePath = requestedPath ? requestedPath : @"/";
     BOOL isDirectory = NO;
 
-    // Containment is confirmed BEFORE the item is stat'ed. Answering 404-vs-403 from a path that
-    // has not been vetted yet makes the status an existence oracle for the whole filesystem: a
-    // symlink pointing out of the share answered 403 when its target existed and 404 when it did
-    // not, so a client could probe for files it can never read. DAV has enforced and documented
-    // this ordering since the eighth pass; these two endpoints inverted it, and -deleteItem: in
-    // this same file gets it right — the rule disagreed with itself inside one server.
+    // Containment is confirmed BEFORE the item is stat'ed — same ordering, and same existence-
+    // oracle reason, as /list above.
     BOOL isHidden = NO;
     NSString *const resolvedPath = [self _resolvedPathForRelativePath:relativePath hidden:&isHidden];
 
@@ -1749,10 +1742,10 @@ static NSString *_OriginAuthority(NSString *value) {
         }
 
         // -removeItemAtPath: deletes as it walks and stops at the first member it cannot unlink,
-        // keeping everything it already destroyed and reporting only a failure. Measured here at
-        // 21 files in and 9 left, answered 500. Ask before touching anything. Deliberately NOT
-        // folded into the allow-list walk above, which is skipped entirely when no allow-list is
-        // configured — the default, and where this is reachable.
+        // keeping everything it already destroyed and reporting only a failure. Ask before
+        // touching anything. Deliberately NOT folded into the allow-list walk above, which is
+        // skipped entirely when no allow-list is configured — the default, and where this is
+        // reachable.
         NSString *const unremovable = WSKFirstUnremovableItemAtPath(absolutePath);
 
         if (unremovable) {

@@ -311,13 +311,9 @@ static BOOL _EntityTagMatchesList(BOOL resourceExists, NSString *currentTag, NSS
 // fails the allow-list — the item itself for a file, or the offending subpath for a collection —
 // and nil when the whole thing may go.
 //
-// Both destructive shapes go through here, because each has been a hole in turn. DELETE of a
-// collection removes its whole subtree, and a folder was a spelling that bypassed the allow-list
-// entirely (measured: with an allow-list of "txt", DELETE /Folder answered 204 and destroyed both
-// "id_rsa" and ".env"). MOVE and COPY destroy exactly as much through Overwrite, and their two
-// extension checks are both gated behind !srcIsDirectory, so a collection source skipped them
-// altogether — and a collection *destination* named "Backup.txt" satisfies the file-source form.
-// Measured before this, 5/5: all four spellings answered 204 and destroyed the target.
+// Both destructive shapes go through here, because each has been a hole in turn: DELETE of a
+// collection removes its whole subtree, and MOVE/COPY destroy exactly as much through Overwrite
+// (a collection *destination* named "Backup.txt" satisfies the file-source form).
 //
 // This mirrors -[WSKWebUploader deleteItem:], deliberately including its two judgement calls.
 // Dot-names and everything under them are skipped whatever -allowHiddenItems says: they are
@@ -385,9 +381,8 @@ static NSDictionary<NSString *, NSString *> *_DeadPropertiesAtPath(NSString *pat
 }
 
 // NO on failure, with errno left as the filesystem set it. Filesystems that cannot store extended
-// attributes at all — exFAT among them, which this project has now measured rather than assumed —
-// report ENOTSUP, and the caller turns that into a per-property 403 rather than pretending the
-// property was stored.
+// attributes at all — exFAT among them — report ENOTSUP, and the caller turns that into a
+// per-property 403 rather than pretending the property was stored.
 static BOOL _SetDeadPropertiesAtPath(NSString *path, NSDictionary<NSString *, NSString *> *properties) {
     const char *const filePath = [path fileSystemRepresentation];
 
@@ -458,11 +453,9 @@ static NSString *_StagingPathForPath(NSString *path) {
 // will not replace a *non-empty directory*, so that one case still needs an explicit
 // removal first — safe here, because by then the replacement is already complete on disk.
 // `expected` is the identity the caller vetted, or NULL when the caller established that nothing
-// was there. The fallback removal below is recursive and used to run against whatever occupied the
-// path at that instant rather than against the item any check had looked at — so a PUT that
-// -performPUT: had already cleared (405 if the destination is a collection) destroyed a collection
-// that arrived in the ~30 lines between, and answered 204 No Content. Comparing dev+ino makes the
-// removal refuse anything the caller did not authorise.
+// was there. The fallback removal below is recursive, and vetting happens ~30 lines above the
+// swap — a TOCTOU window in which a collection can arrive at the path. Comparing dev+ino makes
+// the removal refuse anything the caller did not authorise.
 - (BOOL)_replaceItemAtPath:(NSString *)path withStagedItemAtPath:(NSString *)stagingPath expecting:(nullable const struct stat *)expected error:(NSError **)error {
     // With nothing vetted at the destination the swap must not replace anything: an item that
     // appeared during the window belongs to whoever created it. RENAME_EXCL fails rather than
@@ -663,8 +656,8 @@ static WSKResponse *_MethodNotAllowed(NSString *format, ...) {
 
     // absolutePath is the RESOLVED location by now, so its leaf is the target's name. The name the
     // client actually used has to be judged too, or a link is vetted by a different name here than
-    // in the listing that advertised it — measured as advertise-then-403 in one direction and
-    // hidden-then-200 in the other.
+    // in the listing that advertised it — advertise-then-403 in one direction, hidden-then-200 in
+    // the other.
     NSString *const itemName = [relativePath lastPathComponent];
     NSString *const resolvedName = [absolutePath lastPathComponent];
 
@@ -731,11 +724,10 @@ static WSKResponse *_MethodNotAllowed(NSString *format, ...) {
 
     // Resolve and test containment BEFORE asking whether the parent exists. `-fileExistsAtPath:`
     // follows symlinks, so asking it first answers a question about the filesystem OUTSIDE the
-    // share: through an escaping link, `PUT /esc/nodir/x` answered 409 and `PUT /esc/there/x`
-    // answered 403, differing only in whether `there` exists out there. That is the same existence
-    // oracle testUnresolvableEntriesFailClosedWithoutBreakingCreation closed for the read verbs,
-    // left open on the write verbs it never covered — five measured sites: this one, MKCOL, the
-    // COPY and MOVE destinations, and the COPY/MOVE source (404-vs-403 rather than 409-vs-403).
+    // share: through an escaping link, `PUT /esc/nodir/x` and `PUT /esc/there/x` differ only in
+    // whether `there` exists out there — an existence oracle, the write-verb half of the one the
+    // read verbs closed. Same rule at all five sites: here, MKCOL, the COPY and MOVE
+    // destinations, and the COPY/MOVE source (404-vs-403 rather than 409-vs-403).
     //
     // The old order was deliberate, and its comment ("checked after the parent-exists test so a
     // genuinely missing collection still reports 409 rather than 403") was TRUE at the time:
@@ -997,10 +989,10 @@ static WSKResponse *_MethodNotAllowed(NSString *format, ...) {
         NSDate *const date = WSKParseISO8601(creationDateHeader);
 
         if (!date || ![[NSFileManager defaultManager] setAttributes:@{NSFileCreationDate: date} ofItemAtPath:absolutePath error:&error]) {
-            // This step runs AFTER the collection exists, so returning here used to answer 500
-            // having already created it: the client is told the method failed, and a retry then
-            // gets 405 because the collection is there. "A refused transaction leaves nothing
-            // behind" applies to the failure paths too.
+            // This step runs AFTER the collection exists, so returning without removing it
+            // tells the client the method failed while the retry gets 405 because the
+            // collection is there. "A refused transaction leaves nothing behind" applies to
+            // the failure paths too.
             [[NSFileManager defaultManager] removeItemAtPath:absolutePath error:NULL];
             return [WSKErrorResponse responseWithServerError:kWSKHTTPStatusCode_InternalServerError underlyingError:error message:@"Failed setting creation date for directory \"%@\"", relativePath];
         }
@@ -1045,11 +1037,9 @@ static WSKResponse *_MethodNotAllowed(NSString *format, ...) {
     // a cheap thing to duplicate by accident.
     BOOL shallowCopy = NO;
 
-    // Validated for BOTH verbs. This check used to live inside the `if (!isMove)` below, so MOVE
-    // read the header not at all: every spelling — including "banana" and "0," — answered 201 and
-    // performed a full recursive relocation, while COPY, DELETE and PROPFIND all answered 400 for
-    // the same values. One rule present at three of the four verbs it applies to is this
-    // codebase's signature defect shape.
+    // Validated for BOTH verbs — inside `if (!isMove)` MOVE reads the header not at all, so
+    // every spelling ("banana", "0,") performs a full recursive relocation while COPY, DELETE
+    // and PROPFIND all answer 400 for the same values.
     //
     // Deliberately NOT stricter: RFC 4918 §9.9.2 says a client MUST NOT send any Depth but
     // infinity on a MOVE of a COLLECTION, so "0" there could be refused too. COPY and DELETE
@@ -1072,21 +1062,17 @@ static WSKResponse *_MethodNotAllowed(NSString *format, ...) {
     NSString *const hostHeader = request.headers[@"Host"];
 
     // Host is required because HTTP/1.1 requires it, and nothing else here enforces that;
-    // its *value* is deliberately never consulted below. The destination used to be parsed
-    // by searching for the Host value anywhere inside it and taking whatever followed as
-    // the path, so a Host of "x" turned "/victim.txt" into "/t" and silently relocated the
-    // file — any short, common, or ".local" host that happened to appear in a name did it.
+    // its *value* is deliberately never consulted below — Destination is parsed as a URI,
+    // never by substring-searching the Host value (a Host of "x" turns "/victim.txt" into
+    // "/t" that way, silently relocating the file).
     if ((destinationHeader.length == 0) || (hostHeader.length == 0)) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"Malformed 'Destination' header: %@", destinationHeader];
     }
 
     // The same fragment truncation the request-line validator refuses, at the one place it can
     // still arrive: HTTP stacks sanitize a URL they put in the request line but never a header
-    // value, so curl strips '#' from the target and passes it through here untouched. Measured with
-    // the request-target guard alone in place: `COPY /tiny.txt` with `Destination: http://h/Builds#x`
-    // still answered 204 and still replaced a three-build collection with a 4-byte file. Guarding
-    // only the target and calling the class closed would be exactly the "fixed at one of the sites
-    // it occurs at" pattern this file keeps recording.
+    // value, so curl strips '#' from the target and passes it through here untouched — a
+    // target-only guard is defeated by any client doing that.
     if ([destinationHeader rangeOfString:@"#"].location != NSNotFound) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"Malformed 'Destination' header: a fragment is not part of a request target: %@", destinationHeader];
     }
@@ -1180,19 +1166,14 @@ static WSKResponse *_MethodNotAllowed(NSString *format, ...) {
     }
 
     // The SOURCE has to clear the same bar as a DELETE of it would, and for the same reason: a
-    // client told it may not touch "Coll/sub/secret.pem" must not be able to relocate or duplicate
-    // that file by naming its PARENT. Both extension checks above are gated behind
-    // !srcIsDirectory, so a collection source skipped every allow-list rule — measured, MOVE and
-    // COPY of such a collection to a new destination both answered 201 and carried the file with
-    // them, while the direct spelling, a recursive DELETE, and an overwrite were all 403.
-    //
-    // This is the fourth and fifth site of the class this codebase keeps re-finding: a recursive
-    // operation doing what a direct request refuses. Note it is deliberately vetted for COPY too,
-    // which destroys nothing — duplicating a file the client may not read is still acting on it.
+    // client told it may not touch "Coll/sub/secret.pem" must not be able to relocate or
+    // duplicate that file by naming its PARENT — a recursive operation doing what a direct
+    // request refuses. Deliberately vetted for COPY too, which destroys nothing: duplicating a
+    // file the client may not read is still acting on it.
     //
     // The COST, accepted and pinned by the test: a collection holding anything outside the
-    // allow-list becomes unmovable, not merely undeletable. That is exactly the cost already
-    // accepted for DELETE, and the inconsistency was the defect.
+    // allow-list becomes unmovable, not merely undeletable — exactly the cost already accepted
+    // for DELETE, and the inconsistency was the defect.
     if (srcIsDirectory) {
         NSString *const unvettable = [self _firstUnvettableItemAtPath:srcAbsolutePath isDirectory:YES];
 
@@ -1213,9 +1194,8 @@ static WSKResponse *_MethodNotAllowed(NSString *format, ...) {
             return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"%@ to \"%@\" is not allowed: it would destroy \"%@\"", isMove ? @"Moving" : @"Copying", dstRelativePath, undeletable];
         }
 
-        // The overwrite removes the destination, so it inherits the partial-removal problem too:
-        // measured at 7 files in the destination down to 1, answered 403, with the source also left
-        // in place — a failed operation AND a gutted destination.
+        // The overwrite removes the destination, so it inherits the partial-removal problem
+        // too — without this, a failed operation AND a gutted destination.
         NSString *const unremovable = WSKFirstUnremovableItemAtPath(dstAbsolutePath);
 
         if (unremovable) {
@@ -1261,21 +1241,18 @@ static WSKResponse *_MethodNotAllowed(NSString *format, ...) {
     // name rather than removing the destination first: copying a tree takes as long as the
     // tree is big, and a failure part way through the old destroy-then-create left the
     // client with neither the old item nor a whole new one.
-    // Staged unconditionally, which the `existing ? ... : nil` form was not. When the destination
-    // looked absent, writePath WAS the destination — so the cleanup below, written for "a failed
-    // tree copy leaves a partial tree behind", recursively removed whatever occupied that name by
-    // the time the copy failed. Measured: a COPY racing a MKCOL destroyed 209 of 483 collections
-    // the other client had just created, answering 403 to one and 201 to the other, in the default
-    // configuration. The same line unlinked a pre-existing dangling symlink at the destination,
-    // which -fileExistsAtPath: reports as absent because it follows links.
+    // Staged unconditionally. With `existing ? ... : nil`, a destination that looked absent made
+    // writePath the destination itself — so the cleanup below, written for "a failed tree copy
+    // leaves a partial tree behind", recursively removed whatever occupied that name by the time
+    // the copy failed (a collection another client just created; a pre-existing dangling symlink,
+    // which -fileExistsAtPath: reports as absent because it follows links).
     //
     // Staging always means writePath is never a path this request did not create, so the cleanup
     // is safe by construction rather than by the caller remembering which branch it is in. The
-    // swap then decides whether replacing is allowed: `expecting` is NULL when nothing was vetted,
-    // which makes it exclusive, so an item that appeared in the window survives and the request
-    // refuses. Simply staging unconditionally WITHOUT that — the fix originally proposed — is
-    // worse than the defect: it moves the destruction into the swap's fallback and answers 201
-    // Created, measured at 83/144 against 25/95 unfixed.
+    // swap then decides whether replacing is allowed: `expecting` is NULL when nothing was
+    // vetted, which makes it EXCLUSIVE, so an item that appeared in the window survives and the
+    // request refuses. Staging unconditionally WITHOUT the exclusive swap is worse than the
+    // defect — it moves the destruction into the swap's fallback and answers 201.
     struct stat vettedDst;
     BOOL const haveVettedDst = existing && (lstat([dstAbsolutePath fileSystemRepresentation], &vettedDst) == 0);
     NSString *const stagingPath = _StagingPathForPath(dstAbsolutePath);
@@ -1413,9 +1390,9 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
             [xmlString appendString:@"<D:response>"];
             [xmlString appendFormat:@"<D:href>%@</D:href>", escapedPath];
 
-            // <propname/> asks which properties EXIST, not what they hold, so the names go out as
-            // empty elements. RFC 4918 §9.1 makes it part of the method; it used to be refused with
-            // 400 by the body parser, which told a client the request was malformed.
+            // <propname/> asks which properties EXIST, not what they hold, so the names go out
+            // as empty elements. RFC 4918 §9.1 makes it part of the method, not a malformed
+            // body to refuse.
             if (kind == kDAVPropFind_PropName) {
                 [xmlString appendString:@"<D:propstat><D:prop>"];
                 [xmlString appendString:@"<D:resourcetype/>"];
@@ -1451,12 +1428,12 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
             }
 
             if ((properties & kDAVProperty_LastModified) && isFile && attributes[NSFileModificationDate]) {  // Last modification date is not useful for directories as it changes implicitely and 'Last-Modified' header is not provided for directories anyway
-                // The same rule the GET path applies when it MINTS a Last-Modified, for the same
-                // reason. Without it PROPFIND handed out precisely the date WSKFileResponse exists
-                // to refuse to issue — one still inside its own timestamp bucket, so a later
-                // If-Range resume carrying it spliced two builds under one 206. And PROPFIND emits
-                // no getetag, so that unsealed date was the ONLY validator a PROPFIND-driven client
-                // could obtain. Measured 12/12 splices before this.
+                // The same seal the GET path applies when it MINTS a Last-Modified, for the
+                // same reason: without it PROPFIND publishes precisely the date WSKFileResponse
+                // refuses to issue — one still inside its own timestamp bucket, so a later
+                // If-Range resume carrying it splices two builds under one 206. And PROPFIND
+                // emits no getetag, so that unsealed date is the ONLY validator a
+                // PROPFIND-driven client can obtain.
                 //
                 // Opened O_NOFOLLOW because the containment and hidden-item rules have already
                 // judged the resolved path; this only needs the descriptor to ask the filesystem
