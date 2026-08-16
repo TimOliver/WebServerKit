@@ -186,16 +186,14 @@ NS_ASSUME_NONNULL_END
 }
 
 // CFHTTPMessageCreateResponse's own reason-phrase table stops at HTTP/1.1 as it stood in 1999,
-// so every status registered since gets its class default instead of its name. Three of them
-// this library emits in ordinary operation: 421 Misdirected Request — the Host allow-list
-// refusal, i.e. the DNS-rebinding defence — went out as "421 Bad Request", as did 424 Failed
-// Dependency (PROPPATCH's atomicity refusal) and 431 Request Header Fields Too Large (the
-// header cap). Measured across all 56 codes in WSKHTTPStatusCodes.h: fourteen were wrong.
+// so every status registered since gets its class default instead of its name — three are
+// emitted in ordinary operation here: 421 (the DNS-rebinding refusal), 424 (PROPPATCH
+// atomicity) and 431 (the header cap).
 //
-// ONLY those fourteen are supplied. Everything CF already gets right is left to CF, so every
-// status the recorded-trace corpus contains (200, 201, 207, 404) still serializes byte for
-// byte — the corpus fails on any difference, and rewriting phrases it records would have made
-// this a corpus change rather than a fix.
+// ONLY the fourteen CF gets wrong are supplied. Everything CF already gets right is left to
+// CF, so every status the recorded-trace corpus contains still serializes byte for byte —
+// the corpus fails on any difference, and rewriting phrases it records would turn a fix into
+// a corpus change.
 static CFStringRef _ReasonPhraseForStatusCode(NSInteger statusCode) {
     switch (statusCode) {
         case 102:
@@ -231,22 +229,18 @@ static CFStringRef _ReasonPhraseForStatusCode(NSInteger statusCode) {
     }
 }
 
-// What to tell a client whose request body we would not accept.
+// What to tell a client whose request body we would not accept. 500 is a claim that the
+// SERVER broke: it invites a retry of something that can never succeed (malformed chunk
+// framing, a corrupt gzip stream) and makes a client give up on something that could (a
+// momentarily exhausted budget). The typed codes exist so this can tell the truth.
 //
-// Every failure here used to answer 500, because the fixed-length and chunked readers report
-// failure as a plain BOOL and the errors they carry were all `code:-1`. 500 is a claim that the
-// SERVER broke: it invites a retry of something that can never succeed (malformed chunk framing,
-// a corrupt gzip stream) and makes a client give up on something that could (a momentarily
-// exhausted budget). The codes exist so this can tell the truth.
+// Only the zlib results that mean "the bytes you sent are not a valid stream" are the
+// client's. Z_DATA_ERROR and Z_NEED_DICT are; Z_MEM_ERROR is an allocation failure of OURS,
+// and inflateInit2 reports through the same domain — so blanket-mapping this domain to 400
+// would tell a client its request was malformed because the server ran out of memory.
 //
-// Only the zlib results that mean "the bytes you sent are not a valid stream" are the client's.
-// Z_DATA_ERROR and Z_NEED_DICT are; Z_MEM_ERROR is an allocation failure of OURS, and inflateInit2
-// reports through the same domain — so blanket-mapping this domain to 400 would tell a client its
-// request was malformed because the server ran out of memory.
-//
-// Anything unrecognised falls through to WSKServerErrorStatusCodeForError, which already maps a
-// full volume to 507 and everything else to 500, so the ENOSPC rule has ONE home rather than a
-// second copy here.
+// Anything unrecognised falls through to WSKServerErrorStatusCodeForError, which already maps
+// a full volume to 507 and everything else to 500, so the ENOSPC rule has ONE home.
 static NSInteger _StatusForBodyError(NSError *error) {
     if (error == nil) {
         return kWSKHTTPStatusCode_InternalServerError;
@@ -367,13 +361,11 @@ static BOOL _IsIPAddressLiteral(NSString *host) {
         return nil;
     }
 
-    // A stated port must be syntactically a port, but it is deliberately NOT required to equal the
-    // one this connection arrived on. It used to be, which contradicted this option's own
-    // documentation ("may include a port ...; without one, any port matches") and refused every
-    // deployment behind a port-translating hop: the client states the port it dialled, the hop
-    // forwards to a different one, and the server saw a mismatch. That is precisely the priority
-    // deployment — Tailscale Serve terminating TLS on 443 and forwarding to an ephemeral local
-    // port — where it presented as a total outage, 421 for every request.
+    // A stated port must be syntactically a port, but it is deliberately NOT required to equal
+    // the one this connection arrived on — requiring that refuses every deployment behind a
+    // port-translating hop (the client states the port it dialled, the hop forwards to a
+    // different one), which is precisely the priority deployment: Tailscale Serve terminating
+    // TLS on 443 and forwarding to an ephemeral local port.
     //
     // Dropping it costs no security, which is the whole reason it can go. The DNS-rebinding
     // defence turns entirely on the NAME: an attacker who repoints DNS still cannot make a browser
@@ -444,9 +436,8 @@ static BOOL _IsIPAddressLiteral(NSString *host) {
 // which is exactly the shape a TE.CL desync is built from.
 //
 // Matched case-insensitively over every key, rather than by subscripting the two standard
-// spellings, because CFHTTPMessageCopyAllHeaderFields only standardizes the names it recognises.
-// CFHTTPMessageCopyAllHeaderFields only standardizes the names it recognises, so a lookup that
-// matters is done over the keys rather than by subscripting one spelling.
+// spellings, because CFHTTPMessageCopyAllHeaderFields only standardizes the names it
+// recognises — a lookup that matters is done over the keys, never one spelling.
 static NSString *_HeaderValueForName(NSDictionary *headers, NSString *name) {
     for (NSString *key in headers) {
         if ([key caseInsensitiveCompare:name] == NSOrderedSame) {
@@ -1001,11 +992,9 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
                             }
 
                             // A content coding we cannot undo has to be refused here, before a
-                            // byte of it is accepted. Preparing the writer is what decides that:
-                            // an unknown coding used to leave the raw sink in place, so the
-                            // still-encoded octets were stored as the entity and answered with a
-                            // success status. Same rule, and same reason, as an unsupported
-                            // Transfer-Encoding.
+                            // byte of it is accepted — an unknown coding left in place stores
+                            // the still-encoded octets as the entity under a success status.
+                            // Same rule, and same reason, as an unsupported Transfer-Encoding.
                             if (![self->_request prepareForWriting]) {
                                 self->_requestReceived = YES;  // Nothing further is read from this socket
                                 [self _finishProcessingRequest:[WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_UnsupportedMediaType message:@"Unsupported 'Content-Encoding' header: %@", requestHeaders[@"Content-Encoding"]]];
@@ -1122,10 +1111,8 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
             } else if (self->_awaitingNextRequest && (self->_totalBytesRead == self->_readBytesWhenIdleBegan)) {
                 // A persistent connection whose client went away without beginning another
                 // request. That is how one is SUPPOSED to end — there is no request to refuse,
-                // and nobody left to read an answer — so it unwinds silently. It used to take
-                // the branch below and write a 500 into a socket that was already gone, which
-                // put a fabricated server error in the access log for every well-behaved
-                // keep-alive client.
+                // and nobody left to read an answer — so it unwinds silently, with no ERROR
+                // line and no fabricated 500 into a socket that is already gone.
                 WSK_LOG_DEBUG(@"Client closed idle keep-alive connection on socket %i", self->_socket);
             } else {
                 // A header block we could not read is the client's problem far more often
@@ -1313,18 +1300,15 @@ static BOOL _ValidateRequestLine(const unsigned char *line, NSUInteger length) {
         }
     }
 
-    // A '#' in the request-target is not a fragment to be discarded, it is a malformed target: RFC
-    // 9110 §7.1 says the fragment is not part of the request target at all. CFURLCopyPath() honours
-    // it as a delimiter and hands back only the prefix, and every verb was then executed against
-    // that prefix — so `PUT /ci/MyApp#42.ipa` wrote to `/ci/MyApp`, three builds published that way
-    // collapsed into one file under 201/204/204, and `DELETE /D1/#nope` answered 204 having
-    // destroyed `/D1`. Same shape as the NUL truncation the eighth pass refused rather than
-    // honoured, at a delimiter that fix never covered, and refused here for the same reason:
-    // truncating does not make the request mean what the client wrote.
+    // A '#' in the request-target is not a fragment to be discarded, it is a malformed target:
+    // RFC 9110 §7.1 says the fragment is not part of the request target at all. CFURLCopyPath()
+    // honours it as a delimiter and hands back only the prefix, and every verb then executes
+    // against that prefix — `PUT /ci/MyApp#42.ipa` writes to `/ci/MyApp`, `DELETE /D1/#nope`
+    // destroys `/D1`. Truncating does not make the request mean what the client wrote.
     //
     // Checked on the raw wire bytes, ahead of any CF parsing, so a -rewriteRequestURL: subclass
-    // cannot route around it. "%23" still addresses a '#'-bearing filename correctly and must keep
-    // working — that is the case a naive fix breaks.
+    // cannot route around it. "%23" still addresses a '#'-bearing filename correctly and must
+    // keep working — that is the case a naive fix breaks.
     for (NSUInteger i = firstSpace + 1; i < lastSpace; i++) {
         if (line[i] == '#') {
             return NO;
@@ -1449,10 +1433,9 @@ typedef NS_ENUM(NSInteger, WSKHeaderBlockState) {
 
     NSUInteger const length = range.location + range.length;
 
-    // kHeadersMaxLength was only ever enforced on the branch above, i.e. while still waiting for
-    // the terminator. A client that sent an oversized header block in one burst had it found,
-    // parsed and served — the cap was skipped entirely. Bound the block itself, not the buffer,
-    // which legitimately runs past it once body bytes arrive in the same read.
+    // The cap applies to the BLOCK, not the buffer: enforced only while waiting for the
+    // terminator (the branch above), an oversized block sent in one burst is found, parsed and
+    // served. The buffer legitimately runs past the cap once body bytes arrive in the same read.
     if (length > kHeadersMaxLength) {
         WSK_LOG_ERROR(@"Request headers exceeded %i bytes on socket %i", (int)kHeadersMaxLength, _socket);
         _headerFailureStatus = kWSKHTTPStatusCode_RequestHeaderFieldsTooLarge;
@@ -2083,13 +2066,11 @@ static BOOL _ETagMatchesIfNoneMatch(NSString *responseETag, NSString *ifNoneMatc
 }
 
 // RFC 9110 §13.1.3: a recipient MUST ignore If-Modified-Since when If-None-Match is
-// present. Evaluating the date first, and independently, meant a revalidation carrying a
-// *stale* ETag still got a 304 whenever the replacement's mtime was not strictly newer —
-// routine when a file is replaced within the same second, or restored with an older mtime.
-// Per RFC 9111 §4.3.4 the client then updates its stored headers from that 304, so it
-// holds the old body under the new ETag and every later revalidation matches too: the
-// stale copy is pinned indefinitely, which is precisely what the ETag exists to prevent.
-// The comment this replaces had the precedence backwards.
+// present. Evaluating the date first lets a revalidation carrying a *stale* ETag still get
+// a 304 whenever the replacement's mtime is not strictly newer — and per RFC 9111 §4.3.4
+// the client updates its stored headers from that 304, so it holds the old body under the
+// new ETag and every later revalidation matches too: the stale copy is pinned indefinitely,
+// which is precisely what the ETag exists to prevent.
 static inline BOOL _CompareResources(NSString *responseETag, NSString *requestETag, NSDate *responseLastModified, NSDate *requestLastModified) {
     if (requestETag) {
         if (!responseETag) {

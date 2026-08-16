@@ -233,11 +233,9 @@ static void _ExecuteMainThreadRunLoopSources(void) {
     if ((self = [super init])) {
         _syncQueue = dispatch_queue_create([NSStringFromClass([self class]) UTF8String], DISPATCH_QUEUE_SERIAL);
         // The Thread Performance Checker reports a priority inversion on every -stop called
-        // from the main thread. It is NOT this queue's QoS — raising it to user-initiated or
-        // even user-interactive changes nothing, which was measured. The wait is inside
-        // -_stop itself: dispatch_group_wait blocks on the listening sources' cancel
-        // handlers, which run on dispatch_get_global_queue(_dispatchQueuePriority, 0), and
-        // that priority is a documented public option (WSKOption_DispatchQueuePriority)
+        // from the main thread. It is NOT this queue's QoS — raising it changes nothing. The
+        // wait is inside -_stop itself: dispatch_group_wait blocks on the listening sources'
+        // cancel handlers, which run at _dispatchQueuePriority — a documented public option
         // governing connection handling too. Left alone deliberately: the warning is
         // diagnostic, the wait is bounded and correct, and silencing it would mean changing
         // the priority of every accepted connection.
@@ -855,9 +853,8 @@ static inline NSString *_EncodeBase64(NSString *string) {
 
     // A fixed product name rather than NSStringFromClass([self class]). This value is the
     // "Server" response header — public, observable output — and deriving it from a class
-    // name meant any internal rename leaked onto the wire and invalidated every recorded
-    // trace that asserts it. Subclasses used to change it silently too, which is not
-    // something a subclass should decide. Use WSKOption_ServerName to override.
+    // name lets an internal rename (or a subclass) leak onto the wire and invalidate every
+    // recorded trace that asserts it. Use WSKOption_ServerName to override.
     _serverName = [(NSString *)_GetOption(_options, WSKOption_ServerName, kWSKServerName) copy];
     NSString *const authenticationMethod = _GetOption(_options, WSKOption_AuthenticationMethod, nil);
 
@@ -1213,16 +1210,12 @@ static inline NSString *_EncodeBase64(NSString *string) {
                 // dead for the rest of the foreground session, so an operator staring at an
                 // unreachable device otherwise has nothing at all to go on.
                 //
-                // Deliberately NOT a -webServerDidStop: call. -_stop above already posts one, so
-                // adding a second delivered TWO callbacks for one stop — and the added one fired
-                // synchronously, so it arrived FIRST and inverted the ordering against
-                // -webServerDidDisconnect:. The delegate could already tell this case apart
-                // without it: a failed restart delivers a stop with no matching start.
-                //
-                // The claim that justified that call — that -isRunning and -serverURL "still
-                // answer as though it were serving" — was measured FALSE on both trees, 7/7:
-                // both report stopped. Recorded here because this file has now overstated the
-                // code five times, and this is the correction.
+                // Deliberately NOT a -webServerDidStop: call. -_stop above already posts one;
+                // a second call here delivers TWO callbacks for one stop, and a synchronous
+                // one arrives FIRST, inverting the ordering against -webServerDidDisconnect:.
+                // The delegate can already tell this case apart without it — a failed restart
+                // delivers a stop with no matching start — and -isRunning/-serverURL both
+                // correctly report stopped here, so nothing needs "fixing".
                 WSK_LOG_ERROR(@"Failed restarting %@ on returning to the foreground: %@", [self class], error);
             }
         }
@@ -1678,17 +1671,13 @@ static NSString *_EscapeHTMLString(NSString *string) {
     [html appendString:@"<ul>\n"];
 
     for (NSString *entry in contents) {
-        // The index must agree with what the handler will actually serve. With
-        // allowHiddenItems:YES it served a dot-file happily while omitting it here, so the
-        // browsable listing described a *smaller* tree than the one being vended — the same
-        // disagreement, in the opposite direction, that the sixth pass fixed by refusing to
-        // serve what this listing hid.
+        // The index must agree with what the handler will actually serve — "advertise iff
+        // served", in both directions: neither serving what the listing hides nor listing
+        // what the handler refuses.
         if (includeHiddenItems || ![entry hasPrefix:@"."]) {
             // Classified by what a symlink points at, so the index describes what is actually
-            // served — the same "the listing must agree with the handler" rule the sixth and
-            // eighth passes each fixed in the other direction. A link out of the served root, or
-            // a dangling one, classifies as nothing and stays unlisted, because that is what the
-            // handler would refuse.
+            // served. A link out of the served root, or a dangling one, classifies as nothing
+            // and stays unlisted, because that is what the handler would refuse.
             NSString *const type = WSKServableFileTypeAtPath([path stringByAppendingPathComponent:entry], path, includeHiddenItems, NULL);
 
             // Any process can delete the entry between the directory read above and this
@@ -1732,11 +1721,10 @@ static NSString *_EscapeHTMLString(NSString *string) {
     // has to be recorded here too.
     [self _noteRegisteredMethod:@"GET"];
 
-    // The leading and trailing slashes used to be an undocumented precondition enforced by
-    // WSK_DNOT_REACHED(): abort with no diagnostic in Debug, and in Release register
-    // NOTHING and return, so every request 404'd with the host app given no clue why.
-    // Neither spelling is ambiguous, so both are simply normalized. Only a genuinely
-    // unusable base path is refused now, and loudly.
+    // Leading/trailing-slash spellings are normalized rather than treated as an undocumented
+    // precondition — neither is ambiguous, and aborting (Debug) or silently registering
+    // nothing (Release) gives the host app no clue why every request 404s. Only a genuinely
+    // unusable base path is refused, and loudly.
     if (basePath.length == 0) {
         WSK_LOG_ERROR(@"Refusing to add a base-path handler: the base path is empty");
         return;
@@ -1839,14 +1827,13 @@ static NSString *_EscapeHTMLString(NSString *string) {
                 if (fileType) {
                     if ([fileType isEqualToString:NSFileTypeDirectory]) {
                         if (indexFilename) {
-                            // Resolved and contained like every other path this handler acts on.
-                            // It used to be appended to an already-resolved directory and served
-                            // unchecked — so an indexFilename containing a separator or ".."
-                            // escaped the served root, since -attributesOfItemAtPath: follows
-                            // intermediate components and WSKFileResponse's O_NOFOLLOW guards only
-                            // the final one. Host-app configuration rather than client input, and
-                            // every in-tree caller passes nil, but the header states the
-                            // containment guarantee unconditionally.
+                            // Resolved and contained like every other path this handler acts
+                            // on: appended unchecked, an indexFilename containing a separator
+                            // or ".." escapes the served root — -attributesOfItemAtPath:
+                            // follows intermediate components and WSKFileResponse's O_NOFOLLOW
+                            // guards only the final one. Host-app configuration rather than
+                            // client input, but the header states the containment guarantee
+                            // unconditionally.
                             NSString *indexRelativePath = nil;
                             NSString *const indexPath = WSKResolveWithinDirectory([filePath stringByAppendingPathComponent:indexFilename], directoryPath, &indexRelativePath);
 
