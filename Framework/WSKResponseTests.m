@@ -355,6 +355,93 @@
     XCTAssertEqualObjects([[NSString alloc] initWithData:decoded encoding:NSUTF8StringEncoding], [chunks componentsJoinedByString:@""]);
 }
 
+// gzip over a FILE response, which neither round-trip above covers: WSKFileResponse ends its
+// body through the `} else if (_size > 0)` branch in -readData:, and a zero-length NSData is
+// the end-of-stream sentinel WSKGZipEncoder needs to select Z_FINISH. A regression there
+// (returning nil at normal end) produced an unterminated, undecodable gzip stream at every
+// size — while identity file responses hid it completely, because Content-Length had already
+// framed the body. This is the identity-hidden half, so it needs its own pin.
+- (void)testGZipEncodedFileResponseRoundTrips {
+    NSString* dir = MakeTempDirectory();
+
+    // One file smaller than the 32 KiB read buffer, one spanning several reads with an
+    // unaligned tail, so both the single-chunk and multi-chunk paths reach the sentinel.
+    for (NSNumber* sizeNumber in @[ @117, @100000 ]) {
+        NSUInteger size = sizeNumber.unsignedIntegerValue;
+        NSMutableData* original = [NSMutableData dataWithLength:size];
+        uint8_t* bytes = original.mutableBytes;
+        for (NSUInteger i = 0; i < size; i++) {
+            bytes[i] = (uint8_t)(i * 31 + 7);
+        }
+
+        NSString* path = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"f%lu.bin", (unsigned long)size]];
+        XCTAssertTrue([original writeToFile:path atomically:YES]);
+
+        WSKFileResponse* response = [WSKFileResponse responseWithFile:path];
+        XCTAssertNotNil(response);
+        response.gzipContentEncodingEnabled = YES;
+
+        NSData* encoded = DrainResponseBody(response);
+        XCTAssertNotNil(encoded, @"gzip file response never completed at %lu bytes", (unsigned long)size);
+        NSData* decoded = GZipDecompress(encoded);
+        XCTAssertNotNil(decoded, @"file response body was not a valid gzip stream at %lu bytes", (unsigned long)size);
+        XCTAssertEqualObjects(decoded, original, @"gzip round-trip corrupted the body at %lu bytes", (unsigned long)size);
+    }
+
+    [[NSFileManager defaultManager] removeItemAtPath:dir error:NULL];
+}
+
+// A file truncated while it is being served: read(2) returns 0 with bytes still owed against
+// the Content-Length already promised. That must surface as an ERROR — the transfer dies
+// visibly — never as the zero-length success sentinel, which would tell the client a short
+// body is complete.
+- (void)testFileTruncatedWhileServedIsReportedAsAnErrorNotACleanEnd {
+    NSString* dir = MakeTempDirectory();
+    NSString* path = [dir stringByAppendingPathComponent:@"shrinking.bin"];
+    const NSUInteger kSize = 96 * 1024;  // Three 32 KiB reads
+    XCTAssertTrue([[NSMutableData dataWithLength:kSize] writeToFile:path atomically:YES]);
+
+    WSKFileResponse* response = [WSKFileResponse responseWithFile:path];
+    XCTAssertNotNil(response);
+    XCTAssertEqual(response.contentLength, kSize);
+
+    [response prepareForReading];
+    XCTAssertTrue([response performOpen:NULL]);
+
+    NSData* (^readChunk)(NSError**) = ^NSData*(NSError** outError) {
+        __block NSData* chunk = nil;
+        __block NSError* chunkError = nil;
+        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+        [response performReadDataWithCompletion:^(NSData* data, NSError* readError) {
+            chunk = data;
+            chunkError = readError;
+            dispatch_semaphore_signal(semaphore);
+        }];
+        XCTAssertEqual(dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC))), 0L, @"reader never completed");
+        if (outError) {
+            *outError = chunkError;
+        }
+        return chunk;
+    };
+
+    // First chunk arrives normally.
+    NSError* error = nil;
+    NSData* first = readChunk(&error);
+    XCTAssertEqual(first.length, (NSUInteger)(32 * 1024));
+    XCTAssertNil(error);
+
+    // Truncate below the offset already consumed: the next read(2) hits EOF with
+    // two chunks still owed.
+    XCTAssertEqual(truncate(path.fileSystemRepresentation, 16 * 1024), 0);
+
+    NSData* next = readChunk(&error);
+    XCTAssertNil(next, @"a truncated-under-us file must not deliver data or the success sentinel");
+    XCTAssertNotNil(error, @"premature EOF with bytes owed must be reported as an error");
+
+    [response performClose];
+    [[NSFileManager defaultManager] removeItemAtPath:dir error:NULL];
+}
+
 // The same streamed response without gzip must be unaffected.
 - (void)testStreamedResponseWithoutGZipRoundTrips {
     __block NSUInteger index = 0;
