@@ -611,7 +611,7 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
 
 - (WSKResponse *)performGET:(WSKRequest *)request {
     NSString *const relativePath = request.path;
-    NSString *absolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)];
+    NSString *absolutePath = nil;  // Bound below to the resolver's answer; the unresolved spelling was a dead store here, and the resolved path is the only one any rule may consult anyway.
     BOOL isDirectory = NO;
 
     // Containment comes before the item is stat'ed: answering 404-vs-403 from a path that
@@ -1739,7 +1739,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
     }
 
     NSString *relativePath = request.path;
-    NSString *absolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)];
+    NSString *absolutePath = nil;  // Bound below to the resolver's answer; the unresolved spelling was a dead store here, and the resolved path is the only one any rule may consult anyway.
     BOOL isDirectory = NO;
 
     // As in -performGET:, containment is confirmed before the item is stat'ed so that the
@@ -1835,7 +1835,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
     }
 
     NSString *const relativePath = request.path;
-    NSString *absolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)];
+    NSString *absolutePath = nil;  // Bound below to the resolver's answer; the unresolved spelling was a dead store here, and the resolved path is the only one any rule may consult anyway.
     BOOL isDirectory = NO;
 
     // Locking neither reads nor writes content, but the resolved location is checked here
@@ -1977,7 +1977,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
     }
 
     NSString *const relativePath = request.path;
-    NSString *absolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)];
+    NSString *absolutePath = nil;  // Bound below to the resolver's answer; the unresolved spelling was a dead store here, and the resolved path is the only one any rule may consult anyway.
     BOOL isDirectory = NO;
 
     // As in -performLOCK:, checked so that no path-handling entry point lacks one, and

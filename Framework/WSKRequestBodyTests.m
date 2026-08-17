@@ -560,4 +560,26 @@
     XCTAssertEqualObjects(text.text, @"hello", @"a genuine text/* body must still decode");
 }
 
+// The Headers state refuses a part whose Content-Disposition carries no name= before the
+// Content state is ever entered — the invariant the part constructors' nonnull control-name
+// contracts stand on (the content-state guard added with the analyzer cleanup restates it
+// locally). An empty VALUE, by contrast, is an ordinary blank form field and must parse to
+// an argument holding empty data, not be confused with the nameless case.
+- (void)testMultipartRefusesANamelessPartAndAcceptsAnEmptyValue {
+    NSError* error = nil;
+
+    WSKMultiPartFormRequest* nameless = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
+    NSData* namelessBody = SSEData(@"--X\r\nContent-Disposition: form-data\r\n\r\nvalue\r\n--X--\r\n");
+    BOOL const namelessAccepted = [nameless performWriteData:namelessBody error:&error] && [nameless performClose:&error];
+    XCTAssertFalse(namelessAccepted, @"a part with no control name must fail the parse");
+
+    WSKMultiPartFormRequest* blank = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
+    NSData* blankBody = SSEData(@"--X\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\n\r\n--X--\r\n");
+    XCTAssertTrue([blank performWriteData:blankBody error:&error], @"an empty value is an ordinary blank field: %@", error);
+    XCTAssertTrue([blank performClose:&error], @"%@", error);
+    WSKMultiPartArgument* argument = [blank firstArgumentForControlName:@"note"];
+    XCTAssertNotNil(argument, @"the blank field must still be delivered");
+    XCTAssertEqual(argument.data.length, (NSUInteger)0, @"a blank field's value is empty data");
+}
+
 @end

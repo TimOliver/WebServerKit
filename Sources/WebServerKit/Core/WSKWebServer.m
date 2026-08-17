@@ -232,13 +232,18 @@ static void _ExecuteMainThreadRunLoopSources(void) {
 - (instancetype)init {
     if ((self = [super init])) {
         _syncQueue = dispatch_queue_create([NSStringFromClass([self class]) UTF8String], DISPATCH_QUEUE_SERIAL);
-        // The Thread Performance Checker reports a priority inversion on every -stop called
-        // from the main thread. It is NOT this queue's QoS — raising it changes nothing. The
-        // wait is inside -_stop itself: dispatch_group_wait blocks on the listening sources'
-        // cancel handlers, which run at _dispatchQueuePriority — a documented public option
-        // governing connection handling too. Left alone deliberately: the warning is
-        // diagnostic, the wait is bounded and correct, and silencing it would mean changing
-        // the priority of every accepted connection.
+        // The Thread Performance Checker used to report a priority inversion on every -stop
+        // called from the main thread. It was never this queue's QoS — raising it changes
+        // nothing. The wait is inside -_stop itself: dispatch_group_wait blocks on the
+        // listening sources' cancel handlers, and group waits do not propagate the waiter's
+        // priority the way dispatch_sync does. An earlier note left this alone on the ground
+        // that silencing it "would mean changing the priority of every accepted connection" —
+        // true only of the blunt fix (raising _dispatchQueuePriority, the documented public
+        // option governing accept handling). The actual fix is surgical: the CANCEL handler
+        // alone is wrapped in an enforced USER_INTERACTIVE block where it is installed, so
+        // the two instructions a stopper actively waits on (close() + leave) can never be
+        // outranked by any waiter, and accepted-connection work keeps the configured
+        // priority untouched. Measured: 27 checker reports per suite run before, 0 after.
         _stateQueue = dispatch_queue_create("gcdwebserver.state", DISPATCH_QUEUE_SERIAL);
         _sourceGroup = dispatch_group_create();
         _handlers = [[NSMutableArray alloc] init];
@@ -695,7 +700,14 @@ static inline NSString *_EncodeBase64(NSString *string) {
 - (dispatch_source_t)_createDispatchSourceWithListeningSocket:(int)listeningSocket isIPv6:(BOOL)isIPv6 {
     dispatch_group_enter(_sourceGroup);
     dispatch_source_t source = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, listeningSocket, 0, dispatch_get_global_queue(_dispatchQueuePriority, 0));
-    dispatch_source_set_cancel_handler(source, ^{
+    // ENFORCE_QOS_CLASS at USER_INTERACTIVE, deliberately above the source's own queue: this is
+    // the one block -_stop's dispatch_group_wait actively waits on, group waits do not propagate
+    // the waiter's priority, and a -stop from the main thread otherwise inverts against
+    // Default-QoS teardown (the Thread Performance Checker flagged exactly this, 27 times per
+    // suite run). The EVENT handler below stays at _dispatchQueuePriority — that option governs
+    // connection handling, and this wrap is what lets it keep doing so. See the _sourceGroup
+    // ivar comment for the ruling this supersedes.
+    dispatch_source_set_cancel_handler(source, dispatch_block_create_with_qos_class(DISPATCH_BLOCK_ENFORCE_QOS_CLASS, QOS_CLASS_USER_INTERACTIVE, 0, ^{
         @autoreleasepool {
             int result = close(listeningSocket);
 
@@ -706,7 +718,7 @@ static inline NSString *_EncodeBase64(NSString *string) {
             }
         }
         dispatch_group_leave(self->_sourceGroup);
-    });
+    }));
     dispatch_source_set_event_handler(source, ^{
         @autoreleasepool {
             struct sockaddr_storage remoteSockAddr;

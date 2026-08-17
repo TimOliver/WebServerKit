@@ -982,10 +982,30 @@ exercise changes, not on suspicion.
 - **Static analysis found nothing reproducible** (nine analyzer configurations, three engines,
   every plausible diagnostic then driven from the network; zero survived). After thirteen passes
   of runtime instrumentation, the remaining defects are not the kind a symbolic explorer finds —
-  do not re-run it.
+  do not re-run it *hunting for bugs*. Xcode's 2640-era default checker set later surfaced six
+  diagnostics as IDE noise, and their triage confirmed the rule: none was a reachable defect. One
+  imprecision (errno read after a short write, which sets none — the code now captures each
+  syscall's errno at the call), one cross-state-machine invariant the analyzer cannot see (a
+  nameless multipart part is refused in the Headers state; the Content state now restates it as
+  log-and-fail, the same nonnull contracts' defense-in-depth), and four dead stores of the
+  UNRESOLVED path spelling in DAV verbs — deleted, which is the direction the two-observations
+  rule prefers anyway. `xcodebuild analyze` reads zero at tip; keep it that way as hygiene, and
+  keep not mining it for security findings.
 - **ThreadSanitizer's 4 data races in `-_stop` are FALSE POSITIVES** — a 200-trial experiment
   (198 genuinely overlapping) confirmed libdispatch orders a source's cancel handler after its
   in-flight event handler, an edge TSan does not model. Do not "fix" them.
+- **The Thread Performance Checker's priority-inversion report on `-stop` was REAL and is
+  FIXED — the opposite ruling from TSan's, on the same method.** `-_stop`'s `dispatch_group_wait`
+  blocks on the listening sources' cancel handlers, and group waits do not propagate the
+  waiter's priority; a stop from the main thread waited on Default-QoS teardown (27 reports per
+  suite run, all one site). An in-code note used to leave this alone because "silencing it would
+  mean changing the priority of every accepted connection" — true only of the blunt fix (raising
+  `WSKOption_DispatchQueuePriority`'s queue). The surgical fix wraps ONLY the cancel handler in a
+  `DISPATCH_BLOCK_ENFORCE_QOS_CLASS` USER_INTERACTIVE block, so the two instructions a stopper
+  waits on (`close()` + leave) cannot be outranked while accept handling keeps the configured
+  priority. Measured 27 → 0. The residual, accepted: an accept handler already in flight when
+  cancellation lands still runs at the option's QoS ahead of the cancel handler — bounded by one
+  `accept()` round, not worth touching the public option over.
 - **Request smuggling is structurally impossible in the DEFAULT configuration** (keep-alive off, so
   one request per connection, `Connection: Close`, leftover bytes dropped) — verified LIVE by
   pipelining. With `WSKOption_ConnectionKeepAliveTimeout` set, that premise is preserved by

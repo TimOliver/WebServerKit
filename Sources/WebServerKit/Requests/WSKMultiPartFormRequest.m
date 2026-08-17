@@ -380,7 +380,16 @@ static NSData *_dashNewlineData = nil;
                     NSUInteger contentLength = range.location;
                     NSUInteger dataLength = (contentLength >= 2) ? (contentLength - 2) : 0;
 
-                    if (_subParser) {
+                    if (_controlName == nil) {
+                        // The Headers state refuses a nameless part before the Content state is
+                        // ever entered, so this cannot fire today — but that invariant lives a
+                        // whole state-machine iteration away (the analyzer flags the argument
+                        // constructor below without it), the constructors' nonnull contracts
+                        // depend on it, and every byte here is remote input: log-and-fail,
+                        // never assert.
+                        WSK_LOG_ERROR(@"Multipart part reached the content state without a control name");
+                        success = NO;
+                    } else if (_subParser) {
                         if (![_subParser appendBytes:dataBytes length:contentLength] || ![_subParser isAtEnd]) {
                             // Reachable on malicious/malformed nested content — the sub-parser
                             // rejected it (depth cap or in-memory buffer cap) or the nested
@@ -402,7 +411,13 @@ static NSData *_dashNewlineData = nil;
                         }
                     } else if (_tmpPath) {
                         ssize_t result = write(_tmpFile, dataBytes, dataLength);
+                        // errno is only defined after a FAILING call, and a SHORT write is not a
+                        // failing call — it sets nothing. Capture each call's errno at the call,
+                        // or the read in the failure branch below picks up whatever stale value
+                        // the last unrelated syscall left there (and close() clobbers write()'s).
+                        int const writeErrno = (result < 0) ? errno : 0;
                         int closeResult = close(_tmpFile);  // Always close (no short-circuit) so the fd never leaks on a write failure.
+                        int const closeErrno = (closeResult != 0) ? errno : 0;
                         _tmpFile = -1;
 
                         if ((result == (ssize_t)dataLength) && (closeResult == 0)) {
@@ -412,9 +427,11 @@ static NSData *_dashNewlineData = nil;
                         } else {
                             // A short write means the temporary directory filled up — an ordinary
                             // environment condition, not an unreachable state, so fail the parse
-                            // rather than abort in debug.
+                            // rather than abort in debug. It also sets no errno, hence the
+                            // ENOSPC default — which is what a short write means here anyway.
                             WSK_LOG_ERROR(@"Failed writing part of 'multipart/form-data' to disk");
-                            _failureError = WSKMakePosixError(errno ? errno : ENOSPC);
+                            int const failureErrno = writeErrno ? writeErrno : (closeErrno ? closeErrno : ENOSPC);
+                            _failureError = WSKMakePosixError(failureErrno);
                             success = NO;
                             unlink([_tmpPath fileSystemRepresentation]);  // Remove the orphaned temp file; -dealloc can't (we clear _tmpPath below).
                         }
@@ -435,7 +452,13 @@ static NSData *_dashNewlineData = nil;
                     } else {
                         _budget->partCount += 1;
                         _budget->argumentBytes += dataLength;
-                        NSData *const data = [[NSData alloc] initWithBytes:(void *)dataBytes length:dataLength];
+                        // -subdataWithRange: rather than -initWithBytes:length: over the raw
+                        // pointer: same copy of the same bytes, but bounds-checked, and with no
+                        // pointer for an empty argument value (an ordinary blank form field) to
+                        // turn into the recurring nil-into-Foundation class — .bytes is nullable
+                        // and -initWithBytes: declares its pointer non-null, which is what the
+                        // analyzer's nullability checker flagged.
+                        NSData *const data = [_data subdataWithRange:NSMakeRange(0, dataLength)];
                         WSKMultiPartArgument *const argument = [[WSKMultiPartArgument alloc] initWithControlName:_controlName contentType:_contentType data:data];
                         [_arguments addObject:argument];
                     }
