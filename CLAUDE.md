@@ -74,7 +74,9 @@ What each shape depends on:
 - **Both depend on refusing clearly rather than half-succeeding.** A request the server cannot
   honour exactly should fail with a status that says so, leaving prior state untouched.
   Silently accepting something and doing an approximation of it is the worst outcome. This is
-  why an unsupported `Transfer-Encoding` is a 400 rather than an empty body, why a destructive
+  why an unsupported `Transfer-Encoding` is refused rather than read as an empty body (501 for a
+  coding the server does not implement, 400 for a malformed application of one it does — the
+  eighteenth pass split the two, both still refusals), why a destructive
   operation stages and swaps rather than removing first, why a truncated gzip body is refused
   rather than written, and why a recursive delete refuses when it would destroy a file a
   direct delete would have refused.
@@ -296,8 +298,13 @@ the same rule spelled two ways in two places.
   how `POST /delete path=/Keep%00/x` once destroyed `/Keep`). `WSKNormalizePath` truncating at a
   NUL is kept as a SECOND line, because the filesystem's C-string APIs truncate and the mismatch
   is otherwise exploitable (`secret.dat\0.png` passes an allow-list and opens `secret.dat`). The
-  nil/NUL class is this codebase's single most repeated defect — five recurrences, each a site an
-  earlier fix did not reach. **Never claim it closed without a site inventory.**
+  nil/NUL class is this codebase's single most repeated defect — six recurrences, each a site an
+  earlier fix did not reach. **Never claim it closed without a site inventory.** The sixth site
+  was a NUL in a header field VALUE, which sailed through the validating pass and into
+  `request.headers` answering 200 (RFC 9110 §5.5 requires reject-or-replace; digest auth had
+  been individually hardened against exactly this). Closed in the eighteenth pass at the block
+  validator, alongside every other C0 control and DEL — HTAB and obs-text (0x80–0xFF) still
+  pass, because that is a control-byte refusal, not an ASCII allow-list.
 - **`#` is guarded at both places a URL arrives**: on the raw wire bytes in
   `_ValidateRequestLine` — ahead of any CF parsing, so a `-rewriteRequestURL:` subclass cannot
   route around it — and in `Destination`. `CFURLCopyPath()` treats `#` as a fragment delimiter,
@@ -368,6 +375,18 @@ the same rule spelled two ways in two places.
   PUT is the opposite case because it would create, so there `If-Match: *` correctly fails 412.
   Both directions are pinned by a test precisely so a later pass does not re-find the 404 and
   "correct" it.
+- **`If-Match` and `If-Unmodified-Since` are ALSO evaluated on reads** (GET/HEAD, every serving
+  surface), in `-overrideResponse:forRequest:` ahead of the If-None-Match/If-Modified-Since
+  pair — RFC 9110 §13.2.1 applies the preconditions to every method, and a mismatching
+  `If-Match` on a GET answered 200 until the eighteenth pass (safe direction, so no client ever
+  noticed). The site is deliberately GATED to GET/HEAD and 2xx: the DAV write verbs evaluate
+  preconditions BEFORE acting and their 201/204 carries no entity tag, so an ungated re-check
+  here would turn every conditional write that correctly SUCCEEDED into a 412 — the test pins a
+  passing conditional PUT for exactly that trap. The tag comparison is `WSKEntityTagMatchesList`,
+  ONE home shared with the DAV write-verb evaluator (hoisted there from DAV). Interplay with the
+  seal: while `Last-Modified` is withheld, the response has no modification date, so
+  `If-Unmodified-Since` is ignored per §13.1.4 — inside the bucket a date cannot distinguish two
+  representations, so it cannot be allowed to refuse one either.
 - **All three RFC 9110 date spellings parse** (IMF-fixdate, RFC 850, `asctime()`); only
   IMF-fixdate is ever FORMATTED. Sharp details: `twoDigitStartDate` is exactly a window opening
   50 years ago (§5.6.7's two-digit-year rule); `asctime()` pads a single-digit day to width two
@@ -403,13 +422,25 @@ the same rule spelled two ways in two places.
 ### Header and framing rules
 
 - **One validating pass over the header block**: paired CRLF only, no obs-fold, `1*tchar` field
-  names, and a request line of exactly `method SP target SP HTTP/1.[01]`. Header failures answer
-  431/400, never 500. This exists because the block was delimited by CRLFCRLF but parsed by
-  CFHTTPMessage, which ends at a bare LF-LF — headers between the two silently dropped
+  names, and a request line of exactly `method SP target SP HTTP-version`. Header failures answer
+  431/414/400/505, never 500. This exists because the block was delimited by CRLFCRLF but parsed
+  by CFHTTPMessage, which ends at a bare LF-LF — headers between the two silently dropped
   (`X-Pad: p\n\nHost: evil.example` produced a request with NO Host, taking the allow-list's
   no-Host branch), `Content-Length : 5` and folded `Content-Length:\r\n 5` both produced a
   length, and `GET /a HTTP/1.1 junk` dispatched with path `/a HTTP/1.1`. All eight probe cases
-  answered 200 before.
+  answered 200 before. The eighteenth pass widened the same pass rather than adding a second one:
+  C0 controls and DEL in field values are refused (the NUL entry under path resolution), more
+  than one `Host` line is 400 (counted on the RAW lines — CFHTTPMessage merges duplicates into
+  one comma-joined value, and a comma is LEGAL in a reg-name, so the merged spelling cannot be
+  told apart downstream), at least one empty line ahead of the request-line is skipped (RFC 9112
+  §2.2 — the skip offset is also where the CF append starts), and the version rules are grammar
+  first: not `HTTP/DIGIT.DIGIT` → 400; a major this server does not implement → **505**; a HIGHER
+  minor within HTTP/1 is patched to `1.1` in place and served (RFC 9110 §2.5 — the patched line
+  is exactly what CF parses, so `_clientIsHTTP10` stays truthful). The validator also reports
+  whether the target was ABSOLUTE-FORM, read off the raw line — see Host validation for why the
+  parsed URL cannot answer that. An over-cap refusal splits by what overflowed: no line
+  terminator inside the whole block budget means the request LINE itself did → **414**; anything
+  else → 431.
 - **`kHeadersMaxLength` applies to the BLOCK, not the buffer** — enforcing it only while waiting
   for the terminator let an oversized block sent in one burst be parsed and served, and the
   buffer legitimately runs past the cap once body bytes arrive in the same read.
@@ -424,7 +455,13 @@ the same rule spelled two ways in two places.
 - **`Transfer-Encoding` is parsed properly** (list split, parameters stripped, chunked must be
   the sole coding); anything that cannot be framed or decoded is refused, never treated as an
   empty body — exact-string matching once read RFC-legal `gzip, chunked` as "no body" after the
-  destination had already been unlinked. Chunked framing and interim `100 Continue` are never
+  destination had already been unlinked. The refusal status splits per RFC 9112 §6.1 (eighteenth
+  pass): a coding the server does not IMPLEMENT (`gzip, chunked`, `gzip`) answers **501**; a
+  malformed APPLICATION of an implemented one (`chunked, chunked`, `Content-Length` alongside
+  chunked, an unparseable Content-Length) stays 400. The split is decided by
+  `WSKTransferEncodingIsUnsupported`, which shares its tokenizer with the framing decision in
+  `WSKRequest` — by the time the connection writes the refusal, both cases are just a nil
+  request, so the connection has to re-ask. Chunked framing and interim `100 Continue` are never
   sent to HTTP/1.0 clients, which read them as body.
 - **`Content-Encoding`: `gzip` and `x-gzip` decode** (RFC 9110 §8.4.1 defines `x-gzip` as a
   synonym; refusing it trades silent corruption for an interop bug); every other coding is 415,
@@ -466,7 +503,20 @@ the same rule spelled two ways in two places.
   reverse): `Host` derives from the request URL, so a browser can only state this server's port;
   a differing port comes from a forwarder or a non-browser client, against which rebinding does
   not apply. The uploader's CSRF check (Origin vs Host) is sound *because* Host is validated
-  first.
+  first. Three eighteenth-pass refinements, none of which moves the rebinding defence:
+  **an ABSOLUTE-FORM target's authority is what gets validated and the Host header is ignored**
+  (RFC 9112 §3.2.2 — the old order let the more attacker-shaped input win; not browser-reachable,
+  browsers send absolute-form only to proxies). The form flag comes from the RAW request line
+  (`_requestTargetIsAbsoluteForm`), NEVER from `_request.URL.host` alone —
+  `CFHTTPMessageCopyRequestURL` synthesizes an absolute URL FROM the Host header for origin-form
+  requests, so by the time a URL exists, "the target carried an authority" and "Host did" are
+  indistinguishable, and CF has already sanitized the value ("bad host value" came back as a
+  clean host, which silently defeated the syntax rule below — measured, the one green-phase
+  failure of the pass). **More than one Host line answers 400** (in the block validator).
+  **A refusal splits by syntax**: not even a well-formed authority → 400 (RFC 9112 §3.2), a
+  well-formed name this server does not serve → 421 — judged only on the REFUSAL path,
+  deliberately, so an operator who allow-listed an odd spelling keeps it (an exact match is
+  admitted before syntax is ever asked).
 - **A mapped HEAD gets a bodiless response** (it once ran `/events` and registered an SSE channel
   no client ever held). The deliberate exception that is NOT fixed: with
   `WSKOption_AutomaticallyMapHEADToGET` = NO *and* a host-app handler registered for HEAD, a body
@@ -647,7 +697,17 @@ data held in memory; bodies streamed to disk (uploads, WebDAV PUT) are deliberat
   real, deliberately: deployments are single-user, the same lost-update protection exists
   statelessly via `If-Match`/`If-Unmodified-Since` (usable by every client, not only lockers),
   and real class 2 needs the `If:` grammar — a parser, and parsers have been the richest defect
-  source here.
+  source here. Sharp edges an auditor will trip on: the whole class-2 façade is **Finder-only**
+  (`_IsMacFinder` — `WebDAVFS/`/`WebDAVLib/` user agents; everyone else gets `DAV: 1` and 405
+  for LOCK/UNLOCK), and the stub requires `Depth: 0` exactly — a LOCK with no Depth answers 403
+  even from Finder's user agent, which is fine because Finder always sends it (the recorded
+  traces are the proof). Since the eighteenth pass a new lock also returns the RFC 4918 §9.10
+  `Lock-Token` response header (Finder reads the body's `locktoken`; a conforming client is
+  entitled to the header — the affected recordings had the one header line added, verified as
+  the only byte difference), and **`Allow` tells the same per-client story as `DAV`**: the
+  class-1 list for non-Finder clients, so the 405 a non-Finder LOCK receives no longer lists
+  LOCK inside its own refusal (RFC 9110 §15.5.6 — Allow is the target's CURRENTLY SUPPORTED
+  methods).
 - **MOVE/COPY stage unconditionally and swap EXCLUSIVELY** (`renamex_np(RENAME_EXCL)`) when
   nothing was vetted, so an item appearing in the window survives and the request refuses.
   `existing` detection is deliberately unchanged: `-fileExistsAtPath:` follows links, so a
@@ -1006,8 +1066,12 @@ exercise changes, not on suspicion.
 Each is deliberate and carries its reason, because without the reason someone re-fixes it — which
 has happened.
 
-- **A MOVE with no `Overwrite` header answers 412.** RFC 4918 §9.9.3 says absent means `T`, but
-  conforming would make MOVE destructive by default, against "refuse rather than half-succeed".
+- **A MOVE with no `Overwrite` header answers 412 — when the destination EXISTS.** RFC 4918
+  §9.9.3 says absent means `T`, but conforming would make MOVE destructive by default, against
+  "refuse rather than half-succeed". The earlier spelling of this entry omitted the scope: a MOVE
+  to a FRESH destination has nothing to overwrite and answers 201 with no `Overwrite` header at
+  all (measured in the eighteenth pass — the code was always scoped this way; the record's
+  sentence over-claimed).
 - **The `//` status disagreement** (501 from the base-path handler, 404 from WebDAV) stays. Both
   refuse; only the status differs. Cosmetic.
 - **The directory-rename TOCTOU** (a real directory renamed between resolution and use) is not
@@ -1505,6 +1569,26 @@ alongside the two that must change — the first change made deliberately under 
 
 Newest first. One entry per pass/change-set; the durable rules extracted from each live in the
 body above.
+
+- **Eighteenth pass: HTTP-conformance audit + fixes, 2026-08-17.** ~115 raw-socket probes across
+  request-line, framing, Range, conditional, Expect and WebDAV matrices, then a fix branch for
+  everything not covered by a settled decision. The bulk measured clean (framing strictness,
+  Range/416 arithmetic, 304 validator set, 100-continue both directions, chunk extensions and
+  trailers, the DAV status matrix). Fixed, each with a regression test proven red first: NUL and
+  other C0 controls in header VALUES answered 200 (the nil/NUL class's sixth site); If-Match /
+  If-Unmodified-Since were never evaluated on reads (safe direction; gated to GET/HEAD to avoid
+  re-judging the write verbs' tag-less successes); an absolute-form target's authority lost to
+  the Host header; multiple/invalid Host answered 421 where 400 is owed (syntax judged only on
+  the refusal path); unsupported transfer codings answered 400 for 501; HTTP/2.0 answered 400
+  for 505 and HTTP/1.2 was refused instead of served as 1.1; a leading CRLF was refused; an
+  oversized request-target answered 431 for 414; the non-Finder 405 for LOCK listed LOCK in its
+  own Allow; a new lock omitted the Lock-Token header. Two probe-design artifacts in the audit
+  itself (a MOVE matrix that forgot the destination must exist; a LOCK probe missing `Depth: 0`)
+  re-confirmed the project's outside-findings base rate. One record over-claim corrected (the
+  MOVE/Overwrite settled entry). One green-phase surprise recorded: CFHTTPMessageCopyRequestURL
+  synthesizes the URL's authority from Host for origin-form, so absolute-form must be detected
+  on the raw request line. Deliberate deviations left standing: no-Host-still-served,
+  the 501/404 unmatched-request model, and the Finder-only class-2 façade.
 
 - **Outside audit + three PRs (#70–#72), 2026-08-01.** An independent agent (Codex) reported 23
   findings without running the code. Verification plus adversarial review left 5 solid, 3
