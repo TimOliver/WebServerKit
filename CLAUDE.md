@@ -1363,6 +1363,13 @@ alongside the two that must change — the first change made deliberately under 
 
 ### Verification
 
+- **Code coverage is enabled in the Mac scheme's TestAction** (scoped to the framework target so
+  the test bundle does not dilute it; view via Xcode's Report navigator after ⌘U, or
+  `xcodebuild test -resultBundlePath r.xcresult` + `xcrun xccov view --report r.xcresult`).
+  **Read it as "what lacks an IN-SUITE test", never as "what is unverified"**: the trace corpus,
+  litmus, the soaks and every probe harness run OUT-OF-PROCESS, so code they exercise —
+  the replay machinery itself, endpoints covered only by recorded traces — reports as uncovered
+  here. Baseline at enablement: 75.3% of the framework.
 - **Read the executed count, never the failure count.** A crashed test runner reports
   success-shaped output: `Executed 0 tests, with 0 failures` (three separate recorded instances,
   including regression tests that SEGV'd the runner against the unfixed tree, and a SIGPIPE'd
