@@ -405,6 +405,16 @@ BOOL WSKIsHeaderTokenString(NSString *_Nullable string);
  */
 NSString *WSKHostNameWithoutRootLabel(NSString *host);
 
+/**
+ *  Returns YES when a `Transfer-Encoding` header names a transfer coding this server does not
+ *  implement at all — the case RFC 9112 §6.1 assigns 501 rather than the 400 owed to a malformed
+ *  APPLICATION of an implemented coding ("chunked, chunked", Content-Length alongside chunked).
+ *
+ *  Shares its tokenizer with the framing decision in WSKRequest's initializer, which has already
+ *  collapsed both cases into a nil request by the time the connection writes the refusal.
+ */
+BOOL WSKTransferEncodingIsUnsupported(NSString *header);
+
 #pragma mark - Path, validator and vetting internals
 
 // The audit-shaped half of what used to be WSKFunctions.h. These carry contracts that changed
@@ -582,6 +592,21 @@ NSString *_Nullable WSKServableFileTypeAtPath(NSString *path, NSString *director
  *  measurement behind that.
  */
 NSString *WSKEntityTagForFileInfo(const struct stat *info);
+
+/**
+ *  Evaluates an `If-Match` / `If-None-Match` style entity-tag list against the current tag.
+ *
+ *  `"*"` matches any existing representation — `resourceExists` answers that question, and it is
+ *  deliberately NOT keyed on `currentTag` being non-nil: a tag is only minted for a regular file,
+ *  and keying `*` on it made every conditional operation on a collection fail forever. `strong`
+ *  selects the RFC 9110 §8.8.3.2 comparison: strong (required for `If-Match`), where a `W/` tag
+ *  can never match, or weak (for `If-None-Match`), where the prefix is stripped from the
+ *  client's side — tags this server issues are always strong.
+ *
+ *  One home shared by the WebDAV write-verb preconditions and the connection's read-side
+ *  evaluation, so the tag a GET hands out is judged by the same rule everywhere it comes back.
+ */
+BOOL WSKEntityTagMatchesList(BOOL resourceExists, NSString *_Nullable currentTag, NSString *list, BOOL strong);
 
 /**
  *  Returns YES if the modification time in `info` may be ISSUED as a `Last-Modified` validator for

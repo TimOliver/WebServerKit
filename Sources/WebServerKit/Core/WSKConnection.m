@@ -133,6 +133,7 @@ NS_ASSUME_NONNULL_END
     // — answers and closes exactly as it always has.
     NSTimeInterval _keepAliveTimeout;   // 0 disables reuse entirely, which is the default
     BOOL _requestIsBodyless;            // No Content-Length and no Transfer-Encoding, from the raw header names
+    BOOL _requestTargetIsAbsoluteForm;  // The request-target carried its own authority (RFC 9112 §3.2.2), read off the raw request line
     BOOL _willKeepAlive;                // Decided before the headers go out, honoured after the body does
     BOOL _awaitingNextRequest;          // Between requests: the idle rules differ from the header phase
     NSUInteger _requestsServed;         // Bounds how long one client can hold a connection slot
@@ -302,6 +303,33 @@ static BOOL _IsIPAddressLiteral(NSString *host) {
     return (inet_pton(AF_INET, value, &address4) == 1) || (inet_pton(AF_INET6, value, &address6) == 1);
 }
 
+// Is this a syntactically plausible reg-name (RFC 3986 §3.2.2: unreserved / pct-encoded /
+// sub-delims)? Decides 400-versus-421 on the Host refusal path — RFC 9112 §3.2 requires 400 for
+// an INVALID field value, and a 421 there instead invites the client to retry the same malformed
+// bytes at another origin. Deliberately not consulted on the admission path, so an allow-list
+// entry an operator spelled unusually keeps working.
+static BOOL _IsSyntacticallyValidRegName(NSString *name) {
+    if (name.length == 0) {
+        return NO;
+    }
+
+    for (NSUInteger i = 0; i < name.length; i++) {
+        unichar const character = [name characterAtIndex:i];
+        BOOL const unreserved = ((character >= 'a') && (character <= 'z')) || ((character >= 'A') && (character <= 'Z')) ||
+                                ((character >= '0') && (character <= '9')) ||
+                                (character == '-') || (character == '.') || (character == '_') || (character == '~');
+        BOOL const subDelimOrEscape = (character == '!') || (character == '$') || (character == '&') || (character == '\'') ||
+                                      (character == '(') || (character == ')') || (character == '*') || (character == '+') ||
+                                      (character == ',') || (character == ';') || (character == '=') || (character == '%');
+
+        if (!unreserved && !subDelimOrEscape) {
+            return NO;
+        }
+    }
+
+    return YES;
+}
+
 
 // Refuse a request whose "Host" names something this server does not answer to. This is the
 // only defence against DNS rebinding: once a page on evil.example repoints its DNS here, the
@@ -309,15 +337,32 @@ static BOOL _IsIPAddressLiteral(NSString *host) {
 // satisfied — but the browser still sends the name the page was loaded from. See
 
 - (WSKResponse *)_rejectIfHostNotAllowed {
-    NSString *const hostHeader = _request.headers[@"Host"];
+    NSString *authority = _request.headers[@"Host"];
+
+    // RFC 9112 §3.2.2: with an absolute-form request-target the origin server MUST ignore the
+    // Host header and validate the TARGET's authority — of the two, Host is the one this check
+    // used, i.e. the more attacker-shaped input won. CFHTTPMessageCopyRequestURL preserves the
+    // target as sent, so the URL carries a host exactly when the request line was absolute-form.
+    // This does not move the rebinding defence (a rebound browser sends origin-form), it makes
+    // the absolute-form spelling answer the same way its origin-form spelling always has.
+    NSURL *const requestURL = _request.URL;
+    NSString *const targetHost = _requestTargetIsAbsoluteForm ? requestURL.host : nil;
+
+    if (targetHost.length) {
+        NSNumber *const targetPort = requestURL.port;
+        // NSURL hands an IPv6 literal back without its brackets; restore the header spelling so
+        // one parse below serves both sources.
+        NSString *const bracketedHost = [targetHost containsString:@":"] ? [NSString stringWithFormat:@"[%@]", targetHost] : targetHost;
+        authority = targetPort ? [NSString stringWithFormat:@"%@:%@", bracketedHost, targetPort] : bracketedHost;
+    }
 
     // No "Host" at all: HTTP/1.0 and plenty of native clients omit it, and rebinding needs
     // a browser, which never does. There is nothing here that could have been rebound.
-    if (hostHeader.length == 0) {
+    if (authority.length == 0) {
         return nil;
     }
 
-    NSString *const normalized = [hostHeader lowercaseString];
+    NSString *const normalized = [authority lowercaseString];
     NSString *name = normalized;
     NSString *portText = nil;
 
@@ -325,13 +370,13 @@ static BOOL _IsIPAddressLiteral(NSString *host) {
         NSRange closing = [name rangeOfString:@"]"];
 
         if (closing.location == NSNotFound) {
-            return [self _misdirectedResponseForHost:hostHeader];
+            return [self _invalidHostResponseForAuthority:authority];
         }
 
         NSString *const remainder = [name substringFromIndex:(closing.location + 1)];
 
         if (remainder.length && ![remainder hasPrefix:@":"]) {
-            return [self _misdirectedResponseForHost:hostHeader];
+            return [self _invalidHostResponseForAuthority:authority];
         }
 
         portText = remainder.length ? [remainder substringFromIndex:1] : nil;
@@ -382,7 +427,7 @@ static BOOL _IsIPAddressLiteral(NSString *host) {
         }
 
         if (!digitsOnly) {
-            return [self _misdirectedResponseForHost:hostHeader];
+            return [self _invalidHostResponseForAuthority:authority];
         }
     }
 
@@ -390,7 +435,17 @@ static BOOL _IsIPAddressLiteral(NSString *host) {
         return nil;
     }
 
-    return [self _misdirectedResponseForHost:hostHeader];
+    // RFC 9112 §3.2 splits the refusals: a value that is not even a syntactically valid
+    // authority answers 400, while a well-formed name this server does not serve answers 421.
+    // The syntax question is asked only on the refusal path, deliberately: an exact allow-list
+    // match was admitted above, so an operator who explicitly listed an odd spelling keeps it.
+    // A bracketed form reaching this point is always invalid — every valid IPv6 literal was
+    // admitted by _IsIPAddressLiteral.
+    if (isBracketed || !_IsSyntacticallyValidRegName(name)) {
+        return [self _invalidHostResponseForAuthority:authority];
+    }
+
+    return [self _misdirectedResponseForHost:authority];
 }
 
 - (WSKResponse *)_misdirectedResponseForHost:(NSString *)hostHeader {
@@ -401,6 +456,16 @@ static BOOL _IsIPAddressLiteral(NSString *host) {
                   _request.method, _request.path, self.remoteAddressString, hostHeader, accepted);
     return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_MisdirectedRequest
                                                       message:@"Host \"%@\" is not served here. Accepted: %@, or any IP address. Set WSKOption_AllowedHostNames to add one.", hostHeader, accepted];
+}
+
+// RFC 9112 §3.2: a Host whose field value is not a syntactically valid authority answers 400 —
+// the message itself is broken, which is a different statement from 421's "well-formed, but not
+// a name this server answers to". Logged just as loudly: a deployment tripping this is almost
+// certainly a client or proxy bug worth seeing.
+- (WSKResponse *)_invalidHostResponseForAuthority:(NSString *)authority {
+    WSK_LOG_ERROR(@"Refusing \"%@ %@\" from %@: \"%@\" is not a syntactically valid authority (RFC 9112 §3.2)",
+                  _request.method, _request.path, self.remoteAddressString, authority);
+    return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"Invalid \"Host\" header \"%@\"", authority];
 }
 
 // The Host allow-list and authentication both decide on headers alone, so they can be
@@ -1094,10 +1159,22 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
                         } else {
                             // The base request rejected these headers too — a framing conflict
                             // such as "Content-Length" together with a chunked "Transfer-Encoding"
-                            // — so no handler could have matched. That is a malformed request
-                            // rather than an unimplemented one, and must not assert.
+                            // — so no handler could have matched, and must not assert. One shape
+                            // in this branch owes a different status: a Transfer-Encoding naming
+                            // a coding this server does not implement is a WELL-FORMED request
+                            // the server cannot decode, and RFC 9112 §6.1 assigns that 501 —
+                            // answering 400 told the client its message was broken when it was
+                            // not. A malformed application of a coding the server DOES implement
+                            // ("chunked, chunked", Content-Length alongside chunked) stays 400.
+                            NSString *const transferEncodingHeader = _HeaderValueForName(requestHeaders, @"Transfer-Encoding");
+                            NSInteger status = kWSKHTTPStatusCode_BadRequest;
+
+                            if ((transferEncodingHeader != nil) && WSKTransferEncodingIsUnsupported(transferEncodingHeader)) {
+                                status = kWSKHTTPStatusCode_NotImplemented;
+                            }
+
                             WSK_LOG_ERROR(@"Rejecting malformed request headers on socket %i", self->_socket);
-                            [self abortRequest:nil withStatusCode:kWSKHTTPStatusCode_BadRequest];
+                            [self abortRequest:nil withStatusCode:status];
                         }
                     }
                 } else {
@@ -1269,7 +1346,16 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
 // method SP request-target SP HTTP-version, with no room for interpretation. Without
 // this a request line is split on the first two spaces and whatever remains becomes part
 // of the path: "GET /a HTTP/1.1 junk" was dispatched with a path of "/a HTTP/1.1".
-static BOOL _ValidateRequestLine(const unsigned char *line, NSUInteger length) {
+//
+// Returns 0 for a valid line, otherwise the status to refuse with: 400 for a grammar
+// violation, and 505 for a well-formed HTTP-version whose MAJOR this server does not
+// implement (RFC 9112 §2.3 — refusing those with 400 claimed the message was malformed
+// when it was not). A higher MINOR within HTTP/1 is not refused at all: RFC 9110 §2.5
+// says to process it as the highest minor version this server is conformant to, so the
+// version byte is rewritten to '1' in place — the line is exactly what CFHTTPMessage
+// parses next, so patching it here IS the "process as 1.1" the RFC asks for, and
+// _clientIsHTTP10 then correctly reads such a client as 1.1-capable.
+static NSInteger _ValidateRequestLine(unsigned char *line, NSUInteger length, BOOL *outAbsoluteFormTarget) {
     NSUInteger firstSpace = NSNotFound;
     NSUInteger lastSpace = NSNotFound;
     NSUInteger spaceCount = 0;
@@ -1286,17 +1372,26 @@ static BOOL _ValidateRequestLine(const unsigned char *line, NSUInteger length) {
 
             lastSpace = i;
         } else if ((character < 0x21) || (character == 0x7F)) {
-            return NO;  // A CTL or stray whitespace inside the method, target or version
+            return kWSKHTTPStatusCode_BadRequest;  // A CTL or stray whitespace inside the method, target or version
         }
     }
 
     if ((spaceCount != 2) || (firstSpace == 0) || (lastSpace <= firstSpace + 1)) {
-        return NO;  // Wrong shape, empty method, or empty request-target
+        return kWSKHTTPStatusCode_BadRequest;  // Wrong shape, empty method, or empty request-target
     }
+
+    // Report the request-target's form off the RAW line: anything that is not origin-form
+    // ("/...") or asterisk-form ("*") carries its own authority (RFC 9112 §3.2). This cannot be
+    // derived from the parsed URL downstream, because CFHTTPMessageCopyRequestURL synthesizes an
+    // absolute URL FROM the Host header for origin-form requests — by then "the target carried
+    // an authority" and "the Host header carried one" are indistinguishable, and CF has already
+    // sanitized the value the syntax rules need to judge raw.
+    *outAbsoluteFormTarget = (line[firstSpace + 1] != '/') &&
+                             !((lastSpace - firstSpace == 2) && (line[firstSpace + 1] == '*'));
 
     for (NSUInteger i = 0; i < firstSpace; i++) {
         if (!WSKIsHeaderTokenCharacter(line[i])) {
-            return NO;
+            return kWSKHTTPStatusCode_BadRequest;
         }
     }
 
@@ -1311,18 +1406,30 @@ static BOOL _ValidateRequestLine(const unsigned char *line, NSUInteger length) {
     // keep working — that is the case a naive fix breaks.
     for (NSUInteger i = firstSpace + 1; i < lastSpace; i++) {
         if (line[i] == '#') {
-            return NO;
+            return kWSKHTTPStatusCode_BadRequest;
         }
     }
 
     NSUInteger const versionLength = length - lastSpace - 1;
-    const unsigned char *const version = line + lastSpace + 1;
+    unsigned char *const version = line + lastSpace + 1;
 
-    if ((versionLength != 8) || (memcmp(version, "HTTP/1.", 7) != 0)) {
-        return NO;
+    // The grammar is exactly HTTP-name "/" DIGIT "." DIGIT (RFC 9112 §2.3); anything else —
+    // "http/1.1", "HTTP/1.x", a ten-byte "HTTP/12.1" — is malformed, not merely unsupported.
+    if ((versionLength != 8) || (memcmp(version, "HTTP/", 5) != 0) ||
+        (version[5] < '0') || (version[5] > '9') || (version[6] != '.') ||
+        (version[7] < '0') || (version[7] > '9')) {
+        return kWSKHTTPStatusCode_BadRequest;
     }
 
-    return (version[7] == '0') || (version[7] == '1');
+    if (version[5] != '1') {
+        return kWSKHTTPStatusCode_HTTPVersionNotSupported;  // HTTP/2.0, HTTP/0.9, ...
+    }
+
+    if (version[7] > '1') {
+        version[7] = '1';  // HTTP/1.2 through 1.9: process as HTTP/1.1 (RFC 9110 §2.5)
+    }
+
+    return 0;
 }
 
 // The header block is framed here by scanning for CRLFCRLF, but it is *parsed* by
@@ -1334,22 +1441,39 @@ static BOOL _ValidateRequestLine(const unsigned char *line, NSUInteger length) {
 // obs-fold. The remaining checks are ordinary field syntax that CFHTTPMessage accepts far
 // too leniently — "Content-Length : 5" and a folded "Content-Length:\r\n 5" both yielded
 // a content length, and those fields decide how many bytes reach the disk.
-static BOOL _ValidateRequestHeaderBlock(const void *rawBytes, NSUInteger length) {
-    const unsigned char *const bytes = (const unsigned char *)rawBytes;
+// Returns 0 for a valid block, otherwise the status to refuse with (400, or 505 from the
+// request-line check). *outRequestLineOffset is where the request line actually starts —
+// past any empty lines RFC 9112 §2.2 says to ignore ahead of it — so the caller hands
+// CFHTTPMessage a block that begins with the request line. The buffer is mutable because
+// the request-line check rewrites a higher HTTP/1.x minor version to 1.1 in place.
+static NSInteger _ValidateRequestHeaderBlock(void *rawBytes, NSUInteger length, NSUInteger *outRequestLineOffset, BOOL *outAbsoluteFormTarget) {
+    unsigned char *const bytes = (unsigned char *)rawBytes;
+    *outRequestLineOffset = 0;
+    *outAbsoluteFormTarget = NO;
 
     for (NSUInteger i = 0; i < length; i++) {
         if (bytes[i] == '\r') {
             if ((i + 1 >= length) || (bytes[i + 1] != '\n')) {
-                return NO;
+                return kWSKHTTPStatusCode_BadRequest;
             }
         } else if (bytes[i] == '\n') {
             if ((i == 0) || (bytes[i - 1] != '\r')) {
-                return NO;
+                return kWSKHTTPStatusCode_BadRequest;
             }
+        } else if (((bytes[i] < 0x20) && (bytes[i] != '\t')) || (bytes[i] == 0x7F)) {
+            // RFC 9110 §5.5: CR, LF or NUL in a field value must be rejected or replaced with
+            // SP, and every other C0 control (plus DEL) is illegal field content outright.
+            // Bare CR and LF are handled by the pairing checks above; this closes the rest —
+            // the NUL was measured sailing through into request.headers, the exact byte whose
+            // consumers each needed individual hardening. HTAB is legal in a value, and
+            // obs-text (0x80-0xFF) is untouched: this refuses controls, it is not an ASCII
+            // allow-list.
+            return kWSKHTTPStatusCode_BadRequest;
         }
     }
 
     BOOL expectingRequestLine = YES;
+    NSUInteger hostLineCount = 0;
     NSUInteger lineStart = 0;
 
     for (NSUInteger i = 0; i + 1 < length; i++) {
@@ -1357,22 +1481,32 @@ static BOOL _ValidateRequestHeaderBlock(const void *rawBytes, NSUInteger length)
             continue;
         }
 
-        const unsigned char *const line = bytes + lineStart;
+        unsigned char *const line = bytes + lineStart;
         NSUInteger const lineLength = i - lineStart;
 
         if (lineLength == 0) {
+            if (expectingRequestLine) {
+                // RFC 9112 §2.2: ignore empty lines received ahead of the request-line.
+                *outRequestLineOffset = i + 2;
+                lineStart = i + 2;
+                i += 1;
+                continue;
+            }
+
             break;  // The empty line terminates the block
         }
 
         if (expectingRequestLine) {
-            if (!_ValidateRequestLine(line, lineLength)) {
-                return NO;
+            NSInteger const requestLineStatus = _ValidateRequestLine(line, lineLength, outAbsoluteFormTarget);
+
+            if (requestLineStatus != 0) {
+                return requestLineStatus;
             }
 
             expectingRequestLine = NO;
         } else {
             if ((line[0] == ' ') || (line[0] == '\t')) {
-                return NO;  // obs-fold continuation line
+                return kWSKHTTPStatusCode_BadRequest;  // obs-fold continuation line
             }
 
             NSUInteger colon = NSNotFound;
@@ -1385,12 +1519,27 @@ static BOOL _ValidateRequestHeaderBlock(const void *rawBytes, NSUInteger length)
             }
 
             if ((colon == NSNotFound) || (colon == 0)) {
-                return NO;  // No field name, or no colon at all
+                return kWSKHTTPStatusCode_BadRequest;  // No field name, or no colon at all
             }
 
             for (NSUInteger j = 0; j < colon; j++) {
                 if (!WSKIsHeaderTokenCharacter(line[j])) {
-                    return NO;  // Includes whitespace before the colon
+                    return kWSKHTTPStatusCode_BadRequest;  // Includes whitespace before the colon
+                }
+            }
+
+            // RFC 9112 §3.2: more than one Host header line MUST answer 400. Counted here on
+            // the raw lines because CFHTTPMessage merges duplicates into one comma-joined
+            // value, after which "two Host lines" and "one strange Host" are indistinguishable
+            // — and a comma is legal inside a reg-name, so the merged spelling cannot simply
+            // be refused downstream by syntax.
+            if ((colon == 4) &&
+                ((line[0] == 'H') || (line[0] == 'h')) && ((line[1] == 'O') || (line[1] == 'o')) &&
+                ((line[2] == 'S') || (line[2] == 's')) && ((line[3] == 'T') || (line[3] == 't'))) {
+                hostLineCount += 1;
+
+                if (hostLineCount > 1) {
+                    return kWSKHTTPStatusCode_BadRequest;
                 }
             }
         }
@@ -1399,7 +1548,7 @@ static BOOL _ValidateRequestHeaderBlock(const void *rawBytes, NSUInteger length)
         i += 1;  // Skip the LF we just consumed
     }
 
-    return !expectingRequestLine;
+    return expectingRequestLine ? kWSKHTTPStatusCode_BadRequest : 0;
 }
 
 typedef NS_ENUM(NSInteger, WSKHeaderBlockState) {
@@ -1418,13 +1567,25 @@ typedef NS_ENUM(NSInteger, WSKHeaderBlockState) {
 // dispatch_read in that state waits for bytes the client has no reason to send: it has a complete
 // request outstanding and is waiting for us. That is a hang until the idle timeout, and it is the
 // specific hazard that makes this a refactor rather than a one-line loop.
+// Which refusal does an over-cap header block owe? 431 covers an oversized BLOCK, but when no
+// line terminator has arrived anywhere inside the block budget, what overflowed is the request
+// LINE itself — in practice a request-target longer than the server is willing to parse, which
+// RFC 9110 §15.5.15 assigns 414. (A target that fits the block but exceeds PATH_MAX is a
+// different, later refusal: it parses fine and answers 404 from the resolvers.)
+static NSInteger _StatusForOversizedHeaderBlock(NSData *headersData) {
+    NSUInteger const scanLength = MIN(headersData.length, (NSUInteger)kHeadersMaxLength);
+    NSRange const lineEnd = [headersData rangeOfData:_CRLFData options:(NSDataSearchOptions)0 range:NSMakeRange(0, scanLength)];
+    return (lineEnd.location == NSNotFound) ? kWSKHTTPStatusCode_RequestURITooLong
+                                            : kWSKHTTPStatusCode_RequestHeaderFieldsTooLarge;
+}
+
 - (WSKHeaderBlockState)_settleHeadersFromBuffer:(NSMutableData *)headersData extraData:(NSData *_Nullable *_Nonnull)outExtraData {
     NSRange range = [headersData rangeOfData:_CRLFCRLFData options:0 range:NSMakeRange(0, headersData.length)];
 
     if (range.location == NSNotFound) {
         if (headersData.length > kHeadersMaxLength) {
             WSK_LOG_ERROR(@"Request headers exceeded %i bytes on socket %i", (int)kHeadersMaxLength, _socket);
-            _headerFailureStatus = kWSKHTTPStatusCode_RequestHeaderFieldsTooLarge;
+            _headerFailureStatus = _StatusForOversizedHeaderBlock(headersData);
             return kWSKHeaderBlockFailed;
         }
 
@@ -1438,17 +1599,26 @@ typedef NS_ENUM(NSInteger, WSKHeaderBlockState) {
     // served. The buffer legitimately runs past the cap once body bytes arrive in the same read.
     if (length > kHeadersMaxLength) {
         WSK_LOG_ERROR(@"Request headers exceeded %i bytes on socket %i", (int)kHeadersMaxLength, _socket);
-        _headerFailureStatus = kWSKHTTPStatusCode_RequestHeaderFieldsTooLarge;
+        _headerFailureStatus = _StatusForOversizedHeaderBlock(headersData);
         return kWSKHeaderBlockFailed;
     }
 
-    if (!_ValidateRequestHeaderBlock(headersData.bytes, length)) {
+    NSUInteger requestLineOffset = 0;
+    BOOL absoluteFormTarget = NO;
+    NSInteger const invalidStatus = _ValidateRequestHeaderBlock(headersData.mutableBytes, length, &requestLineOffset, &absoluteFormTarget);
+
+    if (invalidStatus != 0) {
         WSK_LOG_ERROR(@"Rejecting malformed request line or header syntax on socket %i", _socket);
-        _headerFailureStatus = kWSKHTTPStatusCode_BadRequest;
+        _headerFailureStatus = invalidStatus;
         return kWSKHeaderBlockFailed;
     }
 
-    if (!CFHTTPMessageAppendBytes(_requestMessage, headersData.bytes, length)) {
+    _requestTargetIsAbsoluteForm = absoluteFormTarget;
+
+    // Append from the request line onward: CFHTTPMessage is not owed the leading empty lines
+    // the validator just skipped, and the extra-data split below still uses the ORIGINAL
+    // buffer offsets, so nothing downstream shifts.
+    if (!CFHTTPMessageAppendBytes(_requestMessage, (const UInt8 *)headersData.bytes + requestLineOffset, length - requestLineOffset)) {
         WSK_LOG_ERROR(@"Failed appending request headers data from socket %i", _socket);
         _headerFailureStatus = kWSKHTTPStatusCode_BadRequest;
         return kWSKHeaderBlockFailed;
@@ -2102,6 +2272,41 @@ static inline BOOL _CompareResources(NSString *responseETag, NSString *requestET
 }
 
 - (WSKResponse *)overrideResponse:(WSKResponse *)response forRequest:(WSKRequest *)request {
+    // RFC 9110 §13.2.1: If-Match and If-Unmodified-Since apply to EVERY method, and a false
+    // condition owes 412 — on a GET as much as on a PUT. The write verbs evaluate them in
+    // WSKWebDAVServer BEFORE acting, and their success responses carry no entity tag, which is
+    // why this site is gated to the read methods: re-judging a 204 whose precondition already
+    // held would turn every conditional write into a 412. Only a 2xx is judged (§13.2.1 says to
+    // ignore preconditions when the unconditional response would be an error anyway), and the
+    // order is §13.2.2: If-Match, then If-Unmodified-Since in its absence, both ahead of the
+    // If-None-Match / If-Modified-Since pair below. The failure this closes was safe-direction —
+    // the current representation was served to a client asking for exactly-that-representation —
+    // but "the server ignored my precondition" is still the wrong answer to give.
+    if ((response.statusCode >= 200) && (response.statusCode < 300) &&
+        ([request.method isEqualToString:@"GET"] || [request.method isEqualToString:@"HEAD"])) {
+        NSString *const ifMatch = request.headers[@"If-Match"];
+        NSString *const ifUnmodifiedSince = request.headers[@"If-Unmodified-Since"];
+
+        if (ifMatch != nil) {
+            // A 2xx read IS a current representation, so "*" holds here by construction.
+            if (!WSKEntityTagMatchesList(YES, response.eTag, ifMatch, YES)) {
+                return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_PreconditionFailed message:@"\"If-Match\" precondition failed for \"%@\"", request.path];
+            }
+        } else if (ifUnmodifiedSince != nil) {
+            NSDate *const limit = WSKParseRFC822(ifUnmodifiedSince);
+            NSDate *const lastModified = response.lastModifiedDate;
+
+            // An unparseable date is ignored (RFC 9110 §13.1.4), and so is a response without a
+            // modification date — which includes one the timestamp seal is deliberately
+            // withholding: inside the bucket a date cannot distinguish two representations, so
+            // it cannot be allowed to refuse one either.
+            if ((limit != nil) && (lastModified != nil) &&
+                (floor(lastModified.timeIntervalSince1970) > floor(limit.timeIntervalSince1970))) {
+                return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_PreconditionFailed message:@"\"If-Unmodified-Since\" precondition failed for \"%@\"", request.path];
+            }
+        }
+    }
+
     if ((response.statusCode >= 200) && (response.statusCode < 300) &&
         _CompareResources(response.eTag, request.ifNoneMatch, response.lastModifiedDate, request.ifModifiedSince)) {
         NSInteger code = kWSKHTTPStatusCode_PreconditionFailed;

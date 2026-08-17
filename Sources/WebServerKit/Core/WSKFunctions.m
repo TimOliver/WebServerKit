@@ -1133,6 +1133,46 @@ NSString *WSKEntityTagForFileInfo(const struct stat *info) {
     return [NSString stringWithFormat:@"\"%llu/%lld/%li/%li\"", info->st_ino, (long long)info->st_size, info->st_mtimespec.tv_sec, info->st_mtimespec.tv_nsec];
 }
 
+// "*" matches any existing representation. Otherwise the list is compared entry by entry.
+// If-Match requires the STRONG comparison (RFC 9110 §13.1.1), where a "W/" tag can never match;
+// If-None-Match uses the weak one, where the prefix is stripped from the client's side. Tags
+// this server issues are always strong. Hoisted here from the WebDAV write-verb preconditions
+// when the connection's read verbs gained the same evaluation, so both sides judge the tag a
+// GET hands out by one rule.
+BOOL WSKEntityTagMatchesList(BOOL resourceExists, NSString *currentTag, NSString *list, BOOL strong) {
+    NSString *const trimmed = [list stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+
+    // "*" asks whether the origin has a current representation AT ALL (RFC 9110 §13.1.1), which is
+    // not the same question as "does it have an entity tag". Keying it on the tag made `If-Match: *`
+    // always FAIL for a collection, since no tag is minted for a directory — so a conditional
+    // DELETE, MOVE or COPY of a folder could never succeed.
+    if ([trimmed isEqualToString:@"*"]) {
+        return resourceExists;
+    }
+
+    if (currentTag == nil) {
+        return NO;
+    }
+
+    for (NSString *candidate in [trimmed componentsSeparatedByString:@","]) {
+        NSString *value = [candidate stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+
+        if ([value hasPrefix:@"W/"]) {
+            if (strong) {
+                continue;
+            }
+
+            value = [value substringFromIndex:2];
+        }
+
+        if ([value isEqualToString:currentTag]) {
+            return YES;
+        }
+    }
+
+    return NO;
+}
+
 // FAT truncates mtime into two-second buckets, so a timestamp one second old there can still take
 // another write without moving. Unrecognised types fail CLOSED at two seconds — smbfs and nfs can
 // be backed by FAT and cannot be probed from here, and the cost of being wrong that way is one

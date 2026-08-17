@@ -1160,4 +1160,82 @@
     [fm removeItemAtPath:dir error:NULL];
 }
 
+// The class-2 façade is Finder-only by design: OPTIONS answers "DAV: 1, 2" and the LOCK stub
+// works only for a WebDAVFS/WebDAVLib user agent; everyone else gets class 1 and a 405 for
+// LOCK. The Allow header must tell the same story — RFC 9110 §10.2.1 makes Allow on a 405 the
+// list of the target's CURRENTLY SUPPORTED methods, and one shared constant meant the 405 a
+// non-Finder LOCK received listed LOCK inside its own refusal.
+- (void)testNonFinderClientsAreNotOfferedTheLockMethods {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* (^headerLine)(NSString*, NSString*) = ^NSString*(NSString* reply, NSString* name) {
+        NSRange start = [reply rangeOfString:[name stringByAppendingString:@": "] options:NSCaseInsensitiveSearch];
+        if (start.location == NSNotFound) {
+            return nil;
+        }
+        NSString* rest = [reply substringFromIndex:NSMaxRange(start)];
+        return [rest substringToIndex:[rest rangeOfString:@"\r\n"].location];
+    };
+
+    NSString* genericOptions = SendRawRequest(server.port, @"OPTIONS / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString* genericAllow = headerLine(genericOptions, @"Allow");
+    XCTAssertNotNil(genericAllow, @"OPTIONS must carry Allow: %@", genericOptions);
+    XCTAssertFalse([genericAllow containsString:@"LOCK"], @"a client whose LOCK answers 405 must not be offered it: %@", genericAllow);
+    XCTAssertTrue([genericAllow containsString:@"PROPPATCH"], @"trimming LOCK must not drop the methods everyone gets: %@", genericAllow);
+
+    NSString* genericLock = SendRawRequest(server.port, @"LOCK / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
+    XCTAssertTrue([genericLock hasPrefix:@"HTTP/1.1 405"], @"non-Finder LOCK stays 405: %@", [genericLock substringToIndex:MIN((NSUInteger)40, genericLock.length)]);
+    NSString* refusalAllow = headerLine(genericLock, @"Allow");
+    XCTAssertNotNil(refusalAllow, @"RFC 9110 §15.5.6: the 405 must carry Allow: %@", genericLock);
+    XCTAssertFalse([refusalAllow containsString:@"LOCK"], @"the 405 for LOCK listed LOCK as allowed: %@", refusalAllow);
+
+    NSString* finderOptions = SendRawRequest(server.port, @"OPTIONS / HTTP/1.1\r\nHost: localhost\r\nUser-Agent: WebDAVFS/3.0.1 (03018000) Darwin/13.1.0 (x86_64)\r\n\r\n");
+    NSString* finderAllow = headerLine(finderOptions, @"Allow");
+    XCTAssertTrue([finderAllow containsString:@"UNLOCK"], @"Finder must keep being offered the lock methods: %@", finderAllow);
+    NSString* finderDAV = headerLine(finderOptions, @"DAV");
+    XCTAssertEqualObjects(finderDAV, @"1, 2", @"Finder must keep seeing class 2: %@", finderOptions);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// RFC 4918 §9.10: a LOCK that creates a new lock MUST return the token in a Lock-Token response
+// header, not only inside the lockdiscovery body. Finder happens to read the body — the trace
+// corpus predates this header — but a conforming client is entitled to the header.
+- (void)testANewLockCarriesTheLockTokenResponseHeader {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    NSString* path = [dir stringByAppendingPathComponent:@"f.txt"];
+    XCTAssertTrue([@"LOCKED" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* body = @"<?xml version=\"1.0\" encoding=\"utf-8\"?><D:lockinfo xmlns:D=\"DAV:\"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>";
+    NSString* request = [NSString stringWithFormat:@"LOCK /f.txt HTTP/1.1\r\nHost: localhost\r\nUser-Agent: WebDAVFS/3.0.1 (03018000) Darwin/13.1.0 (x86_64)\r\nDepth: 0\r\nContent-Type: application/xml\r\nX-WebServerKit-LockToken: urn:uuid:AUDIT-LOCK-TOKEN\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)body.length, body];
+    NSString* reply = SendRawRequest(server.port, request);
+    XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 200"], @"the Finder-shaped LOCK must succeed: %@", [reply substringToIndex:MIN((NSUInteger)60, reply.length)]);
+
+    NSRange start = [reply rangeOfString:@"Lock-Token: " options:NSCaseInsensitiveSearch];
+    XCTAssertNotEqual(start.location, (NSUInteger)NSNotFound, @"a new lock owes a Lock-Token response header: %@", reply);
+
+    if (start.location == NSNotFound) {  // The assertion above has already failed; don't throw on top of it
+        [server stop];
+        [fm removeItemAtPath:dir error:NULL];
+        return;
+    }
+
+    NSString* rest = [reply substringFromIndex:NSMaxRange(start)];
+    NSString* token = [rest substringToIndex:[rest rangeOfString:@"\r\n"].location];
+    XCTAssertEqualObjects(token, @"<urn:uuid:AUDIT-LOCK-TOKEN>", @"the header must carry the minted token as a Coded-URL: %@", token);
+    XCTAssertTrue([reply containsString:@"urn:uuid:AUDIT-LOCK-TOKEN"], @"the same token must appear in the lockdiscovery body");
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 @end

@@ -1,4 +1,5 @@
 HTTP/1.1 200 OK
+Lock-Token: <urn:uuid:50EA272F-C8AB-4057-8B49-9C70CBCC2E33>
 Cache-Control: no-cache
 Content-Length: 522
 Content-Type: application/xml; charset="utf-8"

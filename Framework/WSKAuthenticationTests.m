@@ -276,8 +276,10 @@
     XCTAssertTrue([get(@"pinned.example:1234") hasPrefix:@"HTTP/1.1 421"], @"a pinned entry must not match a different port");
     XCTAssertTrue([get(@"evil.example") hasPrefix:@"HTTP/1.1 421"], @"an unlisted name must still be refused");
     XCTAssertTrue([get(@"evil.example:8080") hasPrefix:@"HTTP/1.1 421"], @"an unlisted name must still be refused whatever port it states");
-    // A syntactically impossible port is still a malformed Host.
-    XCTAssertTrue([get(@"files.example:notaport") hasPrefix:@"HTTP/1.1 421"], @"a non-numeric port should still be refused");
+    // A syntactically impossible port is a malformed Host, and since the eighteenth pass it is
+    // answered as one: 400 per RFC 9112 §3.2, not the 421 that covers a well-formed name this
+    // server does not serve. Still a refusal either way — the rebinding defence is unchanged.
+    XCTAssertTrue([get(@"files.example:notaport") hasPrefix:@"HTTP/1.1 400"], @"a non-numeric port is a malformed Host and owes 400");
 
     [server stop];
     [[NSFileManager defaultManager] removeItemAtPath:dir error:NULL];

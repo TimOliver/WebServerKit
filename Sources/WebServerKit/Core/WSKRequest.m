@@ -294,13 +294,9 @@ static BOOL _ParseUnsignedHeaderValue(NSString *header, NSUInteger *outLength) {
     return YES;
 }
 
-// Parse a "Transfer-Encoding" list (RFC 7230 §3.3.1). Returns YES when the body uses
-// chunked framing; sets *outRejected when the framing cannot be honoured at all. A real
-// list parse, not a string comparison: legal spellings like "chunked;a=b" and
-// "gzip, chunked" must be refused rather than read as "no body" — the caller must never
-// mistake an unread body for an empty one.
-static BOOL _ParseTransferEncoding(NSString *header, BOOL *outRejected) {
-    *outRejected = NO;
+// The one tokenizer for a "Transfer-Encoding" list, shared by the framing decision below and by
+// WSKTransferEncodingIsUnsupported so the two can never read the same header differently.
+static NSArray<NSString *> *_TransferCodingTokens(NSString *header) {
     NSMutableArray<NSString *> *const codings = [[NSMutableArray alloc] init];
 
     for (NSString *coding in [header componentsSeparatedByString:@","]) {
@@ -317,6 +313,32 @@ static BOOL _ParseTransferEncoding(NSString *header, BOOL *outRejected) {
             [codings addObject:token];
         }
     }
+
+    return codings;
+}
+
+// Does the list name a transfer coding this server does not implement at all? That case owes
+// 501 (RFC 9112 §6.1) rather than the 400 a malformed APPLICATION of an implemented coding
+// gets, and the connection can only tell the two apart by asking — the initializer below has
+// already collapsed both into a nil request by the time the refusal is written.
+BOOL WSKTransferEncodingIsUnsupported(NSString *header) {
+    for (NSString *token in _TransferCodingTokens(header)) {
+        if (![token isEqualToString:@"chunked"] && ![token isEqualToString:@"identity"]) {
+            return YES;
+        }
+    }
+
+    return NO;
+}
+
+// Parse a "Transfer-Encoding" list (RFC 7230 §3.3.1). Returns YES when the body uses
+// chunked framing; sets *outRejected when the framing cannot be honoured at all. A real
+// list parse, not a string comparison: legal spellings like "chunked;a=b" and
+// "gzip, chunked" must be refused rather than read as "no body" — the caller must never
+// mistake an unread body for an empty one.
+static BOOL _ParseTransferEncoding(NSString *header, BOOL *outRejected) {
+    *outRejected = NO;
+    NSArray<NSString *> *const codings = _TransferCodingTokens(header);
 
     if (codings.count == 0) {
         *outRejected = YES;

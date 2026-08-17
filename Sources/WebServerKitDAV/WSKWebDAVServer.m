@@ -198,43 +198,8 @@ static inline BOOL _HeaderTokenIs(NSString *value, NSString *token) {
     return (value != nil) && ([value caseInsensitiveCompare:token] == NSOrderedSame);
 }
 
-// "*" matches any existing representation. Otherwise the list is compared entry by entry.
-// If-Match requires the STRONG comparison (RFC 9110 §13.1.1), where a "W/" tag can never match;
-// If-None-Match uses the weak one, where the prefix is stripped from both sides. Tags this
-// server issues are always strong, so only the client's side can carry the prefix.
-static BOOL _EntityTagMatchesList(BOOL resourceExists, NSString *currentTag, NSString *list, BOOL strong) {
-    NSString *const trimmed = [list stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-
-    // "*" asks whether the origin has a current representation AT ALL (RFC 9110 §13.1.1), which is
-    // not the same question as "does it have an entity tag". Keying it on the tag made `If-Match: *`
-    // always FAIL for a collection, since no tag is minted for a directory — so a conditional
-    // DELETE, MOVE or COPY of a folder could never succeed.
-    if ([trimmed isEqualToString:@"*"]) {
-        return resourceExists;
-    }
-
-    if (currentTag == nil) {
-        return NO;
-    }
-
-    for (NSString *candidate in [trimmed componentsSeparatedByString:@","]) {
-        NSString *value = [candidate stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-
-        if ([value hasPrefix:@"W/"]) {
-            if (strong) {
-                continue;
-            }
-
-            value = [value substringFromIndex:2];
-        }
-
-        if ([value isEqualToString:currentTag]) {
-            return YES;
-        }
-    }
-
-    return NO;
-}
+// The entity-tag list evaluation lives in WSKEntityTagMatchesList (one home, shared with the
+// connection's read-side precondition check since the eighteenth pass).
 
 // RFC 9110 §13.1.1 requires an origin server NOT to perform the method when If-Match evaluates
 // false. Nothing here did: preconditions were evaluated only in -overrideResponse:forRequest:,
@@ -270,7 +235,7 @@ static BOOL _EntityTagMatchesList(BOOL resourceExists, NSString *currentTag, NSS
     // Evaluation order is RFC 9110 §13.2.2: If-Match, then If-Unmodified-Since only in its
     // absence, then If-None-Match. If-Modified-Since plays no part in a state-changing method.
     if (ifMatch != nil) {
-        if (!_EntityTagMatchesList(stated, currentTag, ifMatch, YES)) {
+        if (!WSKEntityTagMatchesList(stated, currentTag, ifMatch, YES)) {
             return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_PreconditionFailed message:@"\"If-Match\" precondition failed for \"%@\"", request.path];
         }
     } else if (ifUnmodifiedSince != nil) {
@@ -289,7 +254,7 @@ static BOOL _EntityTagMatchesList(BOOL resourceExists, NSString *currentTag, NSS
         if (stated && (limit != nil) && ((time_t)limitSeconds < info.st_mtimespec.tv_sec)) {
             return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_PreconditionFailed message:@"\"If-Unmodified-Since\" precondition failed for \"%@\"", request.path];
         }
-    } else if (_EntityTagMatchesList(stated, currentTag, ifNoneMatch, NO)) {
+    } else if (WSKEntityTagMatchesList(stated, currentTag, ifNoneMatch, NO)) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_PreconditionFailed message:@"\"If-None-Match\" precondition failed for \"%@\"", request.path];
     }
 
@@ -596,32 +561,44 @@ static inline BOOL _IsMacFinder(WSKRequest *request) {
     return ([userAgentHeader hasPrefix:@"WebDAVFS/"] || [userAgentHeader hasPrefix:@"WebDAVLib/"]);  // OS X WebDAV client
 }
 
-// Every method this server implements. RFC 9110 §15.5.6 requires an Allow header on a 405, and
-// §10.2.1 recommends one on OPTIONS; a client discovering capabilities from OPTIONS otherwise has
-// to guess. Kept beside performOPTIONS: so adding a verb without advertising it is visible here.
-// PROPPATCH was implemented by the class-1 work and never added here, so capability discovery
-// disagreed with routing: a client reading OPTIONS concluded the method was unavailable and never
-// tried it, while the server would have answered it perfectly well.
+// Every method this server implements, in the two spellings the Finder gate produces. RFC 9110
+// §15.5.6 requires an Allow header on a 405, and §10.2.1 recommends one on OPTIONS; a client
+// discovering capabilities from OPTIONS otherwise has to guess. Kept beside performOPTIONS: so
+// adding a verb without advertising it is visible here. PROPPATCH was implemented by the class-1
+// work and never added here, so capability discovery disagreed with routing: a client reading
+// OPTIONS concluded the method was unavailable and never tried it, while the server would have
+// answered it perfectly well.
+//
+// Two lists because the lock stub is Finder-only: for everyone else LOCK answers 405, and one
+// shared constant meant that 405's own Allow header LISTED the method it was refusing — §15.5.6
+// defines Allow as the target's currently supported methods, and for that client LOCK is not
+// one. The DAV class header has always made this per-client distinction; Allow now tells the
+// same story.
 static NSString *const kDAVAllowedMethods = @"OPTIONS, HEAD, GET, PUT, DELETE, MKCOL, PROPFIND, PROPPATCH, COPY, MOVE, LOCK, UNLOCK";
+static NSString *const kDAVClass1AllowedMethods = @"OPTIONS, HEAD, GET, PUT, DELETE, MKCOL, PROPFIND, PROPPATCH, COPY, MOVE";
+
+static NSString *_AllowedMethodsForRequest(WSKRequest *request) {
+    return _IsMacFinder(request) ? kDAVAllowedMethods : kDAVClass1AllowedMethods;
+}
 
 // RFC 9110 §15.5.6 makes Allow mandatory on a 405. Every site answering one goes through here so
 // a refusal added later cannot forget it — the omission this replaces was in two of the four.
-static WSKResponse *_MethodNotAllowed(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
+static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...) NS_FORMAT_FUNCTION(2, 3);
 
-static WSKResponse *_MethodNotAllowed(NSString *format, ...) {
+static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...) {
     va_list arguments;
     va_start(arguments, format);
     NSString *const message = [[NSString alloc] initWithFormat:format arguments:arguments];
     va_end(arguments);
 
     WSKResponse *const response = [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_MethodNotAllowed message:@"%@", message];
-    [response setValue:kDAVAllowedMethods forAdditionalHeader:@"Allow"];
+    [response setValue:_AllowedMethodsForRequest(request) forAdditionalHeader:@"Allow"];
     return response;
 }
 
 - (WSKResponse *)performOPTIONS:(WSKRequest *)request {
     WSKResponse *response = [WSKResponse response];
-    [response setValue:kDAVAllowedMethods forAdditionalHeader:@"Allow"];
+    [response setValue:_AllowedMethodsForRequest(request) forAdditionalHeader:@"Allow"];
 
     if (_IsMacFinder(request)) {
         [response setValue:@"1, 2" forAdditionalHeader:@"DAV"];  // Classes 1 and 2
@@ -752,7 +729,7 @@ static WSKResponse *_MethodNotAllowed(NSString *format, ...) {
     BOOL existing = [[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory];
 
     if (existing && isDirectory) {
-        return _MethodNotAllowed(@"PUT not allowed on existing collection \"%@\"", relativePath);
+        return _MethodNotAllowed(request, @"PUT not allowed on existing collection \"%@\"", relativePath);
     }
 
     NSString *const fileName = [absolutePath lastPathComponent];
@@ -962,7 +939,7 @@ static WSKResponse *_MethodNotAllowed(NSString *format, ...) {
     // refusal rather than its existence. Tested against an existing FILE as well as a collection:
     // §9.3.1 says "resource", not "collection", and both took the 500 branch.
     if ([[NSFileManager defaultManager] fileExistsAtPath:absolutePath]) {
-        return _MethodNotAllowed(@"Collection \"%@\" already exists", relativePath);
+        return _MethodNotAllowed(request, @"Collection \"%@\" already exists", relativePath);
     }
 
     NSError *error = nil;
@@ -975,7 +952,7 @@ static WSKResponse *_MethodNotAllowed(NSString *format, ...) {
             BOOL const posixExists = [candidate.domain isEqualToString:NSPOSIXErrorDomain] && (candidate.code == EEXIST);
 
             if (cocoaExists || posixExists) {
-                return _MethodNotAllowed(@"Collection \"%@\" already exists", relativePath);
+                return _MethodNotAllowed(request, @"Collection \"%@\" already exists", relativePath);
             }
         }
 
@@ -1843,7 +1820,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
     // single out. If a genuinely concurrent client ever matters, the cheap version is an in-memory
     // path -> token map enforced on the destructive verbs, accepting only "If: (<token>)".
     if (!_IsMacFinder(request)) {
-        return _MethodNotAllowed(@"LOCK method only allowed for Mac Finder");
+        return _MethodNotAllowed(request, @"LOCK method only allowed for Mac Finder");
     }
 
     // The Host header is required because it is interpolated into the <D:lockroot>
@@ -1986,12 +1963,17 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
     [self logVerbose:@"WebDAV pretending to lock \"%@\"", relativePath];
     WSKDataResponse *response = [WSKDataResponse responseWithData:(NSData *)[xmlString dataUsingEncoding:NSUTF8StringEncoding]
                                                                         contentType:@"application/xml; charset=\"utf-8\""];
+    // RFC 4918 §9.10: a LOCK that creates a new lock MUST return the token in a Lock-Token
+    // response header (as a Coded-URL), not only inside the lockdiscovery body. Finder reads
+    // the body — the recorded traces predate this header, and both spellings were re-driven
+    // through them when it was added — but a conforming client is entitled to the header.
+    [response setValue:[NSString stringWithFormat:@"<%@>", token] forAdditionalHeader:@"Lock-Token"];
     return response;
 }
 
 - (WSKResponse *)performUNLOCK:(WSKRequest *)request {
     if (!_IsMacFinder(request)) {
-        return _MethodNotAllowed(@"UNLOCK method only allowed for Mac Finder");
+        return _MethodNotAllowed(request, @"UNLOCK method only allowed for Mac Finder");
     }
 
     NSString *const relativePath = request.path;

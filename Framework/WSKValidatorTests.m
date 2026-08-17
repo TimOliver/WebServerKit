@@ -557,4 +557,87 @@
     XCTAssertLessThan(elapsed, 2.0, @"2000 rejections of a 60 KB non-date took %.2fs; rejection must not be linear in length", elapsed);
 }
 
+// RFC 9110 §13.2.1 requires an origin server to evaluate If-Match and If-Unmodified-Since for
+// EVERY method, not only the destructive ones — a false condition on a GET owes 412. The DAV
+// write verbs got this in the tenth pass; the read verbs never entered that work, so a
+// mismatching If-Match on a GET answered 200 on every serving surface (measured in the
+// eighteenth pass). The failure direction was safe — the current representation is served —
+// which is why no client ever noticed; this closes the conformance half.
+//
+// The write-verb evaluator in WSKWebDAVServer runs BEFORE the handler and its success responses
+// carry no entity tag, so the read-side evaluation must not re-run against them: the last
+// assertion pins that a conditional PUT whose precondition holds still succeeds.
+- (void)testReadRequestsEvaluateIfMatchAndIfUnmodifiedSince {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    NSString* path = [dir stringByAppendingPathComponent:@"f.txt"];
+    XCTAssertTrue([@"ORIGINAL" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    // Backdate the mtime so the Last-Modified seal window is closed and the date validator is
+    // actually issued — If-Unmodified-Since is ignored (fail-open, §13.1.4) while it is withheld.
+    NSDate* settled = [NSDate dateWithTimeIntervalSinceNow:-30.0];
+    XCTAssertTrue([fm setAttributes:@{NSFileModificationDate : settled} ofItemAtPath:path error:NULL]);
+
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addGETHandlerForBasePath:@"/" directoryPath:dir indexFilename:nil cacheAge:0 allowRangeRequests:YES];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* get = SendRawRequest(server.port, @"GET /f.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([get hasPrefix:@"HTTP/1.1 200"], @"fixture GET failed: %@", [get substringToIndex:MIN((NSUInteger)40, get.length)]);
+    NSRange tagStart = [get rangeOfString:@"Etag: " options:NSCaseInsensitiveSearch];
+    XCTAssertNotEqual(tagStart.location, (NSUInteger)NSNotFound, @"the server did not send an ETag: %@", get);
+    NSString* rest = [get substringFromIndex:NSMaxRange(tagStart)];
+    NSString* eTag = [rest substringToIndex:[rest rangeOfString:@"\r\n"].location];
+
+    NSString* (^getWith)(NSString*) = ^(NSString* preconditions) {
+        return SendRawRequest(server.port, [NSString stringWithFormat:@"GET /f.txt HTTP/1.1\r\nHost: localhost\r\n%@\r\n", preconditions]);
+    };
+
+    NSString* stale = getWith(@"If-Match: \"0/0/0/0\"\r\n");
+    XCTAssertTrue([stale hasPrefix:@"HTTP/1.1 412"], @"a mismatching If-Match on a GET owes 412: %@", [stale substringToIndex:MIN((NSUInteger)40, stale.length)]);
+
+    NSString* matching = getWith([NSString stringWithFormat:@"If-Match: %@\r\n", eTag]);
+    XCTAssertTrue([matching hasPrefix:@"HTTP/1.1 200"], @"a matching If-Match must serve normally: %@", [matching substringToIndex:MIN((NSUInteger)40, matching.length)]);
+
+    NSString* star = getWith(@"If-Match: *\r\n");
+    XCTAssertTrue([star hasPrefix:@"HTTP/1.1 200"], @"If-Match: * against an existing representation must serve: %@", [star substringToIndex:MIN((NSUInteger)40, star.length)]);
+
+    // §13.2.2 order: If-Match is evaluated ahead of If-None-Match, so a stale If-Match beats a
+    // matching If-None-Match's 304.
+    NSString* ordered = getWith([NSString stringWithFormat:@"If-Match: \"0/0/0/0\"\r\nIf-None-Match: %@\r\n", eTag]);
+    XCTAssertTrue([ordered hasPrefix:@"HTTP/1.1 412"], @"If-Match must be evaluated ahead of If-None-Match: %@", [ordered substringToIndex:MIN((NSUInteger)40, ordered.length)]);
+
+    NSString* head = SendRawRequest(server.port, @"HEAD /f.txt HTTP/1.1\r\nHost: localhost\r\nIf-Match: \"0/0/0/0\"\r\n\r\n");
+    XCTAssertTrue([head hasPrefix:@"HTTP/1.1 412"], @"HEAD evaluates the same preconditions as GET: %@", [head substringToIndex:MIN((NSUInteger)40, head.length)]);
+
+    NSString* ius = getWith(@"If-Unmodified-Since: Thu, 01 Jan 1970 00:00:00 GMT\r\n");
+    XCTAssertTrue([ius hasPrefix:@"HTTP/1.1 412"], @"a GET modified since the given date owes 412: %@", [ius substringToIndex:MIN((NSUInteger)40, ius.length)]);
+
+    NSString* iusFuture = getWith(@"If-Unmodified-Since: Fri, 01 Jan 2100 00:00:00 GMT\r\n");
+    XCTAssertTrue([iusFuture hasPrefix:@"HTTP/1.1 200"], @"unmodified since a future date must serve: %@", [iusFuture substringToIndex:MIN((NSUInteger)40, iusFuture.length)]);
+
+    // The behaviour that already existed must not move: If-None-Match alone still revalidates.
+    NSString* revalidated = getWith([NSString stringWithFormat:@"If-None-Match: %@\r\n", eTag]);
+    XCTAssertTrue([revalidated hasPrefix:@"HTTP/1.1 304"], @"If-None-Match revalidation must still answer 304: %@", [revalidated substringToIndex:MIN((NSUInteger)40, revalidated.length)]);
+
+    [server stop];
+
+    // A conditional WRITE whose precondition holds must be unaffected: DAV evaluates it before
+    // acting and answers 201/204 with no entity tag, which the read-side evaluation must not
+    // re-judge. This is the double-application trap the GET/HEAD gate exists for.
+    WSKWebDAVServer* dav = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    XCTAssertTrue([dav startWithOptions:options error:NULL]);
+    NSString* davGet = SendRawRequest(dav.port, @"GET /f.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSRange davTagStart = [davGet rangeOfString:@"Etag: " options:NSCaseInsensitiveSearch];
+    XCTAssertNotEqual(davTagStart.location, (NSUInteger)NSNotFound);
+    NSString* davRest = [davGet substringFromIndex:NSMaxRange(davTagStart)];
+    NSString* davTag = [davRest substringToIndex:[davRest rangeOfString:@"\r\n"].location];
+    NSString* body = @"REPLACEMENT";
+    NSString* conditionalPut = SendRawRequest(dav.port, [NSString stringWithFormat:@"PUT /f.txt HTTP/1.1\r\nHost: localhost\r\nIf-Match: %@\r\nContent-Length: %lu\r\n\r\n%@", davTag, (unsigned long)body.length, body]);
+    XCTAssertTrue([conditionalPut hasPrefix:@"HTTP/1.1 204"], @"a conditional PUT whose precondition holds must still succeed: %@", [conditionalPut substringToIndex:MIN((NSUInteger)40, conditionalPut.length)]);
+
+    [dav stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 @end

@@ -1191,4 +1191,216 @@
     [fm removeItemAtPath:dir error:NULL];
 }
 
+// RFC 9110 §5.5: a recipient of CR, LF, or NUL within a field VALUE must either reject the
+// message or replace the byte with SP. The validating pass already refuses a bare CR, a bare LF
+// and obs-fold, and the tchar check refuses a NUL in a field NAME — the value bytes were the one
+// place the class stayed open (measured answering 200 with the NUL delivered intact into
+// request.headers). obs-text (0x80–0xFF) is legal field content and HTAB is legal whitespace,
+// so both must keep being served: this is a control-byte refusal, not an ASCII allow-list.
+- (void)testControlBytesInHeaderValuesAreRefused {
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[WSKRequest class]
+                          processBlock:^WSKResponse*(WSKRequest* request) {
+                              return [WSKDataResponse responseWithText:@"ok"];
+                          }];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSData* (^requestWithValueByte)(unsigned char) = ^(unsigned char byte) {
+        NSMutableData* raw = [[@"GET /a HTTP/1.1\r\nHost: localhost\r\nX-A: a" dataUsingEncoding:NSASCIIStringEncoding] mutableCopy];
+        [raw appendBytes:&byte length:1];
+        [raw appendData:[@"b\r\n\r\n" dataUsingEncoding:NSASCIIStringEncoding]];
+        return (NSData*)raw;
+    };
+
+    const unsigned char refused[] = {0x00, 0x01, 0x1F, 0x7F};
+    for (size_t i = 0; i < sizeof(refused); i++) {
+        NSString* reply = SendRawDataRequest(server.port, requestWithValueByte(refused[i]));
+        XCTAssertTrue([reply containsString:@"400"], @"byte 0x%02X in a field value must be refused, got: %@", refused[i], [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+    }
+
+    const unsigned char served[] = {0x09, 0xE9};  // HTAB, and an obs-text byte
+    for (size_t i = 0; i < sizeof(served); i++) {
+        NSString* reply = SendRawDataRequest(server.port, requestWithValueByte(served[i]));
+        XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 200"], @"byte 0x%02X is legal field content and must be served, got: %@", served[i], [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+    }
+
+    [server stop];
+}
+
+// RFC 9112 §2.3 / RFC 9110 §2.5: a major version this server does not implement is refused with
+// 505, and a message with a HIGHER MINOR version than the server implements is processed as the
+// highest minor version the server is conformant to — i.e. HTTP/1.2 is served as HTTP/1.1, not
+// refused. Both previously collapsed into 400, which tells the client its message was malformed
+// when it was not. Grammar violations (a version that is not HTTP/DIGIT.DIGIT) must stay 400.
+- (void)testUnsupportedHTTPVersionAnswers505AndAHigherMinorIsServedAs11 {
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[WSKRequest class]
+                          processBlock:^WSKResponse*(WSKRequest* request) {
+                              return [WSKDataResponse responseWithText:@"ok"];
+                          }];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSArray<NSString*>* unsupported = @[@"HTTP/2.0", @"HTTP/3.0", @"HTTP/0.9"];
+    for (NSString* version in unsupported) {
+        NSString* reply = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /a %@\r\nHost: localhost\r\n\r\n", version]);
+        XCTAssertTrue([reply containsString:@"505"], @"%@ must answer 505, got: %@", version, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+    }
+
+    NSString* higherMinor = SendRawRequest(server.port, @"GET /a HTTP/1.2\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([higherMinor hasPrefix:@"HTTP/1.1 200"], @"HTTP/1.2 must be processed as HTTP/1.1, got: %@", [higherMinor substringToIndex:MIN((NSUInteger)40, higherMinor.length)]);
+
+    NSArray<NSString*>* malformed = @[@"http/1.1", @"HTTP/1.x", @"HTTP/11.1"];
+    for (NSString* version in malformed) {
+        NSString* reply = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /a %@\r\nHost: localhost\r\n\r\n", version]);
+        XCTAssertTrue([reply containsString:@"400"], @"%@ is a grammar violation and must stay 400, got: %@", version, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+    }
+
+    [server stop];
+}
+
+// RFC 9112 §2.2: a server SHOULD ignore at least one empty line received before the
+// request-line. The validator treated a leading CRLF as an empty block terminating at the
+// request line's expense and refused the whole message.
+- (void)testALeadingEmptyLineBeforeTheRequestLineIsIgnored {
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[WSKRequest class]
+                          processBlock:^WSKResponse*(WSKRequest* request) {
+                              return [WSKDataResponse responseWithText:@"ok"];
+                          }];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* reply = SendRawRequest(server.port, @"\r\nGET /a HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 200"], @"a single leading CRLF must be ignored, got: %@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+
+    [server stop];
+}
+
+// RFC 9112 §3.2: a request with more than one Host header line, or a Host whose field value is
+// syntactically invalid, MUST answer 400. Both previously fell through to the allow-list and
+// answered 421 — a refusal either way, but 421 invites the client to retry the same bytes at
+// another origin, which a malformed message does not deserve. A well-formed name that is simply
+// not on the allow-list must KEEP answering 421: that split is the point of this test.
+- (void)testMultipleOrSyntacticallyInvalidHostHeadersAnswer400 {
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[WSKRequest class]
+                          processBlock:^WSKResponse*(WSKRequest* request) {
+                              return [WSKDataResponse responseWithText:@"ok"];
+                          }];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSDictionary* badCases = @{
+        @"two identical Host lines" : @"GET /a HTTP/1.1\r\nHost: localhost\r\nHost: localhost\r\n\r\n",
+        @"two differing Host lines" : @"GET /a HTTP/1.1\r\nHost: localhost\r\nHost: evil.example\r\n\r\n",
+        @"space inside the Host value" : @"GET /a HTTP/1.1\r\nHost: bad host value\r\n\r\n",
+    };
+    [badCases enumerateKeysAndObjectsUsingBlock:^(NSString* name, NSString* raw, BOOL* stop) {
+        NSString* reply = SendRawRequest(server.port, raw);
+        XCTAssertTrue([reply containsString:@"400"], @"%@: expected 400, got: %@", name, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+    }];
+
+    NSString* sane = SendRawRequest(server.port, @"GET /a HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([sane hasPrefix:@"HTTP/1.1 200"], @"a single valid Host must still be served: %@", [sane substringToIndex:MIN((NSUInteger)40, sane.length)]);
+
+    NSString* misdirected = SendRawRequest(server.port, @"GET /a HTTP/1.1\r\nHost: other.example\r\n\r\n");
+    XCTAssertTrue([misdirected containsString:@"421"], @"a well-formed but unrecognized name must stay 421, got: %@", [misdirected substringToIndex:MIN((NSUInteger)40, misdirected.length)]);
+
+    [server stop];
+}
+
+// RFC 9112 §3.2.2: an origin server receiving an absolute-form request-target MUST ignore the
+// Host header and use the target's authority instead. The authority was discarded and Host
+// consulted, i.e. the more attacker-controlled of the two won. Not reachable from a browser
+// (absolute-form is only sent to proxies), so the rebinding defence never depended on it — but
+// the two positive assertions here pin the required direction both ways.
+- (void)testAbsoluteFormTargetAuthorityOverridesTheHostHeader {
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[WSKRequest class]
+                          processBlock:^WSKResponse*(WSKRequest* request) {
+                              return [WSKDataResponse responseWithText:@"ok"];
+                          }];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* foreignAuthority = SendRawRequest(server.port, @"GET http://evil.example/a HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([foreignAuthority containsString:@"421"], @"the absolute-form authority must be validated, not the Host header: %@", [foreignAuthority substringToIndex:MIN((NSUInteger)40, foreignAuthority.length)]);
+
+    NSString* localAuthority = SendRawRequest(server.port, @"GET http://localhost/a HTTP/1.1\r\nHost: evil.example\r\n\r\n");
+    XCTAssertTrue([localAuthority hasPrefix:@"HTTP/1.1 200"], @"with absolute-form the Host header must be ignored entirely: %@", [localAuthority substringToIndex:MIN((NSUInteger)40, localAuthority.length)]);
+
+    NSString* originForm = SendRawRequest(server.port, @"GET /a HTTP/1.1\r\nHost: evil.example\r\n\r\n");
+    XCTAssertTrue([originForm containsString:@"421"], @"origin-form must keep validating the Host header: %@", [originForm substringToIndex:MIN((NSUInteger)40, originForm.length)]);
+
+    [server stop];
+}
+
+// RFC 9110 §15.5.15: a request-target longer than the server is willing to parse owes 414, not
+// the 431 that covers an oversized header BLOCK. The two are distinguishable at refusal time:
+// if no line terminator has arrived inside the whole block budget, it is the request line
+// itself that is oversized. An oversized block whose request line is ordinary must stay 431.
+- (void)testARequestTargetLongerThanTheHeaderCapAnswers414 {
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[WSKRequest class]
+                          processBlock:^WSKResponse*(WSKRequest* request) {
+                              return [WSKDataResponse responseWithText:@"ok"];
+                          }];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* hugeTarget = [@"/" stringByPaddingToLength:(80 * 1024) withString:@"a" startingAtIndex:0];
+    NSString* reply = SendRawRequest(server.port, [NSString stringWithFormat:@"GET %@ HTTP/1.1\r\nHost: localhost\r\n\r\n", hugeTarget]);
+    XCTAssertTrue([reply containsString:@"414"], @"an oversized request-target owes 414, got: %@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+
+    NSString* hugeHeader = [@"" stringByPaddingToLength:(80 * 1024) withString:@"A" startingAtIndex:0];
+    NSString* blockReply = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /a HTTP/1.1\r\nHost: localhost\r\nX-Big: %@\r\n\r\n", hugeHeader]);
+    XCTAssertTrue([blockReply containsString:@"431"], @"an oversized block with an ordinary request line must stay 431, got: %@", [blockReply substringToIndex:MIN((NSUInteger)40, blockReply.length)]);
+
+    [server stop];
+}
+
+// RFC 9112 §6.1: a transfer coding the server does not understand answers 501 Not Implemented —
+// the request is well-formed, the server just cannot decode it, and 400 tells the client its
+// message was broken when it was not. A malformed APPLICATION of a coding the server does
+// implement ("chunked, chunked", or Content-Length alongside chunked) is the client's framing
+// error and must stay 400.
+- (void)testATransferCodingTheServerDoesNotImplementAnswers501 {
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[WSKRequest class]
+                          processBlock:^WSKResponse*(WSKRequest* request) {
+                              return [WSKDataResponse responseWithText:@"ok"];
+                          }];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSDictionary* notImplemented = @{
+        @"gzip ahead of chunked" : @"GET /a HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: gzip, chunked\r\n\r\n",
+        @"gzip alone" : @"GET /a HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: gzip\r\n\r\n",
+    };
+    [notImplemented enumerateKeysAndObjectsUsingBlock:^(NSString* name, NSString* raw, BOOL* stop) {
+        NSString* reply = SendRawRequest(server.port, raw);
+        XCTAssertTrue([reply containsString:@"501"], @"%@: an unimplemented coding owes 501, got: %@", name, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+    }];
+
+    NSDictionary* stillMalformed = @{
+        @"chunked applied twice" : @"GET /a HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked, chunked\r\n\r\n",
+        @"Content-Length alongside chunked" : @"GET /a HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n",
+    };
+    [stillMalformed enumerateKeysAndObjectsUsingBlock:^(NSString* name, NSString* raw, BOOL* stop) {
+        NSString* reply = SendRawRequest(server.port, raw);
+        XCTAssertTrue([reply containsString:@"400"], @"%@: a framing error must stay 400, got: %@", name, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+    }];
+
+    [server stop];
+}
+
 @end
