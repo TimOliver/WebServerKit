@@ -685,9 +685,20 @@ data held in memory; bodies streamed to disk (uploads, WebDAV PUT) are deliberat
   `<D:getetag/>` answered a 404 propstat while GET sent a strong ETag for the same file).
   `getetag`/`getcontenttype` are FILE-only: a collection has no entity tag, and inventing one
   would make an `If-Match` on a folder compare against a value nothing else produces.
-  `displayname` derives from the RESOURCE path the client used, never the filesystem path — the
-  client already knows that name, whereas the on-disk leaf can differ (a symlink alias) and the
-  share's own directory name is not the client's business; the root is special-cased because
+  **`displayname` prefers a STORED value and derives one only as a fallback** — §15.2 says it
+  "SHOULD NOT be protected", so it is settable via PROPPATCH like any dead property and is
+  deliberately absent from the refused-live list (publishing it while refusing to store it traded
+  one §15.2 obligation for the other; measured, a client COULD set and read it back before the
+  property was published). A stored value is skipped by the allprop dead-property loop, or one
+  `<D:prop>` would carry two `<D:displayname>` elements. The derived fallback comes from the
+  RESOURCE path the client used, never the filesystem path — the client already knows that name,
+  whereas the on-disk leaf can differ (a symlink alias) and the share's own directory name is not
+  the client's business, which is also why the ROOT's displayname is deliberately EMPTY (pinned
+  by a test that allows exactly one empty element in a listing). **That path arrives ALREADY
+  unescaped and must not be unescaped again**: doing so published a name that was not the name on
+  disk for anything containing a percent sign — `100%20off.txt` as `100 off.txt`,
+  `%2Fnot-a-slash.txt` truncated at the decoded separator, and `50%.txt` as EMPTY, since an
+  invalid escape makes `WSKUnescapeURLString` return nil. The root is also special-cased because
   `[@"/" lastPathComponent]` is `@"/"`. `supportedlock` tells the same per-client story as the
   `DAV` and `Allow` headers (populated for Finder, empty otherwise), and `lockdiscovery` is
   ALWAYS empty — not a stub apology but the one honest answer, since `performLOCK:` stores no
@@ -704,7 +715,14 @@ data held in memory; bodies streamed to disk (uploads, WebDAV PUT) are deliberat
   local port — the same ruling already recorded for the Host allow-list's removed port comparison.
   Matched against the request's own `Host` (already validated in the connection ahead of every
   handler) or the configured allow-list; an authority-less `Destination` is this server by
-  definition. Every `Destination` in the recorded corpus is an absolute URI whose authority equals
+  definition. **A value beginning `//` is a network-path reference and CARRIES an authority**
+  (RFC 3986 §4.2), so it takes the absolute-form branch — choosing that branch on a leading `/`
+  alone left this spelling in the PATH branch, where the authority became a directory name and the
+  check never ran: after one `MKCOL /evil.example` (which the same client can send) a COPY to
+  `//evil.example/x` answered 201 writing locally and a MOVE answered 201 having deleted the
+  source, while the identical request in absolute form answered 502. One parser handles both forms
+  by prepending a scheme; `///path` then parses with an EMPTY authority, which §4.2 makes this
+  server, and is admitted on that basis — the case a "reject anything starting with //" fix breaks. Every `Destination` in the recorded corpus is an absolute URI whose authority equals
   its `Host`, which is what makes the strict form safe.
 - **`DELETE` refuses `Depth: 0` on a collection** (400). §9.6.1 forbids the client from sending any
   Depth but infinity AND fixes the semantics at infinity, so answering it as infinity was
@@ -1574,6 +1592,15 @@ alongside the two that must change — the first change made deliberately under 
   corpus green, iOS and tvOS Debug clean; plus `swift build` AND the external SwiftPM consumer
   (depends on the package by path, imports all three modules) for any header/layout move —
   in-package builds cannot detect external unbuildability.
+- **Audit a fix by PREDICTING where it broke something, then measuring the prediction.** Stating
+  three specific hypotheses about the previous pass's own new code — before touching a server —
+  found two real defects and refuted the third, and the refutation taught something too (resolve-once
+  is why PROPFIND and GET cannot disagree about a symlink). This beats re-sweeping the protocol
+  surface, which the previous pass had already covered and which found nothing here. Pair it with a
+  differential against the pre-fix build: 147 cells, and the number that mattered was **0 cells where
+  the status matched but the filesystem effect differed**, which is the shape a status-only sweep
+  cannot see. And always ask what the fix COSTS — that probe found a DoS in the seventeenth pass and
+  a clean bill in the twentieth, and both answers were worth having.
 - **When a change must rewrite recorded fixtures, PROVE the rewrite is additive instead of
   blessing it.** Publishing five new PROPFIND properties changed 16 recorded 207 bodies, and
   re-recording them would have blessed whatever the new code emitted — the exact thing the
@@ -1695,6 +1722,24 @@ alongside the two that must change — the first change made deliberately under 
 
 Newest first. One entry per pass/change-set; the durable rules extracted from each live in the
 body above.
+
+- **Twentieth pass: sweep of the nineteenth pass's own fixes, 2026-08-17.** Four lenses, none reused
+  from the pass it audited (no status sweep, no mounted client): three predictions stated BEFORE
+  measuring, a 147-cell whole-behaviour differential against the pre-fix build recording filesystem
+  effect as well as status, a hostile-name fuzz of the one new derived string, and a cost probe.
+  **All three findings were self-inflicted — defects the previous pass created**, which is the
+  ~1-new-per-5-fixed rate holding almost exactly (8 fixed, 3 created): the protocol-relative
+  `Destination` bypass, the `displayname` double-unescape (4 of 22 hostile names wrong, two published
+  EMPTY), and `displayname` losing its settability. All three fixed here. **The negative results are
+  the more valuable half**, because they cover what that pass most endangered: the shared authority
+  parser did not move Host validation AT ALL (32 spellings × 2 servers = 64 cells, zero differences),
+  the differential's 19 differences were all intended fixes with **0 cells where the status matched
+  but the filesystem effect differed**, and the cost probe found no regression (957 ms vs 1,082 ms
+  for a 5,000-file allprop, descriptors flat) — the same probe that found a denial of service two
+  passes earlier. Prediction 3 was REFUTED and the refutation is worth keeping: PROPFIND and GET
+  agree byte-for-byte on `getetag`/`getcontenttype` even for a symlink whose name and target
+  disagree about the extension, because resolve-once hands the writer an already-resolved path.
+  190 tests.
 
 - **Nineteenth pass: WebDAV-conformance audit + fixes, 2026-08-17.** Three raw-socket rounds (~90
   checks, every 207 parsed by a real XML parser) plus 40 operations through macOS's kernel WebDAV

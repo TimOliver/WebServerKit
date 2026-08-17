@@ -1116,10 +1116,20 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
     // WSKConnection uses to derive request.path).
     NSString *dstRelativePath = nil;
 
-    if ([destinationHeader hasPrefix:@"/"]) {
+    // RFC 3986 §4.2: a value beginning "//" is a network-path reference and CARRIES an authority, so
+    // it belongs with the absolute form below rather than in the path branch. Choosing the branch on
+    // a leading "/" alone put it in the path branch, where the authority was silently reinterpreted
+    // as a directory name — so the foreign-Destination check never ran, and after one MKCOL of that
+    // name a COPY wrote locally under 201 while the same request in absolute form answered 502.
+    // A scheme is prepended so ONE parser handles both forms; "///path" then parses with an EMPTY
+    // authority, which §4.2 says means this server, and the check below admits it on that basis.
+    BOOL const isNetworkPathReference = [destinationHeader hasPrefix:@"//"];
+
+    if ([destinationHeader hasPrefix:@"/"] && !isNetworkPathReference) {
         dstRelativePath = WSKUnescapeURLString(destinationHeader);  // No authority: this server, by definition
     } else {
-        NSURL *const destinationURL = [NSURL URLWithString:destinationHeader];
+        NSString *const absoluteForm = isNetworkPathReference ? [@"http:" stringByAppendingString:destinationHeader] : destinationHeader;
+        NSURL *const destinationURL = [NSURL URLWithString:absoluteForm];
         NSString *const escapedPath = destinationURL.scheme.length ? CFBridgingRelease(CFURLCopyPath((__bridge CFURLRef)destinationURL)) : nil;  // Not -[NSURL path], which strips a trailing slash
         dstRelativePath = escapedPath ? WSKUnescapeURLString(escapedPath) : nil;
 
@@ -1467,6 +1477,9 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
             [xmlString appendString:@"<D:propstat>"];
             [xmlString appendString:@"<D:prop>"];
 
+            // Read before the property block because displayname consults it for a stored value.
+            NSDictionary<NSString *, NSString *> *const dead = _DeadPropertiesAtPath(itemPath);
+
             if (properties & kDAVProperty_ResourceType) {
                 if (isDirectory) {
                     [xmlString appendString:@"<D:resourcetype><D:collection/></D:resourcetype>"];
@@ -1536,16 +1549,31 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
                 }
             }
 
-            // Derived from the RESOURCE path the client used, never from the filesystem path: the
+            // A STORED displayname wins, because RFC 4918 §15.2 says the property "SHOULD NOT be
+            // protected" — a client may set one, and refusing that (as this did when the property was
+            // first published) traded one §15.2 obligation for the other. With nothing stored the name
+            // is DERIVED from the RESOURCE path the client used, never from the filesystem path: the
             // client already knows the name it asked for, whereas the on-disk leaf can differ (a
-            // symlink alias) and the share's own directory name is not the client's business. Note
-            // the recorded trap that makes the root a special case — [@"/" lastPathComponent] is
-            // @"/", the one input that does not yield a leaf.
+            // symlink alias) and the share's own directory name is not the client's business.
+            //
+            // resourcePath arrives ALREADY unescaped — the connection unescaped it before the handler
+            // ever saw it — so it must NOT be unescaped again. Doing so published a name that was not
+            // the name on disk for any name legitimately containing a percent sign: "100%20off.txt"
+            // came out as "100 off.txt", "%2Fnot-a-slash.txt" was truncated at the decoded separator,
+            // and "50%.txt" came out EMPTY because an invalid escape makes WSKUnescapeURLString
+            // return nil. Note the recorded trap that makes the root a special case —
+            // [@"/" lastPathComponent] is @"/", the one input that does not yield a leaf.
             if (properties & kDAVProperty_DisplayName) {
-                NSString *const unescaped = WSKUnescapeURLString(resourcePath);
-                NSString *const trimmed = [unescaped hasSuffix:@"/"] ? [unescaped substringToIndex:(unescaped.length - 1)] : unescaped;
-                NSString *const leaf = (trimmed.length > 0) ? [trimmed lastPathComponent] : @"";
-                [xmlString appendFormat:@"<D:displayname>%@</D:displayname>", _XMLEscape([leaf isEqualToString:@"/"] ? @"" : leaf)];
+                NSString *const stored = dead[_DeadPropertyKey(@"DAV:", @"displayname")];
+                NSString *published = stored;
+
+                if (published == nil) {
+                    NSString *const trimmed = [resourcePath hasSuffix:@"/"] ? [resourcePath substringToIndex:(resourcePath.length - 1)] : resourcePath;
+                    NSString *const leaf = (trimmed.length > 0) ? [trimmed lastPathComponent] : @"";
+                    published = [leaf isEqualToString:@"/"] ? @"" : leaf;
+                }
+
+                [xmlString appendFormat:@"<D:displayname>%@</D:displayname>", _XMLEscape(published)];
             }
 
             // RFC 4918 §18.2 counts DAV:supportedlock as part of class 2, which OPTIONS advertises
@@ -1569,12 +1597,18 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
             }
 
             // Dead properties stored by PROPPATCH. <allprop/> returns them all; a named request
-            // returns the ones it asked for and reports the rest as 404 below.
-            NSDictionary<NSString *, NSString *> *const dead = _DeadPropertiesAtPath(itemPath);
+            // returns the ones it asked for and reports the rest as 404 below. A stored displayname
+            // is SKIPPED here because the live block above has already published it — emitting it
+            // from both would put two <D:displayname> elements in one <D:prop>.
             NSMutableArray<NSString *> *const notFound = [NSMutableArray array];
+            NSString *const displayNameKey = _DeadPropertyKey(@"DAV:", @"displayname");
 
             if (kind == kDAVPropFind_AllProp) {
                 for (NSString *key in dead) {
+                    if ([key isEqualToString:displayNameKey]) {
+                        continue;
+                    }
+
                     [xmlString appendFormat:@"%@%@%@", [_DeadPropertyElement(key) stringByReplacingOccurrencesOfString:@"/>" withString:@">"], _XMLEscape(dead[key]), [self _closingElementForDeadPropertyKey:key]];
                 }
             } else {
@@ -1702,11 +1736,10 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
                 ([localName isEqualToString:@"resourcetype"] || [localName isEqualToString:@"creationdate"] ||
                  [localName isEqualToString:@"getlastmodified"] || [localName isEqualToString:@"getcontentlength"] ||
                  [localName isEqualToString:@"getetag"] || [localName isEqualToString:@"lockdiscovery"] ||
-                 [localName isEqualToString:@"supportedlock"] || [localName isEqualToString:@"getcontenttype"] ||
-                 // displayname is NOT protected per §15.2, so a server MAY store one — this one
-                 // derives it from the request path instead, which is why it is refused rather
-                 // than silently accepted and never read back.
-                 [localName isEqualToString:@"displayname"])) {
+                 [localName isEqualToString:@"supportedlock"] || [localName isEqualToString:@"getcontenttype"])) {
+                 // displayname is deliberately ABSENT from this list: RFC 4918 §15.2 says it
+                 // "SHOULD NOT be protected", so it is stored as a dead property like any other and
+                 // the PROPFIND writer prefers a stored value over the derived name.
                 [refused addObject:_DeadPropertyElement(_DeadPropertyKey(href, localName))];
                 continue;
             }

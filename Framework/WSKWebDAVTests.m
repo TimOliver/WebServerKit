@@ -1445,4 +1445,143 @@
     [fm removeItemAtPath:dir error:NULL];
 }
 
+// RFC 3986 §4.2: "//authority/path" is a network-path reference — the authority IS present. The
+// foreign-Destination check added in the nineteenth pass lives in the branch that parses an absolute
+// URI, and that branch is chosen by testing for a leading "/", which this form also has. So the
+// authority was reinterpreted as a directory name and the check never ran: after one MKCOL of that
+// name (which the same client can send) COPY answered 201 writing locally and MOVE answered 201
+// having deleted the source, while the IDENTICAL request in absolute form answered 502.
+//
+// An EMPTY authority ("///path") means this server per §4.2 and must keep working, which is the case
+// a naive "reject anything starting with //" fix breaks.
+- (void)testProtocolRelativeDestinationIsJudgedLikeTheAbsoluteForm {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* src = [dir stringByAppendingPathComponent:@"src.txt"];
+    XCTAssertTrue([@"SOURCE" writeToFile:src atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    NSString* (^verb)(NSString*, NSString*) = ^(NSString* method, NSString* destination) {
+        return SendRawRequest(server.port, [NSString stringWithFormat:@"%@ /src.txt HTTP/1.1\r\nHost: localhost\r\nDestination: %@\r\nOverwrite: T\r\n\r\n", method, destination]);
+    };
+
+    // The collection the bypass needs, created exactly as a client would.
+    NSString* mkcol = SendRawRequest(server.port, @"MKCOL /evil.example HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
+    XCTAssertTrue([mkcol hasPrefix:@"HTTP/1.1 201"], @"fixture MKCOL failed: %@", [mkcol substringToIndex:MIN((NSUInteger)40, mkcol.length)]);
+
+    NSString* copied = verb(@"COPY", @"//evil.example/stolen.txt");
+    XCTAssertTrue([copied hasPrefix:@"HTTP/1.1 502"], @"a protocol-relative foreign authority owes 502: %@", [copied substringToIndex:MIN((NSUInteger)40, copied.length)]);
+    XCTAssertFalse([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"evil.example/stolen.txt"]], @"the COPY was performed locally");
+
+    NSString* moved = verb(@"MOVE", @"//evil.example/moved.txt");
+    XCTAssertTrue([moved hasPrefix:@"HTTP/1.1 502"], @"a protocol-relative foreign authority owes 502: %@", [moved substringToIndex:MIN((NSUInteger)40, moved.length)]);
+    XCTAssertTrue([fm fileExistsAtPath:src], @"a refused MOVE must leave the source alone");
+    XCTAssertFalse([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"evil.example/moved.txt"]], @"the MOVE was performed locally");
+
+    // A protocol-relative destination naming THIS server is legitimate and must work.
+    NSString* ours = verb(@"COPY", @"//localhost/ours.txt");
+    XCTAssertTrue([ours hasPrefix:@"HTTP/1.1 201"], @"a protocol-relative destination naming this Host must be served: %@", [ours substringToIndex:MIN((NSUInteger)40, ours.length)]);
+    XCTAssertTrue([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"ours.txt"]]);
+
+    // "///path" is an EMPTY authority, which per §4.2 means this server.
+    NSString* empty = verb(@"COPY", @"///empty-authority.txt");
+    XCTAssertTrue([empty hasPrefix:@"HTTP/1.1 201"], @"an empty authority names this server: %@", [empty substringToIndex:MIN((NSUInteger)40, empty.length)]);
+    XCTAssertTrue([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"empty-authority.txt"]]);
+
+    // And the plain path form, which carries no authority at all.
+    NSString* pathOnly = verb(@"COPY", @"/path-only.txt");
+    XCTAssertTrue([pathOnly hasPrefix:@"HTTP/1.1 201"], @"a path-only Destination must be served: %@", [pathOnly substringToIndex:MIN((NSUInteger)40, pathOnly.length)]);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// Two nineteenth-pass defects in one property. `resourcePath` reaches the writer ALREADY unescaped,
+// and the new code unescaped it a second time, so any name legitimately containing a percent sign
+// was published wrong: "100%20off.txt" as "100 off.txt", "%2Fnot-a-slash.txt" truncated at the
+// decoded separator, and "50%.txt" as EMPTY (an invalid escape makes WSKUnescapeURLString return
+// nil). And adding displayname to the refused-live list removed a working capability: RFC 4918 §15.2
+// says DAV:displayname "SHOULD NOT be protected", and pre-fix a client could PROPPATCH it and read
+// it back. A stored value now wins, with the derived name as the fallback.
+- (void)testDisplayNameIsTheRealNameAndRemainsSettable {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+
+    // Written without a format string: these names are all percent hazards.
+    NSArray<NSString*>* names = @[ @"100%20off.txt", @"50%.txt", @"%2Fnot-a-slash.txt", @"%%%.txt", @"plain.txt" ];
+    for (NSString* name in names) {
+        XCTAssertTrue([@"payload" writeToFile:[dir stringByAppendingPathComponent:name] atomically:YES encoding:NSUTF8StringEncoding error:NULL], @"fixture %@", name);
+    }
+
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* listing = SendRawRequest(server.port, @"PROPFIND / HTTP/1.1\r\nHost: localhost\r\nDepth: 1\r\nContent-Length: 0\r\n\r\n");
+    XCTAssertTrue([listing hasPrefix:@"HTTP/1.1 207"], @"%@", [listing substringToIndex:MIN((NSUInteger)40, listing.length)]);
+
+    for (NSString* name in names) {
+        // The element carries the name verbatim; none of these need XML escaping.
+        NSString* expected = [[@"<D:displayname>" stringByAppendingString:name] stringByAppendingString:@"</D:displayname>"];
+        XCTAssertTrue([listing containsString:expected], @"displayname must be the name on disk (%@) — listing: %@", name, listing);
+    }
+    // Exactly one empty displayname is expected and correct: the share ROOT's. Its client-facing
+    // name is "/", and the on-disk alternative is the share's own directory name, which is not the
+    // client's business — deliberately pinned here so an empty name anywhere ELSE fails.
+    NSUInteger empties = 0;
+    NSRange emptyScan = NSMakeRange(0, listing.length);
+    while (emptyScan.length > 0) {
+        NSRange found = [listing rangeOfString:@"<D:displayname></D:displayname>" options:0 range:emptyScan];
+        if (found.location == NSNotFound) {
+            break;
+        }
+        empties += 1;
+        NSUInteger resume = NSMaxRange(found);
+        emptyScan = NSMakeRange(resume, listing.length - resume);
+    }
+    XCTAssertEqual(empties, (NSUInteger)1, @"only the root may publish an empty displayname, found %lu: %@", (unsigned long)empties, listing);
+
+    // Settable, and a stored value wins over the derived one.
+    NSString* setBody = @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\"><D:set><D:prop><D:displayname>Friendly Name</D:displayname></D:prop></D:set></D:propertyupdate>";
+    NSString* patchRequest = [NSString stringWithFormat:@"PROPPATCH /plain.txt HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)setBody.length, setBody];
+    NSString* patched = SendRawRequest(server.port, patchRequest);
+    XCTAssertTrue([patched hasPrefix:@"HTTP/1.1 207"], @"%@", [patched substringToIndex:MIN((NSUInteger)40, patched.length)]);
+    XCTAssertFalse([patched containsString:@"403 Forbidden"], @"§15.2 makes displayname settable: %@", patched);
+
+    NSString* afterSet = SendRawRequest(server.port, @"PROPFIND /plain.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
+    XCTAssertTrue([afterSet containsString:@"<D:displayname>Friendly Name</D:displayname>"], @"a stored displayname must be published: %@", afterSet);
+
+    // Exactly one element — the stored value must not ALSO come out of the dead-property loop.
+    NSUInteger occurrences = 0;
+    NSRange search = NSMakeRange(0, afterSet.length);
+    while (search.length > 0) {
+        NSRange found = [afterSet rangeOfString:@"<D:displayname" options:0 range:search];
+        if (found.location == NSNotFound) {
+            break;
+        }
+        occurrences += 1;
+        NSUInteger resume = NSMaxRange(found);
+        search = NSMakeRange(resume, afterSet.length - resume);
+    }
+    XCTAssertEqual(occurrences, (NSUInteger)1, @"displayname was emitted %lu times: %@", (unsigned long)occurrences, afterSet);
+
+    // Removing the stored value falls back to the derived name.
+    NSString* removeBody = @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\"><D:remove><D:prop><D:displayname/></D:prop></D:remove></D:propertyupdate>";
+    NSString* removeRequest = [NSString stringWithFormat:@"PROPPATCH /plain.txt HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)removeBody.length, removeBody];
+    XCTAssertTrue([SendRawRequest(server.port, removeRequest) hasPrefix:@"HTTP/1.1 207"]);
+    NSString* afterRemove = SendRawRequest(server.port, @"PROPFIND /plain.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
+    XCTAssertTrue([afterRemove containsString:@"<D:displayname>plain.txt</D:displayname>"], @"removing the stored name must fall back to the derived one: %@", afterRemove);
+
+    // The other live properties stay protected — this change is about displayname alone.
+    NSString* etagBody = @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\"><D:set><D:prop><D:getetag>x</D:getetag></D:prop></D:set></D:propertyupdate>";
+    NSString* etagRequest = [NSString stringWithFormat:@"PROPPATCH /plain.txt HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)etagBody.length, etagBody];
+    XCTAssertTrue([SendRawRequest(server.port, etagRequest) containsString:@"403 Forbidden"], @"getetag must stay protected");
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 @end
