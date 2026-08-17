@@ -15,6 +15,8 @@
 #import "WSKWebUploaderSSEChannel.h"
 
 extern NSData* SSEData(NSString* string);
+extern NSData* UTF8Data(NSString* string);
+extern NSURL* LiteralURL(NSString* string);
 extern int ConnectToLocalhostPort(NSUInteger port);
 extern NSData* ReadToEOF(int fd, BOOL* sawEOF);
 extern NSUInteger DrainToEOFAtPace(int fd, NSUInteger chunkSize, useconds_t pauseMicroseconds);

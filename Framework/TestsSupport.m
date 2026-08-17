@@ -20,6 +20,22 @@ NSData* SSEData(NSString* string) {
     return [string dataUsingEncoding:NSUTF8StringEncoding];
 }
 
+// The two nonnull-laundering helpers for fixture literals. -dataUsingEncoding: and +URLWithString:
+// are nullable, which is true in general and never true for the literals tests are built from —
+// but an inline cast at every call site is a lie with no witness, so the assertion lives here
+// instead: a fixture that genuinely fails to convert stops the test at the point of failure.
+NSData* UTF8Data(NSString* string) {
+    NSData* data = [string dataUsingEncoding:NSUTF8StringEncoding];
+    NSCAssert(data != nil, @"fixture string did not encode as UTF-8: %@", string);
+    return data;
+}
+
+NSURL* LiteralURL(NSString* string) {
+    NSURL* url = [NSURL URLWithString:string];
+    NSCAssert(url != nil, @"fixture URL literal did not parse: %@", string);
+    return url;
+}
+
 // Opens a raw TCP connection to localhost:port with a 5 second receive timeout,
 // so tests can exercise server behavior below the HTTP-client abstraction.
 int ConnectToLocalhostPort(NSUInteger port) {

@@ -526,7 +526,7 @@
     NSDictionary* octetStream = @{@"Content-Type" : @"application/octet-stream", @"Content-Length" : @"4"};
     WSKDataRequest* binary = OpenBodyRequest([WSKDataRequest class], octetStream);
     XCTAssertNotNil(binary);
-    XCTAssertTrue([binary writeData:[@"data" dataUsingEncoding:NSUTF8StringEncoding] error:NULL]);
+    XCTAssertTrue([binary writeData:UTF8Data(@"data") error:NULL]);
     XCTAssertTrue([binary close:NULL]);
 
     // Not text/*, so -text has nothing to decode: the header says nil, so nil it must be.
@@ -538,7 +538,7 @@
     WSKDataRequest* untyped = OpenBodyRequest([WSKDataRequest class], @{@"Content-Length" : @"2"});
 
     if (untyped) {
-        XCTAssertTrue([untyped writeData:[@"hi" dataUsingEncoding:NSUTF8StringEncoding] error:NULL]);
+        XCTAssertTrue([untyped writeData:UTF8Data(@"hi") error:NULL]);
         XCTAssertTrue([untyped close:NULL]);
         XCTAssertNil(untyped.text, @"-text must return nil when there is no content type to judge");
         XCTAssertNil(untyped.jsonObject, @"-jsonObject must return nil when there is no content type to judge");
@@ -548,14 +548,14 @@
     NSDictionary* jsonHeaders = @{@"Content-Type" : @"application/json", @"Content-Length" : @"13"};
     WSKDataRequest* json = OpenBodyRequest([WSKDataRequest class], jsonHeaders);
     XCTAssertNotNil(json);
-    XCTAssertTrue([json writeData:[@"{\"ok\":true}xx" dataUsingEncoding:NSUTF8StringEncoding] error:NULL]);
+    XCTAssertTrue([json writeData:UTF8Data(@"{\"ok\":true}xx") error:NULL]);
     XCTAssertTrue([json close:NULL]);
     XCTAssertNil(json.jsonObject, @"malformed JSON is also a documented nil, not an abort");
 
     NSDictionary* textHeaders = @{@"Content-Type" : @"text/plain; charset=utf-8", @"Content-Length" : @"5"};
     WSKDataRequest* text = OpenBodyRequest([WSKDataRequest class], textHeaders);
     XCTAssertNotNil(text);
-    XCTAssertTrue([text writeData:[@"hello" dataUsingEncoding:NSUTF8StringEncoding] error:NULL]);
+    XCTAssertTrue([text writeData:UTF8Data(@"hello") error:NULL]);
     XCTAssertTrue([text close:NULL]);
     XCTAssertEqualObjects(text.text, @"hello", @"a genuine text/* body must still decode");
 }

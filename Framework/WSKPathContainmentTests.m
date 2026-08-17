@@ -81,7 +81,7 @@
     NSData* (^upload)(NSString*, BOOL, NSString*, BOOL) = ^(NSString* fileName, BOOL nulInName, NSString* pathField, BOOL nulInPath) {
         NSMutableData* body = [NSMutableData data];
         void (^add)(NSString*) = ^(NSString* text) {
-            [body appendData:[text dataUsingEncoding:NSUTF8StringEncoding]];
+            [body appendData:UTF8Data(text)];
         };
         add(@"--B\r\nContent-Disposition: form-data; name=\"path\"\r\n\r\n");
         add(pathField);
@@ -138,7 +138,7 @@
         NSString* body = [NSString stringWithFormat:@"--B\r\nContent-Disposition: form-data; name=\"files[]\"; filename=\"%@\"\r\nContent-Type: text/plain\r\n\r\nESCAPED\r\n--B--\r\n", fileName];
         NSString* head = [NSString stringWithFormat:@"POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data; boundary=B\r\nContent-Length: %lu\r\n\r\n", (unsigned long)[body lengthOfBytesUsingEncoding:NSUTF8StringEncoding]];
         NSMutableData* request = [[head dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
-        [request appendData:[body dataUsingEncoding:NSUTF8StringEncoding]];
+        [request appendData:UTF8Data(body)];
         return (NSData*)request;
     };
 
@@ -990,7 +990,8 @@
 
     for (NSArray* row in rows) {
         NSString* name = row[0];
-        BOOL expected = [row[1] boolValue];
+        NSNumber* const expectedNumber = row[1];
+        BOOL expected = expectedNumber.boolValue;
         NSString* request = [NSString stringWithFormat:@"GET /download?path=%%2F%@ HTTP/1.1\r\nHost: localhost\r\n\r\n", name];
         NSString* download = SendRawRequest(uploader.port, request);
 
@@ -1048,9 +1049,10 @@
                             @[ @"GET /real.txt HTTP/1.1\r\nHost: localhost\r\n\r\n", @"200" ] ];
 
     for (NSArray* row in creations) {
-        NSString* reply = SendRawRequest(dav.port, row[0]);
+        NSString* requestText = row[0];
+        NSString* reply = SendRawRequest(dav.port, requestText);
         NSString* status = (reply.length > 12) ? [reply substringWithRange:NSMakeRange(9, 3)] : reply;
-        XCTAssertEqualObjects(status, row[1], @"the not-yet-exists fallback must keep working: %@ -> %@", [row[0] substringToIndex:MIN((NSUInteger)24, [row[0] length])], status);
+        XCTAssertEqualObjects(status, row[1], @"the not-yet-exists fallback must keep working: %@ -> %@", [requestText substringToIndex:MIN((NSUInteger)24, requestText.length)], status);
     }
 
     [dav stop];

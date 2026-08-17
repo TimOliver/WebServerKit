@@ -1158,7 +1158,7 @@
 // fail, i.e. SEGV rather than a nil. Inspecting the request is the match block's job.
 - (void)testRequestAddressAccessorsAreSafeBeforeTheServerPopulatesThem {
     WSKRequest* request = [[WSKRequest alloc] initWithMethod:@"GET"
-                                                         url:[NSURL URLWithString:@"http://localhost/x"]
+                                                         url:LiteralURL(@"http://localhost/x")
                                                      headers:@{}
                                                         path:@"/x"
                                                        query:@{}];
@@ -1210,7 +1210,7 @@
     NSData* (^requestWithValueByte)(unsigned char) = ^(unsigned char byte) {
         NSMutableData* raw = [[@"GET /a HTTP/1.1\r\nHost: localhost\r\nX-A: a" dataUsingEncoding:NSASCIIStringEncoding] mutableCopy];
         [raw appendBytes:&byte length:1];
-        [raw appendData:[@"b\r\n\r\n" dataUsingEncoding:NSASCIIStringEncoding]];
+        [raw appendData:UTF8Data(@"b\r\n\r\n")];
         return (NSData*)raw;
     };
 

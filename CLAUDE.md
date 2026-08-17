@@ -1426,7 +1426,17 @@ alongside the two that must change — the first change made deliberately under 
   killing it — the whole process, server included, freezes together.
 - **Check warnings against a clean `-derivedDataPath` or the count means nothing** — an
   incremental build recompiles nothing and reports zero (five warnings accumulated this way; the
-  GNU `?:` class recurred and was caught only by the clean build).
+  GNU `?:` class recurred and was caught only by the clean build). **And check the TEST target,
+  not only the framework**: every warning check for sixteen passes was scoped to framework
+  sources, so 250+ warnings accumulated unseen in the Tests target — it inherits the
+  PROJECT-level `-Weverything` list, which had drifted one suppression behind the framework
+  targets' curated copies. The bar since the warnings cleanup is ZERO compile warnings across
+  `build-for-testing` on a clean derived-data path (framework + tests together); the C++-interop
+  pedantry families (`-Wimplicit-int-enum-cast`, `-Wimplicit-void-ptr-cast`) are suppressed in
+  all four WARNING_CFLAGS lists as deliberate config, same family as `-Wno-pre-c11-compat`.
+  Relatedly: `Run-Tests.sh` now passes its own `-derivedDataPath` — sharing the IDE's build
+  database is what stamped every `SYMROOT=./build` product into it and made later IDE builds
+  emit a "Stale file … outside of the allowed root paths" warning per product.
 - **Verify batches together, not per-fix** — per-fix greens let two regressions ride `main`
   through three CI runs. **Periodically run every technique family together against tip**: each
   had last run against an older commit, and only the combined run asks "do the repairs hold

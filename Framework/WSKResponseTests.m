@@ -186,7 +186,7 @@
     // division, a non-string key, and raw bytes.
     NSArray* invalid = @[
         @{@"created" : [NSDate date]},
-        @{@"url" : [NSURL URLWithString:@"http://example.com"]},
+        @{@"url" : LiteralURL(@"http://example.com")},
         @{@"n" : @(NAN)},
         @{@"n" : @(INFINITY)},
         @{@42 : @"v"},

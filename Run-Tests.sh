@@ -14,6 +14,11 @@
 # test, and they need no hardcoded version here to go stale.
 
 BUILD_DIR="$(pwd)/build"
+# A build database of its own, so these SYMROOT=./build products are never recorded in the
+# project's default DerivedData. Sharing that database is what made every later IDE build warn
+# "Stale file .../build/... is located outside of the allowed root paths" for each product this
+# script had produced.
+DERIVED_DATA_DIR="$BUILD_DIR/DerivedData"
 PAYLOAD_ZIP="Tests/Payload.zip"
 PAYLOAD_DIR="$BUILD_DIR/Payload"
 TRACE_RUNNER="$BUILD_DIR/Release/WebServerKitExample"
@@ -49,10 +54,12 @@ function runTests {
 rm -rf "$BUILD_DIR"
 
 echo "=== Unit tests ==="
-xcodebuild test -project WebServerKit.xcodeproj -scheme "WebServerKit (Mac)" -configuration Debug "SYMROOT=$BUILD_DIR" "${SIGNING[@]}"
+xcodebuild test -project WebServerKit.xcodeproj -scheme "WebServerKit (Mac)" -configuration Debug "SYMROOT=$BUILD_DIR" -derivedDataPath "$DERIVED_DATA_DIR" "${SIGNING[@]}"
 
 echo "=== Recorded traces ==="
-xcodebuild build -project WebServerKit.xcodeproj -sdk macosx -target "WebServerKit Example (Mac)" -configuration Release "SYMROOT=$BUILD_DIR" "${SIGNING[@]}"
+# -scheme rather than -target: xcodebuild rejects -derivedDataPath on target-style invocations
+# (usage error, exit 64), and the private build database is the point of passing it.
+xcodebuild build -project WebServerKit.xcodeproj -sdk macosx -scheme "WebServerKit Example (Mac)" -configuration Release "SYMROOT=$BUILD_DIR" -derivedDataPath "$DERIVED_DATA_DIR" "${SIGNING[@]}"
 
 runTests htmlForm Tests/HTMLForm
 runTests htmlFileUpload Tests/HTMLFileUpload
@@ -64,9 +71,9 @@ runTests webUploader Tests/WebUploader
 runTests webServer Tests/WebServer-Sample-Movie Tests/Sample-Movie.mp4
 
 echo "=== Release builds ==="
-xcodebuild build -project WebServerKit.xcodeproj -scheme "WebServerKit (Mac)" -configuration Release "SYMROOT=$BUILD_DIR" "${SIGNING[@]}"
-xcodebuild build -project WebServerKit.xcodeproj -scheme "WebServerKit (iOS)" -configuration Release -destination 'generic/platform=iOS Simulator' "SYMROOT=$BUILD_DIR" "${SIGNING[@]}"
-xcodebuild build -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -configuration Release -destination 'generic/platform=tvOS Simulator' "SYMROOT=$BUILD_DIR" "${SIGNING[@]}"
+xcodebuild build -project WebServerKit.xcodeproj -scheme "WebServerKit (Mac)" -configuration Release "SYMROOT=$BUILD_DIR" -derivedDataPath "$DERIVED_DATA_DIR" "${SIGNING[@]}"
+xcodebuild build -project WebServerKit.xcodeproj -scheme "WebServerKit (iOS)" -configuration Release -destination 'generic/platform=iOS Simulator' "SYMROOT=$BUILD_DIR" -derivedDataPath "$DERIVED_DATA_DIR" "${SIGNING[@]}"
+xcodebuild build -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -configuration Release -destination 'generic/platform=tvOS Simulator' "SYMROOT=$BUILD_DIR" -derivedDataPath "$DERIVED_DATA_DIR" "${SIGNING[@]}"
 
 echo "=== Swift Package Manager ==="
 # The package layout is fragile in ways a plain Xcode build cannot see: the public headers

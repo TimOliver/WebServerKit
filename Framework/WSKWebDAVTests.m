@@ -994,7 +994,7 @@
     NSString* illegal = [NSString stringWithFormat:@"%C", (unichar)0x01];
     XCTAssertFalse([xml containsString:illegal], @"the emitted XML must not contain a raw 0x01");
 
-    NSXMLParser* parser = [[NSXMLParser alloc] initWithData:[xml dataUsingEncoding:NSUTF8StringEncoding]];
+    NSXMLParser* parser = [[NSXMLParser alloc] initWithData:UTF8Data(xml)];
     XCTAssertTrue([parser parse], @"the emitted document must be well-formed XML: %@", parser.parserError);
 
     [server stop];

@@ -1242,6 +1242,9 @@
 					"-Wno-reserved-identifier",
 					"-Wno-pre-c11-compat",
 					"-Wno-cast-qual",
+					"-Wno-declaration-after-statement",
+					"-Wno-implicit-int-enum-cast",
+					"-Wno-implicit-void-ptr-cast",
 					"-Wno-missing-include-dirs",
 				);
 			};
@@ -1373,6 +1376,8 @@
 					"-Wno-pre-c11-compat",
 					"-Wno-cast-qual",
 					"-Wno-declaration-after-statement",
+					"-Wno-implicit-int-enum-cast",
+					"-Wno-implicit-void-ptr-cast",
 					"-Wno-missing-include-dirs",
 				);
 			};
@@ -1452,6 +1457,8 @@
 					"-Wno-pre-c11-compat",
 					"-Wno-cast-qual",
 					"-Wno-declaration-after-statement",
+					"-Wno-implicit-int-enum-cast",
+					"-Wno-implicit-void-ptr-cast",
 					"-Wno-missing-include-dirs",
 				);
 			};
@@ -1609,6 +1616,8 @@
 					"-Wno-pre-c11-compat",
 					"-Wno-cast-qual",
 					"-Wno-declaration-after-statement",
+					"-Wno-implicit-int-enum-cast",
+					"-Wno-implicit-void-ptr-cast",
 					"-Wno-missing-include-dirs",
 				);
 			};

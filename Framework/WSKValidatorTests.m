@@ -212,7 +212,7 @@
 
     for (NSString* header in cases) {
         WSKRequest* request = [[WSKRequest alloc] initWithMethod:@"GET"
-                                                             url:[NSURL URLWithString:@"http://localhost/"]
+                                                             url:LiteralURL(@"http://localhost/")
                                                          headers:@{@"Accept-Encoding" : header}
                                                             path:@"/"
                                                            query:@{}];
@@ -221,7 +221,7 @@
     }
 
     // No header at all is not an acceptance.
-    WSKRequest* bare = [[WSKRequest alloc] initWithMethod:@"GET" url:[NSURL URLWithString:@"http://localhost/"] headers:@{} path:@"/" query:@{}];
+    WSKRequest* bare = [[WSKRequest alloc] initWithMethod:@"GET" url:LiteralURL(@"http://localhost/") headers:@{} path:@"/" query:@{}];
     XCTAssertFalse(bare.acceptsGzipContentEncoding, @"an absent Accept-Encoding is not an acceptance");
 }
 

@@ -92,7 +92,8 @@
 
     NSMutableArray<NSString*>* received = [NSMutableArray array];
     void (^reader)(NSData*) = ^(NSData* data) {
-        [received addObject:[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]];
+        NSString* text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        [received addObject:(text != nil ? text : @"<invalid UTF-8>")];
     };
 
     [channel parkReader:reader];           // parked on empty buffer
@@ -130,7 +131,8 @@
 
     NSMutableArray<NSString*>* received = [NSMutableArray array];
     void (^reader)(NSData*) = ^(NSData* data) {
-        [received addObject:[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]];
+        NSString* text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        [received addObject:(text != nil ? text : @"<invalid UTF-8>")];
     };
     [channel parkReader:reader];
     [channel parkReader:reader];
