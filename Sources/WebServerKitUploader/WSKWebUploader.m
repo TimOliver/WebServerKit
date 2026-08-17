@@ -1494,7 +1494,14 @@ static NSString *_OriginAuthority(NSString *value) {
     }
 
     if (!moved) {
-        return [WSKErrorResponse responseWithServerError:kWSKHTTPStatusCode_InternalServerError underlyingError:error message:@"Failed moving uploaded file to \"%@\"", relativePath];
+        // A full volume or exhausted quota is 507, not 500 — the same mapping WebDAV's PUT and
+        // COPY/MOVE already run through, and the same rule the record states for every write-to-disk
+        // verb. This endpoint hardcoded 500, so an upload onto a nearly-full device (temp on
+        // internal storage, share smaller or near-full) reported a server fault for what is really
+        // "no room" — and a 5xx invites the client to retry a request that can never succeed.
+        // WSKServerErrorStatusCodeForError reads NSFileWriteOutOfSpaceError AND the POSIX errno
+        // under NSUnderlyingError, so it catches both spellings; everything else it still maps to 500.
+        return [WSKErrorResponse responseWithServerError:WSKServerErrorStatusCodeForError(error) underlyingError:error message:@"Failed moving uploaded file to \"%@\"", relativePath];
     }
 
     if ([self.delegate respondsToSelector:@selector(webUploader:didUploadFileAtPath:)]) {
@@ -1640,7 +1647,8 @@ static NSString *_OriginAuthority(NSString *value) {
     }
 
     if (!moved) {
-        return [WSKErrorResponse responseWithServerError:kWSKHTTPStatusCode_InternalServerError underlyingError:error message:@"Failed moving \"%@\" to \"%@\"", oldRelativePath, newRelativePath];
+        // Same rule as /upload above: a full volume or quota is 507, via the shared mapping.
+        return [WSKErrorResponse responseWithServerError:WSKServerErrorStatusCodeForError(error) underlyingError:error message:@"Failed moving \"%@\" to \"%@\"", oldRelativePath, newRelativePath];
     }
 
     if ([self.delegate respondsToSelector:@selector(webUploader:didMoveItemFromPath:toPath:)]) {
@@ -1847,7 +1855,9 @@ static NSString *_OriginAuthority(NSString *value) {
     }
 
     if (!created) {
-        return [WSKErrorResponse responseWithServerError:kWSKHTTPStatusCode_InternalServerError underlyingError:error message:@"Failed creating directory \"%@\"", relativePath];
+        // Same rule as /upload and /move: a full volume or quota is 507, via the shared mapping.
+        // Matches WebDAV's MKCOL, which already routes createDirectory failures through it.
+        return [WSKErrorResponse responseWithServerError:WSKServerErrorStatusCodeForError(error) underlyingError:error message:@"Failed creating directory \"%@\"", relativePath];
     }
 
     if ([self.delegate respondsToSelector:@selector(webUploader:didCreateDirectoryAtPath:)]) {

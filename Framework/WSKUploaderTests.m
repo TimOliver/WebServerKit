@@ -5,6 +5,31 @@
 
 #import "TestsSupport.h"
 
+#import <objc/runtime.h>
+
+// A full volume or exhausted quota must reach the client as 507, not 500 — a 5xx server-fault code
+// invites the client to retry an upload that cannot succeed until space is freed. The mapping
+// function WSKServerErrorStatusCodeForError was always correct and is unit-tested separately; what
+// this pins is that the uploader's write ENDPOINTS actually ROUTE their moveItem failures through
+// it. They hardcoded 500, so the mapping existed but /upload, /move and /create never consulted it.
+//
+// The error is INJECTED rather than reproduced with a real small volume: hdiutil in a unit test is
+// slow and fragile on CI, and the thing under test is the call-site routing, not the filesystem.
+// Only -moveItemAtPath:toPath:error: is swizzled and only while armed, so the multipart temp write
+// (raw open/write/close) and all test setup are untouched.
+static BOOL gWSKInjectOutOfSpace = NO;
+static IMP gWSKOriginalMoveIMP = NULL;
+
+static BOOL WSKInjectingMove(id self, SEL _cmd, NSString* src, NSString* dst, NSError** err) {
+    if (gWSKInjectOutOfSpace) {
+        if (err) {
+            *err = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileWriteOutOfSpaceError userInfo:nil];
+        }
+        return NO;
+    }
+    return ((BOOL (*)(id, SEL, NSString*, NSString*, NSError**))gWSKOriginalMoveIMP)(self, _cmd, src, dst, err);
+}
+
 @interface WSKUploaderTests : XCTestCase
 @end
 
@@ -383,6 +408,49 @@
     WSKWebUploader* ok = [[WSKWebUploader alloc] initWithUploadDirectory:dir];
     XCTAssertNotNil(ok);
     [[NSFileManager defaultManager] removeItemAtPath:dir error:NULL];
+}
+
+- (void)testUploadOntoAFullVolumeIs507NotServerError {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    WSKWebUploader* server = [[WSKWebUploader alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    Method move = class_getInstanceMethod([NSFileManager class], @selector(moveItemAtPath:toPath:error:));
+    gWSKOriginalMoveIMP = method_getImplementation(move);
+    method_setImplementation(move, (IMP)WSKInjectingMove);
+
+    NSString* boundary = @"----wskfulltest";
+    NSString* head = [NSString stringWithFormat:
+        @"--%@\r\nContent-Disposition: form-data; name=\"files[]\"; filename=\"x.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n", boundary];
+    NSString* tail = [NSString stringWithFormat:@"\r\n--%@--\r\n", boundary];
+    NSString* payload = @"some bytes that cannot land";
+    NSString* body = [NSString stringWithFormat:@"%@%@%@", head, payload, tail];
+    NSString* request = [NSString stringWithFormat:
+        @"POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data; boundary=%@\r\nContent-Length: %lu\r\n\r\n%@",
+        boundary, (unsigned long)strlen(body.UTF8String), body];
+
+    gWSKInjectOutOfSpace = YES;
+    NSString* reply = SendRawRequest(server.port, request);
+    gWSKInjectOutOfSpace = NO;
+
+    // Restore before any assertion can bail, or a failure leaves the whole suite swizzled.
+    method_setImplementation(move, gWSKOriginalMoveIMP);
+
+    XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 507"], @"a full volume must be 507 Insufficient Storage, not a server fault: %@",
+                  [reply substringToIndex:MIN((NSUInteger)50, reply.length)]);
+    // Nothing may have landed, and the injected failure must not have left the temp behind — the
+    // reliability half of the same guarantee.
+    XCTAssertEqualObjects([fm contentsOfDirectoryAtPath:dir error:NULL], @[], @"a refused upload left residue in the share");
+
+    // And the endpoint still works once space is available, so the routing change did not break the
+    // success path.
+    NSString* ok = SendRawRequest(server.port, request);
+    XCTAssertTrue([ok hasPrefix:@"HTTP/1.1 200"], @"an ordinary upload must still succeed: %@", [ok substringToIndex:MIN((NSUInteger)50, ok.length)]);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
 }
 
 @end

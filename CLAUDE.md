@@ -190,7 +190,15 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   capped at `kDAVMaxRequestBodyLength` before libxml2; `_EscapeHTMLString` escapes `&` FIRST;
   hrefs are percent-encoded THEN HTML-escaped; `_XMLEscape` drops XML-1.0-illegal controls.
 - ENOSPC/EDQUOT answer 507 for PUT/MKCOL/COPY/MOVE — read both `NSFileWriteOutOfSpaceError`
-  and the POSIX errno under `NSUnderlyingError`.
+  and the POSIX errno under `NSUnderlyingError`. **The uploader's `/upload`, `/move` and `/create`
+  route through the SAME `WSKServerErrorStatusCodeForError` now** — they hardcoded 500, so a
+  disk-full upload reported a server fault (measured 500 on a real 2 MB volume) for what is "no
+  room", and a 5xx invites the client to retry a request that cannot succeed. `/delete` and `/list`
+  stay 500 (delete frees space, a listing failure is genuinely a server fault) — matching WebDAV,
+  which also leaves its DELETE site hardcoded. The mapping FUNCTION was always right and unit-tested;
+  the gap was the uploader call sites never consulting it, the "class closed at only some sites"
+  shape. Regression driven by injecting `NSFileWriteOutOfSpaceError` into `-moveItemAtPath:` at the
+  live `/upload` endpoint, which the pure-function test could not reach.
 
 ### File serving and connection reuse
 
@@ -363,6 +371,22 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
   (`200,error` where `200,200` was owed). The RFC remedy (`shutdown(SHUT_WR)` + drain) holds
   connection slots on a 128-slot server, so it needs its own bounded design.
 - A header-time refusal can lose its error-page body to a TCP reset (the status never is).
+- **ENAMETOOLONG answers 500, both servers.** A filename ≥ NAME_MAX (a 300-char component
+  measured 500 on `/upload` AND WebDAV PUT) is client-supplied input the filesystem cannot store,
+  so 4xx is owed, not a server fault. Not fixed with the disk-full pass deliberately: the status is
+  a genuine choice (400 vs 414 — the name is in the URI for WebDAV but in the body for the uploader,
+  so one shared answer is 400), and adding it to `WSKServerErrorStatusCodeForError` turns that
+  function from "server error mapper" into a client/server mapper, which is a contract change worth
+  its own decision. No leak — measured 0 temp residue, fds flat, server alive across 15 in a row.
+- **The uploader answers 404/501 for a wrong method on an existing endpoint, never 405+`Allow`.**
+  Measured: `GET /upload` 404, `POST /list` 404 (methods with SOME handler fall through a catch-all),
+  `PUT`/`DELETE`/`OPTIONS`/`TRACE` and `OPTIONS *` all 501 (no handler anywhere). RFC 9110 wants
+  405 with `Allow` when the resource exists but the method is not supported. Low value here —
+  trusted network, the uploader's own JS client always uses the right method, and it rejects
+  cross-origin so OPTIONS preflight is not part of its design — and a real fix means per-path
+  `Allow` generation in the match-block router (WSKWebServer core), which is disproportionate.
+  Recorded, not fixed. The WebDAV server already does 405+`Allow` via `_MethodNotAllowed`; this is
+  the uploader surface only.
 - Phase 2's low-value structural tail: URI-to-path derivation; the limits/constants.
 - litmus `props` has NOT been re-run since the nineteenth pass added five PROPFIND
   properties — install litmus and run it before treating those as conformance-verified.
