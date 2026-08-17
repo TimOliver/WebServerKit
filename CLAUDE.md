@@ -2,7 +2,7 @@
 
 A fork of GCDWebServer with additional features for iOS/macOS web serving.
 
-This file is the project's institutional memory across sixteen audit passes and a structural
+This file is the project's institutional memory across twenty-one audit passes and a structural
 cleanup. It is organized by **what is true now**, not by when things happened; the pass-by-pass
 narrative is compressed into the appendix. When editing this file: a sentence about what some pass
 DID belongs in the appendix; a sentence about what the code relies on NOW belongs in the body. The
@@ -689,8 +689,10 @@ data held in memory; bodies streamed to disk (uploads, WebDAV PUT) are deliberat
   "SHOULD NOT be protected", so it is settable via PROPPATCH like any dead property and is
   deliberately absent from the refused-live list (publishing it while refusing to store it traded
   one §15.2 obligation for the other; measured, a client COULD set and read it back before the
-  property was published). A stored value is skipped by the allprop dead-property loop, or one
-  `<D:prop>` would carry two `<D:displayname>` elements. The derived fallback comes from the
+  property was published). A stored value is skipped by BOTH loops that walk the dead-property
+  store — the allprop one and `<propname/>`'s — or one `<D:prop>` carries two `<D:displayname>`
+  elements. The key is derived once above both for that reason: teaching only the allprop loop is
+  exactly the defect the twenty-first pass found, one site away from the fix that created it. The derived fallback comes from the
   RESOURCE path the client used, never the filesystem path — the client already knows that name,
   whereas the on-disk leaf can differ (a symlink alias) and the share's own directory name is not
   the client's business, which is also why the ROOT's displayname is deliberately EMPTY (pinned
@@ -1036,6 +1038,24 @@ exercise changes, not on suspicion.
   1,957 MB. The gap is file-backed, reclaimable page cache for the 512 KB file being served tens
   of millions of times. `phys_footprint` is what macOS uses for memory pressure and jetsam;
   measure that, or `leaks`, and never report `resident_size` growth as accumulation.
+- **The WebDAV surface has now been driven under CONCURRENCY and for ACCUMULATION**, which no
+  earlier pass had aimed at it. 6 workers × 120 rounds, 2,160 requests in 5.6 s, racing the three
+  newest refusal paths against real work: every one of the 240 hits on each path answered exactly
+  one status (foreign `Destination` 502, protocol-relative `Destination` 502, `DELETE Depth: 0` 400,
+  PUT `Content-Range` 400 — no 500s, no leakage into other codes), PROPFIND returned well-formed XML
+  every time under contention, the collection every refused DELETE targeted survived fully intact,
+  the file every refused `Content-Range` PUT targeted was byte-unchanged, and **no staging residue
+  and no foreign-authority directory** appeared anywhere in the share. `reservedInMemoryByteCount`
+  was 0 at rest with a 288-byte peak in flight (live PROPPATCH bodies), descriptors 16 → 17.
+  Re-run when the DAV verbs or the property writer change, not on suspicion.
+- **The dead-property store's interaction with a live-published name is clean** (20 probes on the
+  one property that is both, `displayname`): a stored value appears exactly once and beats the
+  derived name; a BARE no-namespace `displayname` stays a genuinely separate property and does not
+  disturb the `DAV:`-namespaced one — the exact disagreement litmus once caught for no-namespace
+  properties; values round-trip EXACT through XML for markup, `&`, quotes, `]]>`, pre-escaped text,
+  newlines, tabs, unicode with emoji and 60 KB; an empty value is honoured as deliberate; removing
+  an unset property is a no-op per §14.23; and a stored name travels correctly through both MOVE
+  and COPY. Only `<propname/>`'s duplicate came out of this, and it is fixed.
 - **Torn writes do not happen** — 240 concurrent 128 KiB + 90 concurrent 4 MiB PUTs, zero mixed
   files (the body always lands in a temp file first). **Atomic replacement under load is safe**
   — 915 `rename(2)` replacements, 47.7 GB, zero splices, with the oracle provably sensitive
@@ -1592,6 +1612,14 @@ alongside the two that must change — the first change made deliberately under 
   corpus green, iOS and tvOS Debug clean; plus `swift build` AND the external SwiftPM consumer
   (depends on the package by path, imports all three modules) for any header/layout move —
   in-package builds cannot detect external unbuildability.
+- **A finding count of 3 → 3 → 1 across consecutive passes on one subsystem is the signal to
+  STOP, and it has now been reached twice.** The sixteenth pass concluded "~1 new defect per 5 fixed
+  → stop auditing" and was right; passes 19–21 walked the same curve on WebDAV, with every finding
+  after the first pass being self-inflicted by the previous one. What breaks the plateau is not
+  another lens from inside but an INDEPENDENT implementation of the spec: litmus's `props` suite
+  would have found the twenty-first pass's finding on its own, and litmus is a package install rather
+  than a week of probing. When the yield curve flattens, buy an outside oracle instead of writing
+  another probe.
 - **Audit a fix by PREDICTING where it broke something, then measuring the prediction.** Stating
   three specific hypotheses about the previous pass's own new code — before touching a server —
   found two real defects and refuted the third, and the refutation taught something too (resolve-once
@@ -1722,6 +1750,18 @@ alongside the two that must change — the first change made deliberately under 
 
 Newest first. One entry per pass/change-set; the durable rules extracted from each live in the
 body above.
+
+- **Twenty-first pass: the WebDAV audit sequence's stopping point, 2026-08-17.** Three lenses never
+  aimed at this surface — the dead-property/live-property collision the twentieth pass created,
+  concurrency over the new refusal paths, and accumulation. **Yield: one trivial finding**
+  (`<propname/>` listing `displayname` twice once a value was stored — the allprop loop had been
+  taught to skip the stored key and this one had not, landing one site from the fix that created it).
+  Everything else was clean, including 2,160 concurrent requests with zero anomalies and a budget of
+  0 at rest. **The sequence is over, and the numbers say so plainly: 3 findings, then 3, then 1, all
+  self-inflicted after the first.** The remaining WebDAV known-opens need design, not discovery (the
+  lingering-close/RST item, the directory-rename TOCTOU). The highest-value next step is not another
+  lens from inside — it is **installing litmus**, whose `props` suite exercises `<propname/>` and
+  would have found this pass's finding independently. 191 tests.
 
 - **Twentieth pass: sweep of the nineteenth pass's own fixes, 2026-08-17.** Four lenses, none reused
   from the pass it audited (no status sweep, no mounted client): three predictions stated BEFORE

@@ -1445,6 +1445,72 @@
     [fm removeItemAtPath:dir error:NULL];
 }
 
+// <propname/> answers which properties EXIST, so each name must appear ONCE. displayname is the only
+// property that is both published live and storable as a dead property, and once a value was stored
+// it came out twice — from the static name list and again from the dead-property loop. The allprop
+// branch had been taught to skip the stored key; this branch had not, which is this codebase's
+// signature shape (a class closed at one of the sites it applies to) landing one site away from the
+// fix that created it. Asserted over every name rather than just displayname, so the next property
+// to gain a stored form cannot reintroduce it quietly.
+- (void)testPropnameListsEveryPropertyExactlyOnce {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    XCTAssertTrue([@"payload" writeToFile:[dir stringByAppendingPathComponent:@"f.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSUInteger (^countOf)(NSString*, NSString*) = ^(NSString* haystack, NSString* needle) {
+        NSUInteger found = 0;
+        NSRange scan = NSMakeRange(0, haystack.length);
+        while (scan.length > 0) {
+            NSRange hit = [haystack rangeOfString:needle options:0 range:scan];
+            if (hit.location == NSNotFound) {
+                break;
+            }
+            found += 1;
+            NSUInteger resume = NSMaxRange(hit);
+            scan = NSMakeRange(resume, haystack.length - resume);
+        }
+        return found;
+    };
+    NSString* (^propname)(void) = ^{
+        NSString* body = @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:propname/></D:propfind>";
+        NSString* request = [NSString stringWithFormat:@"PROPFIND /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)body.length, body];
+        return SendRawRequest(server.port, request);
+    };
+
+    NSArray<NSString*>* names = @[ @"resourcetype", @"creationdate", @"displayname", @"supportedlock",
+                                   @"lockdiscovery", @"getlastmodified", @"getcontentlength",
+                                   @"getetag", @"getcontenttype" ];
+
+    // Nothing stored yet: the baseline every name must already satisfy.
+    NSString* before = propname();
+    XCTAssertTrue([before hasPrefix:@"HTTP/1.1 207"], @"%@", [before substringToIndex:MIN((NSUInteger)40, before.length)]);
+    for (NSString* name in names) {
+        NSString* element = [NSString stringWithFormat:@"<D:%@/>", name];
+        XCTAssertEqual(countOf(before, element), (NSUInteger)1, @"%@ listed %lu times: %@", name, (unsigned long)countOf(before, element), before);
+    }
+
+    // Store a displayname AND a custom property, then ask again. Both must be listed once.
+    NSString* setBody = @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:z=\"urn:z\"><D:set><D:prop><D:displayname>Stored</D:displayname><z:custom>v</z:custom></D:prop></D:set></D:propertyupdate>";
+    NSString* patchRequest = [NSString stringWithFormat:@"PROPPATCH /f.txt HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)setBody.length, setBody];
+    NSString* patched = SendRawRequest(server.port, patchRequest);
+    XCTAssertTrue([patched hasPrefix:@"HTTP/1.1 207"], @"%@", [patched substringToIndex:MIN((NSUInteger)40, patched.length)]);
+    XCTAssertFalse([patched containsString:@"403 Forbidden"], @"both properties are settable: %@", patched);
+
+    NSString* after = propname();
+    for (NSString* name in names) {
+        NSString* element = [NSString stringWithFormat:@"<D:%@/>", name];
+        XCTAssertEqual(countOf(after, element), (NSUInteger)1, @"with a value stored, %@ listed %lu times: %@", name, (unsigned long)countOf(after, element), after);
+    }
+    XCTAssertEqual(countOf(after, @"custom"), (NSUInteger)1, @"a stored custom property must be listed once: %@", after);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 // RFC 3986 §4.2: "//authority/path" is a network-path reference — the authority IS present. The
 // foreign-Destination check added in the nineteenth pass lives in the branch that parses an absolute
 // URI, and that branch is chosen by testing for a leading "/", which this form also has. So the

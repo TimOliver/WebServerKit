@@ -1447,6 +1447,12 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
             [xmlString appendString:@"<D:response>"];
             [xmlString appendFormat:@"<D:href>%@</D:href>", escapedPath];
 
+            // A stored displayname is published by the live block below, so both places that walk
+            // the dead-property store have to skip it or one <D:prop> carries the name twice.
+            // Declared here, above both, because teaching only ONE of them is the defect this
+            // replaces: the allprop loop learned it and <propname/> did not.
+            NSString *const displayNameKey = _DeadPropertyKey(@"DAV:", @"displayname");
+
             // <propname/> asks which properties EXIST, not what they hold, so the names go out
             // as empty elements. RFC 4918 §9.1 makes it part of the method, not a malformed
             // body to refuse.
@@ -1466,6 +1472,10 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
                 }
 
                 for (NSString *key in _DeadPropertiesAtPath(itemPath)) {
+                    if ([key isEqualToString:displayNameKey]) {
+                        continue;  // Already listed above
+                    }
+
                     [xmlString appendString:_DeadPropertyElement(key)];
                 }
 
@@ -1601,7 +1611,6 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
             // is SKIPPED here because the live block above has already published it — emitting it
             // from both would put two <D:displayname> elements in one <D:prop>.
             NSMutableArray<NSString *> *const notFound = [NSMutableArray array];
-            NSString *const displayNameKey = _DeadPropertyKey(@"DAV:", @"displayname");
 
             if (kind == kDAVPropFind_AllProp) {
                 for (NSString *key in dead) {
