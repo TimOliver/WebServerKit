@@ -406,6 +406,21 @@ BOOL WSKIsHeaderTokenString(NSString *_Nullable string);
 NSString *WSKHostNameWithoutRootLabel(NSString *host);
 
 /**
+ *  Splits an authority ("name", "name:8080", "[::1]:8080") into its lowercased, root-label-stripped
+ *  host name and its port text. Returns NO for a malformed bracketed form — an unclosed `[`, or
+ *  junk between `]` and the port — in which case no out-param is written.
+ *
+ *  One home, shared by the Host allow-list in `WSKConnection` and WebDAV's `Destination` check.
+ *  The two ask the same question of the same grammar and differ only in the status they refuse
+ *  with (421/400 versus 502), so a second parser here would be this codebase's signature defect.
+ *
+ *  NOTE the port is returned unvalidated: whether digits are required, and whether the port
+ *  participates in the comparison at all, is the caller's ruling. It is deliberately NOT compared
+ *  by either current caller — a port-translating hop is the priority deployment.
+ */
+BOOL WSKSplitAuthority(NSString *authority, NSString *_Nullable __autoreleasing *_Nullable outName, NSString *_Nullable __autoreleasing *_Nullable outPort, BOOL *_Nullable outBracketed);
+
+/**
  *  Returns YES when a `Transfer-Encoding` header names a transfer coding this server does not
  *  implement at all — the case RFC 9112 §6.1 assigns 501 rather than the 400 owed to a malformed
  *  APPLICATION of an implemented coding ("chunked, chunked", Content-Length alongside chunked).

@@ -2012,6 +2012,50 @@ static CFHTTPMessageRef _CreateHTTPMessageFromPerformingRequest(NSData *inData, 
     return response;
 }
 
+// Neutralises the one element of a recorded body that CANNOT be recorded: DAV:getetag holds an
+// inode-derived tag, and the inode moves every time Tests/Payload.zip is re-extracted (measured
+// 64770720 then 64770739 for the same file, mtime preserved). The comparator has always exempted
+// the Etag HEADER for exactly this reason — "ETags depend on file system node IDs" — but compared
+// bodies byte-for-byte, which is precisely why publishing the property in PROPFIND was recorded as
+// "measured as failing CI; needs care". This is that care: the tag's PRESENCE and position are
+// still compared, only its value is not. A tag differing from the one GET issues is caught by
+// -testPropfindPublishesTheValidatorAndTypeProperties, which asserts the two are byte-identical.
+static NSData *_BodyWithNormalizedEntityTags(NSData *body) {
+    if (body.length == 0) {
+        return body;
+    }
+
+    NSString *const text = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
+
+    if ([text rangeOfString:@"<D:getetag>"].location == NSNotFound) {
+        return body;  // Not a DAV body, or one without the property: unchanged and uncopied
+    }
+
+    NSMutableString *const normalized = [text mutableCopy];
+    NSRange search = NSMakeRange(0, normalized.length);
+
+    while (search.length > 0) {
+        NSRange const open = [normalized rangeOfString:@"<D:getetag>" options:0 range:search];
+
+        if (open.location == NSNotFound) {
+            break;
+        }
+
+        NSUInteger const valueStart = NSMaxRange(open);
+        NSRange const close = [normalized rangeOfString:@"</D:getetag>" options:0 range:NSMakeRange(valueStart, normalized.length - valueStart)];
+
+        if (close.location == NSNotFound) {
+            break;
+        }
+
+        [normalized replaceCharactersInRange:NSMakeRange(valueStart, close.location - valueStart) withString:@"<normalized>"];
+        NSUInteger const resume = valueStart + [@"<normalized>" length];
+        search = NSMakeRange(resume, normalized.length - resume);
+    }
+
+    return (NSData *)[normalized dataUsingEncoding:NSUTF8StringEncoding];
+}
+
 static void _LogResult(NSString *format, ...) {
     va_list arguments;
 
@@ -2023,7 +2067,11 @@ static void _LogResult(NSString *format, ...) {
 
 - (NSInteger)runTestsWithOptions:(NSDictionary<NSString *, id> *)options inDirectory:(NSString *)path {
     WSK_DCHECK([NSThread isMainThread]);
-    NSArray *const ignoredHeaders = @[@"Date", @"Etag"];  // Dates are always different by definition and ETags depend on file system node IDs
+    // Dates are always different by definition and ETags depend on file system node IDs. The same
+    // node-ID reasoning applies INSIDE a body once PROPFIND publishes DAV:getetag, which is what
+    // _BodyWithNormalizedEntityTags handles; a per-response copy of this list picks up
+    // Content-Length for those bodies only.
+    NSArray *const ignoredHeaders = @[@"Date", @"Etag"];
     NSInteger result = -1;
 
     if ([self startWithOptions:options error:NULL]) {
@@ -2074,9 +2122,19 @@ static void _LogResult(NSString *format, ...) {
 
                                             NSDictionary *const expectedHeaders = CFBridgingRelease(CFHTTPMessageCopyAllHeaderFields(expectedResponse));
                                             NSDictionary *const actualHeaders = CFBridgingRelease(CFHTTPMessageCopyAllHeaderFields(actualResponse));
+                                            // A body carrying DAV:getetag cannot be recorded byte-exactly (see
+                                            // _BodyWithNormalizedEntityTags), and its Content-Length is a function of that same
+                                            // un-recordable value — the tag's digit count moves with the inode. Exempted only for
+                                            // those bodies, so every other response still has its length pinned exactly.
+                                            NSData *const recordedBody = CFBridgingRelease(CFHTTPMessageCopyBody(expectedResponse));
+                                            NSMutableArray *const ignoredForThisResponse = [ignoredHeaders mutableCopy];
+
+                                            if (![recordedBody isEqualToData:_BodyWithNormalizedEntityTags(recordedBody)]) {
+                                                [ignoredForThisResponse addObject:@"Content-Length"];
+                                            }
 
                                             for (NSString *expectedHeader in expectedHeaders) {
-                                                if ([ignoredHeaders containsObject:expectedHeader]) {
+                                                if ([ignoredForThisResponse containsObject:expectedHeader]) {
                                                     continue;
                                                 }
 
@@ -2090,7 +2148,7 @@ static void _LogResult(NSString *format, ...) {
                                             }
 
                                             for (NSString *actualHeader in actualHeaders) {
-                                                if (!expectedHeaders[actualHeader]) {
+                                                if (!expectedHeaders[actualHeader] && ![ignoredForThisResponse containsObject:actualHeader]) {
                                                     _LogResult(@"  Header '%@' not matching:\n    Expected: \"%@\"\n      Actual: \"%@\"", actualHeader, nil, actualHeaders[actualHeader]);
                                                     success = NO;
                                                 }
@@ -2105,7 +2163,10 @@ static void _LogResult(NSString *format, ...) {
                                                 actualBody = [actualBody subdataWithRange:NSMakeRange(0, expectedBody.length)];
                                             }
 
-                                            if ((actualBody && expectedBody && ![actualBody isEqualToData:expectedBody]) || (actualBody && !expectedBody) || (!actualBody && expectedBody)) {
+                                            NSData *const comparableExpectedBody = _BodyWithNormalizedEntityTags(expectedBody);
+                                            NSData *const comparableActualBody = _BodyWithNormalizedEntityTags(actualBody);
+
+                                            if ((comparableActualBody && comparableExpectedBody && ![comparableActualBody isEqualToData:comparableExpectedBody]) || (actualBody && !expectedBody) || (!actualBody && expectedBody)) {
                                                 _LogResult(@"  Bodies not matching:\n    Expected: %lu bytes\n      Actual: %lu bytes", (unsigned long)expectedBody.length, (unsigned long)actualBody.length);
                                                 success = NO;
 #if !TARGET_OS_IPHONE

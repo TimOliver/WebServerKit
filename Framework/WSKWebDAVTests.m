@@ -1238,4 +1238,211 @@
     [fm removeItemAtPath:dir error:NULL];
 }
 
+// RFC 4918 §9.8.3 / §9.9.4: a Destination on another server is the 502 (Bad Gateway) case. The
+// authority was discarded and only the path used, so COPY and MOVE to any foreign host were
+// performed LOCALLY and answered 201 — and MOVE additionally deleted the source, leaving a client
+// that believes it relocated a file to another host with its source destroyed and the copy on the
+// original server.
+//
+// The comparison is by host NAME only. Scheme and port are deliberately ignored: the priority
+// deployment terminates TLS upstream (Tailscale Serve) and may translate ports, so a legitimate
+// client says "Destination: https://name/x" while talking plaintext to a local port — comparing
+// either would refuse exactly that deployment. Same reasoning as the Host allow-list's removed
+// port comparison.
+- (void)testDestinationOnAnotherServerIsRefused {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* src = [dir stringByAppendingPathComponent:@"src.txt"];
+    NSString* exfil = [dir stringByAppendingPathComponent:@"exfil.txt"];
+    XCTAssertTrue([@"SOURCE" writeToFile:src atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    NSString* (^verb)(NSString*, NSString*) = ^(NSString* method, NSString* destination) {
+        return SendRawRequest(server.port, [NSString stringWithFormat:@"%@ /src.txt HTTP/1.1\r\nHost: localhost\r\nDestination: %@\r\nOverwrite: T\r\n\r\n", method, destination]);
+    };
+
+    NSArray<NSString*>* foreign = @[ @"http://evil.example/exfil.txt",
+                                     @"http://evil.example:8080/exfil.txt",
+                                     @"https://evil.example/exfil.txt",
+                                     @"http://127.0.0.1/exfil.txt" ];  // a different spelling is still not this Host
+    for (NSString* destination in foreign) {
+        NSString* copied = verb(@"COPY", destination);
+        XCTAssertTrue([copied hasPrefix:@"HTTP/1.1 502"], @"COPY to \"%@\" owes 502: %@", destination, [copied substringToIndex:MIN((NSUInteger)40, copied.length)]);
+        XCTAssertFalse([fm fileExistsAtPath:exfil], @"COPY to \"%@\" created the file locally", destination);
+    }
+
+    NSString* moved = verb(@"MOVE", @"http://elsewhere.example/gone.txt");
+    XCTAssertTrue([moved hasPrefix:@"HTTP/1.1 502"], @"MOVE to another server owes 502: %@", [moved substringToIndex:MIN((NSUInteger)40, moved.length)]);
+    XCTAssertTrue([fm fileExistsAtPath:src], @"a refused MOVE must leave the source alone");
+    XCTAssertFalse([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"gone.txt"]], @"a refused MOVE must not write locally");
+
+    // Every form a real client actually sends must keep working. All eight Destination values in
+    // the recorded trace corpus are absolute URIs whose authority equals the request's Host.
+    NSString* sameAuthority = verb(@"COPY", @"http://localhost/copy1.txt");
+    XCTAssertTrue([sameAuthority hasPrefix:@"HTTP/1.1 201"], @"an authority matching Host must be served: %@", [sameAuthority substringToIndex:MIN((NSUInteger)40, sameAuthority.length)]);
+    NSString* otherPort = verb(@"COPY", @"http://localhost:9999/copy2.txt");
+    XCTAssertTrue([otherPort hasPrefix:@"HTTP/1.1 201"], @"the port must not be compared (port-translating hop): %@", [otherPort substringToIndex:MIN((NSUInteger)40, otherPort.length)]);
+    NSString* otherScheme = verb(@"COPY", @"https://localhost/copy3.txt");
+    XCTAssertTrue([otherScheme hasPrefix:@"HTTP/1.1 201"], @"the scheme must not be compared (TLS terminated upstream): %@", [otherScheme substringToIndex:MIN((NSUInteger)40, otherScheme.length)]);
+    NSString* pathOnly = verb(@"COPY", @"/copy4.txt");
+    XCTAssertTrue([pathOnly hasPrefix:@"HTTP/1.1 201"], @"a path-only Destination names this server: %@", [pathOnly substringToIndex:MIN((NSUInteger)40, pathOnly.length)]);
+    NSString* rootDotted = verb(@"COPY", @"http://localhost./copy5.txt");
+    XCTAssertTrue([rootDotted hasPrefix:@"HTTP/1.1 201"], @"the DNS root label must normalize: %@", [rootDotted substringToIndex:MIN((NSUInteger)40, rootDotted.length)]);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// RFC 9110 §9.3.4: an origin server MUST answer 400 to a PUT carrying Content-Range, "since the
+// target resource may be truncated by the partial content and the client may not be aware of that".
+// It was honoured as an ordinary whole-body write: `Content-Range: bytes 0-2/10` with a 3-byte body
+// answered 201 and stored 3 bytes as the complete representation, and the range's OFFSET was
+// ignored too, so `bytes 5-7/10` also wrote at offset 0. curl -C - puts this header on the wire for
+// upload resume, so it is reachable by an everyday client.
+//
+// Refused on headers, before the body is read, so a large partial PUT never reaches the disk.
+- (void)testPUTCarryingContentRangeIsRefused {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* existing = [dir stringByAppendingPathComponent:@"existing.txt"];
+    XCTAssertTrue([@"ORIGINAL" writeToFile:existing atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    NSString* (^put)(NSString*, NSString*, NSString*) = ^(NSString* name, NSString* extra, NSString* body) {
+        return SendRawRequest(server.port, [NSString stringWithFormat:@"PUT /%@ HTTP/1.1\r\nHost: localhost\r\n%@Content-Length: %lu\r\n\r\n%@", name, extra, (unsigned long)body.length, body]);
+    };
+
+    NSString* partial = put(@"partial.txt", @"Content-Range: bytes 0-2/10\r\n", @"abc");
+    XCTAssertTrue([partial hasPrefix:@"HTTP/1.1 400"], @"a PUT carrying Content-Range owes 400: %@", [partial substringToIndex:MIN((NSUInteger)40, partial.length)]);
+    XCTAssertFalse([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"partial.txt"]], @"the refused PUT still created the file");
+
+    NSString* offset = put(@"existing.txt", @"Content-Range: bytes 5-7/10\r\n", @"xyz");
+    XCTAssertTrue([offset hasPrefix:@"HTTP/1.1 400"], @"a PUT carrying Content-Range owes 400: %@", [offset substringToIndex:MIN((NSUInteger)40, offset.length)]);
+    XCTAssertEqualObjects([NSString stringWithContentsOfFile:existing encoding:NSUTF8StringEncoding error:NULL], @"ORIGINAL",
+                          @"the refused PUT truncated an existing file");
+
+    // An ordinary PUT is untouched, and so is a Content-Range on a method where it has no
+    // defined meaning (RFC 9110 scopes the refusal to PUT).
+    NSString* plain = put(@"plain.txt", @"", @"whole");
+    XCTAssertTrue([plain hasPrefix:@"HTTP/1.1 201"], @"an ordinary PUT must still succeed: %@", [plain substringToIndex:MIN((NSUInteger)40, plain.length)]);
+    NSString* getWithRange = SendRawRequest(server.port, @"GET /existing.txt HTTP/1.1\r\nHost: localhost\r\nContent-Range: bytes 0-2/10\r\n\r\n");
+    XCTAssertTrue([getWithRange hasPrefix:@"HTTP/1.1 200"], @"Content-Range on a GET is meaningless, not fatal: %@", [getWithRange substringToIndex:MIN((NSUInteger)40, getWithRange.length)]);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// RFC 4918 §9.6.1 forbids a client from sending any Depth but infinity on a DELETE of a collection,
+// and the server validated that strictly for every value EXCEPT "0" — the one whose plain reading
+// ("do not touch the members") is the opposite of what happened: 204, subtree destroyed. "0" stays
+// valid on a plain FILE, where it genuinely means the same thing as infinity, which is why the two
+// halves are pinned together here.
+- (void)testDeleteRefusesDepthZeroOnACollectionButNotOnAFile {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    BOOL (^makeTree)(NSString*) = ^(NSString* name) {
+        NSString* path = [dir stringByAppendingPathComponent:name];
+        return (BOOL)([fm createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:NULL] &&
+                      [@"inner" writeToFile:[path stringByAppendingPathComponent:@"inner.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    };
+    NSString* (^del)(NSString*, NSString*) = ^(NSString* name, NSString* extra) {
+        return SendRawRequest(server.port, [NSString stringWithFormat:@"DELETE /%@ HTTP/1.1\r\nHost: localhost\r\n%@\r\n", name, extra]);
+    };
+
+    XCTAssertTrue(makeTree(@"shallow"));
+    NSString* refused = del(@"shallow", @"Depth: 0\r\n");
+    XCTAssertTrue([refused hasPrefix:@"HTTP/1.1 400"], @"DELETE of a collection with Depth:0 owes 400: %@", [refused substringToIndex:MIN((NSUInteger)40, refused.length)]);
+    XCTAssertTrue([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"shallow/inner.txt"]], @"the refused DELETE destroyed the subtree anyway");
+
+    // The two spellings §9.6.1 defines must keep deleting the whole tree.
+    XCTAssertTrue(makeTree(@"absent"));
+    XCTAssertTrue([del(@"absent", @"") hasPrefix:@"HTTP/1.1 204"], @"an absent Depth means infinity");
+    XCTAssertFalse([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"absent"]]);
+    XCTAssertTrue(makeTree(@"infinite"));
+    XCTAssertTrue([del(@"infinite", @"Depth: infinity\r\n") hasPrefix:@"HTTP/1.1 204"], @"Depth:infinity deletes the tree");
+    XCTAssertFalse([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"infinite"]]);
+
+    // A plain file has no internal members, so Depth:0 means exactly what infinity means.
+    NSString* leaf = [dir stringByAppendingPathComponent:@"leaf.txt"];
+    XCTAssertTrue([@"leaf" writeToFile:leaf atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([del(@"leaf.txt", @"Depth: 0\r\n") hasPrefix:@"HTTP/1.1 204"], @"Depth:0 must still delete a plain file");
+    XCTAssertFalse([fm fileExistsAtPath:leaf]);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// PROPFIND published four properties and answered 404 for everything else, so it actively
+// contradicted GET about the same resource: GET sends an ETag and a Content-Type while PROPFIND
+// reported that no such property exists. RFC 4918 §15.5/§15.6 make both SHOULDs precisely because
+// the server sends the matching header, and §15.2 asks for displayname on every compliant resource.
+//
+// getetag comes from WSKEntityTagForFileInfo — the same single formatter GET uses — so the equality
+// asserted here is the property that stops the two surfaces drifting apart again.
+- (void)testPropfindPublishesTheValidatorAndTypeProperties {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    NSString* file = [dir stringByAppendingPathComponent:@"page.html"];
+    XCTAssertTrue([@"<b>hi</b>" writeToFile:file atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    NSDate* settled = [NSDate dateWithTimeIntervalSinceNow:-30.0];
+    XCTAssertTrue([fm setAttributes:@{NSFileModificationDate : settled} ofItemAtPath:file error:NULL]);
+    XCTAssertTrue([fm createDirectoryAtPath:[dir stringByAppendingPathComponent:@"folder"] withIntermediateDirectories:YES attributes:nil error:NULL]);
+
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* get = SendRawRequest(server.port, @"GET /page.html HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSRange tagStart = [get rangeOfString:@"Etag: " options:NSCaseInsensitiveSearch];
+    XCTAssertNotEqual(tagStart.location, (NSUInteger)NSNotFound, @"fixture GET carried no ETag: %@", get);
+    NSString* rest = [get substringFromIndex:NSMaxRange(tagStart)];
+    NSString* eTag = [rest substringToIndex:[rest rangeOfString:@"\r\n"].location];
+
+    NSString* allprop = SendRawRequest(server.port, @"PROPFIND /page.html HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
+    XCTAssertTrue([allprop hasPrefix:@"HTTP/1.1 207"], @"%@", [allprop substringToIndex:MIN((NSUInteger)40, allprop.length)]);
+    // Hoisted: a comma inside a bracketed expression still splits a macro's arguments.
+    NSString* expectedTagElement = [NSString stringWithFormat:@"<D:getetag>%@</D:getetag>", eTag];
+    XCTAssertTrue([allprop containsString:expectedTagElement],
+                  @"PROPFIND must publish the same entity tag GET issues (%@): %@", eTag, allprop);
+    XCTAssertTrue([allprop containsString:@"<D:getcontenttype>text/html</D:getcontenttype>"], @"getcontenttype missing: %@", allprop);
+    XCTAssertTrue([allprop containsString:@"<D:displayname>page.html</D:displayname>"], @"displayname missing: %@", allprop);
+    XCTAssertTrue([allprop containsString:@"<D:lockdiscovery/>"], @"lockdiscovery missing: %@", allprop);
+
+    // Named requests must answer 200 for these now, not the 404 propstat they used to.
+    NSString* namedBody = @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:prop><D:getetag/><D:getcontenttype/><D:displayname/></D:prop></D:propfind>";
+    NSString* namedRequest = [NSString stringWithFormat:@"PROPFIND /page.html HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@",
+                                                        (unsigned long)namedBody.length, namedBody];
+    NSString* named = SendRawRequest(server.port, namedRequest);
+    XCTAssertFalse([named containsString:@"404 Not Found"], @"the named properties are implemented and must not be reported missing: %@", named);
+    XCTAssertTrue([named containsString:eTag], @"a named getetag request must carry the tag: %@", named);
+
+    // A collection has no entity tag and no content type, and must say so rather than inventing one.
+    NSString* collection = SendRawRequest(server.port, @"PROPFIND /folder HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
+    XCTAssertTrue([collection containsString:@"<D:displayname>folder</D:displayname>"], @"a collection owes a displayname: %@", collection);
+    XCTAssertFalse([collection containsString:@"<D:getetag>"], @"a collection has no entity tag: %@", collection);
+    XCTAssertFalse([collection containsString:@"<D:getcontenttype>"], @"a collection has no content type: %@", collection);
+
+    // Class 2 is advertised to Finder alone (see -testNonFinderClientsAreNotOfferedTheLockMethods),
+    // and RFC 4918 §18.2 makes DAV:supportedlock part of that compliance class. The lock stub
+    // stores nothing, so an EMPTY lockdiscovery is the truthful answer for every client.
+    NSString* finder = SendRawRequest(server.port, @"PROPFIND /page.html HTTP/1.1\r\nHost: localhost\r\nUser-Agent: WebDAVFS/3.0.1 (03018000) Darwin/13.1.0 (x86_64)\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
+    XCTAssertTrue([finder containsString:@"<D:lockentry>"], @"a class-2 client owes a supportedlock entry: %@", finder);
+    XCTAssertTrue([finder containsString:@"<D:exclusive/>"], @"the advertised lock scope is exclusive write: %@", finder);
+    XCTAssertTrue([finder containsString:@"<D:lockdiscovery/>"], @"nothing is locked, because nothing is stored: %@", finder);
+    XCTAssertTrue([allprop containsString:@"<D:supportedlock/>"], @"a class-1 client is offered no lock types: %@", allprop);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 @end

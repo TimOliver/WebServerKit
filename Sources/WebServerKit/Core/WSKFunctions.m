@@ -493,6 +493,57 @@ NSString *WSKHostNameWithoutRootLabel(NSString *host) {
     return [host hasSuffix:@"."] ? [host substringToIndex:(host.length - 1)] : host;
 }
 
+// One home for "authority -> host name (+ port)", shared by the Host allow-list and WebDAV's
+// Destination check. Two parsers for this would be the same-rule-twice shape that keeps producing
+// defects here — and the two callers ask the same question of the same grammar, differing only in
+// the status they answer with.
+BOOL WSKSplitAuthority(NSString *authority, NSString *__autoreleasing *outName, NSString *__autoreleasing *outPort, BOOL *outBracketed) {
+    NSString *const normalized = [authority lowercaseString];
+    NSString *name = normalized;
+    NSString *portText = nil;
+    BOOL const isBracketed = [normalized hasPrefix:@"["];
+
+    if (isBracketed) {  // Bracketed IPv6 literal, optionally followed by a port
+        NSRange const closing = [name rangeOfString:@"]"];
+
+        if (closing.location == NSNotFound) {
+            return NO;
+        }
+
+        NSString *const remainder = [name substringFromIndex:(closing.location + 1)];
+
+        if (remainder.length && ![remainder hasPrefix:@":"]) {
+            return NO;
+        }
+
+        portText = remainder.length ? [remainder substringFromIndex:1] : nil;
+        name = [name substringWithRange:NSMakeRange(1, closing.location - 1)];
+    } else {
+        // Searched BACKWARDS so an unbracketed IPv6 literal cannot be mistaken for name:port in a
+        // way that silently succeeds — it still fails the checks the caller applies afterwards.
+        NSRange const colon = [name rangeOfString:@":" options:NSBackwardsSearch];
+
+        if (colon.location != NSNotFound) {
+            portText = [name substringFromIndex:(colon.location + 1)];
+            name = [name substringToIndex:colon.location];
+        }
+    }
+
+    if (outName) {
+        *outName = WSKHostNameWithoutRootLabel(name);
+    }
+
+    if (outPort) {
+        *outPort = portText;
+    }
+
+    if (outBracketed) {
+        *outBracketed = isBracketed;
+    }
+
+    return YES;
+}
+
 BOOL WSKIsHeaderTokenCharacter(unsigned char character) {
     if (((character >= 'a') && (character <= 'z')) || ((character >= 'A') && (character <= 'Z')) || ((character >= '0') && (character <= '9'))) {
         return YES;

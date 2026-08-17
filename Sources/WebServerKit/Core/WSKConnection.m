@@ -362,38 +362,17 @@ static BOOL _IsSyntacticallyValidRegName(NSString *name) {
         return nil;
     }
 
-    NSString *const normalized = [authority lowercaseString];
-    NSString *name = normalized;
-    NSString *portText = nil;
-
-    if ([name hasPrefix:@"["]) {  // Bracketed IPv6 literal, optionally followed by a port
-        NSRange closing = [name rangeOfString:@"]"];
-
-        if (closing.location == NSNotFound) {
-            return [self _invalidHostResponseForAuthority:authority];
-        }
-
-        NSString *const remainder = [name substringFromIndex:(closing.location + 1)];
-
-        if (remainder.length && ![remainder hasPrefix:@":"]) {
-            return [self _invalidHostResponseForAuthority:authority];
-        }
-
-        portText = remainder.length ? [remainder substringFromIndex:1] : nil;
-        name = [name substringWithRange:NSMakeRange(1, closing.location - 1)];
-    } else {
-        NSRange colon = [name rangeOfString:@":" options:NSBackwardsSearch];
-
-        if (colon.location != NSNotFound) {
-            portText = [name substringFromIndex:(colon.location + 1)];
-            name = [name substringToIndex:colon.location];
-        }
-    }
-
-    // Strip the DNS root label from the *name*, not from the end of the whole value, so
+    // Split by the shared authority parser (see WSKSplitAuthority): WebDAV's Destination check
+    // asks the same question of the same grammar, and one home is what stops the two drifting.
+    // It strips the DNS root label from the *name*, not from the end of the whole value, so
     // "name.local.:8080" normalizes as well as "name.local.".
-    BOOL const isBracketed = [normalized hasPrefix:@"["];
-    name = WSKHostNameWithoutRootLabel(name);
+    NSString *name = nil;
+    NSString *portText = nil;
+    BOOL isBracketed = NO;
+
+    if (!WSKSplitAuthority(authority, &name, &portText, &isBracketed)) {
+        return [self _invalidHostResponseForAuthority:authority];
+    }
 
     // An allow-list entry may pin a port ("files.example:8080"), and such an entry is
     // deliberately honoured verbatim — including its port — so rebuild the canonical
@@ -468,6 +447,37 @@ static BOOL _IsSyntacticallyValidRegName(NSString *name) {
     return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"Invalid \"Host\" header \"%@\"", authority];
 }
 
+// RFC 9110 §9.3.4: an origin server MUST answer 400 to a PUT carrying "Content-Range", "since the
+// target resource may be truncated by the partial content and the client may not be aware of that".
+// It was honoured as an ordinary whole-body write instead: a 3-byte body under
+// "Content-Range: bytes 0-2/10" was stored as the complete representation under a 201, and the
+// range's OFFSET was ignored too ("bytes 5-7/10" also wrote at offset 0) — the complete,
+// well-formed, WRONG response this codebase keeps finding. curl -C - puts the header on the wire
+// for upload resume, so an everyday client reaches it.
+//
+// Lives here, in the connection's header-time refusal path, rather than in WebDAV's performPUT:
+// for two reasons: the rule is RFC 9110's and applies to any PUT handler a host app registers, not
+// only to the one PUT in this tree; and refusing on headers means a large partial body is never
+// spooled to disk first.
+//
+// Scoped to PUT because that is where the RFC scopes it. Content-Range on a method for which it
+// has no defined meaning is ignored, not fatal.
+- (WSKResponse *)_rejectIfPUTCarriesContentRange {
+    if (![_request.method isEqualToString:@"PUT"]) {
+        return nil;
+    }
+
+    NSString *const contentRange = _HeaderValueForName(_request.headers, @"Content-Range");
+
+    if (contentRange == nil) {
+        return nil;
+    }
+
+    WSK_LOG_WARNING(@"Refusing PUT on \"%@\" carrying 'Content-Range: %@': a partial PUT would be stored as the whole entity", _request.path, contentRange);
+    return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest
+                                                      message:@"A 'Content-Range' header is not allowed on a PUT (RFC 9110 §9.3.4)"];
+}
+
 // The Host allow-list and authentication both decide on headers alone, so they can be
 // settled before a body is read — and they must be, or a client we are going to refuse
 // still gets to make the server spool an unbounded body into NSTemporaryDirectory()
@@ -487,6 +497,12 @@ static BOOL _IsSyntacticallyValidRegName(NSString *name) {
 
     if (misdirectedResponse) {
         return misdirectedResponse;
+    }
+
+    WSKResponse *const contentRangeResponse = [self _rejectIfPUTCarriesContentRange];
+
+    if (contentRangeResponse) {
+        return contentRangeResponse;
     }
 
     return [self preflightRequest:_request];

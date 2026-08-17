@@ -71,7 +71,19 @@ typedef NS_ENUM(NSInteger, DAVProperties) {
     kDAVProperty_CreationDate = (1 << 1),
     kDAVProperty_LastModified = (1 << 2),
     kDAVProperty_ContentLength = (1 << 3),
-    kDAVAllProperties = kDAVProperty_ResourceType | kDAVProperty_CreationDate | kDAVProperty_LastModified | kDAVProperty_ContentLength
+    // The four above were all PROPFIND published; everything else answered with a 404 propstat, so
+    // PROPFIND actively contradicted GET about the same resource — GET sends an ETag and a
+    // Content-Type while PROPFIND reported no such property exists. RFC 4918 §15.5/§15.6 make both
+    // SHOULDs precisely because the matching header is sent, §15.2 asks for displayname on every
+    // compliant resource, and §18.2 makes supportedlock and lockdiscovery part of the class 2 this
+    // server advertises to Finder.
+    kDAVProperty_ETag = (1 << 4),
+    kDAVProperty_ContentType = (1 << 5),
+    kDAVProperty_DisplayName = (1 << 6),
+    kDAVProperty_SupportedLock = (1 << 7),
+    kDAVProperty_LockDiscovery = (1 << 8),
+    kDAVAllProperties = kDAVProperty_ResourceType | kDAVProperty_CreationDate | kDAVProperty_LastModified | kDAVProperty_ContentLength |
+                        kDAVProperty_ETag | kDAVProperty_ContentType | kDAVProperty_DisplayName | kDAVProperty_SupportedLock | kDAVProperty_LockDiscovery
 };
 
 NS_ASSUME_NONNULL_BEGIN
@@ -794,13 +806,44 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
     return [WSKResponse responseWithStatusCode:(existing ? kWSKHTTPStatusCode_NoContent : kWSKHTTPStatusCode_Created)];
 }
 
+// Does a Destination authority name THIS server? Compared by host NAME only.
+//
+// Scheme and port are deliberately NOT compared. The priority deployment terminates TLS upstream
+// (Tailscale Serve) and may translate ports, so a legitimate client says
+// "Destination: https://puck.tailnet.ts.net/x" while talking plaintext to an ephemeral local port —
+// comparing either would refuse exactly that deployment. This is the same ruling already recorded
+// for the Host allow-list's removed port comparison, and it costs nothing: an attacker who can set
+// Destination can set the path anyway, so the check exists to make a cross-server request FAIL
+// rather than to authorize anything.
+//
+// The Host header has already been validated as a name this server answers to (in the connection,
+// ahead of every handler), so matching against it is enough; the configured allow-list is also
+// accepted so a client addressing the destination by another legitimate spelling still works. Every
+// Destination in the recorded trace corpus is an absolute URI whose authority equals its Host.
+- (BOOL)_destinationHost:(NSString *)destinationHost isThisServer:(NSString *)hostHeader {
+    if (destinationHost.length == 0) {
+        return YES;  // Authority-less destination: same server
+    }
+
+    // NOT put through WSKSplitAuthority: -[NSURL host] has already removed any brackets and port,
+    // and an unbracketed IPv6 literal would be mis-split at its last colon.
+    NSString *const destinationName = WSKHostNameWithoutRootLabel([destinationHost lowercaseString]);
+    NSString *hostName = nil;
+
+    if (WSKSplitAuthority(hostHeader, &hostName, NULL, NULL) && [destinationName isEqualToString:hostName]) {
+        return YES;
+    }
+
+    return [self.allowedHostNames containsObject:destinationName];
+}
+
 - (WSKResponse *)performDELETE:(WSKRequest *)request {
     NSString *const depthHeader = request.headers[@"Depth"];
 
-    // "Depth: 0" is accepted as well as "infinity". For a resource with no internal members it cannot
-    // mean anything else, and refusing it meant a client that sets Depth uniformly could not delete
-    // or copy a single FILE at all — 400 for an operation that is trivially satisfiable. RFC 4918
-    // §9.6.1 fixes DELETE's depth at infinity regardless, so accepting "0" costs nothing.
+    // "Depth: 0" is accepted here as well as "infinity", but only survives the collection check
+    // further down. For a resource with no internal members it cannot mean anything else, and
+    // refusing it outright meant a client that sets Depth uniformly could not delete a single FILE
+    // at all — 400 for an operation that is trivially satisfiable.
     if (depthHeader && !_HeaderTokenIs(depthHeader, @"infinity") && !_HeaderTokenIs(depthHeader, @"0")) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"Unsupported 'Depth' header: %@", depthHeader];
     }
@@ -832,6 +875,19 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
 
     if (isHidden) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not allowed", relativePath];
+    }
+
+    // RFC 4918 §9.6.1 forbids any Depth but infinity on a DELETE of a COLLECTION, and every other
+    // spelling was already refused above — leaving "0" as the one invalid value that got through,
+    // and the one whose plain reading ("do not touch the members") is the opposite of what happened:
+    // 204, subtree destroyed. §9.6.1 does also fix the semantics at infinity, so answering the
+    // request as infinity was defensible; expanding a request the client deliberately scoped narrow
+    // is not, and this library refuses rather than approximating. Asked here rather than at the
+    // header check above because it needs to know the target is a collection — on a plain file "0"
+    // and "infinity" mean the same thing and it keeps working.
+    if (isDirectory && depthHeader && _HeaderTokenIs(depthHeader, @"0")) {
+        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest
+                                                          message:@"'Depth: 0' is not allowed when deleting the collection \"%@\" (RFC 4918 §9.6.1)", relativePath];
     }
 
     NSString *const undeletable = [self _firstUnvettableItemAtPath:absolutePath isDirectory:isDirectory];
@@ -1061,11 +1117,25 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
     NSString *dstRelativePath = nil;
 
     if ([destinationHeader hasPrefix:@"/"]) {
-        dstRelativePath = WSKUnescapeURLString(destinationHeader);
+        dstRelativePath = WSKUnescapeURLString(destinationHeader);  // No authority: this server, by definition
     } else {
         NSURL *const destinationURL = [NSURL URLWithString:destinationHeader];
         NSString *const escapedPath = destinationURL.scheme.length ? CFBridgingRelease(CFURLCopyPath((__bridge CFURLRef)destinationURL)) : nil;  // Not -[NSURL path], which strips a trailing slash
         dstRelativePath = escapedPath ? WSKUnescapeURLString(escapedPath) : nil;
+
+        // RFC 4918 §9.8.3 / §9.9.4: a destination on ANOTHER server is the 502 case. The authority
+        // used to be discarded and only the path kept, so a COPY or MOVE aimed at any foreign host
+        // was performed locally under a 201 — and MOVE deleted the source too, leaving a client
+        // that believes it relocated a file elsewhere with its source destroyed and the copy on the
+        // server it started from. Containment was never at issue (the write lands inside the
+        // share); honouring what the client actually asked for is.
+        // +responseWithServerError:, not the client-error constructor every other refusal here uses:
+        // 502 is a 5xx and the constructors assert their range in Debug. The status is the RFC's
+        // choice for this case even though the fault is the client's.
+        if ((dstRelativePath.length > 0) && ![self _destinationHost:destinationURL.host isThisServer:hostHeader]) {
+            return [WSKErrorResponse responseWithServerError:kWSKHTTPStatusCode_BadGateway
+                                                              message:@"Destination \"%@\" is on another server", destinationHeader];
+        }
     }
 
     if (dstRelativePath.length == 0) {
@@ -1350,7 +1420,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
     return [NSString stringWithFormat:@"</%@:%@>", [href isEqualToString:@"DAV:"] ? @"D" : @"W", _XMLEscape(name)];
 }
 
-- (void)_addPropertyResponseForItem:(NSString *)itemPath resource:(NSString *)resourcePath properties:(DAVProperties)properties kind:(DAVPropFindKind)kind unsupported:(NSArray<NSString *> *)unsupported xmlString:(NSMutableString *)xmlString {
+- (void)_addPropertyResponseForItem:(NSString *)itemPath resource:(NSString *)resourcePath properties:(DAVProperties)properties kind:(DAVPropFindKind)kind unsupported:(NSArray<NSString *> *)unsupported lockCapable:(BOOL)lockCapable xmlString:(NSMutableString *)xmlString {
     NSMutableCharacterSet *const allowed = [[NSCharacterSet URLPathAllowedCharacterSet] mutableCopy];
     [allowed removeCharactersInString:@"<&>?+"];
     NSString *const escapedPath = [resourcePath stringByAddingPercentEncodingWithAllowedCharacters:allowed];
@@ -1374,10 +1444,15 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
                 [xmlString appendString:@"<D:propstat><D:prop>"];
                 [xmlString appendString:@"<D:resourcetype/>"];
                 [xmlString appendString:@"<D:creationdate/>"];
+                [xmlString appendString:@"<D:displayname/>"];
+                [xmlString appendString:@"<D:supportedlock/>"];
+                [xmlString appendString:@"<D:lockdiscovery/>"];
 
                 if (isFile) {
                     [xmlString appendString:@"<D:getlastmodified/>"];
                     [xmlString appendString:@"<D:getcontentlength/>"];
+                    [xmlString appendString:@"<D:getetag/>"];
+                    [xmlString appendString:@"<D:getcontenttype/>"];
                 }
 
                 for (NSString *key in _DeadPropertiesAtPath(itemPath)) {
@@ -1431,6 +1506,66 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
 
             if ((properties & kDAVProperty_ContentLength) && !isDirectory && attributes[NSFileSize]) {
                 [xmlString appendFormat:@"<D:getcontentlength>%llu</D:getcontentlength>", [attributes fileSize]];
+            }
+
+            // Minted by WSKEntityTagForFileInfo — the SAME single formatter WSKFileResponse uses, so
+            // the tag a client is handed by PROPFIND is byte-identical to the one GET issues and the
+            // one If-Match compares against. A second formatter here would make every precondition
+            // fail rather than protect anything, which is why this shares that home rather than
+            // building a tag from the attributes dictionary already in hand.
+            //
+            // Only for a regular file: a collection has no entity tag, and inventing one would make
+            // an If-Match on a folder compare against a value nothing else ever produces. Uses
+            // lstat-free stat() on the already-resolved path, matching what the GET path observes.
+            if ((properties & kDAVProperty_ETag) && isFile) {
+                struct stat info;
+
+                if (stat([itemPath fileSystemRepresentation], &info) == 0) {
+                    [xmlString appendFormat:@"<D:getetag>%@</D:getetag>", WSKEntityTagForFileInfo(&info)];
+                }
+            }
+
+            // The same MIME lookup WSKFileResponse performs, for the same reason as the entity tag:
+            // PROPFIND must not describe a resource differently from the GET that serves it.
+            // Collections have no content type and say nothing rather than guessing one.
+            if ((properties & kDAVProperty_ContentType) && isFile) {
+                NSString *const mimeType = WSKGetMimeTypeForExtension([itemPath pathExtension], nil);
+
+                if (mimeType.length) {
+                    [xmlString appendFormat:@"<D:getcontenttype>%@</D:getcontenttype>", _XMLEscape(mimeType)];
+                }
+            }
+
+            // Derived from the RESOURCE path the client used, never from the filesystem path: the
+            // client already knows the name it asked for, whereas the on-disk leaf can differ (a
+            // symlink alias) and the share's own directory name is not the client's business. Note
+            // the recorded trap that makes the root a special case — [@"/" lastPathComponent] is
+            // @"/", the one input that does not yield a leaf.
+            if (properties & kDAVProperty_DisplayName) {
+                NSString *const unescaped = WSKUnescapeURLString(resourcePath);
+                NSString *const trimmed = [unescaped hasSuffix:@"/"] ? [unescaped substringToIndex:(unescaped.length - 1)] : unescaped;
+                NSString *const leaf = (trimmed.length > 0) ? [trimmed lastPathComponent] : @"";
+                [xmlString appendFormat:@"<D:displayname>%@</D:displayname>", _XMLEscape([leaf isEqualToString:@"/"] ? @"" : leaf)];
+            }
+
+            // RFC 4918 §18.2 counts DAV:supportedlock as part of class 2, which OPTIONS advertises
+            // to Finder alone — so the property tells the same per-client story the DAV and Allow
+            // headers do (see -performOPTIONS: and _AllowedMethodsForRequest). An empty element for
+            // everyone else is the truthful answer: their LOCK is answered 405.
+            if (properties & kDAVProperty_SupportedLock) {
+                if (lockCapable) {
+                    [xmlString appendString:@"<D:supportedlock><D:lockentry><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockentry></D:supportedlock>"];
+                } else {
+                    [xmlString appendString:@"<D:supportedlock/>"];
+                }
+            }
+
+            // Always EMPTY, and that is not a stub apology — it is the one honest answer available.
+            // performLOCK: stores no lock state whatsoever (see its comment), so no lock is ever
+            // held, so there is nothing to discover. If a real lock table is ever added, this is one
+            // of the two places that must start reporting it.
+            if (properties & kDAVProperty_LockDiscovery) {
+                [xmlString appendString:@"<D:lockdiscovery/>"];
             }
 
             // Dead properties stored by PROPPATCH. <allprop/> returns them all; a named request
@@ -1567,7 +1702,11 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
                 ([localName isEqualToString:@"resourcetype"] || [localName isEqualToString:@"creationdate"] ||
                  [localName isEqualToString:@"getlastmodified"] || [localName isEqualToString:@"getcontentlength"] ||
                  [localName isEqualToString:@"getetag"] || [localName isEqualToString:@"lockdiscovery"] ||
-                 [localName isEqualToString:@"supportedlock"])) {
+                 [localName isEqualToString:@"supportedlock"] || [localName isEqualToString:@"getcontenttype"] ||
+                 // displayname is NOT protected per §15.2, so a server MAY store one — this one
+                 // derives it from the request path instead, which is why it is refused rather
+                 // than silently accepted and never read back.
+                 [localName isEqualToString:@"displayname"])) {
                 [refused addObject:_DeadPropertyElement(_DeadPropertyKey(href, localName))];
                 continue;
             }
@@ -1703,6 +1842,16 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
                         properties |= kDAVProperty_LastModified;
                     } else if (!xmlStrcmp(node->name, (const xmlChar *)"getcontentlength")) {
                         properties |= kDAVProperty_ContentLength;
+                    } else if (!xmlStrcmp(node->name, (const xmlChar *)"getetag")) {
+                        properties |= kDAVProperty_ETag;
+                    } else if (!xmlStrcmp(node->name, (const xmlChar *)"getcontenttype")) {
+                        properties |= kDAVProperty_ContentType;
+                    } else if (!xmlStrcmp(node->name, (const xmlChar *)"displayname")) {
+                        properties |= kDAVProperty_DisplayName;
+                    } else if (!xmlStrcmp(node->name, (const xmlChar *)"supportedlock")) {
+                        properties |= kDAVProperty_SupportedLock;
+                    } else if (!xmlStrcmp(node->name, (const xmlChar *)"lockdiscovery")) {
+                        properties |= kDAVProperty_LockDiscovery;
                     } else if (node->type == XML_ELEMENT_NODE) {
                         // Remembered rather than dropped, so it can be reported in a 404 propstat.
                         // The namespace travels with it: a client asking for a property in its own
@@ -1781,7 +1930,10 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
         relativePath = [@"/" stringByAppendingString:relativePath];
     }
 
-    [self _addPropertyResponseForItem:absolutePath resource:relativePath properties:properties kind:kind unsupported:unsupported xmlString:xmlString];
+    // Class 2 is advertised to Finder alone, so the lock properties are told the same thing OPTIONS
+    // and every 405's Allow header are (see _AllowedMethodsForRequest).
+    BOOL const lockCapable = _IsMacFinder(request);
+    [self _addPropertyResponseForItem:absolutePath resource:relativePath properties:properties kind:kind unsupported:unsupported lockCapable:lockCapable xmlString:xmlString];
 
     if (depth == 1) {
         if (![relativePath hasSuffix:@"/"]) {
@@ -1790,7 +1942,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
 
         for (NSString *item in items) {
             if (_allowHiddenItems || ![item hasPrefix:@"."]) {
-                [self _addPropertyResponseForItem:[absolutePath stringByAppendingPathComponent:item] resource:[relativePath stringByAppendingString:item] properties:properties kind:kind unsupported:unsupported xmlString:xmlString];
+                [self _addPropertyResponseForItem:[absolutePath stringByAppendingPathComponent:item] resource:[relativePath stringByAppendingString:item] properties:properties kind:kind unsupported:unsupported lockCapable:lockCapable xmlString:xmlString];
             }
         }
     }

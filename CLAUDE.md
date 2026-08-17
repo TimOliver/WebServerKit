@@ -473,9 +473,19 @@ the same rule spelled two ways in two places.
   superseded twice, so derive current details from code). The decoder's `close:` closes the
   downstream writer even when refusing, so a refused transaction leaves no descriptor or staging
   file behind.
-- **Refusals are evaluated on headers, before the body is read** — the Host allow-list and
-  `-preflightRequest:` both run via a single `-_responseForRejectedRequest` as soon as headers
-  are available.
+- **Refusals are evaluated on headers, before the body is read** — the Host allow-list, the PUT
+  `Content-Range` refusal and `-preflightRequest:` all run via a single
+  `-_responseForRejectedRequest` as soon as headers are available.
+- **A PUT carrying `Content-Range` answers 400** (RFC 9110 §9.3.4, a MUST: "the target resource may
+  be truncated by the partial content and the client may not be aware of that"). It was honoured as
+  an ordinary whole-body write — a 3-byte body under `Content-Range: bytes 0-2/10` stored as the
+  complete representation under a 201, and the range's OFFSET ignored too, so `bytes 5-7/10` also
+  wrote at offset 0. The complete-well-formed-WRONG shape again. Reachable by an everyday client:
+  `curl -C -` puts the header on the wire for upload resume (verified on curl 8.7.1). Lives in the
+  CONNECTION layer, not WebDAV's `performPUT:`, for two reasons — the rule is RFC 9110's and applies
+  to any PUT handler a host app registers, and refusing on headers means a large partial body is
+  never spooled to disk. Scoped to PUT, because that is where the RFC scopes it; `Content-Range` on
+  a method where it has no defined meaning is ignored, not fatal.
 - **Multipart**: `,` delimits only BEFORE a parameter name (RFC 2046 allows a comma in a
   boundary — `boundary=ab,cd` must not truncate). The parser budget (`WSKMIMEStreamBudget`) is
   shared with every sub-parser because nested `multipart/mixed` appends into the same arrays;
@@ -665,6 +675,44 @@ data held in memory; bodies streamed to disk (uploads, WebDAV PUT) are deliberat
 - **Class 1 is complete.** A property that cannot be returned gets its own propstat with 404;
   requested names are echoed in the requester's namespace; `<propname/>` returns names with
   empty values; an unrecognised Depth is still refused.
+- **PROPFIND publishes nine properties, and the four validator-shaped ones share their home with
+  the GET path.** `resourcetype`, `creationdate`, `getlastmodified`, `getcontentlength` (the
+  original four), plus `getetag`, `getcontenttype`, `displayname`, `supportedlock`,
+  `lockdiscovery`. The rule that matters: `getetag` is minted by `WSKEntityTagForFileInfo` and
+  `getcontenttype` by `WSKGetMimeTypeForExtension` — the SAME functions GET uses, never a second
+  derivation from the attributes dictionary already in hand, because PROPFIND describing a
+  resource differently from the GET that serves it is what the nineteenth pass found (an explicit
+  `<D:getetag/>` answered a 404 propstat while GET sent a strong ETag for the same file).
+  `getetag`/`getcontenttype` are FILE-only: a collection has no entity tag, and inventing one
+  would make an `If-Match` on a folder compare against a value nothing else produces.
+  `displayname` derives from the RESOURCE path the client used, never the filesystem path — the
+  client already knows that name, whereas the on-disk leaf can differ (a symlink alias) and the
+  share's own directory name is not the client's business; the root is special-cased because
+  `[@"/" lastPathComponent]` is `@"/"`. `supportedlock` tells the same per-client story as the
+  `DAV` and `Allow` headers (populated for Finder, empty otherwise), and `lockdiscovery` is
+  ALWAYS empty — not a stub apology but the one honest answer, since `performLOCK:` stores no
+  lock state, so no lock is ever held. If a real lock table is ever added, that is one of the two
+  places that must start reporting it.
+- **A `Destination` naming another server answers 502** (RFC 4918 §9.8.3/§9.9.4). The authority
+  used to be discarded and only the path kept, so COPY and MOVE aimed at ANY foreign host were
+  performed locally under a 201 — and MOVE deleted the source too, leaving a client that believes
+  it relocated a file elsewhere with its source destroyed and the copy on the server it started
+  from. Containment was never at issue (the write lands inside the share); honouring what the
+  client asked for is. **Compared by host NAME only: scheme and port are deliberately ignored**,
+  because the priority deployment terminates TLS upstream and may translate ports, so a legitimate
+  client says `Destination: https://puck.tailnet.ts.net/x` while talking plaintext to an ephemeral
+  local port — the same ruling already recorded for the Host allow-list's removed port comparison.
+  Matched against the request's own `Host` (already validated in the connection ahead of every
+  handler) or the configured allow-list; an authority-less `Destination` is this server by
+  definition. Every `Destination` in the recorded corpus is an absolute URI whose authority equals
+  its `Host`, which is what makes the strict form safe.
+- **`DELETE` refuses `Depth: 0` on a collection** (400). §9.6.1 forbids the client from sending any
+  Depth but infinity AND fixes the semantics at infinity, so answering it as infinity was
+  defensible — but every other spelling was already refused, leaving `0` as the one invalid value
+  that got through, and the one whose plain reading ("do not touch the members") is the opposite of
+  what happened: 204, subtree destroyed. Expanding a request the client scoped narrowly is what
+  this library refuses to do. Asked AFTER the target is known to be a collection, because on a
+  plain file `0` and `infinity` mean the same thing and that must keep working.
 - **Status conformance (all four found by an outside audit, closed together).**
   `MKCOL` on a URL that already identifies a resource answers **405 with `Allow`** per §9.3.1 —
   it answered 500, because `EEXIST` arrives as `NSFileWriteFileExistsError` and the error
@@ -1058,7 +1106,11 @@ exercise changes, not on suspicion.
   had to change lens to find anything at all.
 - **Conformance and real clients**, RE-TAKEN against tip after the #70/#71/#75 status changes and
   unchanged: litmus `basic` 16/16, `http` 4/4, `locks` 3/3, `props`
-  29/30 (sole failure still `propfind_invalid2`, settled). The four changed behaviours were also
+  29/30 (sole failure still `propfind_invalid2`, settled). **NOT re-taken after the nineteenth
+  pass's PROPFIND property additions** — litmus and rclone are not installed on the current machine,
+  so that pass's real-client evidence is `mount_webdav` (40 operations, clean) and `curl` only. The
+  `props` suite is the one most likely to have something to say about five new properties; re-run it
+  before treating those as conformance-verified rather than measured-correct. The four changed behaviours were also
   checked directly: MKCOL new 201 / existing **405**, PROPFIND with no Depth **403**, `Allow`
   carrying PROPPATCH, and an unknown target **404**. And driven through macOS's own kernel WebDAV
   client via `mount_webdav`: mkdir, 12 MB write, byte-identical read-back, list, rename,
@@ -1112,6 +1164,22 @@ has happened.
   intermediate symlinks that work today and are pinned by `testHiddenItemsAreRefusedThroughSymlinksToo`
   (`testBasePathHandlerRefusesSymlinkEscape` pins the ESCAPE; its positive assertion is a plain file,
   so it does not cover the benign-symlink case).
+- **Collection hrefs are advertised WITHOUT a trailing slash** when the client asked without one
+  (a Depth:1 listing of `/` advertises the child collection as `/dir`). RFC 4918 §5.2 recommends
+  the slash on server-produced collection URIs, and this is deliberately NOT changed: the same
+  section tells clients to rely on `DAV:resourcetype`, which this server publishes correctly, and
+  changing hrefs would rewrite the bytes of ~96 recorded 207 bodies as a MODIFICATION rather than
+  an insertion — so the additivity proof that made the property additions safe would not apply, and
+  the corpus would be blessed in bulk. The rest of the href construction is correct: `PROPFIND /dir`
+  yields `/dir/child.txt`, not the concatenation bug this class is famous for.
+- **`GET` on a collection returns a bodiless 200.** RFC 4918 §9.4 leaves the response to a GET on a
+  collection undefined, so this is legal; a browser pointed at a folder gets a blank page rather
+  than the listing the uploader surface produces. Recorded rather than "fixed" because inventing a
+  listing here is a feature, not a conformance repair.
+- **A file is also served under a collection-style URI** (`GET /existing.txt/` answers 200).
+  Two URIs naming one resource is a cache and href-construction wrinkle, not a correctness break,
+  and a guard would refuse a path shape some client may be normalizing harmlessly — the kind of
+  "what does this now refuse?" cost this project makes fixes pay before accepting them.
 - **litmus `propfind_invalid2`** (invalid namespace declaration answering 207 not 400) is a
   recorded failure: libxml2 runs with `XML_PARSE_RECOVER` by choice; tightening risks rejecting
   bodies real clients send.
@@ -1247,13 +1315,20 @@ than the record and are restated below; three are now fixed.
   validation sat inside `if (!isMove)`, so every spelling — `banana`, `2`, `0,` — answered 201 and
   performed a full recursive relocation while COPY, DELETE and PROPFIND all answered 400.
   Deliberately NOT made stricter than COPY: RFC 4918 §9.9.2 forbids a non-infinity Depth on a MOVE
-  of a collection, but COPY and DELETE both accept `0` on a plain file because it means the same
-  thing there, and an asymmetry only MOVE enforces would refuse what real clients send.
-- **PROPFIND publishes no `getetag`** — confirmed at tip on EVERY path (allprop, no-body, Depth:1,
-  propname), and an explicit `<D:getetag/>` is answered in a **404 propstat**, so PROPFIND and GET
-  actively contradict each other about the same resource. A just-written file has zero validators
-  12/12, because the mtime seal correctly withholds `getlastmodified` and `getetag` does not exist
-  at all. The obvious fix was measured as failing CI; needs care.
+  of a collection, but COPY and DELETE both accept `0` on a plain FILE because it means the same
+  thing there, and an asymmetry only MOVE enforces would refuse what real clients send. (Since the
+  nineteenth pass DELETE refuses `Depth: 0` on a COLLECTION — see the WebDAV entry for that ruling.
+  The plain-file half is unchanged and pinned in both directions.)
+- ~~PROPFIND publishes no `getetag`~~ — **fixed, and the "needs care" is now spelled out.** The
+  blocker was never the property: it was the trace corpus. The comparator ignores the `Etag`
+  HEADER because "ETags depend on file system node IDs", but compared BODIES byte-for-byte — and
+  the inode genuinely moves between runs (measured 64770720 then 64770739 for the same file after
+  re-extracting `Tests/Payload.zip`, mtime preserved), so a published `<D:getetag>` is
+  un-recordable, not merely stale. `_BodyWithNormalizedEntityTags` now neutralises the VALUE on both
+  sides (presence and position are still compared), and `Content-Length` is exempted for exactly
+  those bodies because its digits move with the tag's. The property itself comes from
+  `WSKEntityTagForFileInfo` — the same single formatter `WSKFileResponse` uses — and a test asserts
+  the two are byte-identical, which is the property that stops the surfaces drifting again.
 - ~~MOVE/COPY of a collection relocates/duplicates members the allow-list refuses individually~~ —
   **fixed, at all three sites**. Measured before: with `allowedFileExtensions = @["txt"]`, every
   DIRECT operation on `Coll/sub/secret.pem` was 403, a recursive DELETE was 403, an overwrite was
@@ -1499,6 +1574,20 @@ alongside the two that must change — the first change made deliberately under 
   corpus green, iOS and tvOS Debug clean; plus `swift build` AND the external SwiftPM consumer
   (depends on the package by path, imports all three modules) for any header/layout move —
   in-package builds cannot detect external unbuildability.
+- **When a change must rewrite recorded fixtures, PROVE the rewrite is additive instead of
+  blessing it.** Publishing five new PROPFIND properties changed 16 recorded 207 bodies, and
+  re-recording them would have blessed whatever the new code emitted — the exact thing the
+  never-re-record-wholesale rule exists to prevent. What worked: replay each recorded request, strip
+  ONLY the newly-added elements from the fresh body, and require the result to equal the recorded
+  body BYTE-FOR-BYTE before writing anything. 16 rewritten, 80 other multistatus bodies proven
+  untouched, and the script refuses to write on any non-additive diff. The corpus then verifies the
+  written bytes against the live server, so the fixture edit is checked rather than trusted.
+- **The recorded sessions are STATEFUL — replay them in sequence or the oracle lies.** The first
+  version of that script replayed each request in isolation and "refused" 58 files: the sessions PUT,
+  MOVE and DELETE as they go, so request #200 against a pristine share asks about resources an
+  earlier request created (18 of them answered 404 outright). A per-suite fresh payload plus in-order
+  replay reproduced the recorded state exactly and the refusals dropped to zero. A guard that fires
+  loudly on a harness bug is worth more than one that quietly writes.
 - **Cheap reusable oracles**: split-invariance (same bytes, different TCP segmentation, compare
   verdicts — found the gzip defect automatically); an independent implementation over the same
   data (`rclone serve webdav` — refuted a "defect" as inherent); property-based generation (the
@@ -1606,6 +1695,24 @@ alongside the two that must change — the first change made deliberately under 
 
 Newest first. One entry per pass/change-set; the durable rules extracted from each live in the
 body above.
+
+- **Nineteenth pass: WebDAV-conformance audit + fixes, 2026-08-17.** Three raw-socket rounds (~90
+  checks, every 207 parsed by a real XML parser) plus 40 operations through macOS's kernel WebDAV
+  client. **The real-client half came back clean — 13/13 data operations byte-perfect** including a
+  12 MB write, a recursive tree copy, renames, recursive delete and filenames carrying `#`, `&`,
+  spaces and non-ASCII; the only non-zero exits were the documented xattr artifact, and `cp -X`
+  removes them. The protocol edges held the defects: a foreign `Destination` authority performed
+  locally under a 201 (MOVE also deleting the source), `Content-Range` on a PUT stored as a whole
+  entity, `DELETE Depth: 0` recursively deleting a collection, and a PROPFIND property set missing
+  five properties RFC 4918 asks for. All fixed. The `getetag` known-open's "needs care" was
+  diagnosed rather than guessed: the trace comparator exempts the `Etag` HEADER for node-ID
+  variability but compared BODIES byte-for-byte, so the property was un-recordable — closed by
+  normalising the value on both sides. Of nine round-1 flags, FOUR were the probe's own bugs
+  (including a helper that appended a second `Content-Length` to PUT, making a correct 409 read as
+  400) — this project's ~1-in-3 rate, applied to its own audit. One self-inflicted defect during the
+  work: 502 passed to `+responseWithClientError:`, which asserts its 4xx range in Debug and crashed
+  the runner — caught because the RED/GREEN cycle reads the EXECUTED count, which showed 2 where 4
+  was expected. 188 tests.
 
 - **Eighteenth pass: HTTP-conformance audit + fixes, 2026-08-17.** ~115 raw-socket probes across
   request-line, framing, Range, conditional, Expect and WebDAV matrices, then a fix branch for
