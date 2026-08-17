@@ -283,42 +283,27 @@ static inline BOOL _HeaderTokenIs(NSString *value, NSString *token) {
     return WSKEntryPassesExtensionAllowList(namedName, resolvedName, _allowedFileExtensions);
 }
 
-// Whatever an operation is about to destroy has to be something the client could have destroyed
-// by naming it directly, or one request means two different things. Returns the first item that
-// fails the allow-list — the item itself for a file, or the offending subpath for a collection —
-// and nil when the whole thing may go.
-//
-// Both destructive shapes go through here, because each has been a hole in turn: DELETE of a
-// collection removes its whole subtree, and MOVE/COPY destroy exactly as much through Overwrite
-// (a collection *destination* named "Backup.txt" satisfies the file-source form).
-//
-// This mirrors -[WSKWebUploader deleteItem:], deliberately including its two judgement calls.
-// Dot-names and everything under them are skipped whatever -allowHiddenItems says: they are
-// incidental metadata rather than content the allow-list protects, and a ".DS_Store" sits in
-// every macOS folder with an empty pathExtension that is in no allow-list, so vetting them would
-// make ordinary folders permanently undeletable. And an extensionless file ("README") is vetted
-// like any other, because addressing it directly is already refused.
+// A destructive verb must refuse whatever a direct request would refuse; see
+// WSKFirstUnvettableItemAtPath, which documents the rule and its two judgement calls. Reached from
+// both destructive shapes, because each has been a hole in turn: DELETE of a collection removes its
+// whole subtree, and MOVE/COPY destroy exactly as much through Overwrite (a collection
+// *destination* named "Backup.txt" satisfies the file-source form).
 - (nullable NSString *)_firstUnvettableItemAtPath:(NSString *)absolutePath isDirectory:(BOOL)isDirectory {
     return WSKFirstUnvettableItemAtPath(absolutePath, isDirectory, _allowedFileExtensions);
 }
 
-// Hidden-item protection has to cover every component of the path, not only the leaf:
-// refusing "/.git" while serving "/.git/config" protects nothing. Normalizing first means
-// a benign "." or ".." is resolved away rather than read as a name starting with a period.
-// See the identical helper in WSKWebUploader: resolve once, judge both rules on that single
-// observation, and act on the returned path rather than the one the client sent. A symlink
-// retargeted between two independent resolutions served content from outside the share and
-// landed a PUT outside it.
-// The same resolution, but yielding the entry the client NAMED rather than what it points at —
-// see WSKResolveNamedEntryWithinDirectory(). Used by the verbs that REMOVE or RELOCATE an entry
-// (DELETE, and MOVE/COPY on both their source and their destination), because `rm latest` removes
-// the alias and `mv a latest` replaces it; only reads follow a link. The NUL guard, the
-// containment check, the hidden-item rule and the refusal to act on the root all still apply, and
-// all still come from a single resolution.
+// Yields the entry the client NAMED rather than what it points at; see
+// WSKNamedEntryPathForRelativePath. Used by the verbs that REMOVE or RELOCATE an entry (DELETE, and
+// MOVE/COPY on both source and destination), because `rm latest` removes the alias and
+// `mv a latest` replaces it; only reads follow a link.
 - (nullable NSString *)_namedEntryPathForRelativePath:(NSString *)relativePath hidden:(BOOL *)outHidden {
     return WSKNamedEntryPathForRelativePath(relativePath, _uploadDirectory, _allowHiddenItems, outHidden);
 }
 
+// Resolve ONCE, following a final symlink; see WSKResolvedPathForRelativePath. Callers must act on
+// the RETURNED path: judging containment with one realpath and hiddenness with another meant two
+// observations that need not agree, and a symlink retargeted between them served content from
+// outside the share and landed a PUT outside it.
 - (nullable NSString *)_resolvedPathForRelativePath:(NSString *)relativePath hidden:(BOOL *)outHidden {
     return WSKResolvedPathForRelativePath(relativePath, _uploadDirectory, _allowHiddenItems, outHidden);
 }

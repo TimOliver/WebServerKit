@@ -52,82 +52,7 @@ FOUNDATION_EXPORT NSBundle *WebServerKitUploader_SWIFTPM_MODULE_BUNDLE(void);
 #import "WSKPrivate.h"
 #import "WSKWebUploader.h"
 #import "WSKWebUploaderSSEChannel.h"
-
-@implementation WSKWebUploaderSSEChannel {
-    NSUInteger _capacity;
-    NSMutableArray<NSData*>* _buffer;
-    void (^_parkedReader)(NSData* data);
-}
-
-- (instancetype)init {
-    return [self initWithCapacity:100];
-}
-
-- (instancetype)initWithCapacity:(NSUInteger)capacity {
-    if ((self = [super init])) {
-        _capacity = capacity > 0 ? capacity : 1;
-        _buffer = [[NSMutableArray alloc] init];
-    }
-    return self;
-}
-
-- (NSUInteger)capacity {
-    return _capacity;
-}
-
-- (BOOL)hasParkedReader {
-    return _parkedReader != nil;
-}
-
-- (NSUInteger)bufferedCount {
-    return _buffer.count;
-}
-
-- (void)enqueueData:(NSData*)data {
-    if (_closed) {
-        return;
-    }
-    if (_parkedReader) {
-        void (^reader)(NSData*) = _parkedReader;
-        _parkedReader = nil;
-        reader(data);
-        return;
-    }
-    [_buffer addObject:data];
-    if (_buffer.count > _capacity) {
-        [_buffer removeObjectAtIndex:0];  // Drop oldest to stay bounded.
-    }
-}
-
-- (void)parkReader:(void (^)(NSData* data))reader {
-    if (_closed) {
-        reader([NSData data]);  // End-of-stream: complete immediately, never park.
-        return;
-    }
-    _idleHeartbeats = 0;  // The client came back to read: it is alive.
-    if (_buffer.count > 0) {
-        NSData* data = _buffer.firstObject;
-        [_buffer removeObjectAtIndex:0];
-        reader(data);
-        return;
-    }
-    _parkedReader = [reader copy];
-}
-
-- (void)close {
-    if (_closed) {
-        return;
-    }
-    _closed = YES;
-    [_buffer removeAllObjects];
-    if (_parkedReader) {
-        void (^reader)(NSData*) = _parkedReader;
-        _parkedReader = nil;
-        reader([NSData data]);  // End-of-stream sentinel: lets the connection finish cleanly.
-    }
-}
-
-@end
+#import "WSKWebUploaderSSEResponse.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -145,32 +70,6 @@ NS_ASSUME_NONNULL_BEGIN
 @end
 
 NS_ASSUME_NONNULL_END
-
-// WSKConnection calls -performClose on the response the moment its body write chain ends,
-// including the write that fails because the client has gone. Nothing listened for that, so a
-// channel outlived its own connection by a full 30 seconds: the server only learned of the
-// departure when a heartbeat write failed (15-30s), and only then did the reaper begin counting
-// its two idle ticks. Sixteen abandoned streams therefore denied live updates to a real client
-// for roughly 45-60s — a browser tab navigating away is enough, no hostility required.
-@interface WSKWebUploaderSSEResponse : WSKStreamedResponse
-@property (nonatomic, copy, nullable) dispatch_block_t onClose;
-@end
-
-@implementation WSKWebUploaderSSEResponse
-
-- (void)close {
-    // Taken once: -close is reachable more than once, and the block drops the channel.
-    dispatch_block_t const block = _onClose;
-
-    _onClose = nil;
-    [super close];
-
-    if (block) {
-        block();
-    }
-}
-
-@end
 
 @interface WSKWebUploader () <NSFilePresenter>
 @end
@@ -306,12 +205,10 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
         // an hour. Unchanged files still return a cheap 304, but after an app
         // update the rebuilt bundle changes each file's ETag, so the new assets
         // (e.g. index.js) are picked up immediately rather than served stale.
-        // Registered FIRST so that it is matched LAST — handlers are inserted at index 0, so
-        // registration order is reverse match order. A GET that nothing else claims answers 404
-        // rather than the 501 the server returns when no handler matches at all, which is a
-        // statement about the *method* and wrong here ("/favicon.ico", which browsers request
-        // unprompted, must not answer "Not Implemented"). Matches GET only, so no other
-        // method's status changes.
+        // Registered FIRST so it is matched LAST (handlers insert at index 0, so registration order
+        // is reverse match order). An unclaimed GET answers 404 rather than the 501 the server
+        // gives when nothing matches at all — 501 is a statement about the METHOD, wrong for
+        // "/favicon.ico". GET only, so no other method's status changes.
         [self addHandlerWithMatchBlock:^WSKRequest *(NSString *requestMethod, NSURL *requestURL, NSDictionary<NSString *, NSString *> *requestHeaders, NSString *urlPath, NSDictionary<NSString *, NSString *> *urlQuery) {
             if (![requestMethod isEqualToString:@"GET"]) {
                 return nil;
@@ -323,18 +220,12 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
                 return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", request.path];
             }];
 
-        //
-        // Only the three asset directories the page actually loads are served. Serving the
-        // bundle's *root* also exposed index.html — which is the template, and which the base
-        // path handler returns raw: placeholders unsubstituted and, the point, without the
-        // framing headers the page handler below sets. Framing "/index.html" instead of "/"
-        // therefore defeated the clickjacking defence completely.
-        //
-        // Excluding it by path does not hold: the base path handler normalizes, so with an
-        // exact-path alias in front of it "/./index.html" and "/x/../index.html" still reach
-        // the raw file (both verified). Serving only what the page asks for takes the template
-        // — and en.lproj/Localizable.strings, which no browser ever needs — out of the URL
-        // space altogether, so there is no spelling left to find.
+        // Only the three asset directories the page loads, never the bundle ROOT — that exposed
+        // index.html raw, without the framing headers the page handler sets, so framing
+        // "/index.html" defeated the clickjacking defence entirely. Excluding it by path does not
+        // hold: the base-path handler normalizes, so "/./index.html" and "/x/../index.html" still
+        // reached the raw file (both verified). An exact path is never a containment boundary;
+        // serving only what the page asks for leaves no spelling to find.
         for (NSString *const assetDirectory in @[ @"css", @"js", @"fonts" ]) {
             [self addGETHandlerForBasePath:[NSString stringWithFormat:@"/%@/", assetDirectory]
                              directoryPath:[(NSString *)[siteBundle resourcePath] stringByAppendingPathComponent:assetDirectory]
@@ -994,34 +885,19 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
     return WSKEntryPassesExtensionAllowList(namedName, resolvedName, _allowedFileExtensions);
 }
 
-// -allowHiddenItems was only ever enforced on the leaf component, so a hidden
-// *directory* was refused while nothing stopped a request from reaching inside one
-// ("/.git/config" listed, downloaded, deleted and overwritten happily). Test every
-// component instead. The path is normalized first so that a benign "." or ".."
-// component is resolved away rather than mistaken for a hidden name.
-// Resolve the client's path ONCE, so containment and hiddenness are judged on the same
-// observation of the filesystem — and so the caller can act on what was actually vetted.
-//
-// Checking containment with one realpath(3) and hiddenness with another meant two observations
-// that need not agree, and then operating on a *third* path: the one the client sent, symlinks
-// intact. A symlink retargeted between those steps served content from outside the share, and
-// landed a WebDAV PUT outside it. Callers must use the returned path for the filesystem
-// operation that follows: a resolved path contains no symlinks, so retargeting one cannot
-// redirect it. Paths that do not exist yet resolve through their parent, so this works for
-// upload and rename destinations too.
-//
-// Returns nil when the path does not resolve inside the share. Sets *outHidden when the
-// resolved location — or the path the client typed — lies inside a hidden item.
-// The same resolution, but yielding the entry the client NAMED rather than what it points at —
-// see WSKResolveNamedEntryWithinDirectory(). Used by the verbs that REMOVE or RELOCATE an entry
-// (DELETE, and MOVE/COPY on both their source and their destination), because `rm latest` removes
-// the alias and `mv a latest` replaces it; only reads follow a link. The NUL guard, the
-// containment check, the hidden-item rule and the refusal to act on the root all still apply, and
-// all still come from a single resolution.
+// Yields the entry the client NAMED rather than what it points at; see
+// WSKNamedEntryPathForRelativePath. Used by the verbs that REMOVE or RELOCATE an entry (DELETE, and
+// MOVE on both source and destination), because `rm latest` removes the alias and `mv a latest`
+// replaces it; only reads follow a link.
 - (nullable NSString *)_namedEntryPathForRelativePath:(NSString *)relativePath hidden:(BOOL *)outHidden {
     return WSKNamedEntryPathForRelativePath(relativePath, _uploadDirectory, _allowHiddenItems, outHidden);
 }
 
+// Resolve ONCE, following a final symlink; see WSKResolvedPathForRelativePath. Callers must act on
+// the RETURNED path: judging containment with one realpath and hiddenness with another meant two
+// observations that need not agree, and a symlink retargeted between them served content from
+// outside the share. Hiddenness covers EVERY component, not just the leaf — refusing "/.git" while
+// serving "/.git/config" protects nothing.
 - (nullable NSString *)_resolvedPathForRelativePath:(NSString *)relativePath hidden:(BOOL *)outHidden {
     return WSKResolvedPathForRelativePath(relativePath, _uploadDirectory, _allowHiddenItems, outHidden);
 }

@@ -780,34 +780,30 @@ static NSString *_RealPath(NSString *path) {
         return [fileManager stringWithFileSystemRepresentation:buffer length:strlen(buffer)];
     }
 
-    // realpath(3) failed. Normally that means the path does not exist YET — a PUT or MKCOL to a new
-    // name — and resolving the parent then appending the leaf is exactly right for it. That branch
-    // is why this function has a fallback at all, so it must keep working.
+    // realpath(3) failed. Normally the path just does not exist YET — a PUT or MKCOL to a new name —
+    // and resolving the parent then appending the leaf is right for it. That is why this fallback
+    // exists at all, so it MUST keep working.
     //
-    // An entry that EXISTS and still fails realpath is a different thing: a dangling symlink, a
-    // loop, or a component that cannot be traversed. Treating one as "a new path inside the share"
-    // makes the answer depend on whether the link's target exists — 403 when it does, 404 when it
-    // does not — an existence oracle for the filesystem OUTSIDE the share, reachable through any
-    // escaping link in the served content. Fail closed: the entry is there and cannot be resolved,
-    // so it cannot be acted on. A dangling link and a symlink loop answer 403 rather than 404;
-    // neither was ever served, so no working operation is lost.
+    // An entry that EXISTS and still fails realpath is different: a dangling link, a loop, or an
+    // untraversable component. Treating one as "a new path inside the share" makes the answer depend
+    // on whether the link's target exists (403 when it does, 404 when it does not) — an existence
+    // oracle for the filesystem OUTSIDE the share, reachable through any escaping link in the served
+    // content. Fail CLOSED. Dangling links and loops answer 403 rather than 404; neither was ever
+    // served, so no working operation is lost.
     //
-    // The walk climbs until an ancestor resolves rather than trying the immediate parent ONCE:
-    // tolerating exactly one missing component makes "absent" and "refused" the same answer as
-    // soon as a client names a path two levels past anything real — 403 where 404 is owed, which
-    // clients like `rclone copy` treat as fatal.
+    // The walk climbs until an ancestor resolves rather than trying the parent ONCE: tolerating
+    // exactly one missing component makes "absent" and "refused" the same answer two levels past
+    // anything real — 403 where 404 is owed, which `rclone copy` treats as fatal.
     //
-    // This does NOT reopen the existence oracle the lstat above closes, and the distinction is the
-    // whole reason the fix lives here rather than in the verbs. The rejected alternative — a
-    // -fileExistsAtPath: parent precheck in each read verb — answers YES/NO for paths OUTSIDE the
-    // share, which is precisely the oracle. Here, an escaping path still resolves to a location
-    // outside the root and is then refused by the CONTAINMENT test in the caller, whether or not
-    // anything exists there; and a component that exists but will not resolve still fails closed
-    // at the top of each iteration.
+    // It does NOT reopen that oracle, and that distinction is why this lives here rather than in the
+    // verbs. The REJECTED alternative — a -fileExistsAtPath: parent precheck per read verb — answers
+    // YES/NO for paths outside the share, which IS the oracle. Here an escaping path resolves outside
+    // the root and is refused by the caller's containment test whether or not anything exists there,
+    // and a component that exists but will not resolve still fails closed each iteration.
     //
-    // The write verbs are deliberately untouched by this. PUT, MKCOL and a MOVE/COPY destination
-    // answer 409 Conflict for a missing ancestor — RFC 4918 §9.7.1 — from their own parent
-    // precheck, which this only lets them reach. 409 is correct there and must not become 404.
+    // The write verbs are deliberately untouched: PUT, MKCOL and a MOVE/COPY destination answer 409
+    // for a missing ancestor (RFC 4918 §9.7.1) from their own precheck, which this only lets them
+    // reach. 409 is correct there and must not become 404.
     NSMutableArray<NSString *> *const missingComponents = [NSMutableArray array];
     NSString *cursor = path;
 

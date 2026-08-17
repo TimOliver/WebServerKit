@@ -29,6 +29,14 @@
 		04D7705658FD667CFDF90AB8 /* WSKResponseTests.m in Sources */ = {isa = PBXBuildFile; fileRef = D9F1F816D28B53333D744D60 /* WSKResponseTests.m */; };
 		1522ECE9EFB9BC8282A3B9F9 /* WSKPathContainmentTests.m in Sources */ = {isa = PBXBuildFile; fileRef = A9D8E21D1D62F9F3149D174B /* WSKPathContainmentTests.m */; };
 		1A2E9ED2B65932B2BA463F9E /* TestsSupport.m in Sources */ = {isa = PBXBuildFile; fileRef = 30F4DED3B7501D0B7F41FADA /* TestsSupport.m */; };
+		22A94149303358AC0054EA60 /* WSKWebUploaderSSEChannel.m in Sources */ = {isa = PBXBuildFile; fileRef = 22A94148303358AC0054EA60 /* WSKWebUploaderSSEChannel.m */; };
+		22A94151303358AC0054EA60 /* WSKWebUploaderSSEResponse.m in Sources */ = {isa = PBXBuildFile; fileRef = 22A94150303358AC0054EA60 /* WSKWebUploaderSSEResponse.m */; };
+		22A9414A303358AC0054EA60 /* WSKWebUploaderSSEChannel.m in Sources */ = {isa = PBXBuildFile; fileRef = 22A94148303358AC0054EA60 /* WSKWebUploaderSSEChannel.m */; };
+		22A94152303358AC0054EA60 /* WSKWebUploaderSSEResponse.m in Sources */ = {isa = PBXBuildFile; fileRef = 22A94150303358AC0054EA60 /* WSKWebUploaderSSEResponse.m */; };
+		22A9414B303358AC0054EA60 /* WSKWebUploaderSSEChannel.m in Sources */ = {isa = PBXBuildFile; fileRef = 22A94148303358AC0054EA60 /* WSKWebUploaderSSEChannel.m */; };
+		22A94153303358AC0054EA60 /* WSKWebUploaderSSEResponse.m in Sources */ = {isa = PBXBuildFile; fileRef = 22A94150303358AC0054EA60 /* WSKWebUploaderSSEResponse.m */; };
+		22A9414C303358AC0054EA60 /* WSKWebUploaderSSEChannel.m in Sources */ = {isa = PBXBuildFile; fileRef = 22A94148303358AC0054EA60 /* WSKWebUploaderSSEChannel.m */; };
+		22A94154303358AC0054EA60 /* WSKWebUploaderSSEResponse.m in Sources */ = {isa = PBXBuildFile; fileRef = 22A94150303358AC0054EA60 /* WSKWebUploaderSSEResponse.m */; };
 		3AA48006BF15AB5C11746755 /* WSKWebDAVTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 3AF8883D91A9830CA9A06234 /* WSKWebDAVTests.m */; };
 		3F58133A05C5E53C5D947644 /* WSKAuthenticationTests.m in Sources */ = {isa = PBXBuildFile; fileRef = DDC26F9BEC8E5C7079116D15 /* WSKAuthenticationTests.m */; };
 		4E57DC3FD9149B0225316B25 /* WSKServerSentEventsTests.m in Sources */ = {isa = PBXBuildFile; fileRef = F3DA3F76B10780DEA46C25F5 /* WSKServerSentEventsTests.m */; };
@@ -271,6 +279,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		22A94148303358AC0054EA60 /* WSKWebUploaderSSEChannel.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = WSKWebUploaderSSEChannel.m; sourceTree = "<group>"; };
+		22A94150303358AC0054EA60 /* WSKWebUploaderSSEResponse.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = WSKWebUploaderSSEResponse.m; sourceTree = "<group>"; };
 		2E7C1C59C8804BA29DE296C0 /* WSKUploaderTests.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = WSKUploaderTests.m; sourceTree = "<group>"; };
 		30F4DED3B7501D0B7F41FADA /* TestsSupport.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = TestsSupport.m; sourceTree = "<group>"; };
 		3AF8883D91A9830CA9A06234 /* WSKWebDAVTests.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = WSKWebDAVTests.m; sourceTree = "<group>"; };
@@ -336,6 +346,7 @@
 		E2DDD2091BE69EE5002CE867 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		EF30CCB6CE581FB5899D5603 /* TestsSupport.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = TestsSupport.h; sourceTree = "<group>"; };
 		F1A2B3C4D5E6F708090A0B0C /* WSKWebUploaderSSEChannel.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = WSKWebUploaderSSEChannel.h; sourceTree = "<group>"; };
+		F1A2B3C4D5E6F708090A0B0D /* WSKWebUploaderSSEResponse.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = WSKWebUploaderSSEResponse.h; sourceTree = "<group>"; };
 		F3DA3F76B10780DEA46C25F5 /* WSKServerSentEventsTests.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = WSKServerSentEventsTests.m; sourceTree = "<group>"; };
 		F8FCD6396D4C3FDA2D78C391 /* WSKConnectionTests.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = WSKConnectionTests.m; sourceTree = "<group>"; };
 		FEAE431E90FB4145A4AFCD2E /* WSKServerLifecycleTests.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = WSKServerLifecycleTests.m; sourceTree = "<group>"; };
@@ -547,8 +558,11 @@
 			children = (
 				E2BE850718E77ECA0061360B /* WSKWebUploader.bundle */,
 				E2BE850818E77ECA0061360B /* WSKWebUploader.h */,
-				F1A2B3C4D5E6F708090A0B0C /* WSKWebUploaderSSEChannel.h */,
 				E2BE850918E77ECA0061360B /* WSKWebUploader.m */,
+				F1A2B3C4D5E6F708090A0B0C /* WSKWebUploaderSSEChannel.h */,
+				22A94148303358AC0054EA60 /* WSKWebUploaderSSEChannel.m */,
+				F1A2B3C4D5E6F708090A0B0D /* WSKWebUploaderSSEResponse.h */,
+				22A94150303358AC0054EA60 /* WSKWebUploaderSSEResponse.m */,
 			);
 			path = WebServerKitUploader;
 			sourceTree = "<group>";
@@ -910,6 +924,8 @@
 				E28BAE3818F99C810095C089 /* WSKFunctions.m in Sources */,
 				E28BAE4A18F99C810095C089 /* WSKFileResponse.m in Sources */,
 				E28BAE4418F99C810095C089 /* WSKURLEncodedFormRequest.m in Sources */,
+				22A94149303358AC0054EA60 /* WSKWebUploaderSSEChannel.m in Sources */,
+				22A94151303358AC0054EA60 /* WSKWebUploaderSSEResponse.m in Sources */,
 				E28BAE3A18F99C810095C089 /* WSKRequest.m in Sources */,
 				E28BAE3418F99C810095C089 /* WSKWebServer.m in Sources */,
 				E28BAE3618F99C810095C089 /* WSKConnection.m in Sources */,
@@ -937,6 +953,8 @@
 				CEE28D271AE0072400F4023C /* WSKFileRequest.m in Sources */,
 				CEE28D1F1AE0070D00F4023C /* WSKResponse.m in Sources */,
 				CEE28D3B1AE0076400F4023C /* WSKFileResponse.m in Sources */,
+				22A9414B303358AC0054EA60 /* WSKWebUploaderSSEChannel.m in Sources */,
+				22A94153303358AC0054EA60 /* WSKWebUploaderSSEResponse.m in Sources */,
 				CEE28D3F1AE0076E00F4023C /* WSKStreamedResponse.m in Sources */,
 				CEE28D331AE0074900F4023C /* WSKDataResponse.m in Sources */,
 				CEE28D431AE0077F00F4023C /* WSKWebDAVServer.m in Sources */,
@@ -959,6 +977,8 @@
 				CEE28D281AE0072400F4023C /* WSKFileRequest.m in Sources */,
 				CEE28D201AE0070E00F4023C /* WSKResponse.m in Sources */,
 				CEE28D3C1AE0076400F4023C /* WSKFileResponse.m in Sources */,
+				22A9414A303358AC0054EA60 /* WSKWebUploaderSSEChannel.m in Sources */,
+				22A94152303358AC0054EA60 /* WSKWebUploaderSSEResponse.m in Sources */,
 				CEE28D401AE0076F00F4023C /* WSKStreamedResponse.m in Sources */,
 				CEE28D341AE0074A00F4023C /* WSKDataResponse.m in Sources */,
 				CEE28D441AE0078000F4023C /* WSKWebDAVServer.m in Sources */,
@@ -999,6 +1019,8 @@
 				E2DDD19B1BE6945F002CE867 /* WSKDataRequest.m in Sources */,
 				E2DDD19C1BE6945F002CE867 /* WSKFileRequest.m in Sources */,
 				E2DDD19D1BE6945F002CE867 /* WSKMultiPartFormRequest.m in Sources */,
+				22A9414C303358AC0054EA60 /* WSKWebUploaderSSEChannel.m in Sources */,
+				22A94154303358AC0054EA60 /* WSKWebUploaderSSEResponse.m in Sources */,
 				E2DDD19E1BE6945F002CE867 /* WSKURLEncodedFormRequest.m in Sources */,
 				E2DDD19F1BE6945F002CE867 /* WSKDataResponse.m in Sources */,
 				E2DDD1A01BE6945F002CE867 /* WSKErrorResponse.m in Sources */,

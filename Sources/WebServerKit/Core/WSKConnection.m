@@ -1448,20 +1448,17 @@ static NSInteger _ValidateRequestLine(unsigned char *line, NSUInteger length, BO
     return 0;
 }
 
-// The header block is framed here by scanning for CRLFCRLF, but it is *parsed* by
-// CFHTTPMessage, which ends the message at a bare LF-LF. When the two disagree every
-// header in between was silently discarded and the request still succeeded — the server
-// acted on a different message than the client sent, which is the worst outcome for a
-// server that would rather refuse than half-succeed. Instead of reconciling the two
-// scanners, require the framing to be unambiguous: every CR paired with an LF, and no
-// obs-fold. The remaining checks are ordinary field syntax that CFHTTPMessage accepts far
-// too leniently — "Content-Length : 5" and a folded "Content-Length:\r\n 5" both yielded
-// a content length, and those fields decide how many bytes reach the disk.
-// Returns 0 for a valid block, otherwise the status to refuse with (400, or 505 from the
-// request-line check). *outRequestLineOffset is where the request line actually starts —
-// past any empty lines RFC 9112 §2.2 says to ignore ahead of it — so the caller hands
-// CFHTTPMessage a block that begins with the request line. The buffer is mutable because
-// the request-line check rewrites a higher HTTP/1.x minor version to 1.1 in place.
+// The header block is FRAMED here by scanning for CRLFCRLF but PARSED by CFHTTPMessage, which ends
+// a message at a bare LF-LF. Where the two disagreed, every header in between was silently
+// discarded and the request still succeeded — the server acting on a different message than the
+// client sent. Rather than reconcile two scanners, require unambiguous framing: every CR paired
+// with an LF, no obs-fold. The rest is field syntax CFHTTPMessage accepts far too leniently
+// ("Content-Length : 5" and a folded "Content-Length:\r\n 5" both yielded a length), and those
+// fields decide how many bytes reach the disk.
+//
+// Returns 0 for a valid block, else the refusal status (400, or 505 from the request-line check).
+// *outRequestLineOffset skips the empty lines RFC 9112 §2.2 ignores ahead of the request line. The
+// buffer is mutable because the request-line check rewrites a higher HTTP/1.x minor to 1.1 in place.
 static NSInteger _ValidateRequestHeaderBlock(void *rawBytes, NSUInteger length, NSUInteger *outRequestLineOffset, BOOL *outAbsoluteFormTarget) {
     unsigned char *const bytes = (unsigned char *)rawBytes;
     *outRequestLineOffset = 0;
@@ -1573,21 +1570,10 @@ typedef NS_ENUM(NSInteger, WSKHeaderBlockState) {
     kWSKHeaderBlockFailed,          // Malformed or oversized; _headerFailureStatus says which
 };
 
-// Decide on what is already buffered, WITHOUT calling the completion block — the caller owns that,
-// so it is called exactly once on every path. (Folding the two together made the block's invocation
-// correlate with a return value the analyzer cannot relate, which it reported as both "never
-// called" and "called twice" in the same function.)
-//
-// Split out of -readHeaders: because a reused connection starts with the next request's bytes
-// ALREADY in the buffer, left there by the previous request's final read. Going straight to
-// dispatch_read in that state waits for bytes the client has no reason to send: it has a complete
-// request outstanding and is waiting for us. That is a hang until the idle timeout, and it is the
-// specific hazard that makes this a refactor rather than a one-line loop.
-// Which refusal does an over-cap header block owe? 431 covers an oversized BLOCK, but when no
-// line terminator has arrived anywhere inside the block budget, what overflowed is the request
-// LINE itself — in practice a request-target longer than the server is willing to parse, which
-// RFC 9110 §15.5.15 assigns 414. (A target that fits the block but exceeds PATH_MAX is a
-// different, later refusal: it parses fine and answers 404 from the resolvers.)
+// Which refusal does an over-cap header block owe? 431 covers an oversized BLOCK, but when no line
+// terminator has arrived anywhere inside the block budget, what overflowed is the request LINE —
+// a request-target longer than the server will parse, which RFC 9110 §15.5.15 assigns 414. (A
+// target that fits the block but exceeds PATH_MAX parses fine and 404s later from the resolvers.)
 static NSInteger _StatusForOversizedHeaderBlock(NSData *headersData) {
     NSUInteger const scanLength = MIN(headersData.length, (NSUInteger)kHeadersMaxLength);
     NSRange const lineEnd = [headersData rangeOfData:_CRLFData options:(NSDataSearchOptions)0 range:NSMakeRange(0, scanLength)];
@@ -1595,6 +1581,15 @@ static NSInteger _StatusForOversizedHeaderBlock(NSData *headersData) {
                                             : kWSKHTTPStatusCode_RequestHeaderFieldsTooLarge;
 }
 
+// Decides on what is ALREADY buffered without calling the completion block — the caller owns that,
+// so it fires exactly once on every path. (Folding the two together made the block's invocation
+// correlate with a return value the analyzer cannot relate; it reported both "never called" and
+// "called twice" in the same function.)
+//
+// Separate from -readHeaders: because a reused connection starts with the next request's bytes
+// already in the buffer, left by the previous read. Going straight to dispatch_read then waits for
+// bytes the client has no reason to send — it has a complete request outstanding and is waiting on
+// us — which hangs until the idle timeout.
 - (WSKHeaderBlockState)_settleHeadersFromBuffer:(NSMutableData *)headersData extraData:(NSData *_Nullable *_Nonnull)outExtraData {
     NSRange range = [headersData rangeOfData:_CRLFCRLFData options:0 range:NSMakeRange(0, headersData.length)];
 
@@ -2266,20 +2261,15 @@ static inline BOOL _CompareResources(NSString *responseETag, NSString *requestET
         return [requestETag isEqualToString:@"*"] || _ETagMatchesIfNoneMatch(responseETag, requestETag);
     }
 
-    // Exact equality, not "not newer". The old comparison answered 304 whenever the file's
-    // mtime was equal *or older*, which pins a date-only client on stale bytes permanently:
-    // restore a previous build (or rsync -a / cp -p / touch -t from an older source) and the
-    // client revalidating with the newer representation's Last-Modified is told 304, keeps the
-    // body it has, and — per RFC 9111 §4.3.4 — adopts the *current* ETag and Last-Modified from
-    // that 304. Its next revalidation therefore matches on the ETag too, so no request will
-    // ever dislodge it. It also answered 304 for an If-Modified-Since in the future, i.e. for a
-    // resource the client demonstrably does not hold.
+    // EXACT equality, not "not newer". Answering 304 for an equal-or-OLDER mtime pins a date-only
+    // client on stale bytes permanently: restore a previous build (rsync -a, cp -p, touch -t) and
+    // the client is told 304, keeps its body, and per RFC 9111 §4.3.4 adopts the CURRENT validators
+    // from that 304 — so its next revalidation matches on the ETag too and nothing dislodges it. It
+    // also answered 304 for a future If-Modified-Since, i.e. a resource the client cannot hold.
     //
-    // Safe to tighten here specifically because _NSDateFromTimeSpec truncates the response's
-    // Last-Modified to whole seconds (see the comment on it), and WSKParseRFC822 parses at the
-    // same precision, so a client echoing back the value it was given still compares equal and
-    // ordinary unchanged-file revalidation keeps working. This is also nginx's default
-    // ("if_modified_since exact"), so it is not an unusual reading.
+    // Safe to tighten only because _NSDateFromTimeSpec truncates Last-Modified to whole seconds and
+    // WSKParseRFC822 parses at the same precision, so a client echoing back what it was given still
+    // compares equal. Matches nginx's default ("if_modified_since exact").
     if (requestLastModified && responseLastModified) {
         return [responseLastModified compare:requestLastModified] == NSOrderedSame;
     }

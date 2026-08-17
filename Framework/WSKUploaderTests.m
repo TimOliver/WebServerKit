@@ -27,7 +27,9 @@ static BOOL WSKInjectingMove(id self, SEL _cmd, NSString* src, NSString* dst, NS
         }
         return NO;
     }
-    return ((BOOL (*)(id, SEL, NSString*, NSString*, NSError**))gWSKOriginalMoveIMP)(self, _cmd, src, dst, err);
+    // Cast through void * : -Wcast-function-type-strict rejects a direct IMP-to-prototype cast,
+    // which is unavoidable for a swizzle that must call the original.
+    return ((BOOL (*)(id, SEL, NSString*, NSString*, NSError**))(void *)gWSKOriginalMoveIMP)(self, _cmd, src, dst, err);
 }
 
 @interface WSKUploaderTests : XCTestCase
@@ -419,7 +421,7 @@ static BOOL WSKInjectingMove(id self, SEL _cmd, NSString* src, NSString* dst, NS
 
     Method move = class_getInstanceMethod([NSFileManager class], @selector(moveItemAtPath:toPath:error:));
     gWSKOriginalMoveIMP = method_getImplementation(move);
-    method_setImplementation(move, (IMP)WSKInjectingMove);
+    method_setImplementation(move, (IMP)(void *)WSKInjectingMove);
 
     NSString* boundary = @"----wskfulltest";
     NSString* head = [NSString stringWithFormat:
