@@ -221,6 +221,21 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
 - `-open`/`-close` fire once per CONNECTION; per-request work (access log, trace recording)
   lives in `-_flushRequestRecordAndLog`. A keep-alive client leaving is EOF, not an error —
   no fabricated 500 in the log.
+- **Lingering close.** `close(2)` with unread inbound data makes the kernel send RST, and the RST
+  destroys bytes already handed to TCP — a response the client has not read yet. Measured before the
+  fix on a WebDAV PUT refused for `Content-Range` while the client kept uploading: 391 B complete on
+  one run, **167 B truncated mid-headers** on the next. So the old record's "the status never is
+  [lost]" was WRONG, and its "last pipelined response" framing was a special case — plain pipelining
+  never reproduced, because the server consumes pipelined bytes in the same read. The rule is unread
+  inbound data at close time, whatever produced it.
+  Fixed by `shutdown(SHUT_WR)` then a bounded drain, and ONLY when the receive queue is non-empty, so
+  an ordinary GET and the whole trace corpus close byte-identically. Half-close rather than a
+  drain-only `lingering_close`: draining alone still ends in RST, because a client uploading 64 MB
+  never reaches EOF inside any sane bound. Bounds are 2 s total, a 500 ms silence gap, and a 64 KB
+  discard cap — fixed constants. The slot cost that kept this open is negligible: the header-phase
+  deadline is `kMaxHeaderPhaseTicks` (2) ticks of the 30 s idle timer, i.e. **60–90 s**, so a 2 s
+  linger cannot be the cheapest way to occupy a slot. `-stop` abandons lingering; note that `-stop`
+  never waited on connections anyway, so this was never about shutdown latency.
 
 ### Limits (fixed constants, deliberately not options)
 
@@ -367,9 +382,6 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
   over-refusal contradicting "symlinks are aliases"; needs an OWNER RULING, not a fix (the
   obvious `lstat` fix re-refuses via `_checkFileExtension:` for extensionless link names).
   Invisible in the default configuration (no allow-list ⇒ walk returns nil).
-- **No lingering close**: a client can lose the last pipelined response to a RST
-  (`200,error` where `200,200` was owed). The RFC remedy (`shutdown(SHUT_WR)` + drain) holds
-  connection slots on a 128-slot server, so it needs its own bounded design.
 - A header-time refusal can lose its error-page body to a TCP reset (the status never is).
 - **ENAMETOOLONG answers 500, both servers.** A filename ≥ NAME_MAX (a 300-char component
   measured 500 on `/upload` AND WebDAV PUT) is client-supplied input the filesystem cannot store,
