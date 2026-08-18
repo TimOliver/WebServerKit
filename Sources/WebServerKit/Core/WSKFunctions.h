@@ -124,15 +124,6 @@ NSDate *_Nullable WSKParseISO8601(NSString *string);
  */
 BOOL WSKPathContainsNULByte(NSString *_Nullable path);
 
-
-
-
-
-
-
-
-
-
 /**
  *  Maps a filesystem NSError onto the server-error status that describes it honestly.
  *
@@ -142,17 +133,6 @@ BOOL WSKPathContainsNULByte(NSString *_Nullable path);
  *  something is freed. Everything else stays 500.
  */
 WSKServerErrorHTTPStatusCode WSKServerErrorStatusCodeForError(NSError *_Nullable error);
-
-
-
-
-
-
-
-
-
-
-
 
 #ifdef __cplusplus
 }

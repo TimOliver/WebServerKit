@@ -55,31 +55,6 @@
 #define kBonjourResolutionTimeout 5.0
 #define kWSKMaxConnections 128  // Upper bound on simultaneous connections, to cap file-descriptor use.
 
-NSString *const WSKOption_Port = @"Port";
-NSString *const WSKOption_BonjourName = @"BonjourName";
-NSString *const WSKOption_BonjourType = @"BonjourType";
-NSString *const WSKOption_BonjourTXTData = @"BonjourTXTData";
-NSString *const WSKOption_RequestNATPortMapping = @"RequestNATPortMapping";
-NSString *const WSKOption_BindToLocalhost = @"BindToLocalhost";
-NSString *const WSKOption_AllowedHostNames = @"AllowedHostNames";
-NSString *const WSKOption_MaxPendingConnections = @"MaxPendingConnections";
-NSString *const WSKOption_ServerName = @"ServerName";
-NSString *const WSKOption_AuthenticationMethod = @"AuthenticationMethod";
-NSString *const WSKOption_AuthenticationRealm = @"AuthenticationRealm";
-NSString *const WSKOption_AuthenticationAccounts = @"AuthenticationAccounts";
-NSString *const WSKOption_ConnectionClass = @"ConnectionClass";
-NSString *const WSKOption_AutomaticallyMapHEADToGET = @"AutomaticallyMapHEADToGET";
-NSString *const WSKOption_ConnectedStateCoalescingInterval = @"ConnectedStateCoalescingInterval";
-NSString *const WSKOption_DispatchQueuePriority = @"DispatchQueuePriority";
-NSString *const WSKOption_ConnectionIdleTimeout = @"ConnectionIdleTimeout";
-NSString *const WSKOption_ConnectionKeepAliveTimeout = @"ConnectionKeepAliveTimeout";
-#if TARGET_OS_IPHONE
-NSString *const WSKOption_AutomaticallySuspendInBackground = @"AutomaticallySuspendInBackground";
-#endif
-
-NSString *const WSKAuthenticationMethod_Basic = @"Basic";
-NSString *const WSKAuthenticationMethod_DigestAccess = @"DigestAccess";
-
 #if defined(__WEBSERVERKIT_LOGGING_FACILITY_BUILTIN__)
 #if DEBUG
 WSKLoggingLevel WSKLogLevel = kWSKLoggingLevel_Debug;
@@ -151,19 +126,6 @@ static void _ExecuteMainThreadRunLoopSources(void) {
 }
 
 #endif
-
-@implementation WSKHandler
-
-- (instancetype)initWithMatchBlock:(WSKMatchBlock _Nonnull)matchBlock asyncProcessBlock:(WSKAsyncProcessBlock _Nonnull)processBlock {
-    if ((self = [super init])) {
-        _matchBlock = [matchBlock copy];
-        _asyncProcessBlock = [processBlock copy];
-    }
-
-    return self;
-}
-
-@end
 
 // Private helpers that assume they are already running on _stateQueue. They exist so the
 // public accessors can funnel through that queue without any of them re-entering it.

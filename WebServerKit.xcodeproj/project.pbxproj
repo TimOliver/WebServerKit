@@ -27,6 +27,10 @@
 
 /* Begin PBXBuildFile section */
 		04D7705658FD667CFDF90AB8 /* WSKResponseTests.m in Sources */ = {isa = PBXBuildFile; fileRef = D9F1F816D28B53333D744D60 /* WSKResponseTests.m */; };
+		0EADE0FF0000000000000002 /* WSKWebServerOptions.m in Sources */ = {isa = PBXBuildFile; fileRef = 0EADE0FF0000000000000001 /* WSKWebServerOptions.m */; };
+		0EADE0FF0000000000000003 /* WSKWebServerOptions.m in Sources */ = {isa = PBXBuildFile; fileRef = 0EADE0FF0000000000000001 /* WSKWebServerOptions.m */; };
+		0EADE0FF0000000000000004 /* WSKWebServerOptions.m in Sources */ = {isa = PBXBuildFile; fileRef = 0EADE0FF0000000000000001 /* WSKWebServerOptions.m */; };
+		0EADE0FF0000000000000005 /* WSKWebServerOptions.m in Sources */ = {isa = PBXBuildFile; fileRef = 0EADE0FF0000000000000001 /* WSKWebServerOptions.m */; };
 		0EADE1200000000000000002 /* WSKWebServerOptions.h in Headers */ = {isa = PBXBuildFile; fileRef = 0EADE1200000000000000001 /* WSKWebServerOptions.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		0EADE1200000000000000003 /* WSKWebServerOptions.h in Headers */ = {isa = PBXBuildFile; fileRef = 0EADE1200000000000000001 /* WSKWebServerOptions.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		0EADE1200000000000000004 /* WSKWebServerOptions.h in Headers */ = {isa = PBXBuildFile; fileRef = 0EADE1200000000000000001 /* WSKWebServerOptions.h */; settings = {ATTRIBUTES = (Public, ); }; };
@@ -50,6 +54,10 @@
 		81AA50D50E7B6DC33347BB36 /* WSKRequestBodyTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 3F4FB19C0C28BEF1B9BA00BE /* WSKRequestBodyTests.m */; };
 		87E0CA09884495DBC83A7E2E /* WSKValidatorTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 979E92C25597917D9E7BBD68 /* WSKValidatorTests.m */; };
 		99CC889C44DDC26F25049A98 /* WSKServerLifecycleTests.m in Sources */ = {isa = PBXBuildFile; fileRef = FEAE431E90FB4145A4AFCD2E /* WSKServerLifecycleTests.m */; };
+		AD0EADE00000000000000003 /* WSKHandler.m in Sources */ = {isa = PBXBuildFile; fileRef = AD0EADE00000000000000002 /* WSKHandler.m */; };
+		AD0EADE00000000000000004 /* WSKHandler.m in Sources */ = {isa = PBXBuildFile; fileRef = AD0EADE00000000000000002 /* WSKHandler.m */; };
+		AD0EADE00000000000000005 /* WSKHandler.m in Sources */ = {isa = PBXBuildFile; fileRef = AD0EADE00000000000000002 /* WSKHandler.m */; };
+		AD0EADE00000000000000006 /* WSKHandler.m in Sources */ = {isa = PBXBuildFile; fileRef = AD0EADE00000000000000002 /* WSKHandler.m */; };
 		CB947B1344428D12A1FFDF1F /* WSKUploaderTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 2E7C1C59C8804BA29DE296C0 /* WSKUploaderTests.m */; };
 		CEE28CF41AE0051F00F4023C /* WebServerKit.h in Headers */ = {isa = PBXBuildFile; fileRef = CEE28CF31AE0051F00F4023C /* WebServerKit.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		CEE28D091AE006C200F4023C /* WSKWebServer.h in Headers */ = {isa = PBXBuildFile; fileRef = E28BAE1618F99C810095C089 /* WSKWebServer.h */; settings = {ATTRIBUTES = (Public, ); }; };
@@ -181,6 +189,18 @@
 		E2DDD2031BE69EE5002CE867 /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = E2DDD2011BE69EE5002CE867 /* Main.storyboard */; };
 		E2DDD2051BE69EE5002CE867 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E2DDD2041BE69EE5002CE867 /* Assets.xcassets */; };
 		E2DDD2081BE69EE5002CE867 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = E2DDD2061BE69EE5002CE867 /* LaunchScreen.storyboard */; };
+		F0FCF0FC0000000000000002 /* WSKMemoryReservation.m in Sources */ = {isa = PBXBuildFile; fileRef = F0FCF0FC0000000000000001 /* WSKMemoryReservation.m */; };
+		F0FCF0FC0000000000000003 /* WSKMemoryReservation.m in Sources */ = {isa = PBXBuildFile; fileRef = F0FCF0FC0000000000000001 /* WSKMemoryReservation.m */; };
+		F0FCF0FC0000000000000004 /* WSKMemoryReservation.m in Sources */ = {isa = PBXBuildFile; fileRef = F0FCF0FC0000000000000001 /* WSKMemoryReservation.m */; };
+		F0FCF0FC0000000000000005 /* WSKMemoryReservation.m in Sources */ = {isa = PBXBuildFile; fileRef = F0FCF0FC0000000000000001 /* WSKMemoryReservation.m */; };
+		F0FCF0FC0000000000000007 /* WSKPathResolution.m in Sources */ = {isa = PBXBuildFile; fileRef = F0FCF0FC0000000000000006 /* WSKPathResolution.m */; };
+		F0FCF0FC0000000000000008 /* WSKPathResolution.m in Sources */ = {isa = PBXBuildFile; fileRef = F0FCF0FC0000000000000006 /* WSKPathResolution.m */; };
+		F0FCF0FC0000000000000009 /* WSKPathResolution.m in Sources */ = {isa = PBXBuildFile; fileRef = F0FCF0FC0000000000000006 /* WSKPathResolution.m */; };
+		F0FCF0FC000000000000000A /* WSKPathResolution.m in Sources */ = {isa = PBXBuildFile; fileRef = F0FCF0FC0000000000000006 /* WSKPathResolution.m */; };
+		F0FCF0FC000000000000000C /* WSKValidators.m in Sources */ = {isa = PBXBuildFile; fileRef = F0FCF0FC000000000000000B /* WSKValidators.m */; };
+		F0FCF0FC000000000000000D /* WSKValidators.m in Sources */ = {isa = PBXBuildFile; fileRef = F0FCF0FC000000000000000B /* WSKValidators.m */; };
+		F0FCF0FC000000000000000E /* WSKValidators.m in Sources */ = {isa = PBXBuildFile; fileRef = F0FCF0FC000000000000000B /* WSKValidators.m */; };
+		F0FCF0FC000000000000000F /* WSKValidators.m in Sources */ = {isa = PBXBuildFile; fileRef = F0FCF0FC000000000000000B /* WSKValidators.m */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -285,8 +305,12 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		0EADE0FF0000000000000001 /* WSKWebServerOptions.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = WSKWebServerOptions.m; sourceTree = "<group>"; };
 		0EADE1200000000000000001 /* WSKWebServerOptions.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = WSKWebServerOptions.h; sourceTree = "<group>"; };
 		0EADE1200000000000000005 /* WSKDelegate.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = WSKDelegate.h; sourceTree = "<group>"; };
+		1EADE1230000000000000001 /* WSKMemoryReservation.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = WSKMemoryReservation.h; sourceTree = "<group>"; };
+		1EADE1230000000000000002 /* WSKPathResolution.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = WSKPathResolution.h; sourceTree = "<group>"; };
+		1EADE1230000000000000003 /* WSKValidators.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = WSKValidators.h; sourceTree = "<group>"; };
 		22A94148303358AC0054EA60 /* WSKWebUploaderSSEChannel.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = WSKWebUploaderSSEChannel.m; sourceTree = "<group>"; };
 		22A94150303358AC0054EA60 /* WSKWebUploaderSSEResponse.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = WSKWebUploaderSSEResponse.m; sourceTree = "<group>"; };
 		2E7C1C59C8804BA29DE296C0 /* WSKUploaderTests.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = WSKUploaderTests.m; sourceTree = "<group>"; };
@@ -296,6 +320,8 @@
 		8DD76FB20486AB0100D96B5E /* WebServerKitExample */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = WebServerKitExample; sourceTree = BUILT_PRODUCTS_DIR; };
 		979E92C25597917D9E7BBD68 /* WSKValidatorTests.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = WSKValidatorTests.m; sourceTree = "<group>"; };
 		A9D8E21D1D62F9F3149D174B /* WSKPathContainmentTests.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = WSKPathContainmentTests.m; sourceTree = "<group>"; };
+		AD0EADE00000000000000001 /* WSKHandler.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = WSKHandler.h; sourceTree = "<group>"; };
+		AD0EADE00000000000000002 /* WSKHandler.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = WSKHandler.m; sourceTree = "<group>"; };
 		CEE28CD11AE004D800F4023C /* WebServerKit.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = WebServerKit.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		CEE28CEF1AE0051F00F4023C /* WebServerKit.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = WebServerKit.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		CEE28CF21AE0051F00F4023C /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -353,6 +379,9 @@
 		E2DDD2071BE69EE5002CE867 /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		E2DDD2091BE69EE5002CE867 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		EF30CCB6CE581FB5899D5603 /* TestsSupport.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = TestsSupport.h; sourceTree = "<group>"; };
+		F0FCF0FC0000000000000001 /* WSKMemoryReservation.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = WSKMemoryReservation.m; sourceTree = "<group>"; };
+		F0FCF0FC0000000000000006 /* WSKPathResolution.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = WSKPathResolution.m; sourceTree = "<group>"; };
+		F0FCF0FC000000000000000B /* WSKValidators.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = WSKValidators.m; sourceTree = "<group>"; };
 		F1A2B3C4D5E6F708090A0B0C /* WSKWebUploaderSSEChannel.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = WSKWebUploaderSSEChannel.h; sourceTree = "<group>"; };
 		F1A2B3C4D5E6F708090A0B0D /* WSKWebUploaderSSEResponse.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = WSKWebUploaderSSEResponse.h; sourceTree = "<group>"; };
 		F3DA3F76B10780DEA46C25F5 /* WSKServerSentEventsTests.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = WSKServerSentEventsTests.m; sourceTree = "<group>"; };
@@ -443,6 +472,22 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
+		1D7E12BA00000000000000A1 /* Internal */ = {
+			isa = PBXGroup;
+			children = (
+				AD0EADE00000000000000001 /* WSKHandler.h */,
+				AD0EADE00000000000000002 /* WSKHandler.m */,
+				1EADE1230000000000000001 /* WSKMemoryReservation.h */,
+				F0FCF0FC0000000000000001 /* WSKMemoryReservation.m */,
+				1EADE1230000000000000002 /* WSKPathResolution.h */,
+				F0FCF0FC0000000000000006 /* WSKPathResolution.m */,
+				E28BAE1D18F99C810095C089 /* WSKPrivate.h */,
+				1EADE1230000000000000003 /* WSKValidators.h */,
+				F0FCF0FC000000000000000B /* WSKValidators.m */,
+			);
+			path = Internal;
+			sourceTree = "<group>";
+		};
 		228C21112F38582100AC49DD /* Examples */ = {
 			isa = PBXGroup;
 			children = (
@@ -499,6 +544,7 @@
 				E28BAE1518F99C810095C089 /* Core */,
 				E28BAE2218F99C810095C089 /* Requests */,
 				E28BAE2B18F99C810095C089 /* Responses */,
+				1D7E12BA00000000000000A1 /* Internal */,
 			);
 			path = WebServerKit;
 			sourceTree = "<group>";
@@ -507,19 +553,19 @@
 			isa = PBXGroup;
 			children = (
 				0EADE1200000000000000005 /* WSKDelegate.h */,
-				0EADE1200000000000000001 /* WSKWebServerOptions.h */,
 				E28BAE1818F99C810095C089 /* WSKConnection.h */,
 				E28BAE1918F99C810095C089 /* WSKConnection.m */,
 				E28BAE1A18F99C810095C089 /* WSKFunctions.h */,
 				E28BAE1B18F99C810095C089 /* WSKFunctions.m */,
 				E28BAE1C18F99C810095C089 /* WSKHTTPStatusCodes.h */,
-				E28BAE1D18F99C810095C089 /* WSKPrivate.h */,
 				E28BAE1E18F99C810095C089 /* WSKRequest.h */,
 				E28BAE1F18F99C810095C089 /* WSKRequest.m */,
 				E28BAE2018F99C810095C089 /* WSKResponse.h */,
 				E28BAE2118F99C810095C089 /* WSKResponse.m */,
 				E28BAE1618F99C810095C089 /* WSKWebServer.h */,
 				E28BAE1718F99C810095C089 /* WSKWebServer.m */,
+				0EADE1200000000000000001 /* WSKWebServerOptions.h */,
+				0EADE0FF0000000000000001 /* WSKWebServerOptions.m */,
 			);
 			path = Core;
 			sourceTree = "<group>";
@@ -938,12 +984,17 @@
 			files = (
 				E28BAE4618F99C810095C089 /* WSKDataResponse.m in Sources */,
 				E28BAE3818F99C810095C089 /* WSKFunctions.m in Sources */,
+				F0FCF0FC000000000000000F /* WSKValidators.m in Sources */,
+				F0FCF0FC000000000000000A /* WSKPathResolution.m in Sources */,
+				F0FCF0FC0000000000000005 /* WSKMemoryReservation.m in Sources */,
 				E28BAE4A18F99C810095C089 /* WSKFileResponse.m in Sources */,
 				E28BAE4418F99C810095C089 /* WSKURLEncodedFormRequest.m in Sources */,
 				22A94149303358AC0054EA60 /* WSKWebUploaderSSEChannel.m in Sources */,
 				22A94151303358AC0054EA60 /* WSKWebUploaderSSEResponse.m in Sources */,
 				E28BAE3A18F99C810095C089 /* WSKRequest.m in Sources */,
 				E28BAE3418F99C810095C089 /* WSKWebServer.m in Sources */,
+				AD0EADE00000000000000006 /* WSKHandler.m in Sources */,
+				0EADE0FF0000000000000005 /* WSKWebServerOptions.m in Sources */,
 				E28BAE3618F99C810095C089 /* WSKConnection.m in Sources */,
 				E28BAE3C18F99C810095C089 /* WSKResponse.m in Sources */,
 				E28BAE4018F99C810095C089 /* WSKFileRequest.m in Sources */,
@@ -975,7 +1026,12 @@
 				CEE28D331AE0074900F4023C /* WSKDataResponse.m in Sources */,
 				CEE28D431AE0077F00F4023C /* WSKWebDAVServer.m in Sources */,
 				CEE28D0B1AE006CC00F4023C /* WSKWebServer.m in Sources */,
+				AD0EADE00000000000000005 /* WSKHandler.m in Sources */,
+				0EADE0FF0000000000000004 /* WSKWebServerOptions.m in Sources */,
 				CEE28D131AE006E900F4023C /* WSKFunctions.m in Sources */,
+				F0FCF0FC000000000000000E /* WSKValidators.m in Sources */,
+				F0FCF0FC0000000000000009 /* WSKPathResolution.m in Sources */,
+				F0FCF0FC0000000000000004 /* WSKMemoryReservation.m in Sources */,
 				CEE28D371AE0075900F4023C /* WSKErrorResponse.m in Sources */,
 				CEE28D491AE0079100F4023C /* WSKWebUploader.m in Sources */,
 			);
@@ -999,7 +1055,12 @@
 				CEE28D341AE0074A00F4023C /* WSKDataResponse.m in Sources */,
 				CEE28D441AE0078000F4023C /* WSKWebDAVServer.m in Sources */,
 				CEE28D0C1AE006CD00F4023C /* WSKWebServer.m in Sources */,
+				AD0EADE00000000000000004 /* WSKHandler.m in Sources */,
+				0EADE0FF0000000000000003 /* WSKWebServerOptions.m in Sources */,
 				CEE28D141AE006EA00F4023C /* WSKFunctions.m in Sources */,
+				F0FCF0FC000000000000000D /* WSKValidators.m in Sources */,
+				F0FCF0FC0000000000000008 /* WSKPathResolution.m in Sources */,
+				F0FCF0FC0000000000000003 /* WSKMemoryReservation.m in Sources */,
 				CEE28D381AE0075900F4023C /* WSKErrorResponse.m in Sources */,
 				CEE28D4A1AE0079200F4023C /* WSKWebUploader.m in Sources */,
 			);
@@ -1028,8 +1089,13 @@
 			buildActionMask = 2147483647;
 			files = (
 				E2DDD1961BE6945F002CE867 /* WSKWebServer.m in Sources */,
+				AD0EADE00000000000000003 /* WSKHandler.m in Sources */,
+				0EADE0FF0000000000000002 /* WSKWebServerOptions.m in Sources */,
 				E2DDD1971BE6945F002CE867 /* WSKConnection.m in Sources */,
 				E2DDD1981BE6945F002CE867 /* WSKFunctions.m in Sources */,
+				F0FCF0FC000000000000000C /* WSKValidators.m in Sources */,
+				F0FCF0FC0000000000000007 /* WSKPathResolution.m in Sources */,
+				F0FCF0FC0000000000000002 /* WSKMemoryReservation.m in Sources */,
 				E2DDD1991BE6945F002CE867 /* WSKRequest.m in Sources */,
 				E2DDD19A1BE6945F002CE867 /* WSKResponse.m in Sources */,
 				E2DDD19B1BE6945F002CE867 /* WSKDataRequest.m in Sources */,

@@ -14,6 +14,7 @@ import PackageDescription
 // The .m files still use bare quoted imports, hence the per-target header search paths.
 let coreSources: [CSetting] = [
     .headerSearchPath("Core"),
+    .headerSearchPath("Internal"),
     .headerSearchPath("Requests"),
     .headerSearchPath("Responses")
 ]
@@ -30,7 +31,7 @@ let coreSources: [CSetting] = [
 // package can reach every header regardless.
 let coreFromSibling: [CSetting] = [
     .headerSearchPath("../WebServerKit/include/WebServerKit"),
-    .headerSearchPath("../WebServerKit/Core")
+    .headerSearchPath("../WebServerKit/Internal")
 ]
 
 let package = Package(

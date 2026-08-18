@@ -348,6 +348,16 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   `headerSearchPath`; `Framework/Tests.m` needs `WSKResolvedPathIsWithinDirectory` linkable —
   not `static`. The symlink farm, hand-written modulemap and `SWIFT_PACKAGE` bundle accessor
   are load-bearing.
+- Implementations split by topic (2026-08-18, pure moves): `WSKPathResolution` (containment,
+  `_RealPath`, resolvers, vetting/removability walks), `WSKValidators` (entity tag, seal),
+  `WSKMemoryReservation` (budget), `WSKHandler`, `WSKWebServerOptions`; `WSKFunctions` keeps
+  the general utilities. Every `.m` has a matching `.h`. The non-user-facing pairs plus
+  `WSKPrivate.h` live in `Sources/WebServerKit/Internal/` (quoted imports only — never
+  installed in the framework), aggregated by `WSKPrivate.h` so it remains the one prelude
+  every `.m` imports. Xcode resolves the cross-folder quoted imports via its headermap;
+  SPM needs the explicit `headerSearchPath("Internal")` entries in Package.swift (the
+  sibling targets' extra path now points at `Internal/`, not `Core/`). One home per rule is
+  unchanged.
 - Nullability tells the truth, source-breaking for Swift deliberately (`WSKFileResponse`'s
   three properties, `allowedFileExtensions`, the uploader's five strings, match-block
   addresses) — nil is meaningful in every case.
