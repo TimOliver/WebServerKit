@@ -1601,7 +1601,7 @@
 // tests that flake under load and must not gain a third. Descriptor count is the observable proxy —
 // it returns to baseline only once the connection object is gone, which is what releases the slot.
 //
-// Two things about this oracle were wrong in earlier drafts and are recorded here rather than
+// Three things about this oracle were wrong in earlier drafts and are recorded here rather than
 // silently fixed, per this project's own rule about not re-importing a corrected story:
 //
 // 1) The baseline must be taken before connecting, AND the poll must compare against baseline + 1,
@@ -1626,13 +1626,40 @@
 //    kLingerDiscardCap, so the discard-cap exit is never hit either) reliably avoid this: the
 //    per-call overhead of hundreds of separate send()s gives the server's header read time to fire
 //    and complete on the header alone first.
+// 3) Run SOLO (this method alone, or a small handful via -only-testing) the baseline itself is
+//    unstable: XCTest's own process is still opening and closing scratch descriptors for a stretch
+//    after the test target launches, and that churn was measured to settle within roughly 50-80ms
+//    -- comfortably inside this test's own 5s poll, so a baseline taken mid-churn drifts back down
+//    on its own and satisfies "<= baseline + 1" well before the connection under test could
+//    possibly have released anything. Measured directly: solo, this passed in under 90ms against
+//    BOTH the fixed source and a build with the gap timer removed -- a false green that a full
+//    suite run does not show, because by the time this test runs amid dozens of others the churn
+//    already happened. The fix is to force that settling to happen BEFORE baseline is captured,
+//    not to lengthen the poll or add a wall-clock assertion: one ordinary request first forces the
+//    one-time lazy setup (date formatters and the like) to happen now rather than during
+//    measurement, and the loop below then waits for FIVE CONSECUTIVE identical readings, 10ms
+//    apart, before trusting the count as a baseline -- so a still-churning count simply keeps
+//    resetting the streak instead of being accepted.
 - (void)testLingeringCloseReleasesItsSlotWhenTheClientGoesQuiet {
     NSString* directory = MakeTempDirectory();
     WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:directory];
     NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSUInteger const baseline = OpenFileDescriptorCount();
+    XCTAssertNotNil(SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"));
+
+    NSUInteger baseline = OpenFileDescriptorCount();
+    NSUInteger stableStreak = 0;
+    for (int i = 0; (i < 200) && (stableStreak < 5); i++) {
+        usleep(10 * 1000);
+        NSUInteger const current = OpenFileDescriptorCount();
+        if (current == baseline) {
+            stableStreak += 1;
+        } else {
+            baseline = current;
+            stableStreak = 0;
+        }
+    }
 
     int fd = ConnectToLocalhostPort(server.port);
     XCTAssertGreaterThan(fd, 0);
