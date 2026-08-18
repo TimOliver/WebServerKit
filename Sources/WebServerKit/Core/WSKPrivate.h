@@ -301,6 +301,11 @@ extern NSString *WSKStringFromSockAddr(const struct sockaddr *addr, BOOL include
 @property (nonatomic, readonly) NSTimeInterval connectionIdleTimeout;
 @property (nonatomic, readonly) NSTimeInterval connectionKeepAliveTimeout;
 @property (nonatomic, readonly) NSSet<NSString *> *registeredMethods;
+/**
+ *  YES once -stop has begun. Safe to read from any thread and deliberately NOT serialized on the
+ *  server's state queue, because connections read it from their own queues while -stop runs.
+ */
+@property (nonatomic, readonly, getter=isStopping) BOOL stopping;
 - (void)willStartConnection:(WSKConnection *)connection;
 - (void)didEndConnection:(WSKConnection *)connection;
 @end
@@ -673,5 +678,19 @@ BOOL WSKLastModifiedDateIsSealed(int descriptor, const struct stat *info);
  *  transactional filesystem.
  */
 NSString *_Nullable WSKFirstUnremovableItemAtPath(NSString *absolutePath);
+
+/**
+ *  Does this socket have inbound data that has been received but not yet read?
+ *
+ *  close(2) on a socket in that state makes the kernel send RST rather than FIN, and an RST
+ *  discards bytes already handed to TCP — including a response already sitting in the client's
+ *  receive buffer, unread. This is the guard that decides whether a connection must linger before
+ *  closing; when it answers NO the close is exactly the one this server has always performed.
+ *
+ *  Answers NO when it cannot tell (a closed descriptor, or one FIONREAD refuses, like /dev/null),
+ *  because the caller uses it to decide whether to do EXTRA work, and "unknown" must not mean "do
+ *  the new thing".
+ */
+BOOL WSKSocketHasUnreadInboundData(int socket);
 
 NS_ASSUME_NONNULL_END

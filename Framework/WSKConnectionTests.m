@@ -1403,4 +1403,299 @@
     [server stop];
 }
 
+// close(2) on a socket with unread inbound data makes the kernel send RST instead of FIN, and an
+// RST destroys bytes already handed to TCP — including a response already delivered into the
+// client's buffer. This predicate is the cheap guard that decides whether a connection needs to
+// linger at all, so the ordinary case (nothing unread) keeps closing exactly as it always has.
+- (void)testUnreadInboundDataIsDetected {
+    int fds[2] = { -1, -1 };
+    XCTAssertEqual(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+
+    XCTAssertFalse(WSKSocketHasUnreadInboundData(fds[0]), @"an idle socket has nothing unread");
+
+    XCTAssertEqual(write(fds[1], "x", 1), (ssize_t)1);
+
+    // Delivery through the socket layer is not instantaneous; poll briefly rather than sleeping a
+    // fixed amount, so this cannot flake on a loaded machine.
+    BOOL sawData = NO;
+    for (int i = 0; (i < 200) && !sawData; i++) {
+        sawData = WSKSocketHasUnreadInboundData(fds[0]);
+        if (!sawData) {
+            usleep(1000);
+        }
+    }
+    XCTAssertTrue(sawData, @"a byte sitting in the receive queue must be reported");
+
+    char scratch = 0;
+    XCTAssertEqual(read(fds[0], &scratch, 1), (ssize_t)1);
+    XCTAssertFalse(WSKSocketHasUnreadInboundData(fds[0]), @"draining the byte clears the condition");
+
+    // A closed descriptor must answer NO rather than assert or report garbage: the caller uses this
+    // to decide whether to do MORE work, so "cannot tell" has to mean "behave exactly as before".
+    close(fds[0]);
+    close(fds[1]);
+    XCTAssertFalse(WSKSocketHasUnreadInboundData(fds[0]), @"an unusable descriptor must fail to NO");
+}
+
+// A header-time refusal answered while the client is still uploading is the measured case: the
+// server writes a complete 400 and closes, but the client is still sending, so the receive queue is
+// non-empty and close(2) emits RST — which destroys the response the client has not read yet.
+// Measured on unfixed source: 391 bytes complete on one run, 167 bytes truncated mid-headers on the
+// next. Because it is a race, this runs K trials and requires ALL of them to be clean.
+- (void)testRefusalSurvivesWhileClientIsStillSending {
+    NSString* directory = MakeTempDirectory();
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:directory];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSUInteger const trials = 20;
+    NSUInteger clean = 0;
+    NSMutableArray<NSString*>* failures = [NSMutableArray array];
+
+    for (NSUInteger trial = 0; trial < trials; trial++) {
+        int fd = ConnectToLocalhostPort(server.port);
+        XCTAssertGreaterThan(fd, 0);
+
+        // Content-Range on PUT is refused 400 in the connection layer, before any body is spooled,
+        // so the server answers immediately while the body is still arriving. WebDAV is used
+        // because it HANDLES PUT — on a server with no PUT handler this is a bodiless 501 abort
+        // instead, which has no error page to lose and would make this test prove nothing.
+        NSString* header = @"PUT /x.bin HTTP/1.1\r\nHost: localhost\r\nContent-Range: bytes 0-2/10\r\nContent-Length: 67108864\r\n\r\n";
+        const char* headerBytes = [header UTF8String];
+        XCTAssertEqual(send(fd, headerBytes, strlen(headerBytes), 0), (ssize_t)strlen(headerBytes));
+
+        // Keep pushing body from another thread so the receive queue stays non-empty while the
+        // server refuses and closes. SIGPIPE is disabled on this socket so a send after the peer
+        // goes away fails rather than killing the test process.
+        int const noSignal = 1;
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, sizeof(noSignal));
+        dispatch_semaphore_t pumpDone = dispatch_semaphore_create(0);
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            char* chunk = malloc(65536);
+            memset(chunk, 'Z', 65536);
+            for (int i = 0; i < 1024; i++) {
+                if (send(fd, chunk, 65536, 0) < 0) {
+                    break;
+                }
+            }
+            free(chunk);
+            dispatch_semaphore_signal(pumpDone);
+        });
+
+        BOOL sawEOF = NO;
+        NSData* reply = ReadToEOF(fd, &sawEOF);
+        dispatch_semaphore_wait(pumpDone, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
+        close(fd);
+
+        NSString* text = [[NSString alloc] initWithData:reply encoding:NSUTF8StringEncoding];
+        NSRange const separator = (text != nil) ? [text rangeOfString:@"\r\n\r\n"] : NSMakeRange(NSNotFound, 0);
+        BOOL const rightStatus = (text != nil) && [text hasPrefix:@"HTTP/1.1 400"];
+
+        // The ORACLE IS THE BODY, and this is the whole subtlety of this test. When the RST lands,
+        // the reply truncates to exactly its 167 bytes of headers and loses the 224-byte error
+        // page. A truncated reply therefore STILL starts "HTTP/1.1 400" and STILL contains the
+        // header terminator — asserting on those two passes 80/80 against unfixed source and
+        // detects nothing. Measured: 391 bytes with the body, 167 without, never anything between.
+        NSUInteger const bodyLength = (separator.location == NSNotFound) ? 0 : (text.length - NSMaxRange(separator));
+
+        if (rightStatus && (separator.location != NSNotFound) && (bodyLength > 0)) {
+            clean += 1;
+        } else if (failures.count < 3) {
+            [failures addObject:[NSString stringWithFormat:@"trial %lu: %lu bytes, body=%lu, sawEOF=%@",
+                                 (unsigned long)trial, (unsigned long)reply.length,
+                                 (unsigned long)bodyLength, sawEOF ? @"YES" : @"NO"]];
+        }
+    }
+
+    XCTAssertEqual(clean, trials, @"a refusal must reach the client intact every time: %@",
+                   [failures componentsJoinedByString:@"; "]);
+
+    [server stop];
+    [[NSFileManager defaultManager] removeItemAtPath:directory error:NULL];
+}
+
+// Covers the OTHER linger call site, -abortRequest:withStatusCode:, which the test above never
+// reaches (a Content-Range refusal is answered through -_finishProcessingRequest: instead). A PUT
+// to a server registering only GET takes the unmatched-handler branch, which aborts 501 from inside
+// the HEADER read, so the answer is written while the client is still uploading and the receive
+// queue is non-empty at close.
+//
+// READ THIS BEFORE TRUSTING IT AS LINGER COVERAGE. This test does NOT discriminate the lingering
+// close, and that was established by experiment rather than assumed: with
+// -_beginLingeringCloseIfNeeded deleted from -abortRequest:withStatusCode: it still passes 20/20,
+// and it still passes 20/20 with a 300 ms delay inserted before the client reads. The reason is
+// structural — an abort response is bodiless by construction (110 bytes here), so it is handed to
+// TCP in a single write and fully transmitted before close(2), leaving the RST nothing to destroy.
+// The measured defect needed a SECOND write (the 224-byte error page) still sitting in the send
+// buffer when the socket was closed.
+//
+// What it does prove: the abort path is driven end to end while a body is in flight, and its reply
+// arrives complete rather than truncated mid-status. Server debug logs confirm the linger genuinely
+// engages here — 18 of 20 trials log "Lingering before close" and hit the discard cap — so the call
+// site is live and exercised; there is simply nothing left to lose by the time it runs.
+- (void)testBodilessAbortIsDeliveredCompleteWhileClientIsStillSending {
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[WSKRequest class]
+                          processBlock:^WSKResponse*(WSKRequest* request) {
+                              return [WSKDataResponse responseWithText:@"alive"];
+                          }];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSUInteger const trials = 20;
+    NSUInteger clean = 0;
+    NSMutableArray<NSString*>* failures = [NSMutableArray array];
+
+    for (NSUInteger trial = 0; trial < trials; trial++) {
+        int fd = ConnectToLocalhostPort(server.port);
+        XCTAssertGreaterThan(fd, 0);
+
+        // No PUT handler is registered, so this is refused 501 before any body is spooled.
+        NSString* header = @"PUT /x.bin HTTP/1.1\r\nHost: localhost\r\nContent-Length: 67108864\r\n\r\n";
+        const char* headerBytes = [header UTF8String];
+        XCTAssertEqual(send(fd, headerBytes, strlen(headerBytes), 0), (ssize_t)strlen(headerBytes));
+
+        // Keep the receive queue non-empty while the server answers and closes.
+        int const noSignal = 1;
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, sizeof(noSignal));
+        dispatch_semaphore_t pumpDone = dispatch_semaphore_create(0);
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            char* chunk = malloc(65536);
+            memset(chunk, 'Z', 65536);
+            for (int i = 0; i < 1024; i++) {
+                if (send(fd, chunk, 65536, 0) < 0) {
+                    break;
+                }
+            }
+            free(chunk);
+            dispatch_semaphore_signal(pumpDone);
+        });
+
+        BOOL sawEOF = NO;
+        NSData* reply = ReadToEOF(fd, &sawEOF);
+        dispatch_semaphore_wait(pumpDone, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
+        close(fd);
+
+        NSString* text = [[NSString alloc] initWithData:reply encoding:NSUTF8StringEncoding];
+        BOOL const rightStatus = (text != nil) && [text hasPrefix:@"HTTP/1.1 501"];
+        BOOL const terminated = (text != nil) && ([text rangeOfString:@"\r\n\r\n"].location != NSNotFound);
+
+        if (rightStatus && terminated) {
+            clean += 1;
+        } else if (failures.count < 3) {
+            [failures addObject:[NSString stringWithFormat:@"trial %lu: %lu bytes, status=%@, terminated=%@",
+                                 (unsigned long)trial, (unsigned long)reply.length,
+                                 rightStatus ? @"YES" : @"NO", terminated ? @"YES" : @"NO"]];
+        }
+    }
+
+    XCTAssertEqual(clean, trials, @"a bodiless abort must reach the client complete every time: %@",
+                   [failures componentsJoinedByString:@"; "]);
+
+    [server stop];
+}
+
+// A client that stops sending but never closes must not pin a connection slot for the whole idle
+// timeout. Asserted through the SLOT returning, not wall-clock: this suite already has two timing
+// tests that flake under load and must not gain a third. Descriptor count is the observable proxy —
+// it returns to baseline only once the connection object is gone, which is what releases the slot.
+//
+// Three things about this oracle were wrong in earlier drafts and are recorded here rather than
+// silently fixed, per this project's own rule about not re-importing a corrected story:
+//
+// 1) The baseline must be taken before connecting, AND the poll must compare against baseline + 1,
+//    never baseline itself. fd (this test's own client socket) stays open until after the
+//    assertion, so it is always one descriptor beyond whatever existed before the connection —
+//    that "+1" is not slack, it is the known, permanent cost of the client's own socket, exactly
+//    like -testSustainedServingDoesNotAccumulateResources tolerates its own bounded overhead
+//    rather than demanding an exact return to baseline. Capturing the baseline AFTER connecting
+//    was tried and measured worse, not better: accept() on this listening socket can complete fast
+//    enough that the SERVER's own accepted-connection descriptor already exists by the time the
+//    next line executes, silently folding it into "baseline" too — the assertion then trivially
+//    passed on the FIRST poll regardless of whether the connection under test had released
+//    anything, which is a worse failure mode (a bound that cannot help but hold) than the
+//    always-fails-by-one shape a plain pre-connect baseline has without the "+1".
+// 2) A single write immediately after the header races the server's OWN header read, which (like
+//    the drain) hands over whatever has already arrived rather than waiting for more. On this
+//    machine the two land together often enough that the write is read as PART OF the header parse
+//    instead of staying unread for the lingering check to find: measured directly, one 4KB write
+//    right after the header made "WSKSocketHasUnreadInboundData" answer NO and the connection close
+//    the ordinary way, never lingering at all — the log showed "received 4191 bytes" (header +
+//    filler) as ONE read. Many small writes in a tight loop (still comfortably under
+//    kLingerDiscardCap, so the discard-cap exit is never hit either) reliably avoid this: the
+//    per-call overhead of hundreds of separate send()s gives the server's header read time to fire
+//    and complete on the header alone first.
+// 3) Run SOLO (this method alone, or a small handful via -only-testing) the baseline itself is
+//    unstable: XCTest's own process is still opening and closing scratch descriptors for a stretch
+//    after the test target launches, and that churn was measured to settle within roughly 50-80ms
+//    -- comfortably inside this test's own 5s poll, so a baseline taken mid-churn drifts back down
+//    on its own and satisfies "<= baseline + 1" well before the connection under test could
+//    possibly have released anything. Measured directly: solo, this passed in under 90ms against
+//    BOTH the fixed source and a build with the gap timer removed -- a false green that a full
+//    suite run does not show, because by the time this test runs amid dozens of others the churn
+//    already happened. The fix is to force that settling to happen BEFORE baseline is captured,
+//    not to lengthen the poll or add a wall-clock assertion: one ordinary request first forces the
+//    one-time lazy setup (date formatters and the like) to happen now rather than during
+//    measurement, and the loop below then waits for FIVE CONSECUTIVE identical readings, 10ms
+//    apart, before trusting the count as a baseline -- so a still-churning count simply keeps
+//    resetting the streak instead of being accepted.
+- (void)testLingeringCloseReleasesItsSlotWhenTheClientGoesQuiet {
+    NSString* directory = MakeTempDirectory();
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:directory];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    XCTAssertNotNil(SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"));
+
+    NSUInteger baseline = OpenFileDescriptorCount();
+    NSUInteger stableStreak = 0;
+    for (int i = 0; (i < 200) && (stableStreak < 5); i++) {
+        usleep(10 * 1000);
+        NSUInteger const current = OpenFileDescriptorCount();
+        if (current == baseline) {
+            stableStreak += 1;
+        } else {
+            baseline = current;
+            stableStreak = 0;
+        }
+    }
+
+    int fd = ConnectToLocalhostPort(server.port);
+    XCTAssertGreaterThan(fd, 0);
+
+    // Declare a huge body, send a little of it, then go silent WITHOUT closing. The refusal is
+    // written immediately, the receive queue is non-empty, so the connection lingers — and then
+    // nothing more ever arrives.
+    NSString* header = @"PUT /x.bin HTTP/1.1\r\nHost: localhost\r\nContent-Range: bytes 0-2/10\r\nContent-Length: 67108864\r\n\r\n";
+    const char* headerBytes = [header UTF8String];
+    XCTAssertEqual(send(fd, headerBytes, strlen(headerBytes), 0), (ssize_t)strlen(headerBytes));
+
+    int const noSignal = 1;
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, sizeof(noSignal));
+    char filler[64];
+    memset(filler, 'Z', sizeof(filler));
+    for (int i = 0; i < 400; i++) {
+        if (send(fd, filler, sizeof(filler), 0) < 0) {
+            break;
+        }
+    }
+
+    // Well inside the 30s idle timeout, so passing this cannot be the idle timer doing the work.
+    // "baseline + 1" -- not "baseline" -- because fd itself is one descriptor beyond baseline for
+    // as long as this test holds it open, which is deliberately until after this assertion; see the
+    // comment above the method.
+    BOOL released = NO;
+    for (int i = 0; (i < 100) && !released; i++) {
+        usleep(50 * 1000);
+        released = (OpenFileDescriptorCount() <= baseline + 1);
+    }
+
+    XCTAssertTrue(released, @"a lingering connection must release its slot once the client goes quiet");
+
+    close(fd);
+    [server stop];
+    [[NSFileManager defaultManager] removeItemAtPath:directory error:NULL];
+}
+
 @end

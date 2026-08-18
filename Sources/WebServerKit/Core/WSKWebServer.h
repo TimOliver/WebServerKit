@@ -375,6 +375,13 @@ extern NSString *const WSKAuthenticationMethod_DigestAccess;
  *  recommended to have the main thread's runloop be running so internal callbacks
  *  can be handled e.g. for Bonjour registration.
  *
+ *  Responses are delivered best-effort, not guaranteed whole. When a client is still sending as its
+ *  request is answered, the server half-closes and briefly drains the socket before closing, because
+ *  close(2) with unread inbound data makes the kernel send RST, and an RST destroys bytes the client
+ *  has not read yet. The drain is bounded, so a client that keeps sending past the deadline or the
+ *  discard cap can still lose the response — the same as a connection still draining when the server
+ *  stops.
+ *
  *  See the README.md file for more information about the architecture of WSKWebServer.
  */
 @interface WSKWebServer : NSObject
@@ -461,6 +468,10 @@ extern NSString *const WSKAuthenticationMethod_DigestAccess;
  *  @warning Stopping the server does not abort WSKConnection instances
  *  currently handling already received HTTP requests. These connections will
  *  continue to execute normally until completion.
+ *
+ *  The one exception is a connection already draining before close (see the
+ *  class documentation above): it stops draining and closes, so its client may
+ *  lose that last response. Stopping never waits on a connection either way.
  */
 - (void)stop;
 
