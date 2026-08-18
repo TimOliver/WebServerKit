@@ -382,7 +382,8 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
   over-refusal contradicting "symlinks are aliases"; needs an OWNER RULING, not a fix (the
   obvious `lstat` fix re-refuses via `_checkFileExtension:` for extensionless link names).
   Invisible in the default configuration (no allow-list ⇒ walk returns nil).
-- A header-time refusal can lose its error-page body to a TCP reset (the status never is).
+- **Lingering close** (Core invariants → File serving and connection reuse) fixes the body-loss
+  case this line named, and corrects its claim that the status was always safe.
 - **ENAMETOOLONG answers 500, both servers.** A filename ≥ NAME_MAX (a 300-char component
   measured 500 on `/upload` AND WebDAV PUT) is client-supplied input the filesystem cannot store,
   so 4xx is owed, not a server fault. Not fixed with the disk-full pass deliberately: the status is
