@@ -1437,4 +1437,81 @@
     XCTAssertFalse(WSKSocketHasUnreadInboundData(fds[0]), @"an unusable descriptor must fail to NO");
 }
 
+// A header-time refusal answered while the client is still uploading is the measured case: the
+// server writes a complete 400 and closes, but the client is still sending, so the receive queue is
+// non-empty and close(2) emits RST — which destroys the response the client has not read yet.
+// Measured on unfixed source: 391 bytes complete on one run, 167 bytes truncated mid-headers on the
+// next. Because it is a race, this runs K trials and requires ALL of them to be clean.
+- (void)testRefusalSurvivesWhileClientIsStillSending {
+    NSString* directory = MakeTempDirectory();
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:directory];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSUInteger const trials = 20;
+    NSUInteger clean = 0;
+    NSMutableArray<NSString*>* failures = [NSMutableArray array];
+
+    for (NSUInteger trial = 0; trial < trials; trial++) {
+        int fd = ConnectToLocalhostPort(server.port);
+        XCTAssertGreaterThan(fd, 0);
+
+        // Content-Range on PUT is refused 400 in the connection layer, before any body is spooled,
+        // so the server answers immediately while the body is still arriving. WebDAV is used
+        // because it HANDLES PUT — on a server with no PUT handler this is a bodiless 501 abort
+        // instead, which has no error page to lose and would make this test prove nothing.
+        NSString* header = @"PUT /x.bin HTTP/1.1\r\nHost: localhost\r\nContent-Range: bytes 0-2/10\r\nContent-Length: 67108864\r\n\r\n";
+        const char* headerBytes = [header UTF8String];
+        XCTAssertEqual(send(fd, headerBytes, strlen(headerBytes), 0), (ssize_t)strlen(headerBytes));
+
+        // Keep pushing body from another thread so the receive queue stays non-empty while the
+        // server refuses and closes. SIGPIPE is disabled on this socket so a send after the peer
+        // goes away fails rather than killing the test process.
+        int const noSignal = 1;
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, sizeof(noSignal));
+        dispatch_semaphore_t pumpDone = dispatch_semaphore_create(0);
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            char* chunk = malloc(65536);
+            memset(chunk, 'Z', 65536);
+            for (int i = 0; i < 1024; i++) {
+                if (send(fd, chunk, 65536, 0) < 0) {
+                    break;
+                }
+            }
+            free(chunk);
+            dispatch_semaphore_signal(pumpDone);
+        });
+
+        BOOL sawEOF = NO;
+        NSData* reply = ReadToEOF(fd, &sawEOF);
+        dispatch_semaphore_wait(pumpDone, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
+        close(fd);
+
+        NSString* text = [[NSString alloc] initWithData:reply encoding:NSUTF8StringEncoding];
+        NSRange const separator = (text != nil) ? [text rangeOfString:@"\r\n\r\n"] : NSMakeRange(NSNotFound, 0);
+        BOOL const rightStatus = (text != nil) && [text hasPrefix:@"HTTP/1.1 400"];
+
+        // The ORACLE IS THE BODY, and this is the whole subtlety of this test. When the RST lands,
+        // the reply truncates to exactly its 167 bytes of headers and loses the 224-byte error
+        // page. A truncated reply therefore STILL starts "HTTP/1.1 400" and STILL contains the
+        // header terminator — asserting on those two passes 80/80 against unfixed source and
+        // detects nothing. Measured: 391 bytes with the body, 167 without, never anything between.
+        NSUInteger const bodyLength = (separator.location == NSNotFound) ? 0 : (text.length - NSMaxRange(separator));
+
+        if (rightStatus && (separator.location != NSNotFound) && (bodyLength > 0)) {
+            clean += 1;
+        } else if (failures.count < 3) {
+            [failures addObject:[NSString stringWithFormat:@"trial %lu: %lu bytes, body=%lu, sawEOF=%@",
+                                 (unsigned long)trial, (unsigned long)reply.length,
+                                 (unsigned long)bodyLength, sawEOF ? @"YES" : @"NO"]];
+        }
+    }
+
+    XCTAssertEqual(clean, trials, @"a refusal must reach the client intact every time: %@",
+                   [failures componentsJoinedByString:@"; "]);
+
+    [server stop];
+    [[NSFileManager defaultManager] removeItemAtPath:directory error:NULL];
+}
+
 @end

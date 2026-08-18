@@ -48,6 +48,18 @@
 #define kMinReceiveBytesPerSecond 32  // Throughput a connection must sustain while its request body is still arriving; see -_checkIdleTimeout.
 #define kMaxRequestsPerConnection 100  // Requests one reused connection may carry before it must be re-established; bounds how long a single client can hold one of the kWSKMaxConnections slots.
 
+// Lingering close. close(2) with unread inbound data makes the kernel send RST instead of FIN, and
+// the RST destroys bytes already handed to TCP — a response the client has not read yet. So when
+// data is still arriving, half-close (which tells the client to stop) and drain briefly first.
+//
+// Bounded because draining holds one of the kWSKMaxConnections slots. The cost is negligible
+// against what is already tolerated: kMaxHeaderPhaseTicks ticks of the idle timer is 60-90s at the
+// 30s default, so a 2s linger cannot become the cheapest way to occupy a slot. Fixed constants
+// rather than options, like kWSKMaxConnections and the in-memory budget.
+#define kLingerTotalSeconds 2.0            // Absolute deadline for the whole drain
+#define kLingerDiscardCap (64 * 1024)      // Early exit: a client mid-upload will never reach EOF
+#define kLingerReadChunk (16 * 1024)       // Discard buffer size
+
 typedef void (^ReadDataCompletionBlock)(BOOL success);
 typedef void (^ReadHeadersCompletionBlock)(NSData *extraData);
 typedef void (^ReadBodyCompletionBlock)(BOOL success);
@@ -141,6 +153,11 @@ NS_ASSUME_NONNULL_END
     NSMutableData *_carryOverData;      // Bytes of the NEXT request that arrived in this request's last read
     BOOL _requestLogged;                // This request's access line and recording are already flushed
     WSKMemoryReservation *_chunkReservation;  // This connection's chunked framing buffer
+
+    // Lingering close. See kLingerTotalSeconds and -_beginLingeringCloseIfNeeded.
+    BOOL _lingering;                    // On _connectionQueue only
+    NSUInteger _lingerDiscarded;        // Bytes read and thrown away while lingering
+    CFAbsoluteTime _lingerDeadline;     // Absolute time the drain must stop
 
 #ifdef __WEBSERVERKIT_ENABLE_TESTING__
     NSUInteger _connectionIndex;
@@ -633,6 +650,7 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
 // which is what closes it — the same unwind as before this existed.
 - (void)_finishConnectionOrReadNextRequest {
     if (!_willKeepAlive) {
+        [self _beginLingeringCloseIfNeeded];
         return;
     }
 
@@ -651,6 +669,63 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
     _readBytesWhenIdleBegan = _totalBytesRead;
     _awaitingNextRequest = YES;
     [self _readRequestHeaders];
+}
+
+// The terminal step for a connection that will not be reused. Called once the response's write
+// chain has completed, so everything this connection intends to send is already queued.
+//
+// Does NOTHING when the receive queue is empty, which is the overwhelmingly common case: an
+// ordinary GET, and every request in the trace corpus, closes byte-identically to before.
+//
+// When data IS still arriving, shutdown(SHUT_WR) first. That flushes the response and tells the
+// client we are done writing, so a well-behaved client stops sending and closes, and the drain
+// below ends at EOF within a round trip. Draining WITHOUT the half-close — nginx's lingering_close
+// shape — was rejected: a client uploading 64 MB never reaches EOF inside any sane bound, so the
+// drain would hit its cap with data still unread and close, reproducing the exact RST this exists
+// to prevent.
+//
+// The dispatch_read block retains self, so -dealloc — and with it close(_socket) — is deferred
+// until draining finishes. No descriptor escapes this object and slot accounting is unchanged.
+- (void)_beginLingeringCloseIfNeeded {
+    if (_lingering) {
+        return;
+    }
+
+    if (!WSKSocketHasUnreadInboundData(_socket)) {
+        return;
+    }
+
+    _lingering = YES;
+    _lingerDiscarded = 0;
+    _lingerDeadline = CFAbsoluteTimeGetCurrent() + kLingerTotalSeconds;
+    shutdown(_socket, SHUT_WR);
+    WSK_LOG_DEBUG(@"Lingering before close on socket %i", _socket);
+    [self _lingerDrain];
+}
+
+- (void)_lingerDrain {
+    dispatch_read(_socket, kLingerReadChunk, _connectionQueue, ^(dispatch_data_t data, int error) {
+        size_t const received = data ? dispatch_data_get_size(data) : 0;
+
+        if ((error != 0) || (received == 0)) {
+            WSK_LOG_DEBUG(@"Lingering close drained to EOF on socket %i", self->_socket);
+            return;  // Done: the block's reference to self goes away and -dealloc closes the socket
+        }
+
+        self->_lingerDiscarded += received;
+
+        if (self->_lingerDiscarded >= (NSUInteger)kLingerDiscardCap) {
+            WSK_LOG_DEBUG(@"Lingering close hit its discard cap on socket %i", self->_socket);
+            return;
+        }
+
+        if (CFAbsoluteTimeGetCurrent() >= self->_lingerDeadline) {
+            WSK_LOG_DEBUG(@"Lingering close hit its deadline on socket %i", self->_socket);
+            return;
+        }
+
+        [self _lingerDrain];
+    });
 }
 
 - (void)_startProcessingRequest {
@@ -2336,7 +2411,9 @@ static inline BOOL _CompareResources(NSString *responseETag, NSString *requestET
     _requestReceived = YES;  // Reading is over either way; only the error response remains
     [self _initializeResponseHeadersWithStatusCode:statusCode];
     [self writeHeadersWithCompletionBlock:^(BOOL success){
-        // Nothing more to do
+        if (success) {
+            [self _beginLingeringCloseIfNeeded];
+        }
     }];
     WSK_LOG_DEBUG(@"Connection aborted with status code %i on socket %i", (int)statusCode, _socket);
 }
