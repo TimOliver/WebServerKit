@@ -299,6 +299,22 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   transition. Foreground handlers release via `_releaseBackgroundTask`, never
   `_endBackgroundTask` — the app state still reads background inside willEnterForeground, so
   the latter's suspend-mode stop would kill a server that just survived the round trip.
+  Unbuilt possibility, noted 2026-08-18: iOS 26's `BGContinuedProcessingTask` (user-initiated,
+  progress-reporting, system progress UI) could extend the drain window for a large in-flight
+  transfer. It cannot hold an idle listener or SSE stream open — no progress, no runtime.
+- **Unbuilt design, agreed 2026-08-18 — suspension notice in the uploader page.** On
+  didEnterBackground the uploader (observing the UIKit notification itself, iOS-gated)
+  broadcasts `{"type":"suspending","secondsRemaining":N}` with N sampled from
+  `backgroundTimeRemaining` — the grant is typically ~30 s but NOT guaranteed, so never
+  hardcode it. The page shows a corner toast counting down, then a fullscreen blur modal at
+  LOCAL zero (accuracy deliberately traded for simplicity); a failed request shows the modal
+  early, one liveness fetch on modal-show dismisses a false block, and EventSource reconnect
+  dismisses everything. Key constraint that shaped this: **EventSource never surfaces SSE
+  comments to JS**, so the `:heartbeat` keep-alives are invisible client-side and silence
+  cannot be detected — the farewell event is the only prompt signal. Additive event type
+  (unknown names are ignored by old clients). Costs when built: index.js has no test harness
+  (Chromium probe against both builds) and the iOS half is simulator-verified. A Live
+  Activity cannot hold or receive a connection — display-only, no process.
 - All lifecycle mutation and `isRunning`/`serverURL` funnel through the serial `_stateQueue`;
   delegate callbacks are main-thread and OUTSIDE the queue (reading `-serverURL` inside the
   callback would deadlock). Each connection SNAPSHOTS server config at accept. NAT-PMP
