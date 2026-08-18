@@ -420,7 +420,17 @@ EOF
 ### Task 3: The remaining two bounds
 
 The deadline in Task 2 only trips when data keeps arriving. A client that stops sending without
-closing would otherwise pin the connection until the idle timer notices.
+closing leaves the final `dispatch_read` outstanding, so the connection is held until the idle timer
+notices it — 30 s at the default.
+
+**Re-derived after Task 2, because the original justification here was wrong.** This section
+previously assumed the drain could hang indefinitely. It cannot: `dispatch_read` hands over whatever
+is available rather than waiting for a full chunk, so the handler keeps running and the drain
+reaches EOF on its own whenever the client is still sending. And since Task 2's fix round the drain
+maintains `_pendingIOCount`, so `-_checkIdleTimeout`'s starvation guard *can* see it. The honest
+value of this task is therefore narrower than first written: it tightens a silent client's hold from
+~30 s to 500 ms. That is still worth having on a 128-slot server, but it is a tightening, not a
+leak fix — do not justify it as one.
 
 **Files:**
 - Modify: `Sources/WebServerKit/Core/WSKConnection.m`
@@ -479,7 +489,7 @@ closing would otherwise pin the connection until the idle timer notices.
 xcodebuild test -project WebServerKit.xcodeproj -scheme "WebServerKit (Mac)" -configuration Debug -only-testing:"Tests (Mac)/WSKConnectionTests/testLingeringCloseReleasesItsSlotWhenTheClientGoesQuiet" CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER= 2>&1 | grep -E "error: -\[|Executed [0-9]+ test"
 ```
 
-Expected: FAIL — the `dispatch_read` from Task 2 is still outstanding, so nothing releases within 5 s.
+Expected: FAIL — the final `dispatch_read` is still outstanding and the idle timer will not act for ~30 s, so nothing releases inside the test's 5 s poll. If it PASSES, stop: it means the drain is ending by some route this task has not accounted for, and the bound you are about to add would be dead code.
 
 - [ ] **Step 3: Add the gap constant and the timer ivar**
 
