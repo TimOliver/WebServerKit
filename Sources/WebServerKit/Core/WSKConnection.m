@@ -703,8 +703,33 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
     [self _lingerDrain];
 }
 
+// Counted as pending socket I/O exactly like every other async read and write on this connection
+// (-readData:withLength:completionBlock: and -writeData:withCompletionBlock: do the same, guard and
+// all), so "async socket I/O is visible to the idle timer" keeps ONE home instead of two spellings.
+//
+// Without it -_checkIdleTimeout reads waitingOnSocket == NO for the whole drain and its starvation
+// guard cannot fire, leaving the drain relying solely on its own two exits — and both the discard cap
+// and the deadline are evaluated INSIDE the handler, so neither can end a drain whose handler is not
+// running. Restoring the timer's visibility is the reason this is here.
+//
+// Recorded honestly, because the stronger claim was mine and it did not survive measurement: the
+// severity first argued for this change — that a client going silent mid-drain pins its slot
+// PERMANENTLY — could NOT be reproduced. Driven with paced, unpaced and single-burst clients, the
+// drain always terminated promptly, because dispatch_read hands over whatever is available instead
+// of waiting for a full kLingerReadChunk. So this is a consistency fix that restores an intended
+// backstop, not the fix for a demonstrated hang.
 - (void)_lingerDrain {
+    if (_idleTimer) {
+        dispatch_async(_connectionQueue, ^{  // Enqueued ahead of dispatch_read's handler on the same serial queue, so the increment always runs first
+            self->_pendingIOCount += 1;
+        });
+    }
+
     dispatch_read(_socket, kLingerReadChunk, _connectionQueue, ^(dispatch_data_t data, int error) {
+        if (self->_idleTimer) {
+            self->_pendingIOCount -= 1;
+        }
+
         size_t const received = data ? dispatch_data_get_size(data) : 0;
 
         if ((error != 0) || (received == 0)) {

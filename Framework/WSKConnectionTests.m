@@ -1514,4 +1514,86 @@
     [[NSFileManager defaultManager] removeItemAtPath:directory error:NULL];
 }
 
+// Covers the OTHER linger call site, -abortRequest:withStatusCode:, which the test above never
+// reaches (a Content-Range refusal is answered through -_finishProcessingRequest: instead). A PUT
+// to a server registering only GET takes the unmatched-handler branch, which aborts 501 from inside
+// the HEADER read, so the answer is written while the client is still uploading and the receive
+// queue is non-empty at close.
+//
+// READ THIS BEFORE TRUSTING IT AS LINGER COVERAGE. This test does NOT discriminate the lingering
+// close, and that was established by experiment rather than assumed: with
+// -_beginLingeringCloseIfNeeded deleted from -abortRequest:withStatusCode: it still passes 20/20,
+// and it still passes 20/20 with a 300 ms delay inserted before the client reads. The reason is
+// structural — an abort response is bodiless by construction (110 bytes here), so it is handed to
+// TCP in a single write and fully transmitted before close(2), leaving the RST nothing to destroy.
+// The measured defect needed a SECOND write (the 224-byte error page) still sitting in the send
+// buffer when the socket was closed.
+//
+// What it does prove: the abort path is driven end to end while a body is in flight, and its reply
+// arrives complete rather than truncated mid-status. Server debug logs confirm the linger genuinely
+// engages here — 18 of 20 trials log "Lingering before close" and hit the discard cap — so the call
+// site is live and exercised; there is simply nothing left to lose by the time it runs.
+- (void)testBodilessAbortIsDeliveredCompleteWhileClientIsStillSending {
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[WSKRequest class]
+                          processBlock:^WSKResponse*(WSKRequest* request) {
+                              return [WSKDataResponse responseWithText:@"alive"];
+                          }];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSUInteger const trials = 20;
+    NSUInteger clean = 0;
+    NSMutableArray<NSString*>* failures = [NSMutableArray array];
+
+    for (NSUInteger trial = 0; trial < trials; trial++) {
+        int fd = ConnectToLocalhostPort(server.port);
+        XCTAssertGreaterThan(fd, 0);
+
+        // No PUT handler is registered, so this is refused 501 before any body is spooled.
+        NSString* header = @"PUT /x.bin HTTP/1.1\r\nHost: localhost\r\nContent-Length: 67108864\r\n\r\n";
+        const char* headerBytes = [header UTF8String];
+        XCTAssertEqual(send(fd, headerBytes, strlen(headerBytes), 0), (ssize_t)strlen(headerBytes));
+
+        // Keep the receive queue non-empty while the server answers and closes.
+        int const noSignal = 1;
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, sizeof(noSignal));
+        dispatch_semaphore_t pumpDone = dispatch_semaphore_create(0);
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            char* chunk = malloc(65536);
+            memset(chunk, 'Z', 65536);
+            for (int i = 0; i < 1024; i++) {
+                if (send(fd, chunk, 65536, 0) < 0) {
+                    break;
+                }
+            }
+            free(chunk);
+            dispatch_semaphore_signal(pumpDone);
+        });
+
+        BOOL sawEOF = NO;
+        NSData* reply = ReadToEOF(fd, &sawEOF);
+        dispatch_semaphore_wait(pumpDone, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
+        close(fd);
+
+        NSString* text = [[NSString alloc] initWithData:reply encoding:NSUTF8StringEncoding];
+        BOOL const rightStatus = (text != nil) && [text hasPrefix:@"HTTP/1.1 501"];
+        BOOL const terminated = (text != nil) && ([text rangeOfString:@"\r\n\r\n"].location != NSNotFound);
+
+        if (rightStatus && terminated) {
+            clean += 1;
+        } else if (failures.count < 3) {
+            [failures addObject:[NSString stringWithFormat:@"trial %lu: %lu bytes, status=%@, terminated=%@",
+                                 (unsigned long)trial, (unsigned long)reply.length,
+                                 rightStatus ? @"YES" : @"NO", terminated ? @"YES" : @"NO"]];
+        }
+    }
+
+    XCTAssertEqual(clean, trials, @"a bodiless abort must reach the client complete every time: %@",
+                   [failures componentsJoinedByString:@"; "]);
+
+    [server stop];
+}
+
 @end
