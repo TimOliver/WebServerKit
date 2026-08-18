@@ -400,6 +400,10 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   accumulation). The remaining ~0.5 ms/entry is the per-entry xattr probe plus the resolver's
   realpath — the latter is the resolve-once security rule; do not optimize it without its own
   measured pass.
+- The buffer change was re-soaked per the response-layer rule: 120 s, 3,349 complete +
+  ~8k abortive transfers — descriptors flat, budget 0 at rest, RSS peak 31 MB. Eight
+  concurrent 512 MiB streams: 1,587 MB/s aggregate at 20 MB RSS. litmus and mount_webdav
+  re-taken on the tuned tree, unchanged.
 - Perspective: Puck's network ceiling (Tailscale over WiFi) is ~30–60 MB/s; the server is not
   the bottleneck. Benchmarks live in the scratch harness (`bench.py` + `wskhost.m`).
 
