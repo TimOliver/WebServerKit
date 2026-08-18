@@ -468,6 +468,10 @@ extern NSString *const WSKAuthenticationMethod_DigestAccess;
  *  @warning Stopping the server does not abort WSKConnection instances
  *  currently handling already received HTTP requests. These connections will
  *  continue to execute normally until completion.
+ *
+ *  The one exception is a connection already draining before close (see the
+ *  class documentation above): it stops draining and closes, so its client may
+ *  lose that last response. Stopping never waits on a connection either way.
  */
 - (void)stop;
 
