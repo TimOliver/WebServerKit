@@ -186,7 +186,14 @@ NS_ASSUME_NONNULL_BEGIN
 /**
  *  This method is the designated initializer for the class.
  */
-- (instancetype)initWithUploadDirectory:(NSString *)path;
+- (instancetype)initWithUploadDirectory:(NSString *)path NS_DESIGNATED_INITIALIZER;
+
+/**
+ *  A uploader without an upload directory has nothing to serve; use
+ *  -initWithUploadDirectory:.
+ */
+- (instancetype)init NS_UNAVAILABLE;
++ (instancetype)new NS_UNAVAILABLE;
 
 @end
 

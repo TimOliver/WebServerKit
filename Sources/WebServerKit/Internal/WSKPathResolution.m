@@ -25,16 +25,16 @@
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-
 #if !__has_feature(objc_arc)
 #error WSKWebServer requires ARC
 #endif
+
+#import "WSKPathResolution.h"
 
 #import <stdlib.h>
 #import <sys/param.h>
 #import <sys/stat.h>
 
-#import "WSKPathResolution.h"
 #import "WSKPrivate.h"
 
 BOOL WSKPathContainsNULByte(NSString *path) {
@@ -47,7 +47,7 @@ NSString *WSKNormalizePath(NSString *path) {
     // Otherwise -pathExtension reads past the NUL while -fileSystemRepresentation truncates at
     // it, so "secret.dat\0.png" would pass an extension allow-list yet open "secret.dat".
     unichar nul = 0;
-    NSRange nulRange = [path rangeOfString:[NSString stringWithCharacters:&nul length:1]];
+    NSRange const nulRange = [path rangeOfString:[NSString stringWithCharacters:&nul length:1]];
     if (nulRange.location != NSNotFound) {
         path = [path substringToIndex:nulRange.location];
     }
@@ -280,7 +280,9 @@ BOOL WSKPathsNameTheSameFile(NSString *path1, NSString *path2) {
     id identifier1 = nil;
     id identifier2 = nil;
     return [[NSURL fileURLWithPath:path1] getResourceValue:&identifier1 forKey:NSURLFileResourceIdentifierKey error:NULL] &&
-           [[NSURL fileURLWithPath:path2] getResourceValue:&identifier2 forKey:NSURLFileResourceIdentifierKey error:NULL] &&
+           [[NSURL fileURLWithPath:path2] getResourceValue:&identifier2
+                                                    forKey:NSURLFileResourceIdentifierKey
+                                                     error:NULL] &&
            identifier1 && [(NSObject *)identifier1 isEqual:identifier2];
 }
 

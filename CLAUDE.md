@@ -341,6 +341,23 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
 - The rename box is seeded with the real name from `/list` (jeditable otherwise re-escapes
   `&` on every pass).
 
+### Style (enforced by `Scripts/lint-objc.py`, run first by Run-Tests.sh)
+
+- clang-format clean (the Xcode toolchain's binary via `xcrun --find` — a bare `clang-format`
+  is NOT on PATH here and greps against its absent output read as zero drift once); every `.m`
+  paired with a `.h`; every header carries an NS_ASSUME_NONNULL region; an undeclared private
+  method must be `_`-prefixed (a method other instances call is a seam — DECLARE it instead).
+- Immutable locals are `const` (2026-08-18 sweep: over-apply, let three build flavors reject,
+  revert the rejects). **The compiler oracle has a HOLE the sweep fell into**: a consted local
+  written through a VARIADIC out-param (`ioctl(fd, FIONREAD, &pending)`) draws no qualifier
+  warning, and the optimizer then folds the variable to its initializer —
+  `WSKSocketHasUnreadInboundData` silently always answered NO and two drain tests caught it.
+  The rule since: no `const` on any local whose address is taken, checked by sweep, not by
+  compiler. No compiler rule enforces future const at all; it is convention.
+- Designated initializers are annotated; bare `-init`/`+new` are NS_UNAVAILABLE on
+  WSKWebDAVServer/WSKWebUploader (source-breaking, deliberate — an uploader without a
+  directory is a broken instance).
+
 ### API shape
 
 - Public `WSKFunctions.h` is 11 declarations; the fourteen audit-shaped functions (resolvers,

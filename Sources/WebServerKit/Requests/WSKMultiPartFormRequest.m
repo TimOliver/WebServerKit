@@ -56,7 +56,7 @@
 // nested "multipart/mixed" part appends into the same argument and file arrays as its
 // parent, so a per-parser counter would let nesting multiply the real ceiling.
 @interface WSKMIMEStreamBudget : NSObject {
-@public
+  @public
     NSUInteger argumentBytes;  // Total bytes retained by argument parts so far
     NSUInteger partCount;      // Total completed parts (arguments and files) so far
 }
@@ -95,6 +95,8 @@ typedef enum {
 // directory or a momentarily exhausted budget into 400, telling a client never to try again.
 @property (nonatomic, readonly) WSKRequestBodyErrorCode failureCode;
 @property (nonatomic, readonly, nullable) NSError *failureError;  // Set instead when an errno is the truth (a full disk)
+// The feed interface: the request and enclosing parsers push body bytes through here.
+- (BOOL)appendBytes:(const void *)bytes length:(NSUInteger)length;
 @end
 
 static NSData *_newlineData = nil;
@@ -171,8 +173,8 @@ static NSData *_dashNewlineData = nil;
     NSString *_tmpPath;
     int _tmpFile;
     WSKMIMEStreamParser *_subParser;
-    NSUInteger _depth;  // Nesting level; 0 for the top-level parser, +1 per multipart/mixed
-    WSKMIMEStreamBudget *_budget;              // Shared with every sub-parser
+    NSUInteger _depth;                          // Nesting level; 0 for the top-level parser, +1 per multipart/mixed
+    WSKMIMEStreamBudget *_budget;               // Shared with every sub-parser
     WSKMemoryReservation *_workingReservation;  // This parser's own working buffer
     WSKRequestBodyErrorCode _failureCode;
     NSError *_failureError;
@@ -219,7 +221,7 @@ static NSData *_dashNewlineData = nil;
 
     _tmpFile = -1;  // fd 0 is legal, so -1 (not 0) is the "no temporary file" sentinel
 
-    NSData *data = boundary.length ? [[NSString stringWithFormat:@"--%@", boundary] dataUsingEncoding:NSASCIIStringEncoding] : nil;
+    NSData *const data = boundary.length ? [[NSString stringWithFormat:@"--%@", boundary] dataUsingEncoding:NSASCIIStringEncoding] : nil;
 
     if (data == nil) {
         // A missing or non-ASCII "boundary" parameter is ordinary malformed client input
@@ -265,243 +267,243 @@ static NSData *_dashNewlineData = nil;
     // many tiny parts delivered in a single read would otherwise recurse thousands
     // of frames deep and overflow the worker-thread stack.
     while (1) {
-    if (_state == kParserState_Headers) {
-        NSRange range = [_data rangeOfData:_newlinesData options:0 range:NSMakeRange(0, _data.length)];
+        if (_state == kParserState_Headers) {
+            NSRange const range = [_data rangeOfData:_newlinesData options:0 range:NSMakeRange(0, _data.length)];
 
-        if (range.location != NSNotFound) {
-            // Bound the part's header block. The budget below charges only part *content*,
-            // but the control name, file name and content type parsed out of these headers
-            // are retained for the life of the request too — so without this a body of parts
-            // each carrying a multi-megabyte name=".…" grows memory without limit while the
-            // budget still reads zero. Real part headers are a few hundred bytes.
-            if (range.location > kMultiPartMaxHeadersLength) {
-                WSK_LOG_ERROR(@"Headers of a part of 'multipart/form-data' exceed the %i byte limit", (int)kMultiPartMaxHeadersLength);
-                _failureCode = kWSKRequestBodyError_TooLarge;
-                return NO;
-            }
+            if (range.location != NSNotFound) {
+                // Bound the part's header block. The budget below charges only part *content*,
+                // but the control name, file name and content type parsed out of these headers
+                // are retained for the life of the request too — so without this a body of parts
+                // each carrying a multi-megabyte name=".…" grows memory without limit while the
+                // budget still reads zero. Real part headers are a few hundred bytes.
+                if (range.location > kMultiPartMaxHeadersLength) {
+                    WSK_LOG_ERROR(@"Headers of a part of 'multipart/form-data' exceed the %i byte limit", (int)kMultiPartMaxHeadersLength);
+                    _failureCode = kWSKRequestBodyError_TooLarge;
+                    return NO;
+                }
 
-            _controlName = nil;
-            _fileName = nil;
-            _contentType = nil;
-            _tmpPath = nil;
-            _subParser = nil;
-            NSString *const headers = [[NSString alloc] initWithData:[_data subdataWithRange:NSMakeRange(0, range.location)] encoding:NSUTF8StringEncoding];
+                _controlName = nil;
+                _fileName = nil;
+                _contentType = nil;
+                _tmpPath = nil;
+                _subParser = nil;
+                NSString *const headers = [[NSString alloc] initWithData:[_data subdataWithRange:NSMakeRange(0, range.location)] encoding:NSUTF8StringEncoding];
 
-            if (headers) {
-                for (NSString *header in [headers componentsSeparatedByString:@"\r\n"]) {
-                    NSRange subRange = [header rangeOfString:@":"];
+                if (headers) {
+                    for (NSString *header in [headers componentsSeparatedByString:@"\r\n"]) {
+                        NSRange const subRange = [header rangeOfString:@":"];
 
-                    if (subRange.location != NSNotFound) {
-                        NSString *const name = [header substringToIndex:subRange.location];
-                        NSString *const value = [[header substringFromIndex:(subRange.location + subRange.length)] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                        if (subRange.location != NSNotFound) {
+                            NSString *const name = [header substringToIndex:subRange.location];
+                            NSString *const value = [[header substringFromIndex:(subRange.location + subRange.length)] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
 
-                        if ([name caseInsensitiveCompare:@"Content-Type"] == NSOrderedSame) {
-                            _contentType = WSKNormalizeHeaderValue(value);
-                        } else if ([name caseInsensitiveCompare:@"Content-Disposition"] == NSOrderedSame) {
-                            NSString *const contentDisposition = WSKNormalizeHeaderValue(value);
+                            if ([name caseInsensitiveCompare:@"Content-Type"] == NSOrderedSame) {
+                                _contentType = WSKNormalizeHeaderValue(value);
+                            } else if ([name caseInsensitiveCompare:@"Content-Disposition"] == NSOrderedSame) {
+                                NSString *const contentDisposition = WSKNormalizeHeaderValue(value);
 
-                            if ([WSKTruncateHeaderValue(contentDisposition) isEqualToString:@"form-data"]) {
-                                _controlName = WSKExtractHeaderValueParameter(contentDisposition, @"name");
-                                _fileName = WSKExtractHeaderValueParameter(contentDisposition, @"filename");
-                            } else if ([WSKTruncateHeaderValue(contentDisposition) isEqualToString:@"file"]) {
-                                _controlName = _defaultcontrolName;
-                                _fileName = WSKExtractHeaderValueParameter(contentDisposition, @"filename");
+                                if ([WSKTruncateHeaderValue(contentDisposition) isEqualToString:@"form-data"]) {
+                                    _controlName = WSKExtractHeaderValueParameter(contentDisposition, @"name");
+                                    _fileName = WSKExtractHeaderValueParameter(contentDisposition, @"filename");
+                                } else if ([WSKTruncateHeaderValue(contentDisposition) isEqualToString:@"file"]) {
+                                    _controlName = _defaultcontrolName;
+                                    _fileName = WSKExtractHeaderValueParameter(contentDisposition, @"filename");
+                                }
                             }
-                        }
-                    }  // A header line without a colon is malformed client input: skip it
-                }
-
-                if (_contentType == nil) {
-                    _contentType = @"text/plain";
-                }
-            } else {
-                // Part headers that are not valid UTF-8 are ordinary malformed input, not an
-                // unreachable state; leaving _controlName nil fails the parse just below.
-                WSK_LOG_ERROR(@"Failed decoding headers in part of 'multipart/form-data'");
-            }
-
-            if (_controlName) {
-                if ([WSKTruncateHeaderValue(_contentType) isEqualToString:@"multipart/mixed"]) {
-                    NSString *const boundary = WSKExtractHeaderValueParameter(_contentType, @"boundary");
-                    _subParser = [[WSKMIMEStreamParser alloc] initWithBoundary:boundary defaultControlName:_controlName arguments:_arguments files:_files depth:(_depth + 1) budget:_budget];
-
-                    if (_subParser == nil) {
-                        // A nil sub-parser is now an expected rejection (nesting past the
-                        // depth cap, or a missing/invalid child boundary), not an
-                        // unreachable state — so fail the parse rather than WSK_DNOT_REACHED
-                        // (which aborts in debug builds).
-                        success = NO;
+                        }  // A header line without a colon is malformed client input: skip it
                     }
-                } else if (_fileName) {
-                    NSString *const path = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSProcessInfo processInfo] globallyUniqueString]];
-                    _tmpFile = open([path fileSystemRepresentation], O_CREAT | O_TRUNC | O_WRONLY, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 
-                    if (_tmpFile >= 0) {
-                        _tmpPath = [path copy];
-                    } else {
-                        // A full or unwritable temporary directory is an environment condition
-                        // rather than an unreachable state.
-                        WSK_LOG_ERROR(@"Failed creating temporary file for part of 'multipart/form-data': %s (%i)", strerror(errno), errno);
-                        // The environment, not the client. Carrying the errno is what lets a full
-                        // volume reach WSKServerErrorStatusCodeForError's 507 rather than being
-                        // reported as malformed input the client must never send again.
-                        _failureError = WSKMakePosixError(errno);
-                        success = NO;
+                    if (_contentType == nil) {
+                        _contentType = @"text/plain";
                     }
+                } else {
+                    // Part headers that are not valid UTF-8 are ordinary malformed input, not an
+                    // unreachable state; leaving _controlName nil fails the parse just below.
+                    WSK_LOG_ERROR(@"Failed decoding headers in part of 'multipart/form-data'");
                 }
-            } else {
-                // A part with no usable Content-Disposition "name" parameter — malformed
-                // client input, so fail the parse rather than abort in debug.
-                WSK_LOG_ERROR(@"Missing control name in part of 'multipart/form-data'");
-                success = NO;
-            }
 
-            [_data replaceBytesInRange:NSMakeRange(0, range.location + range.length) withBytes:NULL length:0];
-            _state = kParserState_Content;
-        }
-    }
+                if (_controlName) {
+                    if ([WSKTruncateHeaderValue(_contentType) isEqualToString:@"multipart/mixed"]) {
+                        NSString *const boundary = WSKExtractHeaderValueParameter(_contentType, @"boundary");
+                        _subParser = [[WSKMIMEStreamParser alloc] initWithBoundary:boundary defaultControlName:_controlName arguments:_arguments files:_files depth:(_depth + 1) budget:_budget];
 
-    if ((_state == kParserState_Start) || (_state == kParserState_Content)) {
-        NSRange range = [_data rangeOfData:_boundary options:0 range:NSMakeRange(0, _data.length)];
-
-        if (range.location != NSNotFound) {
-            NSRange subRange = NSMakeRange(range.location + range.length, _data.length - range.location - range.length);
-            NSRange subRange1 = [_data rangeOfData:_newlineData options:NSDataSearchAnchored range:subRange];
-            NSRange subRange2 = [_data rangeOfData:_dashNewlineData options:NSDataSearchAnchored range:subRange];
-
-            if ((subRange1.location != NSNotFound) || (subRange2.location != NSNotFound)) {
-                if (_state == kParserState_Content) {
-                    const void *dataBytes = _data.bytes;
-                    // range.location is the offset of the boundary delimiter; the part's
-                    // content (including its trailing CRLF) is everything before it. Guard
-                    // the "- 2" that strips that CRLF, so a delimiter at offset 0/1 (a part
-                    // with no content, e.g. a closing "--boundary--" placed with no leading
-                    // CRLF) cannot underflow NSUInteger into a ~18-exabyte length and crash.
-                    NSUInteger contentLength = range.location;
-                    NSUInteger dataLength = (contentLength >= 2) ? (contentLength - 2) : 0;
-
-                    if (_controlName == nil) {
-                        // The Headers state refuses a nameless part before the Content state is
-                        // ever entered, so this cannot fire today — but that invariant lives a
-                        // whole state-machine iteration away (the analyzer flags the argument
-                        // constructor below without it), the constructors' nonnull contracts
-                        // depend on it, and every byte here is remote input: log-and-fail,
-                        // never assert.
-                        WSK_LOG_ERROR(@"Multipart part reached the content state without a control name");
-                        success = NO;
-                    } else if (_subParser) {
-                        if (![_subParser appendBytes:dataBytes length:contentLength] || ![_subParser isAtEnd]) {
-                            // Reachable on malicious/malformed nested content — the sub-parser
-                            // rejected it (depth cap or in-memory buffer cap) or the nested
-                            // part never closed. Fail the parse rather than abort in debug.
+                        if (_subParser == nil) {
+                            // A nil sub-parser is now an expected rejection (nesting past the
+                            // depth cap, or a missing/invalid child boundary), not an
+                            // unreachable state — so fail the parse rather than WSK_DNOT_REACHED
+                            // (which aborts in debug builds).
                             success = NO;
                         }
+                    } else if (_fileName) {
+                        NSString *const path = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSProcessInfo processInfo] globallyUniqueString]];
+                        _tmpFile = open([path fileSystemRepresentation], O_CREAT | O_TRUNC | O_WRONLY, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 
-                        _subParser = nil;
-                    } else if (_budget->partCount >= kMultiPartMaxParts) {
-                        WSK_LOG_ERROR(@"'multipart/form-data' body exceeds the %i part limit", (int)kMultiPartMaxParts);
-                        _failureCode = kWSKRequestBodyError_TooLarge;
-                        success = NO;
+                        if (_tmpFile >= 0) {
+                            _tmpPath = [path copy];
+                        } else {
+                            // A full or unwritable temporary directory is an environment condition
+                            // rather than an unreachable state.
+                            WSK_LOG_ERROR(@"Failed creating temporary file for part of 'multipart/form-data': %s (%i)", strerror(errno), errno);
+                            // The environment, not the client. Carrying the errno is what lets a full
+                            // volume reach WSKServerErrorStatusCodeForError's 507 rather than being
+                            // reported as malformed input the client must never send again.
+                            _failureError = WSKMakePosixError(errno);
+                            success = NO;
+                        }
+                    }
+                } else {
+                    // A part with no usable Content-Disposition "name" parameter — malformed
+                    // client input, so fail the parse rather than abort in debug.
+                    WSK_LOG_ERROR(@"Missing control name in part of 'multipart/form-data'");
+                    success = NO;
+                }
 
-                        if (_tmpPath) {  // Drop the part already staged on disk rather than orphaning it
-                            close(_tmpFile);
+                [_data replaceBytesInRange:NSMakeRange(0, range.location + range.length) withBytes:NULL length:0];
+                _state = kParserState_Content;
+            }
+        }
+
+        if ((_state == kParserState_Start) || (_state == kParserState_Content)) {
+            NSRange const range = [_data rangeOfData:_boundary options:0 range:NSMakeRange(0, _data.length)];
+
+            if (range.location != NSNotFound) {
+                NSRange const subRange = NSMakeRange(range.location + range.length, _data.length - range.location - range.length);
+                NSRange const subRange1 = [_data rangeOfData:_newlineData options:NSDataSearchAnchored range:subRange];
+                NSRange const subRange2 = [_data rangeOfData:_dashNewlineData options:NSDataSearchAnchored range:subRange];
+
+                if ((subRange1.location != NSNotFound) || (subRange2.location != NSNotFound)) {
+                    if (_state == kParserState_Content) {
+                        const void *dataBytes = _data.bytes;
+                        // range.location is the offset of the boundary delimiter; the part's
+                        // content (including its trailing CRLF) is everything before it. Guard
+                        // the "- 2" that strips that CRLF, so a delimiter at offset 0/1 (a part
+                        // with no content, e.g. a closing "--boundary--" placed with no leading
+                        // CRLF) cannot underflow NSUInteger into a ~18-exabyte length and crash.
+                        NSUInteger const contentLength = range.location;
+                        NSUInteger const dataLength = (contentLength >= 2) ? (contentLength - 2) : 0;
+
+                        if (_controlName == nil) {
+                            // The Headers state refuses a nameless part before the Content state is
+                            // ever entered, so this cannot fire today — but that invariant lives a
+                            // whole state-machine iteration away (the analyzer flags the argument
+                            // constructor below without it), the constructors' nonnull contracts
+                            // depend on it, and every byte here is remote input: log-and-fail,
+                            // never assert.
+                            WSK_LOG_ERROR(@"Multipart part reached the content state without a control name");
+                            success = NO;
+                        } else if (_subParser) {
+                            if (![_subParser appendBytes:dataBytes length:contentLength] || ![_subParser isAtEnd]) {
+                                // Reachable on malicious/malformed nested content — the sub-parser
+                                // rejected it (depth cap or in-memory buffer cap) or the nested
+                                // part never closed. Fail the parse rather than abort in debug.
+                                success = NO;
+                            }
+
+                            _subParser = nil;
+                        } else if (_budget->partCount >= kMultiPartMaxParts) {
+                            WSK_LOG_ERROR(@"'multipart/form-data' body exceeds the %i part limit", (int)kMultiPartMaxParts);
+                            _failureCode = kWSKRequestBodyError_TooLarge;
+                            success = NO;
+
+                            if (_tmpPath) {  // Drop the part already staged on disk rather than orphaning it
+                                close(_tmpFile);
+                                _tmpFile = -1;
+                                unlink([_tmpPath fileSystemRepresentation]);
+                                _tmpPath = nil;
+                            }
+                        } else if (_tmpPath) {
+                            ssize_t const result = write(_tmpFile, dataBytes, dataLength);
+                            // errno is only defined after a FAILING call, and a SHORT write is not a
+                            // failing call — it sets nothing. Capture each call's errno at the call,
+                            // or the read in the failure branch below picks up whatever stale value
+                            // the last unrelated syscall left there (and close() clobbers write()'s).
+                            int const writeErrno = (result < 0) ? errno : 0;
+                            int const closeResult = close(_tmpFile);  // Always close (no short-circuit) so the fd never leaks on a write failure.
+                            int const closeErrno = (closeResult != 0) ? errno : 0;
                             _tmpFile = -1;
-                            unlink([_tmpPath fileSystemRepresentation]);
+
+                            if ((result == (ssize_t)dataLength) && (closeResult == 0)) {
+                                _budget->partCount += 1;
+                                WSKMultiPartFile *const file = [[WSKMultiPartFile alloc] initWithControlName:_controlName contentType:_contentType fileName:_fileName temporaryPath:_tmpPath];
+                                [_files addObject:file];
+                            } else {
+                                // A short write means the temporary directory filled up — an ordinary
+                                // environment condition, not an unreachable state, so fail the parse
+                                // rather than abort in debug. It also sets no errno, hence the
+                                // ENOSPC default — which is what a short write means here anyway.
+                                WSK_LOG_ERROR(@"Failed writing part of 'multipart/form-data' to disk");
+                                int const failureErrno = writeErrno ? writeErrno : (closeErrno ? closeErrno : ENOSPC);
+                                _failureError = WSKMakePosixError(failureErrno);
+                                success = NO;
+                                unlink([_tmpPath fileSystemRepresentation]);  // Remove the orphaned temp file; -dealloc can't (we clear _tmpPath below).
+                            }
+
                             _tmpPath = nil;
+                        } else if (_budget->argumentBytes + dataLength > WSKMaxInMemoryBodyLength()) {
+                            // Every argument part stays in memory for the life of the request, so the
+                            // working-buffer cap in -appendBytes: does not bound them: a body of many
+                            // individually-legal parts would otherwise grow without limit. File parts
+                            // are drained to disk and so are governed by the part count instead.
+                            WSK_LOG_ERROR(@"Multipart form arguments retained in memory exceed the %lu byte limit", (unsigned long)WSKMaxInMemoryBodyLength());
+                            _failureCode = kWSKRequestBodyError_TooLarge;
+                            success = NO;
+                        } else if (![_budget.reservation reserveBytes:(_budget->argumentBytes + dataLength)]) {
+                            WSK_LOG_ERROR(@"Refusing multipart argument: the server is already holding its %lu byte in-memory limit across all connections", (unsigned long)kWSKMaxTotalInMemoryLength);
+                            _failureCode = kWSKRequestBodyError_ServerAtCapacity;
+                            success = NO;
+                        } else {
+                            _budget->partCount += 1;
+                            _budget->argumentBytes += dataLength;
+                            // -subdataWithRange: rather than -initWithBytes:length: over the raw
+                            // pointer: same copy of the same bytes, but bounds-checked, and with no
+                            // pointer for an empty argument value (an ordinary blank form field) to
+                            // turn into the recurring nil-into-Foundation class — .bytes is nullable
+                            // and -initWithBytes: declares its pointer non-null, which is what the
+                            // analyzer's nullability checker flagged.
+                            NSData *const data = [_data subdataWithRange:NSMakeRange(0, dataLength)];
+                            WSKMultiPartArgument *const argument = [[WSKMultiPartArgument alloc] initWithControlName:_controlName contentType:_contentType data:data];
+                            [_arguments addObject:argument];
+                        }
+                    }
+
+                    if (subRange1.location != NSNotFound) {
+                        [_data replaceBytesInRange:NSMakeRange(0, subRange1.location + subRange1.length) withBytes:NULL length:0];
+                        _state = kParserState_Headers;
+                        continue;  // Parse the next part on the next loop iteration (was a recursive -_parseData call).
+                    } else {
+                        _state = kParserState_End;
+                    }
+                }
+            } else {
+                NSUInteger const margin = 2 * _boundary.length;
+
+                if (_data.length > margin) {
+                    NSUInteger const length = _data.length - margin;
+
+                    if (_subParser) {
+                        if ([_subParser appendBytes:_data.bytes length:length]) {
+                            [_data replaceBytesInRange:NSMakeRange(0, length) withBytes:NULL length:0];
+                        } else {
+                            // The sub-parser rejected the streamed nested content (depth or
+                            // buffer cap) — expected on malicious input, so fail without abort.
+                            success = NO;
                         }
                     } else if (_tmpPath) {
-                        ssize_t result = write(_tmpFile, dataBytes, dataLength);
-                        // errno is only defined after a FAILING call, and a SHORT write is not a
-                        // failing call — it sets nothing. Capture each call's errno at the call,
-                        // or the read in the failure branch below picks up whatever stale value
-                        // the last unrelated syscall left there (and close() clobbers write()'s).
-                        int const writeErrno = (result < 0) ? errno : 0;
-                        int closeResult = close(_tmpFile);  // Always close (no short-circuit) so the fd never leaks on a write failure.
-                        int const closeErrno = (closeResult != 0) ? errno : 0;
-                        _tmpFile = -1;
+                        ssize_t const result = write(_tmpFile, _data.bytes, length);
 
-                        if ((result == (ssize_t)dataLength) && (closeResult == 0)) {
-                            _budget->partCount += 1;
-                            WSKMultiPartFile *const file = [[WSKMultiPartFile alloc] initWithControlName:_controlName contentType:_contentType fileName:_fileName temporaryPath:_tmpPath];
-                            [_files addObject:file];
+                        if (result == (ssize_t)length) {
+                            [_data replaceBytesInRange:NSMakeRange(0, length) withBytes:NULL length:0];
                         } else {
-                            // A short write means the temporary directory filled up — an ordinary
-                            // environment condition, not an unreachable state, so fail the parse
-                            // rather than abort in debug. It also sets no errno, hence the
-                            // ENOSPC default — which is what a short write means here anyway.
-                            WSK_LOG_ERROR(@"Failed writing part of 'multipart/form-data' to disk");
-                            int const failureErrno = writeErrno ? writeErrno : (closeErrno ? closeErrno : ENOSPC);
-                            _failureError = WSKMakePosixError(failureErrno);
+                            // As above: a short write means the temporary directory filled up.
+                            WSK_LOG_ERROR(@"Failed streaming part of 'multipart/form-data' to disk: %s (%i)", strerror(errno), errno);
+                            _failureError = WSKMakePosixError(errno);
                             success = NO;
-                            unlink([_tmpPath fileSystemRepresentation]);  // Remove the orphaned temp file; -dealloc can't (we clear _tmpPath below).
                         }
-
-                        _tmpPath = nil;
-                    } else if (_budget->argumentBytes + dataLength > WSKMaxInMemoryBodyLength()) {
-                        // Every argument part stays in memory for the life of the request, so the
-                        // working-buffer cap in -appendBytes: does not bound them: a body of many
-                        // individually-legal parts would otherwise grow without limit. File parts
-                        // are drained to disk and so are governed by the part count instead.
-                        WSK_LOG_ERROR(@"Multipart form arguments retained in memory exceed the %lu byte limit", (unsigned long)WSKMaxInMemoryBodyLength());
-                        _failureCode = kWSKRequestBodyError_TooLarge;
-                        success = NO;
-                    } else if (![_budget.reservation reserveBytes:(_budget->argumentBytes + dataLength)]) {
-                        WSK_LOG_ERROR(@"Refusing multipart argument: the server is already holding its %lu byte in-memory limit across all connections", (unsigned long)kWSKMaxTotalInMemoryLength);
-                        _failureCode = kWSKRequestBodyError_ServerAtCapacity;
-                        success = NO;
-                    } else {
-                        _budget->partCount += 1;
-                        _budget->argumentBytes += dataLength;
-                        // -subdataWithRange: rather than -initWithBytes:length: over the raw
-                        // pointer: same copy of the same bytes, but bounds-checked, and with no
-                        // pointer for an empty argument value (an ordinary blank form field) to
-                        // turn into the recurring nil-into-Foundation class — .bytes is nullable
-                        // and -initWithBytes: declares its pointer non-null, which is what the
-                        // analyzer's nullability checker flagged.
-                        NSData *const data = [_data subdataWithRange:NSMakeRange(0, dataLength)];
-                        WSKMultiPartArgument *const argument = [[WSKMultiPartArgument alloc] initWithControlName:_controlName contentType:_contentType data:data];
-                        [_arguments addObject:argument];
-                    }
-                }
-
-                if (subRange1.location != NSNotFound) {
-                    [_data replaceBytesInRange:NSMakeRange(0, subRange1.location + subRange1.length) withBytes:NULL length:0];
-                    _state = kParserState_Headers;
-                    continue;  // Parse the next part on the next loop iteration (was a recursive -_parseData call).
-                } else {
-                    _state = kParserState_End;
-                }
-            }
-        } else {
-            NSUInteger margin = 2 * _boundary.length;
-
-            if (_data.length > margin) {
-                NSUInteger length = _data.length - margin;
-
-                if (_subParser) {
-                    if ([_subParser appendBytes:_data.bytes length:length]) {
-                        [_data replaceBytesInRange:NSMakeRange(0, length) withBytes:NULL length:0];
-                    } else {
-                        // The sub-parser rejected the streamed nested content (depth or
-                        // buffer cap) — expected on malicious input, so fail without abort.
-                        success = NO;
-                    }
-                } else if (_tmpPath) {
-                    ssize_t result = write(_tmpFile, _data.bytes, length);
-
-                    if (result == (ssize_t)length) {
-                        [_data replaceBytesInRange:NSMakeRange(0, length) withBytes:NULL length:0];
-                    } else {
-                        // As above: a short write means the temporary directory filled up.
-                        WSK_LOG_ERROR(@"Failed streaming part of 'multipart/form-data' to disk: %s (%i)", strerror(errno), errno);
-                        _failureError = WSKMakePosixError(errno);
-                        success = NO;
                     }
                 }
             }
         }
-    }
-    break;  // No further complete part was found in this pass: wait for more data.
+        break;  // No further complete part was found in this pass: wait for more data.
     }
 
     return success;
@@ -654,7 +656,7 @@ static NSData *_dashNewlineData = nil;
 }
 
 - (NSString *)description {
-    NSMutableString *description = [NSMutableString stringWithString:[super description]];
+    NSMutableString *const description = [NSMutableString stringWithString:[super description]];
 
     if (_arguments.count) {
         [description appendString:@"\n"];

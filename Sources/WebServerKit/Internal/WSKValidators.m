@@ -25,16 +25,16 @@
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-
 #if !__has_feature(objc_arc)
 #error WSKWebServer requires ARC
 #endif
+
+#import "WSKValidators.h"
 
 #import <sys/mount.h>
 #import <sys/param.h>
 #import <sys/stat.h>
 
-#import "WSKValidators.h"
 #import "WSKPrivate.h"
 
 NSString *WSKEntityTagForFileInfo(const struct stat *info) {

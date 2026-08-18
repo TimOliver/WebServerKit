@@ -79,7 +79,7 @@ NSString *const WSKRequestAttribute_RegexCaptures = @"WSKRequestAttribute_RegexC
 }
 
 - (BOOL)open:(NSError **)error {
-    int result = inflateInit2(&_stream, 15 + 16);
+    int const result = inflateInit2(&_stream, 15 + 16);
 
     if (result != Z_OK) {
         if (error) {
@@ -119,7 +119,7 @@ NSString *const WSKRequestAttribute_RegexCaptures = @"WSKRequestAttribute_RegexC
 
     _stream.next_in = (Bytef *)data.bytes;
     _stream.avail_in = (uInt)data.length;
-    NSMutableData *decodedData = [[NSMutableData alloc] initWithLength:kGZipInitialBufferSize];
+    NSMutableData *const decodedData = [[NSMutableData alloc] initWithLength:kGZipInitialBufferSize];
 
     if (decodedData == nil) {
         WSK_DNOT_REACHED();
@@ -142,10 +142,10 @@ NSString *const WSKRequestAttribute_RegexCaptures = @"WSKRequestAttribute_RegexC
     NSUInteger length = 0;
 
     while (1) {
-        NSUInteger maxLength = decodedData.length - length;
+        NSUInteger const maxLength = decodedData.length - length;
         _stream.next_out = (Bytef *)((char *)decodedData.mutableBytes + length);
         _stream.avail_out = (uInt)maxLength;
-        int result = inflate(&_stream, Z_NO_FLUSH);
+        int const result = inflate(&_stream, Z_NO_FLUSH);
 
         if ((result != Z_OK) && (result != Z_STREAM_END)) {
             if (error) {
@@ -205,9 +205,9 @@ NSString *const WSKRequestAttribute_RegexCaptures = @"WSKRequestAttribute_RegexC
         // cap and be rejected by the check above). Without this clamp a body that
         // inflates to just over the cap first doubles the buffer to twice the cap
         // (128 MB for the 64 MB cap) and commits it before the next check rejects it.
-        NSUInteger maxBufferLength = WSKMaxDecompressedBodyLength() - _totalDecoded + 1;
-        NSUInteger newBufferLength = 2 * decodedData.length;
-        NSUInteger targetBufferLength = (newBufferLength < maxBufferLength) ? newBufferLength : maxBufferLength;
+        NSUInteger const maxBufferLength = WSKMaxDecompressedBodyLength() - _totalDecoded + 1;
+        NSUInteger const newBufferLength = 2 * decodedData.length;
+        NSUInteger const targetBufferLength = (newBufferLength < maxBufferLength) ? newBufferLength : maxBufferLength;
 
         // Charge the larger buffer before committing to it, not after, so the budget is
         // never briefly exceeded by an allocation we have already made.
@@ -225,7 +225,7 @@ NSString *const WSKRequestAttribute_RegexCaptures = @"WSKRequestAttribute_RegexC
     }
     _totalDecoded += length;
     decodedData.length = length;
-    BOOL success = length ? [super writeData:decodedData error:error] : YES;  // No need to call writer if we have no data yet
+    BOOL const success = length ? [super writeData:decodedData error:error] : YES;  // No need to call writer if we have no data yet
 
     // Release the working buffer's charge now that the downstream writer has taken
     // whatever it intends to keep and charged that itself. The reservation must track
@@ -271,7 +271,7 @@ static BOOL _ParseUnsignedHeaderValue(NSString *header, NSUInteger *outLength) {
     unsigned long long value = 0;
 
     for (NSUInteger i = 0; i < header.length; i++) {
-        unichar character = [header characterAtIndex:i];
+        unichar const character = [header characterAtIndex:i];
 
         if ((character < '0') || (character > '9')) {
             return NO;
@@ -301,7 +301,7 @@ static NSArray<NSString *> *_TransferCodingTokens(NSString *header) {
 
     for (NSString *coding in [header componentsSeparatedByString:@","]) {
         NSString *token = coding;
-        NSRange parameters = [token rangeOfString:@";"];  // Transfer-parameters play no part in framing
+        NSRange const parameters = [token rangeOfString:@";"];  // Transfer-parameters play no part in framing
 
         if (parameters.location != NSNotFound) {
             token = [token substringToIndex:parameters.location];
@@ -532,13 +532,13 @@ static BOOL _ParseContentEncoding(NSString *header, BOOL *outGZip) {
                         NSString *const endString = components[1];
                         NSUInteger startValue = 0;
                         NSUInteger endValue = 0;
-                        BOOL hasStart = _ParseUnsignedHeaderValue(startString, &startValue);
-                        BOOL hasEnd = _ParseUnsignedHeaderValue(endString, &endValue);
+                        BOOL const hasStart = _ParseUnsignedHeaderValue(startString, &startValue);
+                        BOOL const hasEnd = _ParseUnsignedHeaderValue(endString, &endValue);
 
                         if (hasStart && hasEnd && (endValue >= startValue)) {  // The second 500 bytes: "500-999"
                             _byteRange.location = startValue;
                             _byteRange.length = endValue - startValue + 1;  // endValue < NSUIntegerMax, so this cannot overflow
-                        } else if (hasStart && (endString.length == 0)) {  // The bytes after 9500 bytes: "9500-"
+                        } else if (hasStart && (endString.length == 0)) {   // The bytes after 9500 bytes: "9500-"
                             _byteRange.location = startValue;
                             _byteRange.length = NSUIntegerMax;
                         } else if (hasEnd && (startString.length == 0) && (endValue > 0)) {  // The final 500 bytes: "-500"
@@ -641,7 +641,7 @@ static BOOL _ParseContentEncoding(NSString *header, BOOL *outGZip) {
 }
 
 - (NSString *)description {
-    NSMutableString *description = [NSMutableString stringWithFormat:@"%@ %@", _method, _path];
+    NSMutableString *const description = [NSMutableString stringWithFormat:@"%@ %@", _method, _path];
 
     for (NSString *argument in [[_query allKeys] sortedArrayUsingSelector:@selector(compare:)]) {
         [description appendFormat:@"\n  %@ = %@", argument, _query[argument]];

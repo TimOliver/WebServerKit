@@ -25,7 +25,6 @@
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-
 #if __has_include(<WebServerKit/WSKWebServer.h>)
 #import <WebServerKit/WSKWebServer.h>
 #else
@@ -40,7 +39,8 @@ NS_ASSUME_NONNULL_BEGIN
 @interface WSKHandler : NSObject
 @property (nonatomic, readonly) WSKMatchBlock matchBlock;
 @property (nonatomic, readonly) WSKAsyncProcessBlock asyncProcessBlock;
-- (instancetype)initWithMatchBlock:(WSKMatchBlock)matchBlock asyncProcessBlock:(WSKAsyncProcessBlock)processBlock;
+- (instancetype)initWithMatchBlock:(WSKMatchBlock)matchBlock asyncProcessBlock:(WSKAsyncProcessBlock)processBlock NS_DESIGNATED_INITIALIZER;
+- (instancetype)init NS_UNAVAILABLE;
 @end
 
 NS_ASSUME_NONNULL_END

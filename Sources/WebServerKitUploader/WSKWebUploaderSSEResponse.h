@@ -25,7 +25,6 @@
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-
 #import <Foundation/Foundation.h>
 
 #if __has_include(<WebServerKit/WebServerKit.h>)

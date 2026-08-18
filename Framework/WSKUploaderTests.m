@@ -38,9 +38,11 @@ static BOOL WSKInjectingMove(id self, SEL _cmd, NSString* src, NSString* dst, NS
 @implementation WSKUploaderTests
 
 - (void)testWebUploader {
-    WSKWebUploader *server = [[WSKWebUploader alloc] init];
+    NSString *const dir = MakeTempDirectory();
+    WSKWebUploader *const server = [[WSKWebUploader alloc] initWithUploadDirectory:dir];
 
     XCTAssertNotNil(server);
+    [[NSFileManager defaultManager] removeItemAtPath:dir error:NULL];
 }
 
 // The uploader's /download built its response with +responseWithFile:isAttachment:, which passes

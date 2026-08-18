@@ -33,15 +33,15 @@
 #if !TARGET_OS_IPHONE
 #import <SystemConfiguration/SystemConfiguration.h>
 #endif
-#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <CommonCrypto/CommonDigest.h>
 #import <ifaddrs.h>
-#import <sys/mount.h>
-#import <sys/param.h>
-#import <sys/ioctl.h>
-#import <os/lock.h>
 #import <net/if.h>
 #import <netdb.h>
+#import <os/lock.h>
+#import <sys/ioctl.h>
+#import <sys/mount.h>
+#import <sys/param.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 #import "WSKPrivate.h"
 
@@ -124,7 +124,7 @@ void WSKInitializeFunctions(void) {
 
 NSString *WSKNormalizeHeaderValue(NSString *value) {
     if (value) {
-        NSRange range = [value rangeOfString:@";"];  // Assume part before ";" separator is case-insensitive
+        NSRange const range = [value rangeOfString:@";"];  // Assume part before ";" separator is case-insensitive
 
         if (range.location != NSNotFound) {
             value = [[[value substringToIndex:range.location] lowercaseString] stringByAppendingString:[value substringFromIndex:range.location]];
@@ -138,7 +138,7 @@ NSString *WSKNormalizeHeaderValue(NSString *value) {
 
 NSString *WSKTruncateHeaderValue(NSString *value) {
     if (value) {
-        NSRange range = [value rangeOfString:@";"];
+        NSRange const range = [value rangeOfString:@";"];
 
         if (range.location != NSNotFound) {
             return [value substringToIndex:range.location];
@@ -351,9 +351,9 @@ NSDictionary<NSString *, NSString *> *WSKParseURLEncodedForm(NSString *form) {
         }
 
         key = [key stringByReplacingOccurrencesOfString:@"+" withString:@" "];
-        NSString *unescapedKey = key ? WSKUnescapeURLString(key) : nil;
+        NSString *const unescapedKey = key ? WSKUnescapeURLString(key) : nil;
         value = [value stringByReplacingOccurrencesOfString:@"+" withString:@" "];
-        NSString *unescapedValue = value ? WSKUnescapeURLString(value) : nil;
+        NSString *const unescapedValue = value ? WSKUnescapeURLString(value) : nil;
 
         if (unescapedKey && unescapedValue) {
             [parameters setObject:unescapedValue forKey:unescapedKey];
@@ -389,7 +389,7 @@ NSString *WSKStringFromSockAddr(const struct sockaddr *addr, BOOL includeService
     // buffers into the result, leaking stack contents into logs — which is what happened
     // in debug builds whenever WSK_DNOT_REACHED did not actually abort (it is a no-op
     // under a custom or XLFacility logging facility).
-    int result = getnameinfo(addr, addr->sa_len, hostBuffer, sizeof(hostBuffer), serviceBuffer, sizeof(serviceBuffer), NI_NUMERICHOST | NI_NUMERICSERV | NI_NOFQDN);
+    int const result = getnameinfo(addr, addr->sa_len, hostBuffer, sizeof(hostBuffer), serviceBuffer, sizeof(serviceBuffer), NI_NUMERICHOST | NI_NUMERICSERV | NI_NOFQDN);
 
     if (result != 0) {
         WSK_LOG_ERROR(@"Failed converting socket address to string: %s", gai_strerror(result));
@@ -478,24 +478,24 @@ BOOL WSKIsHeaderTokenCharacter(unsigned char character) {
     }
 
     switch (character) {
-        case '!':
-        case '#':
-        case '$':
-        case '%':
-        case '&':
-        case '\'':
-        case '*':
-        case '+':
-        case '-':
-        case '.':
-        case '^':
-        case '_':
-        case '`':
-        case '|':
-        case '~':
-            return YES;
-        default:
-            return NO;
+    case '!':
+    case '#':
+    case '$':
+    case '%':
+    case '&':
+    case '\'':
+    case '*':
+    case '+':
+    case '-':
+    case '.':
+    case '^':
+    case '_':
+    case '`':
+    case '|':
+    case '~':
+        return YES;
+    default:
+        return NO;
     }
 }
 

@@ -48,7 +48,7 @@
         // Only a capacity hint — -writeData: enforces the real in-memory cap — so clamp
         // it to that cap rather than trusting the attacker-declared Content-Length,
         // which could otherwise request a huge (or failed) up-front allocation.
-        NSUInteger capacity = MIN(self.contentLength, WSKMaxInMemoryBodyLength());
+        NSUInteger const capacity = MIN(self.contentLength, WSKMaxInMemoryBodyLength());
         _data = [[NSMutableData alloc] initWithCapacity:capacity];
     } else {
         _data = [[NSMutableData alloc] init];
@@ -66,7 +66,7 @@
 }
 
 - (BOOL)writeData:(NSData *)data error:(NSError **)error {
-    NSUInteger total = _data.length + data.length;
+    NSUInteger const total = _data.length + data.length;
 
     if (total > WSKMaxInMemoryBodyLength()) {
         WSK_LOG_ERROR(@"Request body exceeds the %lu byte in-memory limit", (unsigned long)WSKMaxInMemoryBodyLength());
@@ -99,7 +99,7 @@
 }
 
 - (NSString *)description {
-    NSMutableString *description = [NSMutableString stringWithString:[super description]];
+    NSMutableString *const description = [NSMutableString stringWithString:[super description]];
 
     if (_data) {
         [description appendString:@"\n\n"];

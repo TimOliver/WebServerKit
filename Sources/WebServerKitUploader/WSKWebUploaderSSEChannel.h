@@ -91,7 +91,7 @@ NS_ASSUME_NONNULL_BEGIN
  *  On a closed channel the reader is invoked immediately with empty data (the
  *  end-of-stream sentinel) and is never parked.
  */
-- (void)parkReader:(void (^)(NSData* data))reader;
+- (void)parkReader:(void (^)(NSData *data))reader;
 
 /**
  *  YES once -close has been called.

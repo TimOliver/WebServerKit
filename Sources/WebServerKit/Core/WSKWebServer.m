@@ -154,13 +154,13 @@ static void _ExecuteMainThreadRunLoopSources(void) {
     // _syncQueue or on the main queue, so its dispatch_group_wait cannot deadlock.
     dispatch_queue_t _stateQueue;
     dispatch_group_t _sourceGroup;
-    atomic_bool _stopping;               // Read from connection queues WITHOUT _stateQueue
+    atomic_bool _stopping;  // Read from connection queues WITHOUT _stateQueue
     NSMutableArray<WSKHandler *> *_handlers;
     NSMutableSet<NSString *> *_registeredMethods;  // Which methods ANY handler claims; see -_noteRegisteredMethod:
-    NSInteger _activeConnections;        // Accessed through _syncQueue only
-    NSInteger _reservedConnections;      // Accepted sockets not yet counted in _activeConnections; through _syncQueue only
-    BOOL _connected;                     // Accessed on main thread only
-    CFRunLoopTimerRef _disconnectTimer;  // Accessed on main thread only
+    NSInteger _activeConnections;                  // Accessed through _syncQueue only
+    NSInteger _reservedConnections;                // Accepted sockets not yet counted in _activeConnections; through _syncQueue only
+    BOOL _connected;                               // Accessed on main thread only
+    CFRunLoopTimerRef _disconnectTimer;            // Accessed on main thread only
 
     NSDictionary<NSString *, id> *_options;
     NSSet<NSString *> *_allowedHostNames;
@@ -413,7 +413,7 @@ static void _ExecuteMainThreadRunLoopSources(void) {
     __block NSString *result = nil;
 
     dispatch_sync(_stateQueue, ^{
-        CFStringRef type = self->_resolutionService ? CFNetServiceGetType(self->_resolutionService) : NULL;
+        CFStringRef const type = self->_resolutionService ? CFNetServiceGetType(self->_resolutionService) : NULL;
         result = type && CFStringGetLength(type) ? CFBridgingRelease(CFStringCreateCopy(kCFAllocatorDefault, type)) : nil;
     });
     return result;
@@ -462,7 +462,7 @@ static void _NetServiceRegisterCallBack(CFNetServiceRef service, CFStreamError *
         if (error->error) {
             WSK_LOG_ERROR(@"Bonjour registration error %i (domain %i)", (int)error->error, (int)error->domain);
         } else {
-            WSKWebServer *server = (__bridge WSKWebServer *)info;
+            WSKWebServer *const server = (__bridge WSKWebServer *)info;
             WSK_LOG_VERBOSE(@"Bonjour registration complete for %@", [server class]);
 
             // Resolution can fail to start for environmental reasons (mDNSResponder
@@ -482,7 +482,7 @@ static void _NetServiceResolveCallBack(CFNetServiceRef service, CFStreamError *e
                 WSK_LOG_ERROR(@"Bonjour resolution error %i (domain %i)", (int)error->error, (int)error->domain);
             }
         } else {
-            WSKWebServer *server = (__bridge WSKWebServer *)info;
+            WSKWebServer *const server = (__bridge WSKWebServer *)info;
             WSK_LOG_INFO(@"%@ now locally reachable at %@", [server class], server.bonjourServerURL);
 
             if ([server.delegate respondsToSelector:@selector(webServerDidCompleteBonjourRegistration:)]) {
@@ -499,7 +499,7 @@ static void _NetServiceResolveCallBack(CFNetServiceRef service, CFStreamError *e
 static void _DNSServiceCallBack(DNSServiceRef sdRef, DNSServiceFlags flags, uint32_t interfaceIndex, DNSServiceErrorType errorCode, uint32_t externalAddress, DNSServiceProtocol protocol, uint16_t internalPort, uint16_t externalPort, uint32_t ttl, void *context) {
     WSK_DCHECK([NSThread isMainThread]);
     @autoreleasepool {
-        WSKWebServer *server = (__bridge WSKWebServer *)context;
+        WSKWebServer *const server = (__bridge WSKWebServer *)context;
 
         if ((errorCode == kDNSServiceErr_NoError) || (errorCode == kDNSServiceErr_DoubleNAT)) {
             struct sockaddr_in addr4;
@@ -543,7 +543,7 @@ static void _DNSServiceCallBack(DNSServiceRef sdRef, DNSServiceFlags flags, uint
 static void _SocketCallBack(CFSocketRef s, CFSocketCallBackType type, CFDataRef address, const void *data, void *info) {
     WSK_DCHECK([NSThread isMainThread]);
     @autoreleasepool {
-        WSKWebServer *server = (__bridge WSKWebServer *)info;
+        WSKWebServer *const server = (__bridge WSKWebServer *)info;
 
         // _dnsService, _dnsAddress and _dnsPort are owned by _stateQueue, but this callback
         // arrives on the main run loop: without confining it, the main thread could load the
@@ -634,7 +634,7 @@ static inline NSString *_EncodeBase64(NSString *string) {
                        length:(socklen_t)length
         maxPendingConnections:(NSUInteger)maxPendingConnections
                         error:(NSError **)error {
-    int listeningSocket = socket(useIPv6 ? PF_INET6 : PF_INET, SOCK_STREAM, IPPROTO_TCP);
+    int const listeningSocket = socket(useIPv6 ? PF_INET6 : PF_INET, SOCK_STREAM, IPPROTO_TCP);
 
     // socket() only fails with -1; fd 0 is a perfectly good descriptor and is handed
     // out whenever stdin has been closed, so it must not be read as an error.
@@ -675,7 +675,7 @@ static inline NSString *_EncodeBase64(NSString *string) {
 
 - (dispatch_source_t)_createDispatchSourceWithListeningSocket:(int)listeningSocket isIPv6:(BOOL)isIPv6 {
     dispatch_group_enter(_sourceGroup);
-    dispatch_source_t source = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, listeningSocket, 0, dispatch_get_global_queue(_dispatchQueuePriority, 0));
+    dispatch_source_t const source = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, listeningSocket, 0, dispatch_get_global_queue(_dispatchQueuePriority, 0));
     // ENFORCE_QOS_CLASS at USER_INTERACTIVE, deliberately above the source's own queue: this is
     // the one block -_stop's dispatch_group_wait actively waits on, group waits do not propagate
     // the waiter's priority, and a -stop from the main thread otherwise inverts against
@@ -684,27 +684,27 @@ static inline NSString *_EncodeBase64(NSString *string) {
     // connection handling, and this wrap is what lets it keep doing so. See the _sourceGroup
     // ivar comment for the ruling this supersedes.
     dispatch_source_set_cancel_handler(source, dispatch_block_create_with_qos_class(DISPATCH_BLOCK_ENFORCE_QOS_CLASS, QOS_CLASS_USER_INTERACTIVE, 0, ^{
-        @autoreleasepool {
-            int result = close(listeningSocket);
+                                           @autoreleasepool {
+                                               int result = close(listeningSocket);
 
-            if (result != 0) {
-                WSK_LOG_ERROR(@"Failed closing %s listening socket: %s (%i)", isIPv6 ? "IPv6" : "IPv4", strerror(errno), errno);
-            } else {
-                WSK_LOG_DEBUG(@"Did close %s listening socket %i", isIPv6 ? "IPv6" : "IPv4", listeningSocket);
-            }
-        }
-        dispatch_group_leave(self->_sourceGroup);
-    }));
+                                               if (result != 0) {
+                                                   WSK_LOG_ERROR(@"Failed closing %s listening socket: %s (%i)", isIPv6 ? "IPv6" : "IPv4", strerror(errno), errno);
+                                               } else {
+                                                   WSK_LOG_DEBUG(@"Did close %s listening socket %i", isIPv6 ? "IPv6" : "IPv4", listeningSocket);
+                                               }
+                                           }
+                                           dispatch_group_leave(self->_sourceGroup);
+                                       }));
     dispatch_source_set_event_handler(source, ^{
         @autoreleasepool {
             struct sockaddr_storage remoteSockAddr;
             socklen_t remoteAddrLen = sizeof(remoteSockAddr);
-            int socket = accept(listeningSocket, (struct sockaddr *)&remoteSockAddr, &remoteAddrLen);
+            int const socket = accept(listeningSocket, (struct sockaddr *)&remoteSockAddr, &remoteAddrLen);
 
             // accept() only fails with -1; fd 0 is a perfectly good descriptor and is
             // handed out whenever stdin has been closed, so it must not be read as an error.
             if (socket >= 0) {
-                NSData *remoteAddress = [NSData dataWithBytes:&remoteSockAddr length:remoteAddrLen];
+                NSData *const remoteAddress = [NSData dataWithBytes:&remoteSockAddr length:remoteAddrLen];
 
                 struct sockaddr_storage localSockAddr;
                 socklen_t localAddrLen = sizeof(localSockAddr);
@@ -719,7 +719,7 @@ static inline NSString *_EncodeBase64(NSString *string) {
                     return;
                 }
 
-                NSData *localAddress = [NSData dataWithBytes:&localSockAddr length:localAddrLen];
+                NSData *const localAddress = [NSData dataWithBytes:&localSockAddr length:localAddrLen];
                 WSK_DCHECK((!isIPv6 && localSockAddr.ss_family == AF_INET) || (isIPv6 && localSockAddr.ss_family == AF_INET6));
 
                 // This must be checked rather than assumed. If the peer's RST has already
@@ -762,8 +762,8 @@ static inline NSString *_EncodeBase64(NSString *string) {
                     return;
                 }
 
-                WSKConnection *connection = [(WSKConnection *)[self->_connectionClass alloc] initWithServer:self localAddress:localAddress remoteAddress:remoteAddress socket:socket];  // Connection will automatically retain itself while opened
-                [connection self];                                                                                                                                                                        // Prevent compiler from complaining about unused variable / useless statement
+                WSKConnection *const connection = [(WSKConnection *)[self->_connectionClass alloc] initWithServer:self localAddress:localAddress remoteAddress:remoteAddress socket:socket];  // Connection will automatically retain itself while opened
+                [connection self];                                                                                                                                                            // Prevent compiler from complaining about unused variable / useless statement
                 dispatch_sync(self->_syncQueue, ^{
                     self->_reservedConnections -= 1;
                 });
@@ -788,7 +788,7 @@ static inline NSString *_EncodeBase64(NSString *string) {
     if (configuredPort == 0 && _lastBoundPort != 0) {
         port = _lastBoundPort;
     }
-    BOOL bindToLocalhost = [(NSNumber *)_GetOption(_options, WSKOption_BindToLocalhost, @NO) boolValue];
+    BOOL const bindToLocalhost = [(NSNumber *)_GetOption(_options, WSKOption_BindToLocalhost, @NO) boolValue];
     // listen(2) takes an int backlog, so an out-of-range option would be truncated into
     // something nonsensical (possibly negative). Clamp instead of casting blindly.
     NSUInteger const requestedPendingConnections = [(NSNumber *)_GetOption(_options, WSKOption_MaxPendingConnections, @16) unsignedIntegerValue];
@@ -832,7 +832,7 @@ static inline NSString *_EncodeBase64(NSString *string) {
     addr6.sin6_family = AF_INET6;
     addr6.sin6_port = htons(port);
     addr6.sin6_addr = bindToLocalhost ? in6addr_loopback : in6addr_any;
-    int listeningSocket6 = [self _createListeningSocket:YES localAddress:&addr6 length:sizeof(addr6) maxPendingConnections:maxPendingConnections error:error];
+    int const listeningSocket6 = [self _createListeningSocket:YES localAddress:&addr6 length:sizeof(addr6) maxPendingConnections:maxPendingConnections error:error];
 
     if (listeningSocket6 < 0) {
         close(listeningSocket4);
@@ -849,14 +849,14 @@ static inline NSString *_EncodeBase64(NSString *string) {
     if ([authenticationMethod isEqualToString:WSKAuthenticationMethod_Basic]) {
         _authenticationRealm = [(NSString *)_GetOption(_options, WSKOption_AuthenticationRealm, _serverName) copy];
         _authenticationBasicAccounts = [[NSMutableDictionary alloc] init];
-        NSDictionary *accounts = _GetOption(_options, WSKOption_AuthenticationAccounts, @{});
+        NSDictionary *const accounts = _GetOption(_options, WSKOption_AuthenticationAccounts, @{});
         [accounts enumerateKeysAndObjectsUsingBlock:^(NSString *username, NSString *password, BOOL *stop) {
             [self->_authenticationBasicAccounts setObject:_EncodeBase64([NSString stringWithFormat:@"%@:%@", username, password]) forKey:username];
         }];
     } else if ([authenticationMethod isEqualToString:WSKAuthenticationMethod_DigestAccess]) {
         _authenticationRealm = [(NSString *)_GetOption(_options, WSKOption_AuthenticationRealm, _serverName) copy];
         _authenticationDigestAccounts = [[NSMutableDictionary alloc] init];
-        NSDictionary *accounts = _GetOption(_options, WSKOption_AuthenticationAccounts, @{});
+        NSDictionary *const accounts = _GetOption(_options, WSKOption_AuthenticationAccounts, @{});
         [accounts enumerateKeysAndObjectsUsingBlock:^(NSString *username, NSString *password, BOOL *stop) {
             [self->_authenticationDigestAccounts setObject:WSKComputeMD5Digest(@"%@:%@:%@", username, self->_authenticationRealm, password) forKey:username];
         }];
@@ -937,7 +937,7 @@ static inline NSString *_EncodeBase64(NSString *string) {
             CFStreamError streamError = {
                 0};
 
-            NSDictionary *txtDataDictionary = _GetOption(_options, WSKOption_BonjourTXTData, nil);
+            NSDictionary *const txtDataDictionary = _GetOption(_options, WSKOption_BonjourTXTData, nil);
 
             // Built up in a heap dictionary rather than stack arrays sized from the
             // caller's count: a large dictionary would overflow the stack (the arrays were
@@ -958,7 +958,7 @@ static inline NSString *_EncodeBase64(NSString *string) {
                         }
                     }
 
-                    CFDataRef txtData = CFNetServiceCreateTXTDataWithDictionary(kCFAllocatorDefault, txtDictionary);
+                    CFDataRef const txtData = CFNetServiceCreateTXTDataWithDictionary(kCFAllocatorDefault, txtDictionary);
 
                     if (txtData != NULL) {  // Guard: CFRelease(NULL) is a hard crash, and the dictionary may be un-encodable.
                         if (!CFNetServiceSetTXTData(_registrationService, txtData)) {
@@ -1307,7 +1307,7 @@ static inline NSString *_EncodeBase64(NSString *string) {
 #if TARGET_OS_IPHONE
     BOOL inBackground = ([[UIApplication sharedApplication] applicationState] == UIApplicationStateBackground);
 #else
-    BOOL inBackground = NO;
+    BOOL const inBackground = NO;
 #endif
 
     dispatch_sync(_stateQueue, ^{
@@ -1394,7 +1394,7 @@ static inline NSString *_EncodeBase64(NSString *string) {
 
 - (NSURL *)_serverURL {
     if (_source4) {
-        NSString *ipAddress = _bindToLocalhost ? @"localhost" : WSKGetPrimaryIPAddress(NO);  // We can't really use IPv6 anyway as it doesn't work great with HTTP URLs in practice
+        NSString *const ipAddress = _bindToLocalhost ? @"localhost" : WSKGetPrimaryIPAddress(NO);  // We can't really use IPv6 anyway as it doesn't work great with HTTP URLs in practice
 
         if (ipAddress) {
             if (_port != 80) {
@@ -1605,18 +1605,18 @@ static inline NSString *_EncodeBase64(NSString *string) {
                     return nil;
                 }
 
-                NSArray *matches = [expression matchesInString:urlPath options:0 range:NSMakeRange(0, urlPath.length)];
+                NSArray *const matches = [expression matchesInString:urlPath options:0 range:NSMakeRange(0, urlPath.length)];
 
                 if (matches.count == 0) {
                     return nil;
                 }
 
-                NSMutableArray *captures = [NSMutableArray array];
+                NSMutableArray *const captures = [NSMutableArray array];
 
                 for (NSTextCheckingResult *result in matches) {
                     // Start at 1; index 0 is the whole string
                     for (NSUInteger i = 1; i < result.numberOfRanges; i++) {
-                        NSRange range = [result rangeAtIndex:i];
+                        NSRange const range = [result rangeAtIndex:i];
 
                         // range is {NSNotFound, 0} "if one of the capture groups did not participate in this particular match"
                         // see discussion in -[NSRegularExpression firstMatchInString:options:range:]
@@ -1626,7 +1626,7 @@ static inline NSString *_EncodeBase64(NSString *string) {
                     }
                 }
 
-                WSKRequest *request = [(WSKRequest *)[aClass alloc] initWithMethod:requestMethod url:requestURL headers:requestHeaders path:urlPath query:urlQuery];
+                WSKRequest *const request = [(WSKRequest *)[aClass alloc] initWithMethod:requestMethod url:requestURL headers:requestHeaders path:urlPath query:urlQuery];
                 [request setAttribute:captures forKey:WSKRequestAttribute_RegexCaptures];
                 return request;
             }
@@ -1844,7 +1844,7 @@ static NSString *_EscapeHTMLString(NSString *string) {
 
                 filePath = resolvedPath;
 
-                NSString *fileType = [[[NSFileManager defaultManager] attributesOfItemAtPath:filePath error:NULL] fileType];
+                NSString *const fileType = [[[NSFileManager defaultManager] attributesOfItemAtPath:filePath error:NULL] fileType];
 
                 if (fileType) {
                     if ([fileType isEqualToString:NSFileTypeDirectory]) {
@@ -1963,7 +1963,7 @@ static NSString *_EscapeHTMLString(NSString *string) {
 }
 
 static CFHTTPMessageRef _CreateHTTPMessageFromData(NSData *data, BOOL isRequest) {
-    CFHTTPMessageRef message = CFHTTPMessageCreateEmpty(kCFAllocatorDefault, isRequest);
+    CFHTTPMessageRef const message = CFHTTPMessageCreateEmpty(kCFAllocatorDefault, isRequest);
 
     if (CFHTTPMessageAppendBytes(message, data.bytes, data.length)) {
         return message;
@@ -1975,7 +1975,7 @@ static CFHTTPMessageRef _CreateHTTPMessageFromData(NSData *data, BOOL isRequest)
 
 static CFHTTPMessageRef _CreateHTTPMessageFromPerformingRequest(NSData *inData, NSUInteger port) {
     CFHTTPMessageRef response = NULL;
-    int httpSocket = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
+    int const httpSocket = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
 
     if (httpSocket > 0) {
         struct sockaddr_in addr4;
@@ -1987,7 +1987,7 @@ static CFHTTPMessageRef _CreateHTTPMessageFromPerformingRequest(NSData *inData, 
 
         if (connect(httpSocket, (void *)&addr4, sizeof(addr4)) == 0) {
             if (write(httpSocket, inData.bytes, inData.length) == (ssize_t)inData.length) {
-                NSMutableData *outData = [[NSMutableData alloc] initWithLength:(256 * 1024)];
+                NSMutableData *const outData = [[NSMutableData alloc] initWithLength:(256 * 1024)];
                 NSUInteger length = 0;
 
                 while (1) {
@@ -2101,7 +2101,7 @@ static void _LogResult(NSString *format, ...) {
                 NSData *const requestData = [NSData dataWithContentsOfFile:[path stringByAppendingPathComponent:requestFile]];
 
                 if (requestData) {
-                    CFHTTPMessageRef request = _CreateHTTPMessageFromData(requestData, YES);
+                    CFHTTPMessageRef const request = _CreateHTTPMessageFromData(requestData, YES);
 
                     if (request) {
                         NSString *const requestMethod = CFBridgingRelease(CFHTTPMessageCopyRequestMethod(request));
@@ -2114,16 +2114,16 @@ static void _LogResult(NSString *format, ...) {
                                 NSData *const responseData = [NSData dataWithContentsOfFile:[path stringByAppendingPathComponent:responseFile]];
 
                                 if (responseData) {
-                                    CFHTTPMessageRef expectedResponse = _CreateHTTPMessageFromData(responseData, NO);
+                                    CFHTTPMessageRef const expectedResponse = _CreateHTTPMessageFromData(responseData, NO);
 
                                     if (expectedResponse) {
-                                        CFHTTPMessageRef actualResponse = _CreateHTTPMessageFromPerformingRequest(requestData, self.port);
+                                        CFHTTPMessageRef const actualResponse = _CreateHTTPMessageFromPerformingRequest(requestData, self.port);
 
                                         if (actualResponse) {
                                             success = YES;
 
-                                            CFIndex expectedStatusCode = CFHTTPMessageGetResponseStatusCode(expectedResponse);
-                                            CFIndex actualStatusCode = CFHTTPMessageGetResponseStatusCode(actualResponse);
+                                            CFIndex const expectedStatusCode = CFHTTPMessageGetResponseStatusCode(expectedResponse);
+                                            CFIndex const actualStatusCode = CFHTTPMessageGetResponseStatusCode(actualResponse);
 
                                             if (actualStatusCode != expectedStatusCode) {
                                                 _LogResult(@"  Status code not matching:\n    Expected: %i\n      Actual: %i", (int)expectedStatusCode, (int)actualStatusCode);

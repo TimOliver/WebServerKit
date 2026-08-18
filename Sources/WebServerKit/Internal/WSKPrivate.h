@@ -33,7 +33,6 @@
  */
 
 #if __has_include(<WebServerKit/WSKWebServer.h>)
-#import <WebServerKit/WSKWebServer.h>
 #import <WebServerKit/WSKConnection.h>
 #import <WebServerKit/WSKDataRequest.h>
 #import <WebServerKit/WSKDataResponse.h>
@@ -45,8 +44,8 @@
 #import <WebServerKit/WSKMultiPartFormRequest.h>
 #import <WebServerKit/WSKStreamedResponse.h>
 #import <WebServerKit/WSKURLEncodedFormRequest.h>
+#import <WebServerKit/WSKWebServer.h>
 #else
-#import "WSKWebServer.h"
 #import "WSKConnection.h"
 #import "WSKDataRequest.h"
 #import "WSKDataResponse.h"
@@ -58,6 +57,7 @@
 #import "WSKMultiPartFormRequest.h"
 #import "WSKStreamedResponse.h"
 #import "WSKURLEncodedFormRequest.h"
+#import "WSKWebServer.h"
 #endif
 
 // Quoted deliberately in both build flavors: these are project headers, never installed into
@@ -121,27 +121,27 @@ extern WSKLoggingLevel WSKLogLevel;
 extern void WSKLogMessage(WSKLoggingLevel level, NSString *_Nonnull format, ...) NS_FORMAT_FUNCTION(2, 3);
 
 #if DEBUG
-#define WSK_LOG_DEBUG(...)                                                                                                                 \
-    do {                                                                                                                                   \
+#define WSK_LOG_DEBUG(...)                                                                             \
+    do {                                                                                               \
         if (WSKLogLevel <= kWSKLoggingLevel_Debug) WSKLogMessage(kWSKLoggingLevel_Debug, __VA_ARGS__); \
     } while (0)
 #else
 #define WSK_LOG_DEBUG(...)
 #endif
-#define WSK_LOG_VERBOSE(...)                                                                                                                   \
-    do {                                                                                                                                       \
+#define WSK_LOG_VERBOSE(...)                                                                               \
+    do {                                                                                                   \
         if (WSKLogLevel <= kWSKLoggingLevel_Verbose) WSKLogMessage(kWSKLoggingLevel_Verbose, __VA_ARGS__); \
     } while (0)
-#define WSK_LOG_INFO(...)                                                                                                                \
-    do {                                                                                                                                 \
+#define WSK_LOG_INFO(...)                                                                            \
+    do {                                                                                             \
         if (WSKLogLevel <= kWSKLoggingLevel_Info) WSKLogMessage(kWSKLoggingLevel_Info, __VA_ARGS__); \
     } while (0)
-#define WSK_LOG_WARNING(...)                                                                                                                   \
-    do {                                                                                                                                       \
+#define WSK_LOG_WARNING(...)                                                                               \
+    do {                                                                                                   \
         if (WSKLogLevel <= kWSKLoggingLevel_Warning) WSKLogMessage(kWSKLoggingLevel_Warning, __VA_ARGS__); \
     } while (0)
-#define WSK_LOG_ERROR(...)                                                                                                                 \
-    do {                                                                                                                                   \
+#define WSK_LOG_ERROR(...)                                                                             \
+    do {                                                                                               \
         if (WSKLogLevel <= kWSKLoggingLevel_Error) WSKLogMessage(kWSKLoggingLevel_Error, __VA_ARGS__); \
     } while (0)
 
@@ -201,11 +201,11 @@ NS_ASSUME_NONNULL_BEGIN
  *  description stays for the log.
  */
 typedef NS_ENUM(NSInteger, WSKRequestBodyErrorCode) {
-    kWSKRequestBodyError_Unspecified = -1,     // What every one of these errors used to be
-    kWSKRequestBodyError_Malformed = 1,        // The client's framing or encoding is wrong -> 400
-    kWSKRequestBodyError_TooLarge,             // A per-request size cap was exceeded -> 413
-    kWSKRequestBodyError_ServerAtCapacity,     // The process-wide in-memory ceiling is full -> 503
-    kWSKRequestBodyError_Internal,             // Ours, not the client's -> 500
+    kWSKRequestBodyError_Unspecified = -1,  // What every one of these errors used to be
+    kWSKRequestBodyError_Malformed = 1,     // The client's framing or encoding is wrong -> 400
+    kWSKRequestBodyError_TooLarge,          // A per-request size cap was exceeded -> 413
+    kWSKRequestBodyError_ServerAtCapacity,  // The process-wide in-memory ceiling is full -> 503
+    kWSKRequestBodyError_Internal,          // Ours, not the client's -> 500
 };
 
 static inline BOOL WSKIsValidByteRange(NSRange range) {

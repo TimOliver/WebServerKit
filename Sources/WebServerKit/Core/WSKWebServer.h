@@ -144,7 +144,7 @@ typedef void (^WSKBuiltInLoggerBlock)(int level, NSString *_Nonnull message);
 /**
  *  This method is the designated initializer for the class.
  */
-- (instancetype)init;
+- (instancetype)init NS_DESIGNATED_INITIALIZER;
 
 /**
  *  Adds to the server a handler that generates responses synchronously when handling incoming HTTP requests.

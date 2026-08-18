@@ -103,7 +103,7 @@
 }
 
 - (BOOL)open:(NSError **)error {
-    int result = deflateInit2(&_stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY);
+    int const result = deflateInit2(&_stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY);
 
     if (result != Z_OK) {
         if (error) {
@@ -129,10 +129,10 @@
     _stream.avail_in = (uInt)data.length;
 
     while (1) {
-        NSUInteger maxLength = encodedData.length - *length;
+        NSUInteger const maxLength = encodedData.length - *length;
         _stream.next_out = (Bytef *)((char *)encodedData.mutableBytes + *length);
         _stream.avail_out = (uInt)maxLength;
-        int result = deflate(&_stream, flush);
+        int const result = deflate(&_stream, flush);
 
         if (result == Z_STREAM_END) {
             _finished = YES;
@@ -396,7 +396,7 @@
 }
 
 - (NSString *)description {
-    NSMutableString *description = [NSMutableString stringWithFormat:@"Status Code = %i", (int)_statusCode];
+    NSMutableString *const description = [NSMutableString stringWithFormat:@"Status Code = %i", (int)_statusCode];
 
     if (_contentType) {
         [description appendFormat:@"\nContent Type = %@", _contentType];

@@ -67,7 +67,7 @@
 }
 
 - (NSString *)description {
-    NSMutableString *description = [NSMutableString stringWithString:[super description]];
+    NSMutableString *const description = [NSMutableString stringWithString:[super description]];
 
     [description appendString:@"\n\n"];
     [description appendString:WSKDescribeData(_data, self.contentType)];

@@ -44,8 +44,8 @@
 #define kHeadersReadCapacity (1 * 1024)
 #define kBodyReadCapacity (256 * 1024)
 #define kHeadersMaxLength (64 * 1024)  // Upper bound on total request header bytes, to cap memory for a client that never sends the terminating blank line.
-#define kMaxHeaderPhaseTicks 2  // Idle-timer ticks a connection may spend receiving its request line + headers before being closed (defeats a slowloris dribbling bytes just under the zero-progress check).
-#define kMinReceiveBytesPerSecond 32  // Throughput a connection must sustain while its request body is still arriving; see -_checkIdleTimeout.
+#define kMaxHeaderPhaseTicks 2         // Idle-timer ticks a connection may spend receiving its request line + headers before being closed (defeats a slowloris dribbling bytes just under the zero-progress check).
+#define kMinReceiveBytesPerSecond 32   // Throughput a connection must sustain while its request body is still arriving; see -_checkIdleTimeout.
 #define kMaxRequestsPerConnection 100  // Requests one reused connection may carry before it must be re-established; bounds how long a single client can hold one of the kWSKMaxConnections slots.
 
 // Lingering close. close(2) with unread inbound data makes the kernel send RST instead of FIN, and
@@ -56,10 +56,10 @@
 // against what is already tolerated: kMaxHeaderPhaseTicks ticks of the idle timer is 60-90s at the
 // 30s default, so a 2s linger cannot become the cheapest way to occupy a slot. Fixed constants
 // rather than options, like kWSKMaxConnections and the in-memory budget.
-#define kLingerTotalSeconds 2.0            // Absolute deadline for the whole drain
-#define kLingerDiscardCap (64 * 1024)      // Early exit: a client mid-upload will never reach EOF
-#define kLingerReadChunk (16 * 1024)       // Discard buffer size
-#define kLingerGapSeconds 0.5              // No bytes for this long: the client is done, stop waiting
+#define kLingerTotalSeconds 2.0        // Absolute deadline for the whole drain
+#define kLingerDiscardCap (64 * 1024)  // Early exit: a client mid-upload will never reach EOF
+#define kLingerReadChunk (16 * 1024)   // Discard buffer size
+#define kLingerGapSeconds 0.5          // No bytes for this long: the client is done, stop waiting
 
 typedef void (^ReadDataCompletionBlock)(BOOL success);
 typedef void (^ReadHeadersCompletionBlock)(NSData *extraData);
@@ -127,39 +127,39 @@ NS_ASSUME_NONNULL_END
 
     BOOL _opened;
 
-    dispatch_source_t _idleTimer;  // Nil when idle timeouts are disabled
-    NSUInteger _pendingIOCount;    // Accessed on _connectionQueue only
-    NSUInteger _idleCheckedBytes;  // Accessed on _connectionQueue only
-    BOOL _idleCheckWasBusy;        // Accessed on _connectionQueue only
-    NSUInteger _headerPhaseTicks;  // Idle ticks elapsed before a request was matched; on _connectionQueue only
-    BOOL _requestReceived;         // Set once the body is fully read and the handler runs; on _connectionQueue only
-    BOOL _clientIsHTTP10;          // The client spoke HTTP/1.0 (or older): no chunked framing, no interim 1xx
-    BOOL _earlyChecksRun;          // Host allow-list and preflight are decided once, as early as the headers allow
+    dispatch_source_t _idleTimer;    // Nil when idle timeouts are disabled
+    NSUInteger _pendingIOCount;      // Accessed on _connectionQueue only
+    NSUInteger _idleCheckedBytes;    // Accessed on _connectionQueue only
+    BOOL _idleCheckWasBusy;          // Accessed on _connectionQueue only
+    NSUInteger _headerPhaseTicks;    // Idle ticks elapsed before a request was matched; on _connectionQueue only
+    BOOL _requestReceived;           // Set once the body is fully read and the handler runs; on _connectionQueue only
+    BOOL _clientIsHTTP10;            // The client spoke HTTP/1.0 (or older): no chunked framing, no interim 1xx
+    BOOL _earlyChecksRun;            // Host allow-list and preflight are decided once, as early as the headers allow
     NSInteger _headerFailureStatus;  // Why the header block was rejected; 500 only if nothing more specific applies
     NSInteger _bodyFailureStatus;    // Why the body was rejected; same idiom, because the body readers report only a BOOL
-    NSTimeInterval _idleTimeout;   // Seconds between idle-timer ticks; 0 when idle timeouts are disabled
+    NSTimeInterval _idleTimeout;     // Seconds between idle-timer ticks; 0 when idle timeouts are disabled
 
     // Connection reuse. Deliberately restricted to requests carrying NO body, which is what keeps
     // request smuggling structurally impossible rather than a matter of parsing carefully: a
     // desync is a disagreement about where a body ends, and no body is ever read on a reused
     // connection. Everything else — a body, a refusal, HTTP/1.0, an indeterminate response length
     // — answers and closes exactly as it always has.
-    NSTimeInterval _keepAliveTimeout;   // 0 disables reuse entirely, which is the default
-    BOOL _requestIsBodyless;            // No Content-Length and no Transfer-Encoding, from the raw header names
-    BOOL _requestTargetIsAbsoluteForm;  // The request-target carried its own authority (RFC 9112 §3.2.2), read off the raw request line
-    BOOL _willKeepAlive;                // Decided before the headers go out, honoured after the body does
-    BOOL _awaitingNextRequest;          // Between requests: the idle rules differ from the header phase
-    NSUInteger _requestsServed;         // Bounds how long one client can hold a connection slot
-    NSUInteger _readBytesWhenIdleBegan;  // Read count when the last response finished; the next request can only arrive as reads
-    NSMutableData *_carryOverData;      // Bytes of the NEXT request that arrived in this request's last read
-    BOOL _requestLogged;                // This request's access line and recording are already flushed
+    NSTimeInterval _keepAliveTimeout;         // 0 disables reuse entirely, which is the default
+    BOOL _requestIsBodyless;                  // No Content-Length and no Transfer-Encoding, from the raw header names
+    BOOL _requestTargetIsAbsoluteForm;        // The request-target carried its own authority (RFC 9112 §3.2.2), read off the raw request line
+    BOOL _willKeepAlive;                      // Decided before the headers go out, honoured after the body does
+    BOOL _awaitingNextRequest;                // Between requests: the idle rules differ from the header phase
+    NSUInteger _requestsServed;               // Bounds how long one client can hold a connection slot
+    NSUInteger _readBytesWhenIdleBegan;       // Read count when the last response finished; the next request can only arrive as reads
+    NSMutableData *_carryOverData;            // Bytes of the NEXT request that arrived in this request's last read
+    BOOL _requestLogged;                      // This request's access line and recording are already flushed
     WSKMemoryReservation *_chunkReservation;  // This connection's chunked framing buffer
 
     // Lingering close. See kLingerTotalSeconds and -_beginLingeringCloseIfNeeded.
-    BOOL _lingering;                    // On _connectionQueue only
-    NSUInteger _lingerDiscarded;        // Bytes read and thrown away while lingering
-    CFAbsoluteTime _lingerDeadline;     // Absolute time the drain must stop
-    dispatch_source_t _lingerTimer;     // Nil unless lingering; on _connectionQueue only
+    BOOL _lingering;                 // On _connectionQueue only
+    NSUInteger _lingerDiscarded;     // Bytes read and thrown away while lingering
+    CFAbsoluteTime _lingerDeadline;  // Absolute time the drain must stop
+    dispatch_source_t _lingerTimer;  // Nil unless lingering; on _connectionQueue only
 
 #ifdef __WEBSERVERKIT_ENABLE_TESTING__
     NSUInteger _connectionIndex;
@@ -182,7 +182,7 @@ NS_ASSUME_NONNULL_END
     }
 
     if (_continueData == nil) {
-        CFHTTPMessageRef message = CFHTTPMessageCreateResponse(kCFAllocatorDefault, 100, NULL, kCFHTTPVersion1_1);
+        CFHTTPMessageRef const message = CFHTTPMessageCreateResponse(kCFAllocatorDefault, 100, NULL, kCFHTTPVersion1_1);
         _continueData = CFBridgingRelease(CFHTTPMessageCopySerializedMessage(message));
         CFRelease(message);
         WSK_DCHECK(_continueData);
@@ -216,36 +216,36 @@ NS_ASSUME_NONNULL_END
 // a corpus change.
 static CFStringRef _ReasonPhraseForStatusCode(NSInteger statusCode) {
     switch (statusCode) {
-        case 102:
-            return CFSTR("Processing");
-        case 208:
-            return CFSTR("Already Reported");
-        case 421:
-            return CFSTR("Misdirected Request");
-        case 422:
-            return CFSTR("Unprocessable Content");
-        case 423:
-            return CFSTR("Locked");
-        case 424:
-            return CFSTR("Failed Dependency");
-        case 426:
-            return CFSTR("Upgrade Required");
-        case 428:
-            return CFSTR("Precondition Required");
-        case 429:
-            return CFSTR("Too Many Requests");
-        case 431:
-            return CFSTR("Request Header Fields Too Large");
-        case 507:
-            return CFSTR("Insufficient Storage");
-        case 508:
-            return CFSTR("Loop Detected");
-        case 510:
-            return CFSTR("Not Extended");
-        case 511:
-            return CFSTR("Network Authentication Required");
-        default:
-            return NULL;  // CF's phrase is correct for this one.
+    case 102:
+        return CFSTR("Processing");
+    case 208:
+        return CFSTR("Already Reported");
+    case 421:
+        return CFSTR("Misdirected Request");
+    case 422:
+        return CFSTR("Unprocessable Content");
+    case 423:
+        return CFSTR("Locked");
+    case 424:
+        return CFSTR("Failed Dependency");
+    case 426:
+        return CFSTR("Upgrade Required");
+    case 428:
+        return CFSTR("Precondition Required");
+    case 429:
+        return CFSTR("Too Many Requests");
+    case 431:
+        return CFSTR("Request Header Fields Too Large");
+    case 507:
+        return CFSTR("Insufficient Storage");
+    case 508:
+        return CFSTR("Loop Detected");
+    case 510:
+        return CFSTR("Not Extended");
+    case 511:
+        return CFSTR("Network Authentication Required");
+    default:
+        return NULL;  // CF's phrase is correct for this one.
     }
 }
 
@@ -349,7 +349,6 @@ static BOOL _IsSyntacticallyValidRegName(NSString *name) {
     return YES;
 }
 
-
 // Refuse a request whose "Host" names something this server does not answer to. This is the
 // only defence against DNS rebinding: once a page on evil.example repoints its DNS here, the
 // browser treats it as same-origin, so CORS, Origin comparison and CSRF tokens are all
@@ -420,7 +419,7 @@ static BOOL _IsSyntacticallyValidRegName(NSString *name) {
         BOOL digitsOnly = (portText.length <= 5);
 
         for (NSUInteger i = 0; digitsOnly && (i < portText.length); i++) {
-            unichar character = [portText characterAtIndex:i];
+            unichar const character = [portText characterAtIndex:i];
             digitsOnly = ((character >= '0') && (character <= '9'));
         }
 
@@ -451,9 +450,13 @@ static BOOL _IsSyntacticallyValidRegName(NSString *name) {
     // Deliberately loud. This is the check most likely to surprise a deployment nobody
     // anticipated, and a quiet refusal would present as "the server just doesn't work".
     WSK_LOG_ERROR(@"Refusing \"%@ %@\" from %@: host \"%@\" is not one this server answers to (accepted: %@, plus any IP address literal). Set WSKOption_AllowedHostNames if this name is legitimate.",
-                  _request.method, _request.path, self.remoteAddressString, hostHeader, accepted);
+                  _request.method,
+                  _request.path,
+                  self.remoteAddressString,
+                  hostHeader,
+                  accepted);
     return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_MisdirectedRequest
-                                                      message:@"Host \"%@\" is not served here. Accepted: %@, or any IP address. Set WSKOption_AllowedHostNames to add one.", hostHeader, accepted];
+                                             message:@"Host \"%@\" is not served here. Accepted: %@, or any IP address. Set WSKOption_AllowedHostNames to add one.", hostHeader, accepted];
 }
 
 // RFC 9112 §3.2: a Host whose field value is not a syntactically valid authority answers 400 —
@@ -462,7 +465,10 @@ static BOOL _IsSyntacticallyValidRegName(NSString *name) {
 // certainly a client or proxy bug worth seeing.
 - (WSKResponse *)_invalidHostResponseForAuthority:(NSString *)authority {
     WSK_LOG_ERROR(@"Refusing \"%@ %@\" from %@: \"%@\" is not a syntactically valid authority (RFC 9112 §3.2)",
-                  _request.method, _request.path, self.remoteAddressString, authority);
+                  _request.method,
+                  _request.path,
+                  self.remoteAddressString,
+                  authority);
     return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"Invalid \"Host\" header \"%@\"", authority];
 }
 
@@ -494,7 +500,7 @@ static BOOL _IsSyntacticallyValidRegName(NSString *name) {
 
     WSK_LOG_WARNING(@"Refusing PUT on \"%@\" carrying 'Content-Range: %@': a partial PUT would be stored as the whole entity", _request.path, contentRange);
     return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest
-                                                      message:@"A 'Content-Range' header is not allowed on a PUT (RFC 9110 §9.3.4)"];
+                                             message:@"A 'Content-Range' header is not allowed on a PUT (RFC 9110 §9.3.4)"];
 }
 
 // The Host allow-list and authentication both decide on headers alone, so they can be
@@ -633,7 +639,7 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
     _headerFailureStatus = kWSKHTTPStatusCode_InternalServerError;
     _bodyFailureStatus = kWSKHTTPStatusCode_InternalServerError;
     _chunkReservation = nil;  // Named in the reuse ivar block, so it is cleared here like the rest
-    _headerPhaseTicks = 0;  // Or the second request inherits the first's deadline and is killed early.
+    _headerPhaseTicks = 0;    // Or the second request inherits the first's deadline and is killed early.
     // _requestLogged is deliberately NOT cleared here, and this note exists so the omission reads
     // as a decision rather than the leak this method exists to prevent. It is cleared where the
     // next request's header block actually ARRIVES: this reset runs whether or not another request
@@ -719,7 +725,7 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
         _lingerTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _connectionQueue);
         __weak WSKConnection *weakSelf = self;
         dispatch_source_set_event_handler(_lingerTimer, ^{
-            WSKConnection *strongSelf = weakSelf;
+            WSKConnection *const strongSelf = weakSelf;
 
             if (strongSelf == nil) {
                 return;
@@ -1062,8 +1068,8 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
 // response (no pending socket I/O) never counts, so slow handlers are unaffected. How
 // much counts as "enough" depends on the phase — see the two guards below.
 - (void)_checkIdleTimeout {
-    NSUInteger transferredBytes = _totalBytesRead + _totalBytesWritten;
-    BOOL waitingOnSocket = (_pendingIOCount > 0);
+    NSUInteger const transferredBytes = _totalBytesRead + _totalBytesWritten;
+    BOOL const waitingOnSocket = (_pendingIOCount > 0);
 
     // A reused connection with no request in flight is idle BY DESIGN — that is what it is for —
     // so the slowloris deadline below must not apply to it. It gets its own, longer allowance
@@ -1126,7 +1132,7 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
         minimumProgress = MAX(minimumProgress, (NSUInteger)1);
     }
 
-    BOOL starved = ((transferredBytes - _idleCheckedBytes) < minimumProgress);
+    BOOL const starved = ((transferredBytes - _idleCheckedBytes) < minimumProgress);
 
     if (waitingOnSocket && _idleCheckWasBusy && starved) {
         WSK_LOG_WARNING(@"Closing connection on socket %i: too few bytes transferred while waiting on socket I/O across the idle timeout", _socket);
@@ -1402,12 +1408,12 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
         WSK_LOG_DEBUG(@"Did open connection on socket %i", _socket);
 
         _keepAliveTimeout = server.connectionKeepAliveTimeout;
-        NSTimeInterval idleTimeout = server.connectionIdleTimeout;
+        NSTimeInterval const idleTimeout = server.connectionIdleTimeout;
         _idleTimeout = idleTimeout;
 
         if (idleTimeout > 0.0) {
             _idleTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _connectionQueue);
-            uint64_t interval = (uint64_t)(idleTimeout * (NSTimeInterval)NSEC_PER_SEC);
+            uint64_t const interval = (uint64_t)(idleTimeout * (NSTimeInterval)NSEC_PER_SEC);
             dispatch_source_set_timer(_idleTimer, dispatch_time(DISPATCH_TIME_NOW, (int64_t)interval), interval, interval / 10);
             __weak WSKConnection *weakSelf = self;  // A strong capture would cycle through the source's handler and keep the connection alive forever
             dispatch_source_set_event_handler(_idleTimer, ^{
@@ -1451,7 +1457,7 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
         dispatch_source_cancel(_lingerTimer);
     }
 
-    int result = close(_socket);
+    int const result = close(_socket);
 
     if (result != 0) {
         WSK_LOG_ERROR(@"Failed closing socket %i for connection: %s (%i)", _socket, strerror(errno), errno);
@@ -1495,7 +1501,7 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
                 size_t size = dispatch_data_get_size(buffer);
 
                 if (size > 0) {
-                    NSUInteger originalLength = data.length;
+                    NSUInteger const originalLength = data.length;
                     dispatch_data_apply(buffer, ^bool(dispatch_data_t region, size_t chunkOffset, const void *chunkBytes, size_t chunkSize) {
                         [data appendBytes:chunkBytes length:chunkSize];
                         return true;
@@ -1859,7 +1865,7 @@ static NSInteger _StatusForOversizedHeaderBlock(NSData *headersData) {
                     NSError *error = nil;
 
                     if ([self->_request performWriteData:bodyData error:&error]) {
-                        NSUInteger remainingLength = length - bodyData.length;
+                        NSUInteger const remainingLength = length - bodyData.length;
 
                         if (remainingLength) {
                             [self readBodyWithRemainingLength:remainingLength completionBlock:block];
@@ -1943,7 +1949,7 @@ static inline NSUInteger _ScanHexNumber(const void *bytes, NSUInteger size) {
             break;
         }
 
-        NSRange extensionRange = [chunkData rangeOfData:[NSData dataWithBytes:";" length:1] options:0 range:NSMakeRange(0, range.location)];  // Ignore chunk extensions
+        NSRange const extensionRange = [chunkData rangeOfData:[NSData dataWithBytes:";" length:1] options:0 range:NSMakeRange(0, range.location)];  // Ignore chunk extensions
         NSUInteger length = _ScanHexNumber((char *)chunkData.bytes, extensionRange.location != NSNotFound ? extensionRange.location : range.location);
 
         if (length != NSNotFound) {
@@ -1982,7 +1988,7 @@ static inline NSUInteger _ScanHexNumber(const void *bytes, NSUInteger size) {
                     return;
                 }
             } else {
-                NSRange trailerRange = [chunkData rangeOfData:_CRLFCRLFData options:0 range:NSMakeRange(range.location, chunkData.length - range.location)];  // Ignore trailers
+                NSRange const trailerRange = [chunkData rangeOfData:_CRLFCRLFData options:0 range:NSMakeRange(range.location, chunkData.length - range.location)];  // Ignore trailers
 
                 if (trailerRange.location != NSNotFound) {
                     block(YES);
@@ -2040,7 +2046,7 @@ static inline NSUInteger _ScanHexNumber(const void *bytes, NSUInteger size) {
 @implementation WSKConnection (Write)
 
 - (void)writeData:(NSData *)data withCompletionBlock:(WriteDataCompletionBlock)block {
-    dispatch_data_t buffer = dispatch_data_create(data.bytes, data.length, _connectionQueue, ^{
+    dispatch_data_t const buffer = dispatch_data_create(data.bytes, data.length, _connectionQueue, ^{
         [data self];  // Keeps ARC from releasing data too early
     });
 
@@ -2086,7 +2092,7 @@ static inline NSUInteger _ScanHexNumber(const void *bytes, NSUInteger size) {
                 if ([self _shouldChunkResponse]) {
                     const char *hexString = [[NSString stringWithFormat:@"%lx", (unsigned long)data.length] UTF8String];
                     size_t hexLength = strlen(hexString);
-                    NSData *chunk = [NSMutableData dataWithLength:(hexLength + 2 + data.length + 2)];
+                    NSData *const chunk = [NSMutableData dataWithLength:(hexLength + 2 + data.length + 2)];
 
                     if (chunk == nil) {
                         WSK_LOG_ERROR(@"Failed allocating memory for response body chunk for socket %i: %@", self->_socket, error);
@@ -2206,8 +2212,8 @@ static BOOL _ConstantTimeEqualStrings(NSString *a, NSString *b) {
     }
     const char *ca = da.bytes;
     const char *cb = db.bytes;
-    size_t la = da.length;
-    size_t lb = db.length;
+    size_t const la = da.length;
+    size_t const lb = db.length;
     size_t n = (la > lb) ? la : lb;
     unsigned char diff = (unsigned char)(la ^ lb);
     for (size_t i = 0; i < n; i++) {
@@ -2227,7 +2233,7 @@ static BOOL _ConstantTimeEqualStrings(NSString *a, NSString *b) {
 #define kDigestNonceLifetime 300.0  // seconds a nonce stays valid after issue
 
 static NSString *_GenerateDigestNonce(NSString *secret) {
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    CFAbsoluteTime const now = CFAbsoluteTimeGetCurrent();
     unsigned long long seconds = (unsigned long long)now;
     NSString *const stamp = [NSString stringWithFormat:@"%llX", seconds];
     return [NSString stringWithFormat:@"%@.%@", stamp, WSKComputeMD5Digest(@"%@:%@", stamp, secret)];
@@ -2242,7 +2248,7 @@ static BOOL _ValidateDigestNonce(NSString *nonce, NSString *secret, BOOL *expire
         return NO;
     }
 
-    NSRange dot = [nonce rangeOfString:@"." options:NSBackwardsSearch];
+    NSRange const dot = [nonce rangeOfString:@"." options:NSBackwardsSearch];
     if (dot.location == NSNotFound) {
         return NO;
     }
@@ -2259,7 +2265,7 @@ static BOOL _ValidateDigestNonce(NSString *nonce, NSString *secret, BOOL *expire
         return NO;
     }
 
-    CFAbsoluteTime elapsed = CFAbsoluteTimeGetCurrent() - (CFAbsoluteTime)seconds;
+    CFAbsoluteTime const elapsed = CFAbsoluteTimeGetCurrent() - (CFAbsoluteTime)seconds;
     if ((elapsed < 0.0) || (elapsed > kDigestNonceLifetime)) {
         *expired = YES;
     }
@@ -2275,10 +2281,10 @@ static NSString *_DigestURIPath(NSString *uri) {
         return nil;
     }
 
-    NSRange cut = [uri rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"?#"]];
+    NSRange const cut = [uri rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"?#"]];
     NSString *target = (cut.location != NSNotFound) ? [uri substringToIndex:cut.location] : uri;
 
-    NSRange scheme = [target rangeOfString:@"://"];
+    NSRange const scheme = [target rangeOfString:@"://"];
     if (scheme.location != NSNotFound) {
         NSString *const rest = [target substringFromIndex:(scheme.location + 3)];
         NSRange slash = [rest rangeOfString:@"/"];
@@ -2396,7 +2402,7 @@ static NSString *_DigestURIPath(NSString *uri) {
 // must still look like entity-tags, so a stray fragment cannot produce a false match — a
 // wrong "no" here costs a download, a wrong "yes" serves stale content.
 static BOOL _ETagMatchesIfNoneMatch(NSString *responseETag, NSString *ifNoneMatch) {
-    NSString *responseValue = [responseETag hasPrefix:@"W/"] ? [responseETag substringFromIndex:2] : responseETag;
+    NSString *const responseValue = [responseETag hasPrefix:@"W/"] ? [responseETag substringFromIndex:2] : responseETag;
 
     for (NSString *candidate in [ifNoneMatch componentsSeparatedByString:@","]) {
         NSString *trimmed = [candidate stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
@@ -2484,9 +2490,9 @@ static inline BOOL _CompareResources(NSString *responseETag, NSString *requestET
         _CompareResources(response.eTag, request.ifNoneMatch, response.lastModifiedDate, request.ifModifiedSince)) {
         NSInteger code = kWSKHTTPStatusCode_PreconditionFailed;
         if ([request.method isEqualToString:@"HEAD"] || [request.method isEqualToString:@"GET"]) {
-          code = kWSKHTTPStatusCode_NotModified;
+            code = kWSKHTTPStatusCode_NotModified;
         }
-        WSKResponse *newResponse = [WSKResponse responseWithStatusCode:code];
+        WSKResponse *const newResponse = [WSKResponse responseWithStatusCode:code];
         newResponse.cacheControlMaxAge = response.cacheControlMaxAge;
         newResponse.lastModifiedDate = response.lastModifiedDate;
         newResponse.eTag = response.eTag;
@@ -2502,7 +2508,7 @@ static inline BOOL _CompareResources(NSString *responseETag, NSString *requestET
     WSK_DCHECK((statusCode >= 400) && (statusCode < 600));
     _requestReceived = YES;  // Reading is over either way; only the error response remains
     [self _initializeResponseHeadersWithStatusCode:statusCode];
-    [self writeHeadersWithCompletionBlock:^(BOOL success){
+    [self writeHeadersWithCompletionBlock:^(BOOL success) {
         if (success) {
             [self _beginLingeringCloseIfNeeded];
         }
@@ -2523,7 +2529,7 @@ static inline BOOL _CompareResources(NSString *responseETag, NSString *requestET
 
         if (_requestFD > 0) {
             close(_requestFD);
-            NSString *const name = [NSString stringWithFormat:@"%03lu-%@.request", (unsigned long)_connectionIndex, _virtualHEAD ? @"HEAD" : _request.method];
+            NSString *name = [NSString stringWithFormat:@"%03lu-%@.request", (unsigned long)_connectionIndex, _virtualHEAD ? @"HEAD" : _request.method];
             success = [[NSFileManager defaultManager] moveItemAtPath:_requestPath toPath:[[[NSFileManager defaultManager] currentDirectoryPath] stringByAppendingPathComponent:name] error:&error];
         }
 
@@ -2541,7 +2547,7 @@ static inline BOOL _CompareResources(NSString *responseETag, NSString *requestET
 
         if (_responseFD > 0) {
             close(_responseFD);
-            NSString *const name = [NSString stringWithFormat:@"%03lu-%i.response", (unsigned long)_connectionIndex, (int)_statusCode];
+            NSString *name = [NSString stringWithFormat:@"%03lu-%i.response", (unsigned long)_connectionIndex, (int)_statusCode];
             success = [[NSFileManager defaultManager] moveItemAtPath:_responsePath toPath:[[[NSFileManager defaultManager] currentDirectoryPath] stringByAppendingPathComponent:name] error:&error];
         }
 

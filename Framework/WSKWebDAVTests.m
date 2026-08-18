@@ -11,9 +11,11 @@
 @implementation WSKWebDAVTests
 
 - (void)testDAVServer {
-    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] init];
+    NSString *const dir = MakeTempDirectory();
+    WSKWebDAVServer *const server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
 
     XCTAssertNotNil(server);
+    [[NSFileManager defaultManager] removeItemAtPath:dir error:NULL];
 }
 
 // A MOVE whose destination resolves to the source file must never destroy it. The

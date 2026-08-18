@@ -37,7 +37,7 @@
     WSK_DCHECK(((NSInteger)errorCode >= 400) && ((NSInteger)errorCode < 500));
     va_list arguments;
     va_start(arguments, format);
-    WSKErrorResponse *response = [(WSKErrorResponse *)[self alloc] initWithStatusCode:errorCode underlyingError:nil messageFormat:format arguments:arguments];
+    WSKErrorResponse *const response = [(WSKErrorResponse *)[self alloc] initWithStatusCode:errorCode underlyingError:nil messageFormat:format arguments:arguments];
     va_end(arguments);
     return response;
 }
@@ -46,7 +46,7 @@
     WSK_DCHECK(((NSInteger)errorCode >= 500) && ((NSInteger)errorCode < 600));
     va_list arguments;
     va_start(arguments, format);
-    WSKErrorResponse *response = [(WSKErrorResponse *)[self alloc] initWithStatusCode:errorCode underlyingError:nil messageFormat:format arguments:arguments];
+    WSKErrorResponse *const response = [(WSKErrorResponse *)[self alloc] initWithStatusCode:errorCode underlyingError:nil messageFormat:format arguments:arguments];
     va_end(arguments);
     return response;
 }
@@ -55,7 +55,7 @@
     WSK_DCHECK(((NSInteger)errorCode >= 400) && ((NSInteger)errorCode < 500));
     va_list arguments;
     va_start(arguments, format);
-    WSKErrorResponse *response = [(WSKErrorResponse *)[self alloc] initWithStatusCode:errorCode underlyingError:underlyingError messageFormat:format arguments:arguments];
+    WSKErrorResponse *const response = [(WSKErrorResponse *)[self alloc] initWithStatusCode:errorCode underlyingError:underlyingError messageFormat:format arguments:arguments];
     va_end(arguments);
     return response;
 }
@@ -64,7 +64,7 @@
     WSK_DCHECK(((NSInteger)errorCode >= 500) && ((NSInteger)errorCode < 600));
     va_list arguments;
     va_start(arguments, format);
-    WSKErrorResponse *response = [(WSKErrorResponse *)[self alloc] initWithStatusCode:errorCode underlyingError:underlyingError messageFormat:format arguments:arguments];
+    WSKErrorResponse *const response = [(WSKErrorResponse *)[self alloc] initWithStatusCode:errorCode underlyingError:underlyingError messageFormat:format arguments:arguments];
     va_end(arguments);
     return response;
 }
@@ -107,10 +107,10 @@ static inline NSString *_ClampReflectedString(NSString *string) {
     NSString *const title = [NSString stringWithFormat:@"HTTP Error %i", (int)statusCode];
     NSString *const error = underlyingError ? [NSString stringWithFormat:@"[%@] %@ (%li)", _EscapeHTMLString(_ClampReflectedString(underlyingError.domain)), _EscapeHTMLString(_ClampReflectedString(underlyingError.localizedDescription)), (long)underlyingError.code] : @"";
     NSString *const html = [NSString stringWithFormat:@"<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>%@</title></head><body><h1>%@: %@</h1><h3>%@</h3></body></html>",
-                                                title,
-                                                title,
-                                                _EscapeHTMLString(message),
-                                                error];
+                                                      title,
+                                                      title,
+                                                      _EscapeHTMLString(message),
+                                                      error];
 
     if ((self = [self initWithHTML:html])) {
         self.statusCode = statusCode;

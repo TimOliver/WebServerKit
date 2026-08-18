@@ -25,14 +25,14 @@
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-
 #if !__has_feature(objc_arc)
 #error WSKWebServer requires ARC
 #endif
 
+#import "WSKMemoryReservation.h"
+
 #import <os/lock.h>
 
-#import "WSKMemoryReservation.h"
 #import "WSKPrivate.h"
 
 // Guards every field below. Contended only when a buffer grows, never per byte.
@@ -44,14 +44,14 @@ static NSUInteger _memoryDecompressedLimit = kWSKMaxDecompressedBodyLength;
 
 NSUInteger WSKMaxInMemoryBodyLength(void) {
     os_unfair_lock_lock(&_memoryLock);
-    NSUInteger value = _memoryPerRequestLimit;
+    NSUInteger const value = _memoryPerRequestLimit;
     os_unfair_lock_unlock(&_memoryLock);
     return value;
 }
 
 NSUInteger WSKMaxDecompressedBodyLength(void) {
     os_unfair_lock_lock(&_memoryLock);
-    NSUInteger value = _memoryDecompressedLimit;
+    NSUInteger const value = _memoryDecompressedLimit;
     os_unfair_lock_unlock(&_memoryLock);
     return value;
 }
@@ -66,7 +66,7 @@ void WSKSetMemoryLimitsForTesting(NSUInteger perRequest, NSUInteger decompressed
 
 NSUInteger WSKReservedMemoryLength(void) {
     os_unfair_lock_lock(&_memoryLock);
-    NSUInteger value = _memoryReserved;
+    NSUInteger const value = _memoryReserved;
     os_unfair_lock_unlock(&_memoryLock);
     return value;
 }
@@ -80,7 +80,7 @@ NSUInteger WSKReservedMemoryLength(void) {
     os_unfair_lock_lock(&_memoryLock);
 
     if (bytes > _bytes) {
-        NSUInteger increase = bytes - _bytes;
+        NSUInteger const increase = bytes - _bytes;
 
         // Refuse rather than partially grant: the caller fails the request cleanly, which
         // is the whole point — the alternative is every connection buffering a little more

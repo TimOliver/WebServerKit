@@ -32,12 +32,10 @@
 // WebDAV specifications: http://webdav.org/specs/rfc4918.html
 
 // Requires "HEADER_SEARCH_PATHS = $(SDKROOT)/usr/include/libxml2" in Xcode build settings
-#import "WSKPrivate.h"
 #import "WSKWebDAVServer.h"
 
-#import <sys/xattr.h>
-
 #import <libxml/parser.h>
+#import <sys/xattr.h>
 
 #import "WSKDataRequest.h"
 #import "WSKDataResponse.h"
@@ -45,6 +43,7 @@
 #import "WSKFileRequest.h"
 #import "WSKFileResponse.h"
 #import "WSKFunctions.h"
+#import "WSKPrivate.h"
 
 #define kXMLParseOptions (XML_PARSE_NONET | XML_PARSE_RECOVER | XML_PARSE_NOBLANKS | XML_PARSE_COMPACT | XML_PARSE_NOWARNING | XML_PARSE_NOERROR)
 
@@ -594,7 +593,7 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
 }
 
 - (WSKResponse *)performOPTIONS:(WSKRequest *)request {
-    WSKResponse *response = [WSKResponse response];
+    WSKResponse *const response = [WSKResponse response];
     [response setValue:_AllowedMethodsForRequest(request) forAdditionalHeader:@"Allow"];
 
     if (_IsMacFinder(request)) {
@@ -633,7 +632,7 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
     // in the listing that advertised it — advertise-then-403 in one direction, hidden-then-200 in
     // the other.
     NSString *const itemName = [relativePath lastPathComponent];
-    NSString *const resolvedName = [absolutePath lastPathComponent];
+    NSString *resolvedName = [absolutePath lastPathComponent];
 
     if (isHidden || (!isDirectory && ![self _checkFileExtensionForName:itemName resolvedName:resolvedName])) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Downloading \"%@\" is not allowed", relativePath];
@@ -723,7 +722,7 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Conflict message:@"Missing intermediate collection(s) for \"%@\"", relativePath];
     }
 
-    BOOL existing = [[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory];
+    BOOL const existing = [[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory];
 
     if (existing && isDirectory) {
         return _MethodNotAllowed(request, @"PUT not allowed on existing collection \"%@\"", relativePath);
@@ -764,7 +763,7 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
         return [WSKErrorResponse responseWithServerError:WSKServerErrorStatusCodeForError(error) underlyingError:error message:@"Failed moving uploaded file to \"%@\"", relativePath];
     }
 
-    if (stagingPath && ![self _replaceItemAtPath:absolutePath withStagedItemAtPath:stagingPath expecting:(haveVetted ? &vetted : NULL) error:&error]) {
+    if (stagingPath && ![self _replaceItemAtPath:absolutePath withStagedItemAtPath:stagingPath expecting:(haveVetted ? &vetted : NULL)error:&error]) {
         [fileManager removeItemAtPath:stagingPath error:NULL];
         return [WSKErrorResponse responseWithServerError:WSKServerErrorStatusCodeForError(error) underlyingError:error message:@"Failed moving uploaded file to \"%@\"", relativePath];
     }
@@ -872,7 +871,7 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
     // and "infinity" mean the same thing and it keeps working.
     if (isDirectory && depthHeader && _HeaderTokenIs(depthHeader, @"0")) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest
-                                                          message:@"'Depth: 0' is not allowed when deleting the collection \"%@\" (RFC 4918 §9.6.1)", relativePath];
+                                                 message:@"'Depth: 0' is not allowed when deleting the collection \"%@\" (RFC 4918 §9.6.1)", relativePath];
     }
 
     NSString *const undeletable = [self _firstUnvettableItemAtPath:absolutePath isDirectory:isDirectory];
@@ -1074,7 +1073,7 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
     }
 
     NSString *const srcRelativePath = request.path;
-    NSString * srcAbsolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(srcRelativePath)];
+    NSString *srcAbsolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(srcRelativePath)];
 
     NSString *const destinationHeader = request.headers[@"Destination"];
     NSString *const hostHeader = request.headers[@"Host"];
@@ -1129,7 +1128,7 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
         // choice for this case even though the fault is the client's.
         if ((dstRelativePath.length > 0) && ![self _destinationHost:destinationURL.host isThisServer:hostHeader]) {
             return [WSKErrorResponse responseWithServerError:kWSKHTTPStatusCode_BadGateway
-                                                              message:@"Destination \"%@\" is on another server", destinationHeader];
+                                                     message:@"Destination \"%@\" is on another server", destinationHeader];
         }
     }
 
@@ -1137,7 +1136,7 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"Malformed 'Destination' header: %@", destinationHeader];
     }
 
-    NSString * dstAbsolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(dstRelativePath)];
+    NSString *dstAbsolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(dstRelativePath)];
 
     // Neither source nor destination may be the upload directory itself: a Destination
     // that collapses to the root (e.g. "/" or "/..") would otherwise let a MOVE with
@@ -1201,7 +1200,7 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
 
     NSString *const overwriteHeader = request.headers[@"Overwrite"];
     BOOL dstIsDirectory = NO;
-    BOOL existing = [[NSFileManager defaultManager] fileExistsAtPath:dstAbsolutePath isDirectory:&dstIsDirectory];
+    BOOL const existing = [[NSFileManager defaultManager] fileExistsAtPath:dstAbsolutePath isDirectory:&dstIsDirectory];
 
     if (existing && ((isMove && !_HeaderTokenIs(overwriteHeader, @"T")) || (!isMove && _HeaderTokenIs(overwriteHeader, @"F")))) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_PreconditionFailed message:@"Destination \"%@\" already exists", dstRelativePath];
@@ -1335,7 +1334,7 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
         }
     }
 
-    if (![self _replaceItemAtPath:dstAbsolutePath withStagedItemAtPath:stagingPath expecting:(haveVettedDst ? &vettedDst : NULL) error:&error]) {
+    if (![self _replaceItemAtPath:dstAbsolutePath withStagedItemAtPath:stagingPath expecting:(haveVettedDst ? &vettedDst : NULL)error:&error]) {
         // The swap is the only step that can fail with the replacement already built, so
         // unwind it: put a MOVE's source back rather than stranding it under the staging
         // name, and drop a COPY's staged duplicate. Either way the destination is intact.
@@ -1425,7 +1424,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
         // Classified by what a symlink points at, so the listing describes what is actually served.
         NSString *resolvedName = nil;
         NSString *const type = WSKServableFileTypeAtPath(itemPath, _uploadDirectory, _allowHiddenItems, &resolvedName);
-        BOOL isFile = [type isEqualToString:NSFileTypeRegular];
+        BOOL const isFile = [type isEqualToString:NSFileTypeRegular];
         BOOL isDirectory = [type isEqualToString:NSFileTypeDirectory];
 
         if ((isFile && [self _checkFileExtensionForName:[itemPath lastPathComponent] resolvedName:resolvedName]) || isDirectory) {
@@ -1731,9 +1730,9 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
                  [localName isEqualToString:@"getlastmodified"] || [localName isEqualToString:@"getcontentlength"] ||
                  [localName isEqualToString:@"getetag"] || [localName isEqualToString:@"lockdiscovery"] ||
                  [localName isEqualToString:@"supportedlock"] || [localName isEqualToString:@"getcontenttype"])) {
-                 // displayname is deliberately ABSENT from this list: RFC 4918 §15.2 says it
-                 // "SHOULD NOT be protected", so it is stored as a dead property like any other and
-                 // the PROPFIND writer prefers a stored value over the derived name.
+                // displayname is deliberately ABSENT from this list: RFC 4918 §15.2 says it
+                // "SHOULD NOT be protected", so it is stored as a dead property like any other and
+                // the PROPFIND writer prefers a stored value over the derived name.
                 [refused addObject:_DeadPropertyElement(_DeadPropertyKey(href, localName))];
                 continue;
             }
@@ -1803,7 +1802,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
 
     [xmlString appendString:@"</D:response>\n</D:multistatus>"];
 
-    WSKDataResponse *const response = [WSKDataResponse responseWithData:(NSData * _Nonnull)[xmlString dataUsingEncoding:NSUTF8StringEncoding] contentType:@"application/xml; charset=\"utf-8\""];
+    WSKDataResponse *const response = [WSKDataResponse responseWithData:(NSData *_Nonnull)[xmlString dataUsingEncoding:NSUTF8StringEncoding] contentType:@"application/xml; charset=\"utf-8\""];
     response.statusCode = kWSKHTTPStatusCode_MultiStatus;
     return response;
 }
@@ -1824,7 +1823,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
         // RFC 4918 §9.1: a server that refuses an infinite-depth PROPFIND SHOULD answer 403 with
         // the DAV:propfind-finite-depth precondition, which is machine-readable and tells the
         // client to retry with a bounded depth. A bare 400 says only "malformed", which this is not.
-        WSKDataResponse *const response = [WSKDataResponse responseWithData:(NSData * _Nonnull)[@"<?xml version=\"1.0\" encoding=\"utf-8\" ?><D:error xmlns:D=\"DAV:\"><D:propfind-finite-depth/></D:error>" dataUsingEncoding:NSUTF8StringEncoding] contentType:@"application/xml; charset=\"utf-8\""];
+        WSKDataResponse *const response = [WSKDataResponse responseWithData:(NSData *_Nonnull)[@"<?xml version=\"1.0\" encoding=\"utf-8\" ?><D:error xmlns:D=\"DAV:\"><D:propfind-finite-depth/></D:error>" dataUsingEncoding:NSUTF8StringEncoding] contentType:@"application/xml; charset=\"utf-8\""];
         response.statusCode = kWSKHTTPStatusCode_Forbidden;
         return response;
     } else {
@@ -1843,7 +1842,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
         }
 
         BOOL success = YES;
-        xmlDocPtr document = xmlReadMemory(request.data.bytes, (int)request.data.length, NULL, NULL, kXMLParseOptions);
+        xmlDocPtr const document = xmlReadMemory(request.data.bytes, (int)request.data.length, NULL, NULL, kXMLParseOptions);
 
         if (document) {
             xmlNodePtr rootNode = _XMLChildWithName(document->children, (const xmlChar *)"propfind");
@@ -1977,7 +1976,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
     [xmlString appendString:@"</D:multistatus>"];
 
     WSKDataResponse *const response = [WSKDataResponse responseWithData:(NSData *)[xmlString dataUsingEncoding:NSUTF8StringEncoding]
-                                                                             contentType:@"application/xml; charset=\"utf-8\""];
+                                                            contentType:@"application/xml; charset=\"utf-8\""];
     response.statusCode = kWSKHTTPStatusCode_MultiStatus;
     return response;
 }
@@ -2046,7 +2045,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
     }
 
     BOOL success = YES;
-    xmlDocPtr document = xmlReadMemory(request.data.bytes, (int)request.data.length, NULL, NULL, kXMLParseOptions);
+    xmlDocPtr const document = xmlReadMemory(request.data.bytes, (int)request.data.length, NULL, NULL, kXMLParseOptions);
 
     if (document) {
         xmlNodePtr node = _XMLChildWithName(document->children, (const xmlChar *)"lockinfo");
@@ -2140,8 +2139,8 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
     [xmlString appendString:@"</D:prop>"];
 
     [self logVerbose:@"WebDAV pretending to lock \"%@\"", relativePath];
-    WSKDataResponse *response = [WSKDataResponse responseWithData:(NSData *)[xmlString dataUsingEncoding:NSUTF8StringEncoding]
-                                                                        contentType:@"application/xml; charset=\"utf-8\""];
+    WSKDataResponse *const response = [WSKDataResponse responseWithData:(NSData *)[xmlString dataUsingEncoding:NSUTF8StringEncoding]
+                                                            contentType:@"application/xml; charset=\"utf-8\""];
     // RFC 4918 §9.10: a LOCK that creates a new lock MUST return the token in a Lock-Token
     // response header (as a Coded-URL), not only inside the lockdiscovery body. Finder reads
     // the body — the recorded traces predate this header, and both spellings were re-driven

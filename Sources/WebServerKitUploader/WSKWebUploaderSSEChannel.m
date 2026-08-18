@@ -25,13 +25,14 @@
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#import <Foundation/Foundation.h>
 #import "WSKWebUploaderSSEChannel.h"
+
+#import <Foundation/Foundation.h>
 
 @implementation WSKWebUploaderSSEChannel {
     NSUInteger _capacity;
-    NSMutableArray<NSData*>* _buffer;
-    void (^_parkedReader)(NSData* data);
+    NSMutableArray<NSData *> *_buffer;
+    void (^_parkedReader)(NSData *data);
 }
 
 - (instancetype)init {
@@ -58,12 +59,12 @@
     return _buffer.count;
 }
 
-- (void)enqueueData:(NSData*)data {
+- (void)enqueueData:(NSData *)data {
     if (_closed) {
         return;
     }
     if (_parkedReader) {
-        void (^reader)(NSData*) = _parkedReader;
+        void (^reader)(NSData *) = _parkedReader;
         _parkedReader = nil;
         reader(data);
         return;
@@ -74,14 +75,14 @@
     }
 }
 
-- (void)parkReader:(void (^)(NSData* data))reader {
+- (void)parkReader:(void (^)(NSData *data))reader {
     if (_closed) {
         reader([NSData data]);  // End-of-stream: complete immediately, never park.
         return;
     }
     _idleHeartbeats = 0;  // The client came back to read: it is alive.
     if (_buffer.count > 0) {
-        NSData* data = _buffer.firstObject;
+        NSData *data = _buffer.firstObject;
         [_buffer removeObjectAtIndex:0];
         reader(data);
         return;
@@ -96,7 +97,7 @@
     _closed = YES;
     [_buffer removeAllObjects];
     if (_parkedReader) {
-        void (^reader)(NSData*) = _parkedReader;
+        void (^reader)(NSData *) = _parkedReader;
         _parkedReader = nil;
         reader([NSData data]);  // End-of-stream sentinel: lets the connection finish cleanly.
     }

@@ -47,9 +47,9 @@ FOUNDATION_EXPORT NSBundle *WebServerKitUploader_SWIFTPM_MODULE_BUNDLE(void);
 #import "WSKFileResponse.h"
 #import "WSKFunctions.h"
 #import "WSKMultiPartFormRequest.h"
+#import "WSKPrivate.h"
 #import "WSKStreamedResponse.h"
 #import "WSKURLEncodedFormRequest.h"
-#import "WSKPrivate.h"
 #import "WSKWebUploader.h"
 #import "WSKWebUploaderSSEChannel.h"
 #import "WSKWebUploaderSSEResponse.h"
@@ -127,7 +127,7 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
     NSString *_resolvedUploadDirectory;
     NSMutableArray<WSKWebUploaderSSEChannel *> *_sseChannels;  // One per connected /events client. Accessed only on _sseQueue.
     dispatch_queue_t _sseQueue;
-    BOOL _sseAcceptingChannels;  // Owned by _sseQueue. YES only between -start and -stop, while SSE is enabled.
+    BOOL _sseAcceptingChannels;      // Owned by _sseQueue. YES only between -start and -stop, while SSE is enabled.
     NSDate *_lastSSERefusalLogDate;  // Owned by _sseQueue. Rate-limits the "at capacity" warning.
     dispatch_source_t _heartbeatTimer;
     BOOL _heartbeatSuspended;  // Owned by _sseQueue (except in -dealloc). Keeps suspend/resume balanced.
@@ -209,13 +209,14 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
         // is reverse match order). An unclaimed GET answers 404 rather than the 501 the server
         // gives when nothing matches at all — 501 is a statement about the METHOD, wrong for
         // "/favicon.ico". GET only, so no other method's status changes.
-        [self addHandlerWithMatchBlock:^WSKRequest *(NSString *requestMethod, NSURL *requestURL, NSDictionary<NSString *, NSString *> *requestHeaders, NSString *urlPath, NSDictionary<NSString *, NSString *> *urlQuery) {
-            if (![requestMethod isEqualToString:@"GET"]) {
-                return nil;
-            }
+        [self
+            addHandlerWithMatchBlock:^WSKRequest *(NSString *requestMethod, NSURL *requestURL, NSDictionary<NSString *, NSString *> *requestHeaders, NSString *urlPath, NSDictionary<NSString *, NSString *> *urlQuery) {
+                if (![requestMethod isEqualToString:@"GET"]) {
+                    return nil;
+                }
 
-            return [[WSKRequest alloc] initWithMethod:requestMethod url:requestURL headers:requestHeaders path:urlPath query:urlQuery];
-        }
+                return [[WSKRequest alloc] initWithMethod:requestMethod url:requestURL headers:requestHeaders path:urlPath query:urlQuery];
+            }
             processBlock:^WSKResponse *(WSKRequest *request) {
                 return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", request.path];
             }];
@@ -226,7 +227,7 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
         // hold: the base-path handler normalizes, so "/./index.html" and "/x/../index.html" still
         // reached the raw file (both verified). An exact path is never a containment boundary;
         // serving only what the page asks for leaves no spelling to find.
-        for (NSString *const assetDirectory in @[ @"css", @"js", @"fonts" ]) {
+        for (NSString *const assetDirectory in @[@"css", @"js", @"fonts"]) {
             [self addGETHandlerForBasePath:[NSString stringWithFormat:@"/%@/", assetDirectory]
                              directoryPath:[(NSString *)[siteBundle resourcePath] stringByAppendingPathComponent:assetDirectory]
                              indexFilename:nil
@@ -237,93 +238,93 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
         // Web page
         WSKProcessBlock const servePage = ^WSKResponse *(WSKRequest *request) {
 #if TARGET_OS_IPHONE
-                         NSString *device = [[UIDevice currentDevice] name];
+            NSString *const device = [[UIDevice currentDevice] name];
 #else
-                NSString *device = [[NSHost currentHost] localizedName];
+            NSString *const device = [[NSHost currentHost] localizedName];
 #endif
-                         NSString *title = server.title;
+            NSString *title = server.title;
 
-                         if (title == nil) {
-                             title = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleDisplayName"];
+            if (title == nil) {
+                title = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleDisplayName"];
 
-                             if (title == nil) {
-                                 title = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleName"];
-                             }
+                if (title == nil) {
+                    title = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleName"];
+                }
 
 #if !TARGET_OS_IPHONE
 
-                             if (title == nil) {
-                                 title = [[NSProcessInfo processInfo] processName];
-                             }
+                if (title == nil) {
+                    title = [[NSProcessInfo processInfo] processName];
+                }
 
 #endif
-                         }
+            }
 
-                         NSString *header = server.header;
+            NSString *header = server.header;
 
-                         if (header == nil) {
-                             header = title;
-                         }
+            if (header == nil) {
+                header = title;
+            }
 
-                         NSString *prologue = server.prologue;
+            NSString *prologue = server.prologue;
 
-                         if (prologue == nil) {
-                             prologue = [siteBundle localizedStringForKey:@"PROLOGUE" value:@"" table:nil];
-                         }
+            if (prologue == nil) {
+                prologue = [siteBundle localizedStringForKey:@"PROLOGUE" value:@"" table:nil];
+            }
 
-                         NSString *epilogue = server.epilogue;
+            NSString *epilogue = server.epilogue;
 
-                         if (epilogue == nil) {
-                             epilogue = [siteBundle localizedStringForKey:@"EPILOGUE" value:@"" table:nil];
-                         }
+            if (epilogue == nil) {
+                epilogue = [siteBundle localizedStringForKey:@"EPILOGUE" value:@"" table:nil];
+            }
 
-                         NSString *footer = server.footer;
+            NSString *footer = server.footer;
 
-                         if (footer == nil) {
-                             NSString *name = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleDisplayName"];
+            if (footer == nil) {
+                NSString *name = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleDisplayName"];
 
-                             if (name == nil) {
-                                 name = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleName"];
-                             }
+                if (name == nil) {
+                    name = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleName"];
+                }
 
-                             NSString *version = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+                NSString *version = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
 #if !TARGET_OS_IPHONE
 
-                             if (!name && !version) {
-                                 name = @"OS X";
-                                 version = [[NSProcessInfo processInfo] operatingSystemVersionString];
-                             }
+                if (!name && !version) {
+                    name = @"OS X";
+                    version = [[NSProcessInfo processInfo] operatingSystemVersionString];
+                }
 
 #endif
-                             footer = [NSString stringWithFormat:[siteBundle localizedStringForKey:@"FOOTER_FORMAT" value:@"" table:nil], name, version];
-                         }
+                footer = [NSString stringWithFormat:[siteBundle localizedStringForKey:@"FOOTER_FORMAT" value:@"" table:nil], name, version];
+            }
 
-                         // Every value must be non-nil: a nil in a dictionary literal raises
-                         // NSInvalidArgumentException, which would abort the app on "GET /".
-                         // Both sources can legitimately be nil — -[NSHost localizedName] for a
-                         // host with no resolvable name, and the bundle keys for a bundle that
-                         // declares neither a display name nor a name.
-                         WSKDataResponse *const response =
-                             [WSKDataResponse responseWithHTMLTemplate:(NSString *)[siteBundle pathForResource:@"index" ofType:@"html"]
-                                                                      variables:@{
-                                                                          @"device": _JavaScriptStringLiteral(device),  // Substituted into a JS string literal, which supplies its own quotes.
-                                                                          @"title": title ? title : @"",
-                                                                          @"header": header ? header : @"",
-                                                                          @"prologue": prologue ? prologue : @"",
-                                                                          @"epilogue": epilogue ? epilogue : @"",
-                                                                          @"footer": footer ? footer : @""
-                                                                      }];
+            // Every value must be non-nil: a nil in a dictionary literal raises
+            // NSInvalidArgumentException, which would abort the app on "GET /".
+            // Both sources can legitimately be nil — -[NSHost localizedName] for a
+            // host with no resolvable name, and the bundle keys for a bundle that
+            // declares neither a display name nor a name.
+            WSKDataResponse *const response =
+                [WSKDataResponse responseWithHTMLTemplate:(NSString *)[siteBundle pathForResource:@"index" ofType:@"html"]
+                                                variables:@{
+                                                    @"device": _JavaScriptStringLiteral(device),  // Substituted into a JS string literal, which supplies its own quotes.
+                                                    @"title": title ? title : @"",
+                                                    @"header": header ? header : @"",
+                                                    @"prologue": prologue ? prologue : @"",
+                                                    @"epilogue": epilogue ? epilogue : @"",
+                                                    @"footer": footer ? footer : @""
+                                                }];
 
-                         // The UI's one-click delete and move buttons are worth clickjacking —
-                         // and the "#/path" fragment even lets an attacker aim the framed page
-                         // at a chosen folder — so refuse to be framed at all. Only
-                         // "frame-ancestors" is set: a full CSP would have to allow
-                         // "unsafe-eval", because the bundled tmpl.min.js compiles its
-                         // templates with "new Function".
-                         [response setValue:@"DENY" forAdditionalHeader:@"X-Frame-Options"];
-                         [response setValue:@"frame-ancestors 'none'" forAdditionalHeader:@"Content-Security-Policy"];
-                         [response setValue:@"nosniff" forAdditionalHeader:@"X-Content-Type-Options"];
-                         return response;
+            // The UI's one-click delete and move buttons are worth clickjacking —
+            // and the "#/path" fragment even lets an attacker aim the framed page
+            // at a chosen folder — so refuse to be framed at all. Only
+            // "frame-ancestors" is set: a full CSP would have to allow
+            // "unsafe-eval", because the bundled tmpl.min.js compiles its
+            // templates with "new Function".
+            [response setValue:@"DENY" forAdditionalHeader:@"X-Frame-Options"];
+            [response setValue:@"frame-ancestors 'none'" forAdditionalHeader:@"Content-Security-Policy"];
+            [response setValue:@"nosniff" forAdditionalHeader:@"X-Content-Type-Options"];
+            return response;
         };
 
         [self addHandlerForMethod:@"GET" path:@"/" requestClass:[WSKRequest class] processBlock:servePage];
@@ -396,143 +397,143 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
         [self addHandlerForMethod:@"GET"
                              path:@"/events"
                      requestClass:[WSKRequest class]
-             asyncProcessBlock:^(WSKRequest *request, WSKCompletionBlock completionBlock) {
-                         if (!server.serverSentEventsEnabled) {
-                             completionBlock([WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"SSE not enabled"]);
-                             return;
-                         }
+                asyncProcessBlock:^(WSKRequest *request, WSKCompletionBlock completionBlock) {
+                    if (!server.serverSentEventsEnabled) {
+                        completionBlock([WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"SSE not enabled"]);
+                        return;
+                    }
 
-                         // A mapped HEAD never reads the body, so registering a channel for one
-                         // hands out a slot that no client will ever hold or release: it is only
-                         // recovered by the heartbeat reaper, two ticks later. Sixteen HEADs — which
-                         // cost the sender nothing, since each request *completes* and frees its
-                         // connection slot immediately — therefore deny live updates to every real
-                         // client for ~30s, and repeating them sustains that indefinitely. The
-                         // Sec-Fetch-* checks below do not help: they are about which origin is
-                         // asking, and this costs nothing to ask from anywhere on the network.
-                         // A bodiless reply is the right answer to HEAD regardless.
-                         if (request.isVirtualHEAD) {
-                             completionBlock([WSKDataResponse responseWithData:[NSData data] contentType:@"text/event-stream"]);
-                             return;
-                         }
+                    // A mapped HEAD never reads the body, so registering a channel for one
+                    // hands out a slot that no client will ever hold or release: it is only
+                    // recovered by the heartbeat reaper, two ticks later. Sixteen HEADs — which
+                    // cost the sender nothing, since each request *completes* and frees its
+                    // connection slot immediately — therefore deny live updates to every real
+                    // client for ~30s, and repeating them sustains that indefinitely. The
+                    // Sec-Fetch-* checks below do not help: they are about which origin is
+                    // asking, and this costs nothing to ask from anywhere on the network.
+                    // A bodiless reply is the right answer to HEAD regardless.
+                    if (request.isVirtualHEAD) {
+                        completionBlock([WSKDataResponse responseWithData:[NSData data] contentType:@"text/event-stream"]);
+                        return;
+                    }
 
-                         // The same rule the mutating endpoints use. Without it this endpoint is
-                         // the one place a cross-origin page can still reach: the Sec-Fetch-*
-                         // checks below fail *open* when the headers are absent, and they are
-                         // absent on every browser predating them (Safari < 16.4, Firefox < 90).
-                         // Such a browser can hold every channel from any origin.
-                         WSKResponse *const crossOrigin = [server _rejectIfCrossOrigin:request];
+                    // The same rule the mutating endpoints use. Without it this endpoint is
+                    // the one place a cross-origin page can still reach: the Sec-Fetch-*
+                    // checks below fail *open* when the headers are absent, and they are
+                    // absent on every browser predating them (Safari < 16.4, Firefox < 90).
+                    // Such a browser can hold every channel from any origin.
+                    WSKResponse *const crossOrigin = [server _rejectIfCrossOrigin:request];
 
-                         if (crossOrigin) {
-                             completionBlock(crossOrigin);
-                             return;
-                         }
+                    if (crossOrigin) {
+                        completionBlock(crossOrigin);
+                        return;
+                    }
 
-                         // An SSE stream never ends by itself and there are only
-                         // kMaxSSEChannels slots, so any page that can merely *open* this URL
-                         // as a subresource — "new Image().src = 'http://host:port/events'",
-                         // twenty times over, from any origin — pins every slot and silently
-                         // kills live updates for the real user. EventSource always sends
-                         // "Accept: text/event-stream", and browsers that send Sec-Fetch-Dest
-                         // label it "empty"; both are forbidden header names, so page script
-                         // cannot forge them onto an <img>/<script>/<link> load. Non-browser
-                         // clients send no Sec-Fetch-* at all and are unaffected.
-                         //
-                         // "Accept" alone is not sufficient: fetch(url, {mode: 'no-cors'})
-                         // may set it, so a page can request this URL cross-origin without a
-                         // preflight and without ever reading the reply — which is all that
-                         // is needed to hold the slot. Sec-Fetch-Mode and Sec-Fetch-Site
-                         // close that: EventSource is always a cors-mode fetch, and the
-                         // page's own EventSource is same-origin, whereas a no-cors fetch is
-                         // labelled "no-cors" and cross-site by the browser itself.
-                         NSString *const accept = request.headers[@"Accept"];
-                         NSString *const fetchDest = request.headers[@"Sec-Fetch-Dest"];
-                         NSString *const fetchMode = request.headers[@"Sec-Fetch-Mode"];
-                         NSString *const fetchSite = request.headers[@"Sec-Fetch-Site"];
+                    // An SSE stream never ends by itself and there are only
+                    // kMaxSSEChannels slots, so any page that can merely *open* this URL
+                    // as a subresource — "new Image().src = 'http://host:port/events'",
+                    // twenty times over, from any origin — pins every slot and silently
+                    // kills live updates for the real user. EventSource always sends
+                    // "Accept: text/event-stream", and browsers that send Sec-Fetch-Dest
+                    // label it "empty"; both are forbidden header names, so page script
+                    // cannot forge them onto an <img>/<script>/<link> load. Non-browser
+                    // clients send no Sec-Fetch-* at all and are unaffected.
+                    //
+                    // "Accept" alone is not sufficient: fetch(url, {mode: 'no-cors'})
+                    // may set it, so a page can request this URL cross-origin without a
+                    // preflight and without ever reading the reply — which is all that
+                    // is needed to hold the slot. Sec-Fetch-Mode and Sec-Fetch-Site
+                    // close that: EventSource is always a cors-mode fetch, and the
+                    // page's own EventSource is same-origin, whereas a no-cors fetch is
+                    // labelled "no-cors" and cross-site by the browser itself.
+                    NSString *const accept = request.headers[@"Accept"];
+                    NSString *const fetchDest = request.headers[@"Sec-Fetch-Dest"];
+                    NSString *const fetchMode = request.headers[@"Sec-Fetch-Mode"];
+                    NSString *const fetchSite = request.headers[@"Sec-Fetch-Site"];
 
-                         if (([accept rangeOfString:@"text/event-stream" options:NSCaseInsensitiveSearch].location == NSNotFound) ||
-                             (fetchDest.length && ([fetchDest caseInsensitiveCompare:@"empty"] != NSOrderedSame)) ||
-                             (fetchMode.length && ([fetchMode caseInsensitiveCompare:@"cors"] != NSOrderedSame)) ||
-                             (fetchSite.length && ([fetchSite caseInsensitiveCompare:@"same-origin"] != NSOrderedSame))) {
-                             completionBlock([WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotAcceptable message:@"This endpoint only serves \"text/event-stream\" requests"]);
-                             return;
-                         }
+                    if (([accept rangeOfString:@"text/event-stream" options:NSCaseInsensitiveSearch].location == NSNotFound) ||
+                        (fetchDest.length && ([fetchDest caseInsensitiveCompare:@"empty"] != NSOrderedSame)) ||
+                        (fetchMode.length && ([fetchMode caseInsensitiveCompare:@"cors"] != NSOrderedSame)) ||
+                        (fetchSite.length && ([fetchSite caseInsensitiveCompare:@"same-origin"] != NSOrderedSame))) {
+                        completionBlock([WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotAcceptable message:@"This endpoint only serves \"text/event-stream\" requests"]);
+                        return;
+                    }
 
-                         // Each connection gets its own channel, which buffers events so that
-                         // nothing is dropped in the window between WSKWebServer consuming one
-                         // reader and asking for the next (its streaming API is a ping-pong).
-                         WSKWebUploaderSSEChannel *channel = [[WSKWebUploaderSSEChannel alloc] init];
-                         dispatch_async(server->_sseQueue, ^{
-                             // Decide on the SSE queue, which owns _sseAcceptingChannels and
-                             // _sseChannels: the server may have been stopped (or SSE disabled)
-                             // between the check above and now, and a channel added after that
-                             // cleanup would never be serviced or reaped again — the heartbeat
-                             // that would reap it is gone too — stranding the connection on a
-                             // parked reader forever. Answering here instead ends it cleanly.
-                             if (!server->_sseAcceptingChannels) {
-                                 [channel close];
-                                 completionBlock([WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"SSE not enabled"]);
-                                 return;
-                             }
+                    // Each connection gets its own channel, which buffers events so that
+                    // nothing is dropped in the window between WSKWebServer consuming one
+                    // reader and asking for the next (its streaming API is a ping-pong).
+                    WSKWebUploaderSSEChannel *const channel = [[WSKWebUploaderSSEChannel alloc] init];
+                    dispatch_async(server->_sseQueue, ^{
+                        // Decide on the SSE queue, which owns _sseAcceptingChannels and
+                        // _sseChannels: the server may have been stopped (or SSE disabled)
+                        // between the check above and now, and a channel added after that
+                        // cleanup would never be serviced or reaped again — the heartbeat
+                        // that would reap it is gone too — stranding the connection on a
+                        // parked reader forever. Answering here instead ends it cleanly.
+                        if (!server->_sseAcceptingChannels) {
+                            [channel close];
+                            completionBlock([WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"SSE not enabled"]);
+                            return;
+                        }
 
-                             if (server->_sseChannels.count >= kMaxSSEChannels) {
-                                 // At the cap: refuse rather than pin another connection slot. The
-                                 // browser's EventSource reconnects on its own, so a client that
-                                 // loses the race recovers once a slot frees up — but tell it to
-                                 // wait, and do not log once per attempt while it waits.
-                                 NSDate *const now = [NSDate date];
+                        if (server->_sseChannels.count >= kMaxSSEChannels) {
+                            // At the cap: refuse rather than pin another connection slot. The
+                            // browser's EventSource reconnects on its own, so a client that
+                            // loses the race recovers once a slot frees up — but tell it to
+                            // wait, and do not log once per attempt while it waits.
+                            NSDate *const now = [NSDate date];
 
-                                 if ((server->_lastSSERefusalLogDate == nil) || ([now timeIntervalSinceDate:server->_lastSSERefusalLogDate] >= kSSERefusalLogInterval)) {
-                                     server->_lastSSERefusalLogDate = now;
-                                     [server logWarning:@"Refused a Server-Sent Events connection: already streaming to the maximum of %lu clients", (unsigned long)kMaxSSEChannels];
-                                 }
+                            if ((server->_lastSSERefusalLogDate == nil) || ([now timeIntervalSinceDate:server->_lastSSERefusalLogDate] >= kSSERefusalLogInterval)) {
+                                server->_lastSSERefusalLogDate = now;
+                                [server logWarning:@"Refused a Server-Sent Events connection: already streaming to the maximum of %lu clients", (unsigned long)kMaxSSEChannels];
+                            }
 
-                                 [channel close];
-                                 completionBlock([WSKDataResponse responseWithData:(NSData *)[kSSERefusedStreamBody dataUsingEncoding:NSUTF8StringEncoding] contentType:@"text/event-stream"]);
-                                 return;
-                             }
+                            [channel close];
+                            completionBlock([WSKDataResponse responseWithData:(NSData *)[kSSERefusedStreamBody dataUsingEncoding:NSUTF8StringEncoding] contentType:@"text/event-stream"]);
+                            return;
+                        }
 
-                             [server->_sseChannels addObject:channel];
-                             // Buffered now, delivered as the stream's first chunk: undoes the
-                             // back-off above for a client that was refused on an earlier attempt.
-                             [channel enqueueData:(NSData *)[kSSEAcceptedStreamPreamble dataUsingEncoding:NSUTF8StringEncoding]];
+                        [server->_sseChannels addObject:channel];
+                        // Buffered now, delivered as the stream's first chunk: undoes the
+                        // back-off above for a client that was refused on an earlier attempt.
+                        [channel enqueueData:(NSData *)[kSSEAcceptedStreamPreamble dataUsingEncoding:NSUTF8StringEncoding]];
 
-                             WSKWebUploaderSSEResponse *response =
-                                 [WSKWebUploaderSSEResponse responseWithContentType:@"text/event-stream"
-                                                                      asyncStreamBlock:^(WSKBodyReaderCompletionBlock dataBlock) {
-                                     dispatch_async(server->_sseQueue, ^{
-                                         [channel parkReader:^(NSData *data) {
-                                             dataBlock(data, nil);
-                                         }];
-                                     });
-                                 }];
-                             // Let the channel die with the connection rather than waiting for
-                             // the reaper to notice. The reaper stays as the backstop for a
-                             // client that is merely silent — this only fires when the body
-                             // write chain has actually ended. Weak, because the response
-                             // outlives nothing but must not keep the uploader alive; the
-                             // handler's own capture is __unsafe_unretained.
-                             __weak WSKWebUploader *const weakServer = server;
-                             response.onClose = ^{
-                                 WSKWebUploader *const strongServer = weakServer;
+                        WSKWebUploaderSSEResponse *response =
+                            [WSKWebUploaderSSEResponse responseWithContentType:@"text/event-stream"
+                                                              asyncStreamBlock:^(WSKBodyReaderCompletionBlock dataBlock) {
+                                                                  dispatch_async(server->_sseQueue, ^{
+                                                                      [channel parkReader:^(NSData *data) {
+                                                                          dataBlock(data, nil);
+                                                                      }];
+                                                                  });
+                                                              }];
+                        // Let the channel die with the connection rather than waiting for
+                        // the reaper to notice. The reaper stays as the backstop for a
+                        // client that is merely silent — this only fires when the body
+                        // write chain has actually ended. Weak, because the response
+                        // outlives nothing but must not keep the uploader alive; the
+                        // handler's own capture is __unsafe_unretained.
+                        __weak WSKWebUploader *const weakServer = server;
+                        response.onClose = ^{
+                            WSKWebUploader *const strongServer = weakServer;
 
-                                 if (strongServer == nil) {
-                                     return;
-                                 }
+                            if (strongServer == nil) {
+                                return;
+                            }
 
-                                 dispatch_async(strongServer->_sseQueue, ^{
-                                     [strongServer->_sseChannels removeObject:channel];
-                                     [channel close];  // Completes any parked reader; harmless if already closed.
-                                 });
-                             };
-                             response.cacheControlMaxAge = 0;
-                             [response setValue:@"no-cache" forAdditionalHeader:@"Cache-Control"];
-                             // No "Connection: keep-alive" here: it would overwrite the connection
-                             // layer's "Connection: Close", and WSKWebServer never reads a second
-                             // request off a connection, so advertising keep-alive is a lie.
-                             completionBlock(response);
-                         });
-                     }];
+                            dispatch_async(strongServer->_sseQueue, ^{
+                                [strongServer->_sseChannels removeObject:channel];
+                                [channel close];  // Completes any parked reader; harmless if already closed.
+                            });
+                        };
+                        response.cacheControlMaxAge = 0;
+                        [response setValue:@"no-cache" forAdditionalHeader:@"Cache-Control"];
+                        // No "Connection: keep-alive" here: it would overwrite the connection
+                        // layer's "Connection: Close", and WSKWebServer never reads a second
+                        // request off a connection, so advertising keep-alive is a lie.
+                        completionBlock(response);
+                    });
+                }];
     }
 
     return self;
@@ -625,7 +626,7 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
         self->_sseAcceptingChannels = NO;
         // Close before dropping: an unclosed channel with a parked reader
         // strands its connection forever (and leaks it via a retain cycle).
-        for (WSKWebUploaderSSEChannel* channel in self->_sseChannels) {
+        for (WSKWebUploaderSSEChannel *channel in self->_sseChannels) {
             [channel close];
         }
         [self->_sseChannels removeAllObjects];
@@ -670,7 +671,7 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
         // (the heartbeat is stopped too) — the connection stays parked forever, and
         // _activeConnections never returns to zero.
         self->_sseAcceptingChannels = NO;
-        for (WSKWebUploaderSSEChannel* channel in self->_sseChannels) {
+        for (WSKWebUploaderSSEChannel *channel in self->_sseChannels) {
             [channel close];
         }
         [self->_sseChannels removeAllObjects];
@@ -744,7 +745,7 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
     // renew that retain), preventing deterministic teardown.
     __weak WSKWebUploader *weakSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^{
-        WSKWebUploader *strongSelf = weakSelf;
+        WSKWebUploader *const strongSelf = weakSelf;
         if (strongSelf == nil) {
             return;
         }
@@ -760,10 +761,10 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
         }
         [strongSelf->_changeCoalescingTimer invalidate];
         strongSelf->_changeCoalescingTimer = [NSTimer scheduledTimerWithTimeInterval:kChangeCoalescingInterval
-                                                                              repeats:NO
-                                                                                block:^(NSTimer *timer) {
-            [weakSelf _flushPendingChanges];
-        }];
+                                                                             repeats:NO
+                                                                               block:^(NSTimer *timer) {
+                                                                                   [weakSelf _flushPendingChanges];
+                                                                               }];
     });
 }
 
@@ -791,7 +792,7 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
     if (!_serverSentEventsEnabled) {
         return;
     }
-    NSMutableArray<WSKWebUploaderSSEChannel *> *live = [NSMutableArray arrayWithCapacity:_sseChannels.count];
+    NSMutableArray<WSKWebUploaderSSEChannel *> *const live = [NSMutableArray arrayWithCapacity:_sseChannels.count];
     for (WSKWebUploaderSSEChannel *channel in _sseChannels) {
         if (channel.hasParkedReader) {
             channel.idleHeartbeats = 0;  // A reader is waiting: alive.
@@ -813,7 +814,7 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
     }
     _sseChannels = live;
 
-    NSData *heartbeat = [@":heartbeat\n\n" dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *const heartbeat = [@":heartbeat\n\n" dataUsingEncoding:NSUTF8StringEncoding];
     for (WSKWebUploaderSSEChannel *channel in _sseChannels) {
         [channel enqueueData:heartbeat];
     }
@@ -834,8 +835,8 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
         return;
     }
 
-    NSString *sseMessage = [NSString stringWithFormat:@"event: %@\ndata: %@\n\n", eventType, json];
-    NSData *messageData = [sseMessage dataUsingEncoding:NSUTF8StringEncoding];
+    NSString *const sseMessage = [NSString stringWithFormat:@"event: %@\ndata: %@\n\n", eventType, json];
+    NSData *const messageData = [sseMessage dataUsingEncoding:NSUTF8StringEncoding];
 
     dispatch_async(_sseQueue, ^{
         for (WSKWebUploaderSSEChannel *channel in self->_sseChannels) {
@@ -939,7 +940,7 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
         freshRoot = [[NSFileManager defaultManager] stringWithFileSystemRepresentation:resolvedBuffer length:strlen(resolvedBuffer)];
     }
 
-    for (NSString *const root in @[ _uploadDirectory, resolvedRoot, freshRoot ? freshRoot : @"" ]) {
+    for (NSString *const root in @[_uploadDirectory, resolvedRoot, freshRoot ? freshRoot : @""]) {
         if (root.length == 0) {
             continue;
         }
@@ -1161,7 +1162,7 @@ static BOOL _MimeTypeIsInertMedia(NSString *mimeType) {
 
     // As in DAV's GET: absolutePath is resolved by here, so judge the client's name too.
     NSString *const fileName = [relativePath lastPathComponent];
-    NSString *const resolvedName = [absolutePath lastPathComponent];
+    NSString *resolvedName = [absolutePath lastPathComponent];
 
     if (![self _checkFileExtensionForName:fileName resolvedName:resolvedName]) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Downloading file name \"%@\" is not allowed", fileName];
@@ -1229,7 +1230,7 @@ static NSString *_OriginAuthority(NSString *value) {
         return nil;
     }
 
-    NSRange scheme = [value rangeOfString:@"://"];
+    NSRange const scheme = [value rangeOfString:@"://"];
     if (scheme.location == NSNotFound) {
         return nil;
     }
@@ -1284,7 +1285,7 @@ static NSString *_OriginAuthority(NSString *value) {
         return crossOrigin;
     }
 
-    NSRange range = [request.headers[@"Accept"] rangeOfString:@"application/json" options:NSCaseInsensitiveSearch];
+    NSRange const range = [request.headers[@"Accept"] rangeOfString:@"application/json" options:NSCaseInsensitiveSearch];
     NSString *const contentType = (range.location != NSNotFound ? @"application/json" : @"text/plain; charset=utf-8");  // Required when using iFrame transport (see https://github.com/blueimp/jQuery-File-Upload/wiki/Setup)
 
     WSKMultiPartFile *const file = [request firstFileForControlName:@"files[]"];

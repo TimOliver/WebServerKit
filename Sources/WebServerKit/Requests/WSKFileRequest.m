@@ -147,7 +147,7 @@
 }
 
 - (NSString *)description {
-    NSMutableString *description = [NSMutableString stringWithString:[super description]];
+    NSMutableString *const description = [NSMutableString stringWithString:[super description]];
 
     [description appendFormat:@"\n\n{%@}", _temporaryPath];
     return description;

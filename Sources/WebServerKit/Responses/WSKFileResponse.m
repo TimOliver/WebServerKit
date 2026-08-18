@@ -191,7 +191,7 @@ static NSString *_EscapeExtValue(NSString *string) {
     }
 
 #endif
-    NSUInteger fileSize = (NSUInteger)info.st_size;
+    NSUInteger const fileSize = (NSUInteger)info.st_size;
 
     // Derive the validators here, from the same fstat the range decision uses, so If-Range
     // can be answered against the representation we are actually about to serve.
@@ -307,7 +307,7 @@ static NSString *_EscapeExtValue(NSString *string) {
         NSString *const lossyFileName = data ? [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding] : nil;
 
         if (lossyFileName) {
-            NSString *value = [NSString stringWithFormat:@"attachment; filename=\"%@\"; filename*=UTF-8''%@", lossyFileName, _EscapeExtValue(fileName)];
+            NSString *const value = [NSString stringWithFormat:@"attachment; filename=\"%@\"; filename*=UTF-8''%@", lossyFileName, _EscapeExtValue(fileName)];
             [self setValue:value forAdditionalHeader:@"Content-Disposition"];
         } else {
             // The name is remote-controlled, so a transcoding failure is not a programmer
@@ -315,7 +315,7 @@ static NSString *_EscapeExtValue(NSString *string) {
             // rather than no disposition at all: dropping the header would serve the file
             // inline, which is exactly what it exists to prevent.
             WSK_LOG_ERROR(@"Failed encoding attachment file name \"%@\" as ISO-8859-1", fileName);
-            NSString *value = [NSString stringWithFormat:@"attachment; filename*=UTF-8''%@", _EscapeExtValue(fileName)];
+            NSString *const value = [NSString stringWithFormat:@"attachment; filename*=UTF-8''%@", _EscapeExtValue(fileName)];
             [self setValue:value forAdditionalHeader:@"Content-Disposition"];
         }
         // Defense in depth: never let a browser MIME-sniff a download into active content.
@@ -358,8 +358,8 @@ static NSString *_EscapeExtValue(NSString *string) {
 }
 
 - (NSData *)readData:(NSError **)error {
-    size_t length = MIN((NSUInteger)kFileReadBufferSize, _size);
-    NSMutableData *data = [[NSMutableData alloc] initWithLength:length];
+    size_t const length = MIN((NSUInteger)kFileReadBufferSize, _size);
+    NSMutableData *const data = [[NSMutableData alloc] initWithLength:length];
     ssize_t result;
 
     // A signal delivered mid-read is not a transfer failure: without the retry the
@@ -409,7 +409,7 @@ static NSString *_EscapeExtValue(NSString *string) {
         _size = 0;
 
         if (error) {
-            *error = [NSError errorWithDomain:kWSKErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"File \"%@\" was truncated while it was being served", _path]}];
+            *error = [NSError errorWithDomain:kWSKErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"File \"%@\" was truncated while it was being served", _path]}];
         }
 
         return nil;
@@ -433,7 +433,7 @@ static NSString *_EscapeExtValue(NSString *string) {
     WSK_LOG_ERROR(@"File \"%@\" changed while it was being served", _path);
 
     if (error) {
-        *error = [NSError errorWithDomain:kWSKErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"File \"%@\" changed while it was being served", _path]}];
+        *error = [NSError errorWithDomain:kWSKErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: [NSString stringWithFormat:@"File \"%@\" changed while it was being served", _path]}];
     }
 
     return NO;
@@ -462,7 +462,7 @@ static NSString *_EscapeExtValue(NSString *string) {
 }
 
 - (NSString *)description {
-    NSMutableString *description = [NSMutableString stringWithString:[super description]];
+    NSMutableString *const description = [NSMutableString stringWithString:[super description]];
 
     [description appendFormat:@"\n\n{%@}", _path];
     return description;
