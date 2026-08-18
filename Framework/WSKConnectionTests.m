@@ -1596,4 +1596,79 @@
     [server stop];
 }
 
+// A client that stops sending but never closes must not pin a connection slot for the whole idle
+// timeout. Asserted through the SLOT returning, not wall-clock: this suite already has two timing
+// tests that flake under load and must not gain a third. Descriptor count is the observable proxy —
+// it returns to baseline only once the connection object is gone, which is what releases the slot.
+//
+// Two things about this oracle were wrong in earlier drafts and are recorded here rather than
+// silently fixed, per this project's own rule about not re-importing a corrected story:
+//
+// 1) The baseline must be taken before connecting, AND the poll must compare against baseline + 1,
+//    never baseline itself. fd (this test's own client socket) stays open until after the
+//    assertion, so it is always one descriptor beyond whatever existed before the connection —
+//    that "+1" is not slack, it is the known, permanent cost of the client's own socket, exactly
+//    like -testSustainedServingDoesNotAccumulateResources tolerates its own bounded overhead
+//    rather than demanding an exact return to baseline. Capturing the baseline AFTER connecting
+//    was tried and measured worse, not better: accept() on this listening socket can complete fast
+//    enough that the SERVER's own accepted-connection descriptor already exists by the time the
+//    next line executes, silently folding it into "baseline" too — the assertion then trivially
+//    passed on the FIRST poll regardless of whether the connection under test had released
+//    anything, which is a worse failure mode (a bound that cannot help but hold) than the
+//    always-fails-by-one shape a plain pre-connect baseline has without the "+1".
+// 2) A single write immediately after the header races the server's OWN header read, which (like
+//    the drain) hands over whatever has already arrived rather than waiting for more. On this
+//    machine the two land together often enough that the write is read as PART OF the header parse
+//    instead of staying unread for the lingering check to find: measured directly, one 4KB write
+//    right after the header made "WSKSocketHasUnreadInboundData" answer NO and the connection close
+//    the ordinary way, never lingering at all — the log showed "received 4191 bytes" (header +
+//    filler) as ONE read. Many small writes in a tight loop (still comfortably under
+//    kLingerDiscardCap, so the discard-cap exit is never hit either) reliably avoid this: the
+//    per-call overhead of hundreds of separate send()s gives the server's header read time to fire
+//    and complete on the header alone first.
+- (void)testLingeringCloseReleasesItsSlotWhenTheClientGoesQuiet {
+    NSString* directory = MakeTempDirectory();
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:directory];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSUInteger const baseline = OpenFileDescriptorCount();
+
+    int fd = ConnectToLocalhostPort(server.port);
+    XCTAssertGreaterThan(fd, 0);
+
+    // Declare a huge body, send a little of it, then go silent WITHOUT closing. The refusal is
+    // written immediately, the receive queue is non-empty, so the connection lingers — and then
+    // nothing more ever arrives.
+    NSString* header = @"PUT /x.bin HTTP/1.1\r\nHost: localhost\r\nContent-Range: bytes 0-2/10\r\nContent-Length: 67108864\r\n\r\n";
+    const char* headerBytes = [header UTF8String];
+    XCTAssertEqual(send(fd, headerBytes, strlen(headerBytes), 0), (ssize_t)strlen(headerBytes));
+
+    int const noSignal = 1;
+    setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, sizeof(noSignal));
+    char filler[64];
+    memset(filler, 'Z', sizeof(filler));
+    for (int i = 0; i < 400; i++) {
+        if (send(fd, filler, sizeof(filler), 0) < 0) {
+            break;
+        }
+    }
+
+    // Well inside the 30s idle timeout, so passing this cannot be the idle timer doing the work.
+    // "baseline + 1" -- not "baseline" -- because fd itself is one descriptor beyond baseline for
+    // as long as this test holds it open, which is deliberately until after this assertion; see the
+    // comment above the method.
+    BOOL released = NO;
+    for (int i = 0; (i < 100) && !released; i++) {
+        usleep(50 * 1000);
+        released = (OpenFileDescriptorCount() <= baseline + 1);
+    }
+
+    XCTAssertTrue(released, @"a lingering connection must release its slot once the client goes quiet");
+
+    close(fd);
+    [server stop];
+    [[NSFileManager defaultManager] removeItemAtPath:directory error:NULL];
+}
+
 @end

@@ -59,6 +59,7 @@
 #define kLingerTotalSeconds 2.0            // Absolute deadline for the whole drain
 #define kLingerDiscardCap (64 * 1024)      // Early exit: a client mid-upload will never reach EOF
 #define kLingerReadChunk (16 * 1024)       // Discard buffer size
+#define kLingerGapSeconds 0.5              // No bytes for this long: the client is done, stop waiting
 
 typedef void (^ReadDataCompletionBlock)(BOOL success);
 typedef void (^ReadHeadersCompletionBlock)(NSData *extraData);
@@ -158,6 +159,7 @@ NS_ASSUME_NONNULL_END
     BOOL _lingering;                    // On _connectionQueue only
     NSUInteger _lingerDiscarded;        // Bytes read and thrown away while lingering
     CFAbsoluteTime _lingerDeadline;     // Absolute time the drain must stop
+    dispatch_source_t _lingerTimer;     // Nil unless lingering; on _connectionQueue only
 
 #ifdef __WEBSERVERKIT_ENABLE_TESTING__
     NSUInteger _connectionIndex;
@@ -700,7 +702,43 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
     _lingerDeadline = CFAbsoluteTimeGetCurrent() + kLingerTotalSeconds;
     shutdown(_socket, SHUT_WR);
     WSK_LOG_DEBUG(@"Lingering before close on socket %i", _socket);
+    [self _armLingerTimer];
     [self _lingerDrain];
+}
+
+// Bounds the wait BETWEEN reads. dispatch_read has no timeout of its own, so a client that stops
+// sending without closing would leave the read outstanding until the idle timer noticed. Firing
+// shuts the read side down, which completes that read with EOF and ends the drain through its
+// normal path — the same technique the idle timer uses, rather than a second way to tear down.
+- (void)_armLingerTimer {
+    if (_lingerTimer == nil) {
+        _lingerTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _connectionQueue);
+        __weak WSKConnection *weakSelf = self;
+        dispatch_source_set_event_handler(_lingerTimer, ^{
+            WSKConnection *strongSelf = weakSelf;
+
+            if (strongSelf == nil) {
+                return;
+            }
+
+            WSK_LOG_DEBUG(@"Lingering close went quiet on socket %i", strongSelf->_socket);
+            [strongSelf _cancelLingerTimer];
+            shutdown(strongSelf->_socket, SHUT_RD);
+        });
+        dispatch_resume(_lingerTimer);
+    }
+
+    dispatch_source_set_timer(_lingerTimer,
+                              dispatch_time(DISPATCH_TIME_NOW, (int64_t)(kLingerGapSeconds * NSEC_PER_SEC)),
+                              DISPATCH_TIME_FOREVER,
+                              (uint64_t)(0.05 * NSEC_PER_SEC));
+}
+
+- (void)_cancelLingerTimer {
+    if (_lingerTimer) {
+        dispatch_source_cancel(_lingerTimer);
+        _lingerTimer = nil;
+    }
 }
 
 // Counted as pending socket I/O exactly like every other async read and write on this connection
@@ -718,6 +756,11 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
 // drain always terminated promptly, because dispatch_read hands over whatever is available instead
 // of waiting for a full kLingerReadChunk. So this is a consistency fix that restores an intended
 // backstop, not the fix for a demonstrated hang.
+//
+// What DOES need its own bound is the gap BETWEEN reads: a client that goes silent without closing
+// leaves the last dispatch_read outstanding, and nothing but the idle timer (~30s at the default)
+// would otherwise end it. -_armLingerTimer/-_cancelLingerTimer tighten that to kLingerGapSeconds —
+// a tightening on top of an already-bounded drain, not a fix for an unbounded one.
 - (void)_lingerDrain {
     if (_idleTimer) {
         dispatch_async(_connectionQueue, ^{  // Enqueued ahead of dispatch_read's handler on the same serial queue, so the increment always runs first
@@ -734,6 +777,7 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
 
         if ((error != 0) || (received == 0)) {
             WSK_LOG_DEBUG(@"Lingering close drained to EOF on socket %i", self->_socket);
+            [self _cancelLingerTimer];
             return;  // Done: the block's reference to self goes away and -dealloc closes the socket
         }
 
@@ -741,14 +785,17 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
 
         if (self->_lingerDiscarded >= (NSUInteger)kLingerDiscardCap) {
             WSK_LOG_DEBUG(@"Lingering close hit its discard cap on socket %i", self->_socket);
+            [self _cancelLingerTimer];
             return;
         }
 
         if (CFAbsoluteTimeGetCurrent() >= self->_lingerDeadline) {
             WSK_LOG_DEBUG(@"Lingering close hit its deadline on socket %i", self->_socket);
+            [self _cancelLingerTimer];
             return;
         }
 
+        [self _armLingerTimer];
         [self _lingerDrain];
     });
 }
@@ -1382,6 +1429,10 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
 - (void)dealloc {
     if (_idleTimer) {
         dispatch_source_cancel(_idleTimer);
+    }
+
+    if (_lingerTimer) {
+        dispatch_source_cancel(_lingerTimer);
     }
 
     int result = close(_socket);
