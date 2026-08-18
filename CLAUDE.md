@@ -293,6 +293,12 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   re-resolves on a miss WITHOUT caching back, and compares against `root + "/"`.
 - `-bonjourName` reads `_registrationService` (the service that actually registered, which
   carries an auto-rename).
+- **The iOS background task is acquired at the didEnterBackground TRANSITION, iff connected —
+  never at connect time** (a browser holding `/events` open used to pin a task through ordinary
+  foreground use, tripping the OS's 30 s advisory). Both suspension modes observe the
+  transition. Foreground handlers release via `_releaseBackgroundTask`, never
+  `_endBackgroundTask` — the app state still reads background inside willEnterForeground, so
+  the latter's suspend-mode stop would kill a server that just survived the round trip.
 - All lifecycle mutation and `isRunning`/`serverURL` funnel through the serial `_stateQueue`;
   delegate callbacks are main-thread and OUTSIDE the queue (reading `-serverURL` inside the
   callback would deadlock). Each connection SNAPSHOTS server config at accept. NAT-PMP
@@ -388,8 +394,17 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
   Recorded, not fixed. The WebDAV server already does 405+`Allow` via `_MethodNotAllowed`; this is
   the uploader surface only.
 - Phase 2's low-value structural tail: URI-to-path derivation; the limits/constants.
-- litmus `props` has NOT been re-run since the nineteenth pass added five PROPFIND
-  properties — install litmus and run it before treating those as conformance-verified.
+- ~~litmus `props` not re-run since the five new PROPFIND properties~~ — **done 2026-08-18**,
+  against a live tip server (litmus 0.14 built from source; build recipe:
+  `./configure CFLAGS=-Wno-implicit-function-declaration`, run the suite binaries directly —
+  `make check` stops at the first failing suite): basic 16/16, copymove 13/13, **props 29/30
+  with the sole failure the settled `propfind_invalid2`**, locks 3/3, http 4/4. The nine
+  published properties are now conformance-verified, not merely measured-correct. The same
+  pass drove the 19th/20th/21st-pass fixes live with a 39-check matrix proven sensitive
+  against pre-fix builds (18 failures at 58b7469, exactly the `<propname/>` duplicate at
+  ca07ce8), verified the uploader's 507 on a genuinely full 4 MB HFS+ image (zero residue,
+  controls green), and exercised the post-refactor SSE machinery (16-channel bound, 200 +
+  `retry: 30000` refusal stream, reclaim on next failed write).
 - Verification gap: the duplicate-`webServerDidStop:` fix is `#if TARGET_OS_IPHONE` and the
   Mac suite is structurally blind to it; only the single delivery site is established.
 

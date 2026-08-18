@@ -272,6 +272,10 @@ static void _ExecuteMainThreadRunLoopSources(void) {
 #if TARGET_OS_IPHONE
 
 // Always called on main thread
+// Called from -_didEnterBackground: when connections are still open — NOT from -_didConnect.
+// Begun synchronously inside that handler the task is honored just the same, and by existing
+// only while a suspension is actually pending it cannot trip the OS's long-running-task
+// advisory during foreground use (which a browser holding /events open used to).
 - (void)_startBackgroundTask {
     WSK_DCHECK([NSThread isMainThread]);
 
@@ -295,13 +299,9 @@ static void _ExecuteMainThreadRunLoopSources(void) {
     _connected = YES;
     WSK_LOG_DEBUG(@"Did connect");
 
-#if TARGET_OS_IPHONE
-
-    if ([[UIApplication sharedApplication] applicationState] != UIApplicationStateBackground) {
-        [self _startBackgroundTask];
-    }
-
-#endif
+    // Deliberately NO background task here: it belongs to the background TRANSITION, where
+    // -_didEnterBackground: acquires it iff still connected. Begun here it was held for the
+    // whole life of a long-lived connection, making iOS warn during ordinary foreground use.
 
     if ([_delegate respondsToSelector:@selector(webServerDidConnect:)]) {
         [_delegate webServerDidConnect:self];
@@ -332,6 +332,20 @@ static void _ExecuteMainThreadRunLoopSources(void) {
 
 #if TARGET_OS_IPHONE
 
+// The ONE place the task is handed back to UIKit; always called on main thread. Split from
+// -_endBackgroundTask because the foreground handlers must skip its suspend-mode stop: the
+// application state still reads background inside the willEnterForeground notification, so
+// routing them through -_endBackgroundTask would stop a server that just survived the trip.
+- (void)_releaseBackgroundTask {
+    WSK_DCHECK([NSThread isMainThread]);
+
+    if (_backgroundTask != UIBackgroundTaskInvalid) {
+        [[UIApplication sharedApplication] endBackgroundTask:_backgroundTask];
+        _backgroundTask = UIBackgroundTaskInvalid;
+        WSK_LOG_DEBUG(@"Did end background task");
+    }
+}
+
 // Always called on main thread
 - (void)_endBackgroundTask {
     WSK_DCHECK([NSThread isMainThread]);
@@ -347,9 +361,7 @@ static void _ExecuteMainThreadRunLoopSources(void) {
             });
         }
 
-        [[UIApplication sharedApplication] endBackgroundTask:_backgroundTask];
-        _backgroundTask = UIBackgroundTaskInvalid;
-        WSK_LOG_DEBUG(@"Did end background task");
+        [self _releaseBackgroundTask];
     }
 }
 
@@ -1162,20 +1174,37 @@ static inline NSString *_EncodeBase64(NSString *string) {
 // lifecycle transition. Blocking the main thread here also preserves the property the
 // original main-thread-confined code relied on: the main run loop cannot dispatch a
 // CFNetService/DNSService callback while the Bonjour refs are being rebuilt.
+// Registered in BOTH suspension modes; runs on the main thread while the app can still do
+// work (suspension waits for this handler to return).
 - (void)_didEnterBackground:(NSNotification *)notification {
     WSK_DCHECK([NSThread isMainThread]);
     WSK_LOG_DEBUG(@"Did enter background");
 
-    dispatch_sync(_stateQueue, ^{
-        if ((self->_backgroundTask == UIBackgroundTaskInvalid) && self->_source4) {
-            [self _stop];
-        }
-    });
+    // Connected: take the task so in-flight work can finish. The unwind is -_didDisconnect
+    // or the task's expiration handler, both of which stop the server first in suspend mode.
+    if (_connected) {
+        [self _startBackgroundTask];
+        return;
+    }
+
+    // Idle: nothing to drain — stop listening now (suspend mode) or simply suspend with the
+    // process (non-suspend), as always.
+    if (_suspendInBackground) {
+        dispatch_sync(_stateQueue, ^{
+            if (self->_source4) {
+                [self _stop];
+            }
+        });
+    }
 }
 
 - (void)_willEnterForeground:(NSNotification *)notification {
     WSK_DCHECK([NSThread isMainThread]);
     WSK_LOG_DEBUG(@"Will enter foreground");
+
+    // Back before the drain finished: the task is moot. Released via -_releaseBackgroundTask,
+    // whose comment explains why -_endBackgroundTask must not be used here.
+    [self _releaseBackgroundTask];
 
     dispatch_sync(_stateQueue, ^{
         if (!self->_source4) {
@@ -1202,6 +1231,9 @@ static inline NSString *_EncodeBase64(NSString *string) {
 - (void)_reconnectInForeground:(NSNotification *)notification {
     WSK_DCHECK([NSThread isMainThread]);
     WSK_LOG_DEBUG(@"Will enter foreground (not suspending in background)");
+
+    // Same rule as -_willEnterForeground:: a task held across the round trip is moot.
+    [self _releaseBackgroundTask];
 
     // When not suspending in the background we keep serving, but iOS may still
     // tear down our listening sockets once the process is actually suspended.
@@ -1269,8 +1301,11 @@ static inline NSString *_EncodeBase64(NSString *string) {
 
 #if TARGET_OS_IPHONE
 
+        // Both modes hear the background transition — that is where the task protecting
+        // in-flight work is acquired; only the foreground half differs.
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(_didEnterBackground:) name:UIApplicationDidEnterBackgroundNotification object:nil];
+
         if (_suspendInBackground) {
-            [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(_didEnterBackground:) name:UIApplicationDidEnterBackgroundNotification object:nil];
             [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(_willEnterForeground:) name:UIApplicationWillEnterForegroundNotification object:nil];
         } else {
             [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(_reconnectInForeground:) name:UIApplicationWillEnterForegroundNotification object:nil];
@@ -1338,12 +1373,9 @@ static inline NSString *_EncodeBase64(NSString *string) {
     if (_options) {
 #if TARGET_OS_IPHONE
 
-        if (_suspendInBackground) {
-            [[NSNotificationCenter defaultCenter] removeObserver:self name:UIApplicationDidEnterBackgroundNotification object:nil];
-            [[NSNotificationCenter defaultCenter] removeObserver:self name:UIApplicationWillEnterForegroundNotification object:nil];
-        } else {
-            [[NSNotificationCenter defaultCenter] removeObserver:self name:UIApplicationWillEnterForegroundNotification object:nil];
-        }
+        // Mirrors the registration above: both observers exist in both modes.
+        [[NSNotificationCenter defaultCenter] removeObserver:self name:UIApplicationDidEnterBackgroundNotification object:nil];
+        [[NSNotificationCenter defaultCenter] removeObserver:self name:UIApplicationWillEnterForegroundNotification object:nil];
 
 #endif
 
