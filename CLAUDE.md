@@ -389,6 +389,20 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
 - The rename box is seeded with the real name from `/list` (jeditable otherwise re-escapes
   `&` on every pass).
 
+### Performance (first profiled 2026-08-18; Release, loopback, M-series)
+
+- Baseline after tuning: single-stream GET **~1.8 GB/s** (was 830 MB/s at the old 32 KB read
+  buffer; `kFileReadBufferSize` is now 256 KB — the measured knee; 1 MB bought 1.5% for 4× the
+  transient memory). PUT ~920 MB/s. Small files 1.3k/3.4k req/s serial (keep-alive off/on) —
+  keep-alive remains the cheapest 2.6× any deployment can flip on.
+- PROPFIND Depth:1 × 1,000 entries: **~530 ms warm** (was 987) after memoizing the UTType MIME
+  lookup in a BOUNDED NSCache (clients mint arbitrary extensions; an unbounded memo is Shape A
+  accumulation). The remaining ~0.5 ms/entry is the per-entry xattr probe plus the resolver's
+  realpath — the latter is the resolve-once security rule; do not optimize it without its own
+  measured pass.
+- Perspective: Puck's network ceiling (Tailscale over WiFi) is ~30–60 MB/s; the server is not
+  the bottleneck. Benchmarks live in the scratch harness (`bench.py` + `wskhost.m`).
+
 ### Style (enforced by `Scripts/lint-objc.py`, run first by Run-Tests.sh)
 
 - clang-format clean (the Xcode toolchain's binary via `xcrun --find` — a bare `clang-format`

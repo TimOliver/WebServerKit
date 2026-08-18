@@ -33,7 +33,8 @@
 
 #import "WSKPrivate.h"
 
-#define kFileReadBufferSize (32 * 1024)
+// The buffer size is the pipeline depth: one read(2) + one dispatch_write round trip per chunk.
+#define kFileReadBufferSize (256 * 1024)
 
 @implementation WSKFileResponse {
     NSString *_path;

@@ -306,12 +306,29 @@ NSString *WSKGetMimeTypeForExtension(NSString *extension, NSDictionary<NSString 
         }
 
         if (mimeType == nil) {
-            // UniformTypeIdentifiers is available unconditionally at the deployment floors
-            // this library ships against: no availability check, no CoreServices fallback —
-            // a fallback's @available clause has to name each platform by hand, and omitting
-            // one is a silent per-platform bug.
-            UTType *const type = [UTType typeWithFilenameExtension:extension];
-            mimeType = type.preferredMIMEType;
+            // Memoized: the LaunchServices-backed UTType lookup dominated PROPFIND's ~1 ms/entry
+            // cost. Cached after the override checks (extension→type is the pure part), BOUNDED
+            // because clients mint arbitrary extensions and unbounded growth is accumulation.
+            static NSCache<NSString *, NSString *> *typeCache = nil;
+            static dispatch_once_t once;
+            dispatch_once(&once, ^{
+                typeCache = [[NSCache alloc] init];
+                typeCache.countLimit = 256;
+            });
+            mimeType = [typeCache objectForKey:extension];
+
+            if (mimeType == nil) {
+                // UniformTypeIdentifiers is available unconditionally at the deployment floors
+                // this library ships against: no availability check, no CoreServices fallback —
+                // a fallback's @available clause has to name each platform by hand, and omitting
+                // one is a silent per-platform bug.
+                UTType *const type = [UTType typeWithFilenameExtension:extension];
+                mimeType = type.preferredMIMEType;
+
+                if (mimeType != nil) {
+                    [typeCache setObject:mimeType forKey:extension];
+                }
+            }
         }
     }
 
