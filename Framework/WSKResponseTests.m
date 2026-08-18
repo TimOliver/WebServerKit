@@ -398,7 +398,11 @@
 - (void)testFileTruncatedWhileServedIsReportedAsAnErrorNotACleanEnd {
     NSString* dir = MakeTempDirectory();
     NSString* path = [dir stringByAppendingPathComponent:@"shrinking.bin"];
-    const NSUInteger kSize = 96 * 1024;  // Three 32 KiB reads
+    // Comfortably larger than the read buffer, whatever its size: the first chunk must leave
+    // bytes owed or the truncation lands after a complete transfer and proves nothing. The
+    // first-chunk assertion below guards that, so a future buffer bump fails loudly here
+    // instead of letting this test pass without its subject.
+    const NSUInteger kSize = 4 * 1024 * 1024;
     XCTAssertTrue([[NSMutableData dataWithLength:kSize] writeToFile:path atomically:YES]);
 
     WSKFileResponse* response = [WSKFileResponse responseWithFile:path];
@@ -427,12 +431,12 @@
     // First chunk arrives normally.
     NSError* error = nil;
     NSData* first = readChunk(&error);
-    XCTAssertEqual(first.length, (NSUInteger)(32 * 1024));
+    XCTAssertGreaterThan(first.length, (NSUInteger)0);
+    XCTAssertLessThan(first.length, kSize, @"fixture must outsize the read buffer or the truncation cannot land mid-transfer");
     XCTAssertNil(error);
 
-    // Truncate below the offset already consumed: the next read(2) hits EOF with
-    // two chunks still owed.
-    XCTAssertEqual(truncate(path.fileSystemRepresentation, 16 * 1024), 0);
+    // Truncate below the offset already consumed: the next read(2) hits EOF with bytes owed.
+    XCTAssertEqual(truncate(path.fileSystemRepresentation, (off_t)(first.length / 2)), 0);
 
     NSData* next = readChunk(&error);
     XCTAssertNil(next, @"a truncated-under-us file must not deliver data or the success sentinel");
