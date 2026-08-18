@@ -1403,4 +1403,38 @@
     [server stop];
 }
 
+// close(2) on a socket with unread inbound data makes the kernel send RST instead of FIN, and an
+// RST destroys bytes already handed to TCP — including a response already delivered into the
+// client's buffer. This predicate is the cheap guard that decides whether a connection needs to
+// linger at all, so the ordinary case (nothing unread) keeps closing exactly as it always has.
+- (void)testUnreadInboundDataIsDetected {
+    int fds[2] = { -1, -1 };
+    XCTAssertEqual(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+
+    XCTAssertFalse(WSKSocketHasUnreadInboundData(fds[0]), @"an idle socket has nothing unread");
+
+    XCTAssertEqual(write(fds[1], "x", 1), (ssize_t)1);
+
+    // Delivery through the socket layer is not instantaneous; poll briefly rather than sleeping a
+    // fixed amount, so this cannot flake on a loaded machine.
+    BOOL sawData = NO;
+    for (int i = 0; (i < 200) && !sawData; i++) {
+        sawData = WSKSocketHasUnreadInboundData(fds[0]);
+        if (!sawData) {
+            usleep(1000);
+        }
+    }
+    XCTAssertTrue(sawData, @"a byte sitting in the receive queue must be reported");
+
+    char scratch = 0;
+    XCTAssertEqual(read(fds[0], &scratch, 1), (ssize_t)1);
+    XCTAssertFalse(WSKSocketHasUnreadInboundData(fds[0]), @"draining the byte clears the condition");
+
+    // A closed descriptor must answer NO rather than assert or report garbage: the caller uses this
+    // to decide whether to do MORE work, so "cannot tell" has to mean "behave exactly as before".
+    close(fds[0]);
+    close(fds[1]);
+    XCTAssertFalse(WSKSocketHasUnreadInboundData(fds[0]), @"an unusable descriptor must fail to NO");
+}
+
 @end

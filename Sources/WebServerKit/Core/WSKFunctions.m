@@ -38,6 +38,7 @@
 #import <ifaddrs.h>
 #import <sys/mount.h>
 #import <sys/param.h>
+#import <sys/ioctl.h>
 #import <os/lock.h>
 #import <net/if.h>
 #import <netdb.h>
@@ -1299,4 +1300,14 @@ NSString *WSKFirstUnremovableItemAtPath(NSString *absolutePath) {
     }
 
     return nil;
+}
+
+BOOL WSKSocketHasUnreadInboundData(int socket) {
+    int pending = 0;
+
+    if (ioctl(socket, FIONREAD, &pending) != 0) {
+        return NO;
+    }
+
+    return (pending > 0);
 }
