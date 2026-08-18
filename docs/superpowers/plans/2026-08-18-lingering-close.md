@@ -220,14 +220,22 @@ Add to `Framework/WSKConnectionTests.m` before the final `@end`. This is the sta
         close(fd);
 
         NSString* text = [[NSString alloc] initWithData:reply encoding:NSUTF8StringEncoding];
-        BOOL const completeHeaders = (text != nil) && ([text rangeOfString:@"\r\n\r\n"].location != NSNotFound);
+        NSRange const separator = (text != nil) ? [text rangeOfString:@"\r\n\r\n"] : NSMakeRange(NSNotFound, 0);
         BOOL const rightStatus = (text != nil) && [text hasPrefix:@"HTTP/1.1 400"];
 
-        if (completeHeaders && rightStatus) {
+        // The ORACLE IS THE BODY, and this is the whole subtlety of this test. When the RST lands,
+        // the reply truncates to exactly its 167 bytes of headers and loses the 224-byte error
+        // page. A truncated reply therefore STILL starts "HTTP/1.1 400" and STILL contains the
+        // header terminator — asserting on those two passes 80/80 against unfixed source and
+        // detects nothing. Measured: 391 bytes with the body, 167 without, never anything between.
+        NSUInteger const bodyLength = (separator.location == NSNotFound) ? 0 : (text.length - NSMaxRange(separator));
+
+        if (rightStatus && (separator.location != NSNotFound) && (bodyLength > 0)) {
             clean += 1;
         } else if (failures.count < 3) {
-            [failures addObject:[NSString stringWithFormat:@"trial %lu: %lu bytes, sawEOF=%@",
-                                 (unsigned long)trial, (unsigned long)reply.length, sawEOF ? @"YES" : @"NO"]];
+            [failures addObject:[NSString stringWithFormat:@"trial %lu: %lu bytes, body=%lu, sawEOF=%@",
+                                 (unsigned long)trial, (unsigned long)reply.length,
+                                 (unsigned long)bodyLength, sawEOF ? @"YES" : @"NO"]];
         }
     }
 
@@ -245,7 +253,7 @@ Add to `Framework/WSKConnectionTests.m` before the final `@end`. This is the sta
 xcodebuild test -project WebServerKit.xcodeproj -scheme "WebServerKit (Mac)" -configuration Debug -only-testing:"Tests (Mac)/WSKConnectionTests/testRefusalSurvivesWhileClientIsStillSending" CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= PROVISIONING_PROFILE_SPECIFIER= 2>&1 | grep -E "error: -\[|Executed [0-9]+ test"
 ```
 
-Expected: FAIL, with `clean` below 20. **If it passes, stop and investigate before writing any implementation** — either the race is not reproducing on this machine or the test is not exercising the refusal path, and an implementation validated by a test that never failed is worth nothing. Re-run up to 3 times before concluding it passes.
+Expected: FAIL, with `clean` below 20 and at least one failure line showing `body=0`. **If it passes, stop and investigate before writing any implementation** — either the race is not reproducing on this machine or the test is not exercising the refusal path, and an implementation validated by a test that never failed is worth nothing. Re-run up to 3 times before concluding it passes.
 
 - [ ] **Step 3: Add the constants**
 
