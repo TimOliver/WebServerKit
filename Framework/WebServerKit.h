@@ -29,6 +29,8 @@
 
 // WSKWebServer Core
 #import <WebServerKit/WSKWebServer.h>
+#import <WebServerKit/WSKWebServerOptions.h>
+#import <WebServerKit/WSKDelegate.h>
 #import <WebServerKit/WSKConnection.h>
 #import <WebServerKit/WSKFunctions.h>
 #import <WebServerKit/WSKHTTPStatusCodes.h>
@@ -57,6 +59,8 @@
 
 // WSKWebServer Core
 #import "WSKWebServer.h"
+#import "WSKWebServerOptions.h"
+#import "WSKDelegate.h"
 #import "WSKConnection.h"
 #import "WSKFunctions.h"
 #import "WSKHTTPStatusCodes.h"
