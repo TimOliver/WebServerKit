@@ -1256,6 +1256,11 @@ static inline NSString *_EncodeBase64(NSString *string) {
 
         _options = newOptions;
         _lastBoundPort = 0;  // Fresh session: don't inherit a port remembered from a previous run.
+
+        // Before -_start: resumes the listening sources, not after: a connection accepted in that
+        // window would otherwise read isStopping == YES (stale from a previous -stop, which sets it
+        // true before it tears anything down) and silently skip lingering close.
+        atomic_store(&_stopping, false);  // A restarted server lingers again
 #if TARGET_OS_IPHONE
         _suspendInBackground = [(NSNumber *)_GetOption(_options, WSKOption_AutomaticallySuspendInBackground, @YES) boolValue];
 
@@ -1279,7 +1284,6 @@ static inline NSString *_EncodeBase64(NSString *string) {
         }
 
 #endif
-        atomic_store(&_stopping, false);  // A restarted server lingers again
         return YES;
     }
 

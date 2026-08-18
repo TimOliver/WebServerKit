@@ -3,6 +3,8 @@
 // Split out of the single Tests.m that held all 159 tests; the grouping is by subject, not by
 // the pass that added each test.
 
+#import <stdatomic.h>
+
 #import "TestsSupport.h"
 
 @interface WSKServerLifecycleTests : XCTestCase
@@ -270,8 +272,9 @@
 
     int const noSignal = 1;
     setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, sizeof(noSignal));
-    __block BOOL keepSending = YES;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+    __block atomic_bool keepSending = true;
+    dispatch_group_t senderGroup = dispatch_group_create();
+    dispatch_group_async(senderGroup, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         // Phase 1: many small sends in a tight loop, the exact shape
         // -testLingeringCloseReleasesItsSlotWhenTheClientGoesQuiet already relies on to let the
         // header read fire and complete on the header alone, so this filler stays genuinely
@@ -279,7 +282,7 @@
         // comfortably under kLingerDiscardCap on its own.
         char burst[64];
         memset(burst, 'Z', sizeof(burst));
-        for (int i = 0; (i < 400) && keepSending; i++) {
+        for (int i = 0; (i < 400) && atomic_load(&keepSending); i++) {
             if (send(fd, burst, sizeof(burst), 0) < 0) {
                 break;
             }
@@ -293,7 +296,7 @@
         // server is bound only by kLingerTotalSeconds (2s), the thing this test is actually about.
         char drip[1024];
         memset(drip, 'Z', sizeof(drip));
-        while (keepSending) {
+        while (atomic_load(&keepSending)) {
             usleep(100 * 1000);
             if (send(fd, drip, sizeof(drip), 0) < 0) {
                 break;
@@ -319,7 +322,14 @@
         usleep(50 * 1000);
         released = (OpenFileDescriptorCount() <= baseline - 1);
     }
-    keepSending = NO;
+    atomic_store(&keepSending, false);
+
+    // Join before touching fd again: phase 2 checks the flag, then sleeps up to 100ms, then sends --
+    // so the sender can still be inside send(fd, ...) for a moment after the flag flips, and closing
+    // underneath it would be a stray write to what may already be a recycled descriptor. Bounded
+    // (not DISPATCH_TIME_FOREVER) so a genuine hang fails this test instead of wedging the suite.
+    long const joined = dispatch_group_wait(senderGroup, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)));
+    XCTAssertEqual(joined, 0, @"sender did not join before close(fd)");
 
     XCTAssertTrue(released, @"a connection still draining when the server stops must be abandoned");
 

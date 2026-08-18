@@ -93,9 +93,14 @@ two very different deadlines in the machinery where the `-stop`/`-close` races h
 
 ## Interactions
 
-- **`-stop` abandons lingering immediately.** Stop draining, close now. Keeps `-stop` latency exactly
-  what it is today, which matters most for iComics' start/stop correctness and avoids adding waiting
-  to a path with four historical races. The shutdown caveat belongs in the public header docs.
+- **`-stop` abandons lingering at the next read completion or gap-timer fire, not immediately.**
+  `isStopping` is consulted only inside the drain's read-completion handler: an actively sending
+  client's next read completes almost at once, but a silent client's outstanding read only completes
+  once the 500 ms no-bytes gap fires `SHUT_RD`, so `didEndConnection:`/`webServerDidStop:` can trail
+  `-stop` by up to that gap. This is not about `-stop` latency — the call itself still never blocks,
+  waiting only on `_sourceGroup` and never on a connection's drain, which is what matters most for
+  iComics' start/stop correctness — and it avoids adding waiting to a path with four historical
+  races. The shutdown caveat belongs in the public header docs.
 - **SSE and streamed responses** are unaffected: the client sent one bodiless GET, so the receive
   queue is empty and step 1 short-circuits. No change to the channel or reaper machinery.
 - **Keep-alive teardown** likewise — `_carryOverData` holds already-read bytes and does not make the

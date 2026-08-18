@@ -785,7 +785,13 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
 
         size_t const received = data ? dispatch_data_get_size(data) : 0;
 
-        if ((error != 0) || (received == 0)) {
+        if (error != 0) {
+            WSK_LOG_DEBUG(@"Lingering close drain failed on socket %i: %s (%i)", self->_socket, strerror(error), error);
+            [self _cancelLingerTimer];
+            return;  // Done: the block's reference to self goes away and -dealloc closes the socket
+        }
+
+        if (received == 0) {
             WSK_LOG_DEBUG(@"Lingering close drained to EOF on socket %i", self->_socket);
             [self _cancelLingerTimer];
             return;  // Done: the block's reference to self goes away and -dealloc closes the socket

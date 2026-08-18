@@ -687,8 +687,9 @@ NSString *_Nullable WSKFirstUnremovableItemAtPath(NSString *absolutePath);
  *  receive buffer, unread. This is the guard that decides whether a connection must linger before
  *  closing; when it answers NO the close is exactly the one this server has always performed.
  *
- *  Answers NO when it cannot tell (a closed or non-socket descriptor), because the caller uses it
- *  to decide whether to do EXTRA work, and "unknown" must not mean "do the new thing".
+ *  Answers NO when it cannot tell (a closed descriptor, or one FIONREAD refuses, like /dev/null),
+ *  because the caller uses it to decide whether to do EXTRA work, and "unknown" must not mean "do
+ *  the new thing".
  */
 BOOL WSKSocketHasUnreadInboundData(int socket);
 
