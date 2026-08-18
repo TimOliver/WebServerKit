@@ -301,6 +301,11 @@ extern NSString *WSKStringFromSockAddr(const struct sockaddr *addr, BOOL include
 @property (nonatomic, readonly) NSTimeInterval connectionIdleTimeout;
 @property (nonatomic, readonly) NSTimeInterval connectionKeepAliveTimeout;
 @property (nonatomic, readonly) NSSet<NSString *> *registeredMethods;
+/**
+ *  YES once -stop has begun. Safe to read from any thread and deliberately NOT serialized on the
+ *  server's state queue, because connections read it from their own queues while -stop runs.
+ */
+@property (nonatomic, readonly, getter=isStopping) BOOL stopping;
 - (void)willStartConnection:(WSKConnection *)connection;
 - (void)didEndConnection:(WSKConnection *)connection;
 @end

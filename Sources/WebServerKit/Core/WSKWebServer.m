@@ -41,6 +41,7 @@
 #import <netinet/in.h>
 #import <objc/runtime.h>
 #import <signal.h>
+#import <stdatomic.h>
 #import <unistd.h>
 
 #import "WSKPrivate.h"
@@ -191,6 +192,7 @@ static void _ExecuteMainThreadRunLoopSources(void) {
     // _syncQueue or on the main queue, so its dispatch_group_wait cannot deadlock.
     dispatch_queue_t _stateQueue;
     dispatch_group_t _sourceGroup;
+    atomic_bool _stopping;               // Read from connection queues WITHOUT _stateQueue
     NSMutableArray<WSKHandler *> *_handlers;
     NSMutableSet<NSString *> *_registeredMethods;  // Which methods ANY handler claims; see -_noteRegisteredMethod:
     NSInteger _activeConnections;        // Accessed through _syncQueue only
@@ -1277,6 +1279,7 @@ static inline NSString *_EncodeBase64(NSString *string) {
         }
 
 #endif
+        atomic_store(&_stopping, false);  // A restarted server lingers again
         return YES;
     }
 
@@ -1335,6 +1338,8 @@ static inline NSString *_EncodeBase64(NSString *string) {
 
 // Runs on _stateQueue; -stop is the public funnel.
 - (void)_stopWithOptions {
+    atomic_store(&_stopping, true);
+
     if (_options) {
 #if TARGET_OS_IPHONE
 
@@ -1364,6 +1369,13 @@ static inline NSString *_EncodeBase64(NSString *string) {
     dispatch_sync(_stateQueue, ^{
         [self _stopWithOptions];
     });
+}
+
+// Deliberately does NOT go through _stateQueue. A connection reads this from its own queue while
+// -stop is running ON _stateQueue, and routing it through that queue would deadlock — the same
+// hazard as reading -serverURL inside a delegate callback.
+- (BOOL)isStopping {
+    return atomic_load(&_stopping);
 }
 
 @end

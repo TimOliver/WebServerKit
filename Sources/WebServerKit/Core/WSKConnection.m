@@ -689,6 +689,10 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
 // The dispatch_read block retains self, so -dealloc — and with it close(_socket) — is deferred
 // until draining finishes. No descriptor escapes this object and slot accounting is unchanged.
 - (void)_beginLingeringCloseIfNeeded {
+    if (_server.isStopping) {
+        return;
+    }
+
     if (_lingering) {
         return;
     }
@@ -771,6 +775,12 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
     dispatch_read(_socket, kLingerReadChunk, _connectionQueue, ^(dispatch_data_t data, int error) {
         if (self->_idleTimer) {
             self->_pendingIOCount -= 1;
+        }
+
+        if (self->_server.isStopping) {
+            WSK_LOG_DEBUG(@"Abandoning lingering close on socket %i: server is stopping", self->_socket);
+            [self _cancelLingerTimer];
+            return;
         }
 
         size_t const received = data ? dispatch_data_get_size(data) : 0;
