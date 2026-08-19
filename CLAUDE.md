@@ -305,6 +305,12 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   deadline is `kMaxHeaderPhaseTicks` (2) ticks of the 30 s idle timer, i.e. **60–90 s**, so a 2 s
   linger cannot be the cheapest way to occupy a slot. `-stop` abandons lingering; note that `-stop`
   never waited on connections anyway, so this was never about shutdown latency.
+  Accumulation-soaked 2026-08-19 (the connection-layer-change rule): 101,580 drain firings under
+  concurrent refuse-mid-upload load, descriptors flat (17→17), budget 0 at rest, `leaks` 0/0, no
+  server errors, 440k control GETs served throughout. All firings took the discard-cap exit (the
+  mid-upload case); the gap/deadline exits share the same teardown and resisted deterministic
+  triggering (the header read greedily consumes front-loaded bytes, so unread-at-close needs a
+  live blast). Trigger + counting via the Debug build's `Lingering before close` log.
 
 ### Limits (fixed constants, deliberately not options)
 
