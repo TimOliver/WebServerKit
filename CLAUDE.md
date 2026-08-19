@@ -90,6 +90,14 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   (6 chars, unambiguous alphabet — resists LAN-speed guessing without backoff). The example
   change was REVERTED pending a proper example-app refresh; the recipe is the three Bonjour
   options plus Digest accounts on a WSKWebDAVServer.
+- **The browser (WSKWebUploader) and WebDAV (WSKWebDAVServer) are two servers on two ports by
+  design, but this is an implementation detail the USER must never see.** They compose cleanly
+  (uploader is GET/POST only; DAV owns the WebDAV verbs), so an app runs both behind ONE "WiFi
+  Sharing" toggle: start/stop as a pair, both-or-nothing on failure, one shared config (folder +
+  Digest pairing code). The user sees one browser URL (QR/AirDrop/text); Finder finds the DAV
+  endpoint via Bonjour, its port carried invisibly in the SRV record. Do NOT merge them into a
+  single-port server — that fuses two independently-hardened security surfaces for no user-visible
+  gain.
 - A symlinked share is supported for live updates; the one-stream-per-browser SSE relay needs
   Web Locks + BroadcastChannel (falls back to per-tab streams without them).
 
