@@ -2284,10 +2284,16 @@ static NSString *_DigestURIPath(NSString *uri) {
     NSRange const cut = [uri rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"?#"]];
     NSString *target = (cut.location != NSNotFound) ? [uri substringToIndex:cut.location] : uri;
 
-    NSRange const scheme = [target rangeOfString:@"://"];
+    // NSLiteralSearch on both, so this parse says what it means: the default search honours
+    // composed character sequences, and a combining mark straight after a separator would hide
+    // it. MEASURED not to be reachable here — the "uri" comes from the Authorization header,
+    // which CFHTTPMessage decodes as Latin-1, and the percent-decoding that could produce a real
+    // combining mark runs AFTER this reduction. Kept so the reduction does not depend on either
+    // of those staying as they are.
+    NSRange const scheme = [target rangeOfString:@"://" options:NSLiteralSearch];
     if (scheme.location != NSNotFound) {
         NSString *const rest = [target substringFromIndex:(scheme.location + 3)];
-        NSRange slash = [rest rangeOfString:@"/"];
+        NSRange slash = [rest rangeOfString:@"/" options:NSLiteralSearch];
         target = (slash.location != NSNotFound) ? [rest substringFromIndex:slash.location] : @"/";
     }
 

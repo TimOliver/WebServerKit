@@ -38,8 +38,25 @@
 #import "WSKPrivate.h"
 
 BOOL WSKPathContainsNULByte(NSString *path) {
+    // NSLiteralSearch, because the default search honours composed character sequences: a
+    // combining mark straight after the NUL absorbs it into a grapheme cluster and the NUL goes
+    // unseen. That blinded this guard AND the truncation below — both documented defences of the
+    // NUL line at once. See WSKPathComponentsSeparatedBySlash for the same trap in splitting.
     unichar nul = 0;
-    return (path != nil) && ([path rangeOfString:[NSString stringWithCharacters:&nul length:1]].location != NSNotFound);
+    return (path != nil) &&
+           ([path rangeOfString:[NSString stringWithCharacters:&nul length:1] options:NSLiteralSearch].location != NSNotFound);
+}
+
+NSArray<NSString *> *WSKPathComponentsSeparatedBySlash(NSString *path) {
+    // Built once: this runs for every path-taking request, and rebuilding a character set per
+    // call would put an allocation on that path for no reason.
+    static NSCharacterSet *separators = nil;
+    static dispatch_once_t token;
+    dispatch_once(&token, ^{
+        separators = [NSCharacterSet characterSetWithCharactersInString:@"/"];
+    });
+
+    return [path componentsSeparatedByCharactersInSet:separators];
 }
 
 NSString *WSKNormalizePath(NSString *path) {
@@ -47,14 +64,14 @@ NSString *WSKNormalizePath(NSString *path) {
     // Otherwise -pathExtension reads past the NUL while -fileSystemRepresentation truncates at
     // it, so "secret.dat\0.png" would pass an extension allow-list yet open "secret.dat".
     unichar nul = 0;
-    NSRange const nulRange = [path rangeOfString:[NSString stringWithCharacters:&nul length:1]];
+    NSRange const nulRange = [path rangeOfString:[NSString stringWithCharacters:&nul length:1] options:NSLiteralSearch];
     if (nulRange.location != NSNotFound) {
         path = [path substringToIndex:nulRange.location];
     }
 
     NSMutableArray *const components = [[NSMutableArray alloc] init];
 
-    for (NSString *component in [path componentsSeparatedByString:@"/"]) {
+    for (NSString *component in WSKPathComponentsSeparatedBySlash(path)) {
         if ([component isEqualToString:@".."]) {
             if (components.count) {  // Guard: -removeLastObject on an empty array is documented to raise; surplus ".." are simply dropped.
                 [components removeLastObject];

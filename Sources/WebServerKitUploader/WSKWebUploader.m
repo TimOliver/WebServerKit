@@ -1230,13 +1230,20 @@ static NSString *_OriginAuthority(NSString *value) {
         return nil;
     }
 
-    NSRange const scheme = [value rangeOfString:@"://"];
+    // NSLiteralSearch on both, so this parse says what it means: the default search honours
+    // composed character sequences, and a combining mark straight after a separator would hide
+    // it (the shape that made WSKNormalizePath keep a ".."). MEASURED not to be reachable here —
+    // CFHTTPMessage decodes header values as Latin-1, so the UTF-8 bytes of a combining mark
+    // arrive as two ordinary characters and no composed sequence can form in a header value.
+    // Kept because this function must not depend on that decoding staying as it is; a test
+    // asserting a behaviour change was written, passed against the unfixed code, and deleted.
+    NSRange const scheme = [value rangeOfString:@"://" options:NSLiteralSearch];
     if (scheme.location == NSNotFound) {
         return nil;
     }
 
     NSString *authority = [value substringFromIndex:(scheme.location + 3)];
-    NSRange slash = [authority rangeOfString:@"/"];
+    NSRange slash = [authority rangeOfString:@"/" options:NSLiteralSearch];
     if (slash.location != NSNotFound) {
         authority = [authority substringToIndex:slash.location];
     }

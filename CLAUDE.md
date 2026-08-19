@@ -38,6 +38,13 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   `+[WSKWebServer reservedInMemoryByteCount]`), and Range/If-Range correctness (interrupted
   large downloads are a main path; a range served against a changed file splices two builds).
 - **Shape B: ephemeral LAN sharing (iComics).** Start/stop correctness matters most.
+- **Throughput is settled by measurement (2026-08-18, Release, localhost): ~920 MB/s single
+  stream (300 MB in 0.34 s), ~1.2 s CPU per GB served (per-chunk verification included),
+  200×50 KB thumbnail burst in 140 ms cold / 30 ms with keep-alive, 0 leaks.** The server
+  cannot be the bottleneck behind Tailscale (WireGuard) or LAN Wi-Fi — do not spend on
+  performance work. App-side note: keep-alive is 5× on many-small-file pages and defaults
+  OFF; a thumbnail-page client should set `WSKOption_ConnectionKeepAliveTimeout` (bodiless
+  GETs are exactly the class the anti-smuggling restriction permits).
 - **Both:** refuse clearly rather than half-succeed; a refused or failed transaction leaves
   nothing behind (no staging files, temp files, held descriptors, or connection slots).
 - **Threat model:** small trusted network. No rate limiting, no auth backoff, 128-connection
@@ -120,6 +127,47 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   judges the composed path against the `realpath`'d directory.
 - Same-file detection has one home: `WSKPathsNameTheSameFile` (protects against a self-move
   deleting the only copy, incl. case-variant pairs on case-insensitive volumes).
+- **Splitting a path on "/" has one home: `WSKPathComponentsSeparatedBySlash`. NEVER
+  `-componentsSeparatedByString:@"/"`** — it honours composed character sequences, so a
+  combining mark directly after a "/" absorbs that slash into a grapheme cluster and the split
+  skips it. `WSKNormalizePath` therefore left the `..` in front of one unstripped
+  (`"../" + U+030C + "/d"` normalized to itself), while the same string's `-pathComponents`
+  split correctly — one string cut two ways by two APIs that read alike. Client-reachable:
+  request paths are percent-decoded (`WSKConnection.m:1207`), so `%CC%8C` arrives as a real
+  mark. Found by fuzzing and FIXED 2026-08-18 at both sites (`WSKNormalizePath` and the
+  base-path hidden-item walk), test `testNormalizePathStripsDotDotBeforeACombiningMark` (red
+  on all four assertions before the fix). `-pathComponents` is NOT the drop-in — it collapses
+  `//`, prepends `/` and keeps a trailing `/`; splitting on a character SET was measured
+  byte-identical to the old spelling on every input without a mark, and 13% faster
+  (926 vs 1064 ns/split), so the fix costs nothing. `-hasPrefix:` shares the behaviour, which
+  is worth remembering for any future prefix test on a path — it bit the fuzz harness's own
+  oracle, which called a path genuinely inside the share outside. No escape existed either
+  way: realpath containment refused these paths before the fix and still does. The hidden-item
+  site has NO observable behaviour change and no test can pin it — hiding a slash requires a
+  mark immediately after it, which then begins the component, so it can never start with the
+  "." that walk looks for; it was fixed for consistency, not for a hole.
+- **The same blindness reached the NUL line, and that WAS reachable — fixed 2026-08-19.**
+  `-rangeOfString:` without `NSLiteralSearch` misses a NUL that a combining mark follows, so
+  BOTH documented defences went blind at once: `WSKPathContainsNULByte` (the resolver's
+  first-line refusal) answered NO, and `WSKNormalizePath`'s truncation behind it left the NUL
+  in place — measured making `WSKNamePassesExtensionAllowList` accept ".png" on a name the
+  filesystem would read as `secret.dat`, the exact bypass the truncation comment describes.
+  Nothing was exploitable end to end: composing such a path collapses it and `_RealPath`'s
+  length guard refuses, so every resolver still answered nil — **refusal by accident of path
+  composition, not by the guard meant to do it**. Both sites now pass `NSLiteralSearch`, pinned
+  by `testNULIsDetectedAndTruncatedThroughACombiningMark` (red on all four assertions before).
+  A SEVENTH recurrence of the NUL class, in a spelling none of the previous six covered.
+- **The two `rangeOfString:@"/"` authority splits are NOT reachable — an earlier entry here
+  said they "share the blindness", which is wrong.** `_OriginAuthority`
+  (`WSKWebUploader.m`) and `_DigestURIPath` (`WSKConnection.m`) parse HEADER values, and
+  CFHTTPMessage decodes those as Latin-1: the UTF-8 bytes of a combining mark arrive as two
+  ordinary characters (U+00CC, U+008C), so no composed sequence can form in a header value at
+  all. Measured by building a CFHTTPMessage from raw bytes, and independently by a test that
+  asserted a behaviour change and PASSED against the unfixed code — it was deleted rather than
+  kept green, because it could not fail for the reason it claimed. Both now use
+  `NSLiteralSearch` anyway, as a statement of intent that does not depend on that decoding
+  staying as it is. The distinction that decides reachability: `request.path` IS percent-decoded
+  into real Unicode (`WSKConnection.m:1207`), header values are not.
 
 ### Validators and conditional requests
 
@@ -427,6 +475,17 @@ Each was deliberate; full reasons in the archived record (`git show 09416c2:CLAU
 
 Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3.
 
+- **`WSKServableFileTypeAtPath` skips its containment check whenever the final component is
+  not itself a symlink** (found by fuzzing 2026-08-18; `abs/passwd` through a link to `/etc`
+  classifies `NSFileTypeRegular` while `WSKResolvedPathIsWithinDirectory` refuses it).
+  `-attributesOfItemAtPath:` does not follow a FINAL link but does follow INTERMEDIATE ones,
+  and the early `return type` for a non-link runs before any containment test. **Latent, not
+  reachable today**: all three enumerators (uploader `/list`, base-path index, PROPFIND) pass
+  an already-RESOLVED directory and append one raw entry name, so only the final component can
+  be a link — measured 0 disagreements across 19 real fixture entries, against 2 when the
+  directory portion is unresolved. It is the "advertise iff served" rule holding by caller
+  discipline rather than by the one function that owns it; a future caller passing an
+  unresolved directory reopens it.
 - **The allow-list vetting walk judges a symlink's TARGET, not the alias** — fail-closed
   over-refusal contradicting "symlinks are aliases"; needs an OWNER RULING, not a fix (the
   obvious `lstat` fix re-refuses via `_checkFileExtension:` for extensionless link names).
@@ -501,7 +560,34 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
 - A second-opinion agent is differently blind, not more reliable (~1-in-3 finding survival);
   it gets the MECHANISM wrong more often than the symptom — re-verify before relaying.
 - Extensive negative results exist (soaks, split-invariance, conformance, TSan triage — the
-  4 `-stop` races are FALSE positives, do not "fix" them). See "Verified clean" in the
+  4 `-stop` races are FALSE positives, do not "fix" them). Added 2026-08-18: clang static
+  analyzer CLEAN (Mac + iOS, all 22 `.m` files walked) and ASan+UBSan CLEAN over the 197-test
+  suite AND all 8 trace suites (401 replayed requests) — both oracles injection-proven
+  sensitive first (a garbage-return probe for the analyzer; a signed-overflow probe for
+  UBSan). Two probe lessons: under ARC an uninitialized OBJECT local is nil, not garbage —
+  scalar defects are the valid probe; and UBSan reports do NOT fail the run (suite exits 0
+  while reporting), so grep the log for `runtime error`, never trust exit codes. The scheme
+  runs ASan already; UBSan is not wired into `Run-Tests.sh`.
+- **Fuzzing, one bounded pass, 2026-08-18 (~79M executions, harness deliberately NOT kept).**
+  libFuzzer + ASan + UBSan, 10 in-process targets over the pure parsers, the containment
+  resolvers against a symlink/dot-dir fixture farm, and the framing parsers. CLEAN at:
+  header-block validator 41.2M (anti-smuggling rule independently re-derived per input),
+  entity-tag list 18.0M, gzip decode 7.7M, header-value/param machinery 6.3M, Range 1.9M,
+  both date parsers 1.6M, multipart 1.2M, named-entry+classifier 146k, follow-resolver 113k.
+  Zero memory errors, zero UB, zero hangs. The gzip and multipart targets asserted
+  `WSKReservedMemoryLength() == 0` after every single request teardown, so the priority-one
+  Shape A "zero accumulation" property is now measured across ~8.9M request lifecycles rather
+  than argued. Two findings, both above under "Still open at tip"; both fail closed.
+  Rebuild recipe if ever repeated: Apple's clang ships NO libFuzzer runtime
+  (`libclang_rt.fuzzer_osx.a` absent) — use Homebrew LLVM with `-isysroot $(xcrun
+  --show-sdk-path)`; `-fno-sanitize-recover=all` is load-bearing (UBSan otherwise logs and
+  continues, so libFuzzer never sees a finding); `-fno-sanitize=builtin` suppresses a
+  toolchain false positive that fires on the SDK's own `dispatch_once` in programs containing
+  no WebServerKit code; and reach `static` functions by `#import`-ing the `.m` into the
+  harness and omitting it from the link line. **A libFuzzer dictionary accepts ONLY `\xNN`
+  escapes — a `"\r\n"` entry aborts the whole run at startup**, which cost six targets a
+  silent no-run whose empty logs read exactly like clean passes (the project's own "read the
+  executed count" rule, caught only because the count was checked). See "Verified clean" in the
   archived record before re-testing anything speculatively; re-run only when the layer a
   result covers changes.
 

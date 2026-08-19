@@ -1797,8 +1797,16 @@ static NSString *_EscapeHTMLString(NSString *string) {
                 // that vend files already refuse hidden items; this was the one file-serving
                 // path in the library with no such concept. Every component is tested, not
                 // just the leaf, because the interesting secrets live *inside* a dot-directory.
+                //
+                // Split the way the filesystem splits: -componentsSeparatedByString: skips a "/"
+                // that a combining mark has absorbed into a grapheme cluster, so this walk saw
+                // two components merged into one. No request can be smuggled past it that way —
+                // hiding the slash requires a combining mark directly after it, which then
+                // begins the name, so the component can never start with the "." this looks for
+                // — but the check and the filesystem must not disagree about where a component
+                // ends, and one wrong spelling is how the next reader learns the wrong one.
                 if (!allowHiddenItems) {
-                    for (NSString *component in [relativePath componentsSeparatedByString:@"/"]) {
+                    for (NSString *component in WSKPathComponentsSeparatedBySlash(relativePath)) {
                         if ([component hasPrefix:@"."]) {
                             WSK_LOG_WARNING(@"Refusing to serve \"%@\": \"%@\" is a hidden item", relativePath, component);
                             return [WSKResponse responseWithStatusCode:kWSKHTTPStatusCode_NotFound];

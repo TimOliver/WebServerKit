@@ -33,6 +33,56 @@
     XCTAssertEqualObjects(WSKNormalizePath([[@"secret.dat" stringByAppendingString:nulStr] stringByAppendingString:@".png"]), @"secret.dat");
 }
 
+// A combining mark immediately after a "/" makes that slash part of a composed character
+// sequence, and -componentsSeparatedByString: silently skips it — so the ".." in front of it
+// was never seen as its own component and was never stripped. The client can put one on the
+// wire, because request paths are percent-decoded ("%CC%8C"). Found by fuzzing; the resolvers
+// still refused the result, so this is the textual layer being restored, not a hole closed.
+- (void)testNormalizePathStripsDotDotBeforeACombiningMark {
+    unichar const caron = 0x030C;  // U+030C COMBINING CARON
+    NSString *const mark = [NSString stringWithCharacters:&caron length:1];
+
+    // "../" + U+030C + "/d" — the ".." must go, exactly as it does in the plain "../d" case.
+    NSString *const leading = [NSString stringWithFormat:@"../%@/d", mark];
+    XCTAssertEqualObjects(WSKNormalizePath(leading), ([NSString stringWithFormat:@"%@/d", mark]));
+
+    // The same shape with something to pop: "a/../" + mark must lose BOTH "a" and "..".
+    NSString *const popping = [NSString stringWithFormat:@"a/../%@/d", mark];
+    XCTAssertEqualObjects(WSKNormalizePath(popping), ([NSString stringWithFormat:@"%@/d", mark]));
+
+    // Absolute spelling, and a mark that is not the first thing in its component.
+    NSString *const absolute = [NSString stringWithFormat:@"/a/../%@b/c", mark];
+    XCTAssertEqualObjects(WSKNormalizePath(absolute), ([NSString stringWithFormat:@"/%@b/c", mark]));
+
+    // A mark after the FINAL slash must not swallow the component boundary either.
+    NSString *const trailing = [NSString stringWithFormat:@"a/../%@", mark];
+    XCTAssertEqualObjects(WSKNormalizePath(trailing), mark);
+}
+
+// The same composed-sequence blindness reaches the NUL line, which is the class this project
+// has already closed six times: a combining mark straight after a NUL hid the NUL from
+// -rangeOfString:, so BOTH documented defences went blind at once — the resolver's first-line
+// refusal (WSKPathContainsNULByte) and WSKNormalizePath's truncation behind it. Nothing was
+// exploitable, because composing such a path collapses it and _RealPath's length guard then
+// refuses — but that is refusal by accident rather than by the guard meant to do it.
+- (void)testNULIsDetectedAndTruncatedThroughACombiningMark {
+    unichar const nulChar = 0;
+    NSString *const nul = [NSString stringWithCharacters:&nulChar length:1];
+    unichar const caron = 0x030C;
+    NSString *const mark = [NSString stringWithCharacters:&caron length:1];
+
+    // The guard must see a NUL wherever it sits.
+    XCTAssertTrue(WSKPathContainsNULByte([NSString stringWithFormat:@"secret.dat%@.png", nul]));
+    XCTAssertTrue(WSKPathContainsNULByte([NSString stringWithFormat:@"secret.dat%@%@.png", nul, mark]));
+    XCTAssertTrue(WSKPathContainsNULByte([NSString stringWithFormat:@"%@%@", nul, mark]));
+    XCTAssertFalse(WSKPathContainsNULByte(@"secret.dat.png"));
+
+    // And the second line must still truncate, so the extension the allow-list judges is the
+    // extension the filesystem would see.
+    XCTAssertEqualObjects(WSKNormalizePath([NSString stringWithFormat:@"secret.dat%@%@.png", nul, mark]), @"secret.dat");
+    XCTAssertEqualObjects(WSKNormalizePath([NSString stringWithFormat:@"a/b%@%@/c", nul, mark]), @"a/b");
+}
+
 // The uploader's state-changing endpoints must reject a cross-origin browser request
 // (a CSRF attempt): a request whose Origin authority differs from the Host is refused,
 // while a request with no Origin at all (a non-browser client) is allowed through.

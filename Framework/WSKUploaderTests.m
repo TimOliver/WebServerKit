@@ -304,6 +304,14 @@ static BOOL WSKInjectingMove(id self, SEL _cmd, NSString* src, NSString* dst, NS
     [fm removeItemAtPath:dir error:NULL];
 }
 
+// NOTE (2026-08-19): a test was written here asserting that a same-origin Referer whose path
+// begins with a combining mark is allowed, and it PASSED against the unfixed code — the origin
+// parse never had the composed-sequence bug in practice. CFHTTPMessage decodes header values as
+// Latin-1, so the UTF-8 bytes of U+030C arrive as two ordinary characters (U+00CC, U+008C) and
+// no combining mark can reach a header-parsing search at all. The test was deleted rather than
+// kept green: it could not fail for the reason it claimed to test. The NSLiteralSearch in
+// _OriginAuthority stays as a statement of intent, not as a fix for a reachable defect.
+
 // "GET /list" with no "path" query parameter must be answered, not crash the process.
 // A nil path survived every guard (WSKNormalizePath(nil) is @"", so the
 // absolute path collapsed to the upload directory, which exists and is a directory) and

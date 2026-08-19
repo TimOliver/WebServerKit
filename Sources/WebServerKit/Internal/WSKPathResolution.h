@@ -213,6 +213,24 @@ NSString *_Nullable WSKFirstUnvettableItemAtPath(NSString *absolutePath, BOOL is
 BOOL WSKPathsNameTheSameFile(NSString *path1, NSString *path2);
 
 /**
+ *  Splits `path` at every literal "/" — the separators the FILESYSTEM sees.
+ *
+ *  -componentsSeparatedByString:@"/" must not be used for this, which is why the rule has a home
+ *  of its own. That method honours composed character sequences, so a combining mark immediately
+ *  after a "/" makes the slash part of a grapheme cluster and the split silently skips it:
+ *  "../" + U+030C + "/d" came back as two components with the ".." still glued to the first, and
+ *  WSKNormalizePath therefore left the ".." in place. The same string's -pathComponents DOES
+ *  split there, so one string was being cut two different ways by two APIs that read alike. A
+ *  client can put such a byte on the wire, because request paths are percent-decoded.
+ *
+ *  -pathComponents is not the fix: it collapses "//", prepends "/" for an absolute path and
+ *  keeps a trailing "/" as a component. Splitting on a character SET was measured to match
+ *  -componentsSeparatedByString: byte-for-byte on every input WITHOUT a combining mark, so it
+ *  changes only the case that was wrong.
+ */
+NSArray<NSString *> *WSKPathComponentsSeparatedBySlash(NSString *_Nullable path);
+
+/**
  *  Removes "//", "/./" and "/../" components from path as well as any trailing slash.
  */
 NSString *WSKNormalizePath(NSString *path);
