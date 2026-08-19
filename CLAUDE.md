@@ -82,6 +82,14 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   `{"type":"move","oldPath":...,"newPath":...}`; directory paths end `/`; 15 s heartbeats.
 - iOS Files app: `UIFileSharingEnabled` + `LSSupportsOpeningDocumentsInPlace`; background
   serving via `WSKOption_AutomaticallySuspendInBackground: false` (~30 s).
+- **Finder Network-sidebar presence is a Bonjour type, not a feature**: advertise
+  `_webdav._tcp` (+ TXT `path=/`) on a WSKWebDAVServer and NetFS lists the device;
+  double-click mounts via mount_webdav. `_http._tcp` only reaches Safari's Bonjour menu.
+  Measured live 2026-08-18 (simulator): advert named after the device, Digest 401-challenge /
+  wrong-code-401 / right-code-207 matrix all correct with a per-session on-screen pairing code
+  (6 chars, unambiguous alphabet — resists LAN-speed guessing without backoff). The example
+  change was REVERTED pending a proper example-app refresh; the recipe is the three Bonjour
+  options plus Digest accounts on a WSKWebDAVServer.
 - A symlinked share is supported for live updates; the one-stream-per-browser SSE relay needs
   Web Locks + BroadcastChannel (falls back to per-tab streams without them).
 
@@ -365,6 +373,10 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   Unbuilt possibility, noted 2026-08-18: iOS 26's `BGContinuedProcessingTask` (user-initiated,
   progress-reporting, system progress UI) could extend the drain window for a large in-flight
   transfer. It cannot hold an idle listener or SSE stream open — no progress, no runtime.
+  **TLS: considered and parked 2026-08-18.** The shim seam exists (the two dispatch_read/write
+  calls), but SecureTransport is deprecated, Network.framework means rewriting the raced-est
+  code in the tree, and no CA issues LAN/.local certs — the trust-bootstrap UX is the real
+  problem. Tailscale covers Shape A; Digest + the on-screen pairing code covers the LAN threat.
 - **Unbuilt design, agreed 2026-08-18 — suspension notice in the uploader page.** On
   didEnterBackground the uploader (observing the UIKit notification itself, iOS-gated)
   broadcasts `{"type":"suspending","secondsRemaining":N}` with N sampled from
