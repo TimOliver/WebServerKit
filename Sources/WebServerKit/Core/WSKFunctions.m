@@ -138,7 +138,7 @@ NSString *WSKNormalizeHeaderValue(NSString *value) {
 
 NSString *WSKTruncateHeaderValue(NSString *value) {
     if (value) {
-        NSRange const range = [value rangeOfString:@";"];
+        NSRange const range = [value rangeOfString:@";" options:NSLiteralSearch];
 
         if (range.location != NSNotFound) {
             return [value substringToIndex:range.location];
@@ -163,7 +163,7 @@ NSString *WSKExtractHeaderValueParameter(NSString *value, NSString *name) {
 
     while (searchLocation < value.length) {
         NSRange found = [value rangeOfString:token
-                                     options:NSCaseInsensitiveSearch  // Parameter names are case-insensitive
+                                     options:(NSCaseInsensitiveSearch | NSLiteralSearch)  // Case-insensitive; literal so a combining mark can't hide the token
                                        range:NSMakeRange(searchLocation, value.length - searchLocation)];
 
         if (found.location == NSNotFound) {
@@ -449,7 +449,7 @@ BOOL WSKSplitAuthority(NSString *authority, NSString *__autoreleasing *outName, 
     BOOL const isBracketed = [normalized hasPrefix:@"["];
 
     if (isBracketed) {  // Bracketed IPv6 literal, optionally followed by a port
-        NSRange const closing = [name rangeOfString:@"]"];
+        NSRange const closing = [name rangeOfString:@"]" options:NSLiteralSearch];
 
         if (closing.location == NSNotFound) {
             return NO;
@@ -466,7 +466,7 @@ BOOL WSKSplitAuthority(NSString *authority, NSString *__autoreleasing *outName, 
     } else {
         // Searched BACKWARDS so an unbracketed IPv6 literal cannot be mistaken for name:port in a
         // way that silently succeeds — it still fails the checks the caller applies afterwards.
-        NSRange const colon = [name rangeOfString:@":" options:NSBackwardsSearch];
+        NSRange const colon = [name rangeOfString:@":" options:(NSBackwardsSearch | NSLiteralSearch)];
 
         if (colon.location != NSNotFound) {
             portText = [name substringFromIndex:(colon.location + 1)];

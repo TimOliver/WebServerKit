@@ -290,8 +290,12 @@ static NSData *_dashNewlineData = nil;
                 NSString *const headers = [[NSString alloc] initWithData:[_data subdataWithRange:NSMakeRange(0, range.location)] encoding:NSUTF8StringEncoding];
 
                 if (headers) {
-                    for (NSString *header in [headers componentsSeparatedByString:@"\r\n"]) {
-                        NSRange const subRange = [header rangeOfString:@":"];
+                    // Literal split/search: the string forms honour composed sequences, so a
+                    // combining mark after a "\r\n" or ":" hides it (see WSKPathComponentsSeparatedBySlash).
+                    NSCharacterSet *const crlf = [NSCharacterSet characterSetWithCharactersInString:@"\r\n"];
+
+                    for (NSString *header in [headers componentsSeparatedByCharactersInSet:crlf]) {
+                        NSRange const subRange = [header rangeOfString:@":" options:NSLiteralSearch];
 
                         if (subRange.location != NSNotFound) {
                             NSString *const name = [header substringToIndex:subRange.location];

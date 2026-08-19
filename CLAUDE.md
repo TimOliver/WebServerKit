@@ -176,6 +176,19 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   `NSLiteralSearch` anyway, as a statement of intent that does not depend on that decoding
   staying as it is. The distinction that decides reachability: `request.path` IS percent-decoded
   into real Unicode (`WSKConnection.m:1207`), header values are not.
+- **The site sweep for this class is complete (2026-08-19): EVERY structural-delimiter search
+  is now literal, all measured UNREACHABLE — same intent-only status as the two above, no test
+  possible.** Multipart part-header (`\r\n`→CRLF char-set, `:`→literal), the shared header
+  helpers it calls (`WSKTruncateHeaderValue` `;`, `WSKExtractHeaderValueParameter` token,
+  `WSKSplitAuthority` `]`/`:`), the DAV Clark-key `}` split, and the DAV Destination `#` guard.
+  Why none is reachable: a mark after a delimiter attaches to the NEXT token's first char, so
+  even the unhidden token fails its own comparison (`̌Content-Type`≠`Content-Type`) — fails
+  closed. The DAV `{ns}<mark>local` key never forms: XML forbids a mark-initial localname and
+  libxml2 (RECOVER) leaves the QName unbound (`n->name`=`Z:̌name`, no namespace) — probed
+  directly. Header-value sites are additionally Latin-1-decoded (marks arrive as two chars).
+  The Destination `#` guard was worth the most care — it is a REFUSAL that fails OPEN if a `#`
+  is hidden. `componentsSeparatedByString:@"/"` is zero tree-wide; the one remaining non-literal
+  search is the test-only trace comparator (multi-char token, server-generated XML).
 
 ### Validators and conditional requests
 

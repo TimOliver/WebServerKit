@@ -368,7 +368,8 @@ static NSString *_DeadPropertyKey(NSString *namespaceHref, NSString *localName) 
 }
 
 static NSString *_DeadPropertyElement(NSString *key) {
-    NSRange const close = [key rangeOfString:@"}"];
+    // Literal: a combining mark starting the localname hides the "}" from the default search.
+    NSRange const close = [key rangeOfString:@"}" options:NSLiteralSearch];
 
     if (![key hasPrefix:@"{"] || (close.location == NSNotFound)) {
         return [NSString stringWithFormat:@"<%@/>", _XMLEscape(key)];
@@ -1090,7 +1091,9 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
     // still arrive: HTTP stacks sanitize a URL they put in the request line but never a header
     // value, so curl strips '#' from the target and passes it through here untouched — a
     // target-only guard is defeated by any client doing that.
-    if ([destinationHeader rangeOfString:@"#"].location != NSNotFound) {
+    // Literal: a refusal guard, so a "#" hidden from the default search by a following mark would
+    // fail OPEN. Not reachable (header values are Latin-1-decoded), but this is the direction to be sure of.
+    if ([destinationHeader rangeOfString:@"#" options:NSLiteralSearch].location != NSNotFound) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"Malformed 'Destination' header: a fragment is not part of a request target: %@", destinationHeader];
     }
 
@@ -1403,7 +1406,8 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
 
 // The closing tag matching _DeadPropertyElement()'s opening one, so a stored value can be wrapped.
 - (NSString *)_closingElementForDeadPropertyKey:(NSString *)key {
-    NSRange const close = [key rangeOfString:@"}"];
+    // Literal, matching _DeadPropertyElement: else the open/close tags split the key differently.
+    NSRange const close = [key rangeOfString:@"}" options:NSLiteralSearch];
 
     if (![key hasPrefix:@"{"] || (close.location == NSNotFound)) {
         return [NSString stringWithFormat:@"</%@>", _XMLEscape(key)];
