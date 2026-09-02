@@ -233,11 +233,21 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   `WSKConnection.m:594` (case-insensitive `close`), `:2413` (If-None-Match `,` split),
   `WSKValidators.m:65` (entity-tag `,` split) and `WSKFunctions.m:127` — whose SIBLING
   `WSKTruncateHeaderValue` at `:141` is literal, the sharpest evidence that the sweep was
-  believed complete while it was not. All are on HEADER values, which CFHTTPMessage decodes as
-  Latin-1, so none is reachable by the same argument the entry above already makes — the defect
-  is in the RECORD, not in the code, and it is the sixth time this file has claimed a class
-  closed that was not. Left unfixed deliberately (unreachable, and churn in the framing parsers
-  is its own risk); what matters is that "complete" no longer appears here.
+  believed complete while it was not. It is the sixth time this file has claimed a class closed
+  that was not.
+  **And the Latin-1 shield does NOT cover all of them.** The reflex is to say these are header
+  values, which CFHTTPMessage decodes as Latin-1, so no composed sequence can form — true for
+  the top-level-header sites, which stay intent-only. But MULTIPART PART-headers are decoded as
+  **UTF-8** (`WSKMultiPartFormRequest.m:290`, feeding `WSKNormalizeHeaderValue` at `:305`/`:307`),
+  so a real combining mark reaches the non-literal `;` at `WSKFunctions.m:127`. Measured
+  end-to-end: the hidden `;` makes the search return NSNotFound, the WHOLE `Content-Disposition`
+  value is lowercased instead of just its prefix, and the upload is stored under a case-mangled
+  name. Fail direction checked and benign — the extension allow-list and traversal guards run on
+  that same lowercased spelling (no bypass), and a hidden `;` in a part's `Content-Type` lowercases
+  a nested boundary and fails the sub-parse closed. So: a small REAL defect, not just a record
+  error, and unfixed (see "Still open at tip"). Note what this cost — the shielding argument was
+  applied to a list without checking each entry's decoder, which is the same "closed at only some
+  sites" shape one level up.
 
 ### Validators and conditional requests
 
@@ -679,6 +689,13 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
     -side check runs AFTER the handler, so a 412 can follow a side effect that already happened.
     An unsatisfiable Range bypasses precondition evaluation entirely (416 even when If-Match
     fails).
+  - *Multipart part-header normalisation.* `WSKNormalizeHeaderValue`'s `;` search is non-literal
+    and its input IS UTF-8-decoded, so a combining mark after the `;` in a part's
+    `Content-Disposition` lowercases the entire value and the upload lands under a case-mangled
+    name (measured; no bypass, fails closed elsewhere). The one client-REACHABLE member of the
+    non-literal-search list above — fixing it is a one-word change (`NSLiteralSearch`), and the
+    reason it is listed rather than done is that the framing parsers deserve their own measured
+    pass rather than a drive-by.
   - *Framing and dispatch corners.* `Transfer-Encoding: identity` alone is processed as "no body"
     rather than the 400 §6.3 rule 3 owes (both in-tree handlers fail closed: 411/403). Legal BWS
     before a chunk extension (`5 ;x=y`) answers 400. Two or more empty lines before the request
