@@ -117,6 +117,7 @@ NS_ASSUME_NONNULL_END
     NSSet<NSString *> *_allowedHostNames;
     BOOL _shouldAutomaticallyMapHEADToGET;
     NSSet<NSString *> *_registeredMethods;  // Methods SOME handler claims; decides 404 vs 501 for an unmatched request
+    NSArray<WSKHandler *> *_handlers;       // The match order this connection was accepted under; see -initWithServer:
 
     CFHTTPMessageRef _requestMessage;
     WSKRequest *_request;
@@ -1226,7 +1227,7 @@ static BOOL _StatusDelimitsItself(NSInteger statusCode) {
                 NSDictionary *const requestQuery = queryString ? WSKParseURLEncodedForm(queryString) : @{};
 
                 if (requestMethod && requestURL && requestHeaders && requestPath && requestQuery) {
-                    for (self->_handler in self->_server.handlers) {
+                    for (self->_handler in self->_handlers) {
                         self->_request = self->_handler.matchBlock(requestMethod, requestURL, requestHeaders, requestPath, requestQuery);
 
                         if (self->_request) {
@@ -1416,6 +1417,15 @@ static BOOL _StatusDelimitsItself(NSInteger statusCode) {
         _allowedHostNames = server.allowedHostNames;
         _shouldAutomaticallyMapHEADToGET = server.shouldAutomaticallyMapHEADToGET;
         _registeredMethods = server.registeredMethods;
+        // Copied, not referenced: the match loop used to enumerate the server's live
+        // NSMutableArray on every request. -stop does not wait on connections, and handlers may be
+        // re-registered once stopped, so a kept-alive connection outlived the stop and went on
+        // reading an array another thread was rewriting — a mutation-during-enumeration crash, and
+        // when it did not crash, a request answered by handlers registered after the connection was
+        // accepted. `registeredMethods` beside it is snapshotted for the same reason; these two are
+        // one decision and must stay consistent, since they answer the same question (which handler
+        // set is this connection serving) at two different points.
+        _handlers = [server.handlers copy];
         _localAddressData = localAddress;
         _remoteAddressData = remoteAddress;
         _socket = socket;

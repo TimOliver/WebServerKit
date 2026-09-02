@@ -337,4 +337,89 @@
     [[NSFileManager defaultManager] removeItemAtPath:directory error:NULL];
 }
 
+// Reads one reply: the header block plus whatever length it declares. A receive timeout bounds it,
+// because a kept-alive connection sends nothing more until the next request and reading to EOF
+// would wait out the whole keep-alive timeout.
+static NSString* ReadOneReply(int fd) {
+    struct timeval tv = {3, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    NSMutableData* buffered = [NSMutableData data];
+
+    while (1) {
+        NSString* const soFar = [[NSString alloc] initWithData:buffered encoding:NSUTF8StringEncoding];
+        NSRange const headerEnd = soFar ? [soFar rangeOfString:@"\r\n\r\n"] : NSMakeRange(NSNotFound, 0);
+
+        if (headerEnd.location != NSNotFound) {
+            NSRange const label = [soFar rangeOfString:@"Content-Length: " options:NSCaseInsensitiveSearch];
+            NSInteger const expected = (label.location != NSNotFound) ? [[soFar substringFromIndex:NSMaxRange(label)] integerValue] : 0;
+
+            if ((NSInteger)(soFar.length - NSMaxRange(headerEnd)) >= expected) {
+                break;
+            }
+        }
+
+        char chunk[4096];
+        ssize_t const got = recv(fd, chunk, sizeof(chunk), 0);
+
+        if (got <= 0) {
+            break;
+        }
+
+        [buffered appendBytes:chunk length:(NSUInteger)got];
+    }
+
+    NSString* const reply = [[NSString alloc] initWithData:buffered encoding:NSUTF8StringEncoding];
+    return reply ? reply : @"";
+}
+
+// A connection reads the server's handler array LIVE, at match time, for every request it serves —
+// the one piece of server configuration missing from the accept-time snapshot that the ivar block
+// exists for. Handlers may be re-registered once the server is stopped (the header forbids it only
+// "while the server is running", and -stop nils the options the assertion guards on), but -stop
+// does not wait on connections, so a kept-alive connection outlives that stop and keeps reading the
+// array while another thread rewrites it. The deterministic half is pinned here: the second request
+// on a connection accepted under one handler set was answered by a set registered afterwards. The
+// same live read is also a data race, and reproduced as a SIGSEGV under concurrent mutation; a
+// crash cannot be asserted on, so this pins the observable that shares its cause.
+- (void)testConnectionServesTheHandlersItWasAcceptedUnder {
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addHandlerForMethod:@"GET"
+                           path:@"/which"
+                   requestClass:[WSKRequest class]
+                   processBlock:^WSKResponse*(WSKRequest* request) {
+                       return [WSKDataResponse responseWithText:@"SESSION-ONE"];
+                   }];
+
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES, WSKOption_ConnectionKeepAliveTimeout : @10.0};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    NSUInteger const port = server.port;
+
+    int fd = ConnectToLocalhostPort(port);
+    XCTAssertGreaterThan(fd, 0);
+    NSString* const request = @"GET /which HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    const char* bytes = [request UTF8String];
+    XCTAssertEqual(send(fd, bytes, strlen(bytes), 0), (ssize_t)strlen(bytes));
+
+    NSString* const firstReply = ReadOneReply(fd);
+    XCTAssertTrue([firstReply containsString:@"SESSION-ONE"], @"the connection is serving under the first handler set: %@", firstReply);
+    XCTAssertTrue([firstReply rangeOfString:@"keep-alive" options:NSCaseInsensitiveSearch].location != NSNotFound, @"…and was offered for reuse: %@", firstReply);
+
+    // Contract-legal: the server is stopped, so -isRunning is NO and the mutation assertion passes.
+    [server stop];
+    [server removeAllHandlers];
+    [server addHandlerForMethod:@"GET"
+                           path:@"/which"
+                   requestClass:[WSKRequest class]
+                   processBlock:^WSKResponse*(WSKRequest* request) {
+                       return [WSKDataResponse responseWithText:@"SESSION-TWO"];
+                   }];
+
+    XCTAssertEqual(send(fd, bytes, strlen(bytes), 0), (ssize_t)strlen(bytes));
+    NSString* const secondReply = ReadOneReply(fd);
+    close(fd);
+
+    XCTAssertFalse([secondReply containsString:@"SESSION-TWO"],
+                   @"a connection accepted under one handler set must never be answered by handlers registered after it: %@", secondReply);
+}
+
 @end
