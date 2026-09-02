@@ -506,6 +506,46 @@
     [fm removeItemAtPath:dir error:NULL];
 }
 
+// A 304 carries no body BY STATUS: RFC 9112 §6.3 rule 1 terminates it at the first empty line
+// "regardless of the header fields present", so the client always knows where it ends and reuse is
+// safe. The eligibility test asked only whether the response STATED a length, and the substituted
+// 304 states none — so every revalidation closed the connection it arrived on. That lands on
+// exactly the workload keep-alive is for: files are served no-cache by default, so a browser
+// revisiting a page of thumbnails revalidates each one and pays a fresh connection for every 304.
+- (void)testConnectionKeepAliveSurvivesASelfDelimiting304 {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    XCTAssertTrue([@"ALPHA" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([@"BETA" writeToFile:[dir stringByAppendingPathComponent:@"b.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addGETHandlerForBasePath:@"/f/" directoryPath:dir indexFilename:nil cacheAge:0 allowRangeRequests:YES];
+    NSDictionary* keepAliveOptions = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES, WSKOption_ConnectionKeepAliveTimeout : @5.0};
+    XCTAssertTrue([server startWithOptions:keepAliveOptions error:NULL]);
+
+    NSString* unconditional = SendRawRequest(server.port, @"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSRange tagLabel = [unconditional rangeOfString:@"Etag: " options:NSCaseInsensitiveSearch];
+    XCTAssertTrue(tagLabel.location != NSNotFound, @"the 200 must carry the validator the 304 is asked for: %@", unconditional);
+    NSString* afterLabel = [unconditional substringFromIndex:NSMaxRange(tagLabel)];
+    NSString* etag = [afterLabel substringToIndex:[afterLabel rangeOfString:@"\r\n"].location];
+
+    NSString* conditional = [NSString stringWithFormat:@"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: %@\r\n\r\n", etag];
+    NSArray<NSString*>* replies = SendRawRequestsOnOneConnection(server.port, @[ conditional, @"GET /f/b.txt HTTP/1.1\r\nHost: localhost\r\n\r\n" ]);
+
+    XCTAssertTrue(replies.count >= 1, @"the conditional request is answered at all");
+    XCTAssertTrue([replies.firstObject hasPrefix:@"HTTP/1.1 304"], @"the validator must produce a 304: %@", replies.firstObject);
+    XCTAssertTrue([replies.firstObject rangeOfString:@"Connection: keep-alive" options:NSCaseInsensitiveSearch].location != NSNotFound,
+                  @"a 304 is self-delimiting, so it must not close a negotiated keep-alive connection: %@", replies.firstObject);
+    XCTAssertEqual(replies.count, (NSUInteger)2, @"the request after the 304 must still be served on the same connection");
+
+    if (replies.count == 2) {
+        XCTAssertTrue([replies[1] containsString:@"BETA"], @"…with its own body: %@", replies[1]);
+    }
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 // The option defaults to off, so every existing deployment keeps serving exactly one request per
 // connection until it opts in. Worth pinning: the whole feature is new machinery in the most
 // security-critical file in the library, and "the default did not change" is the property that

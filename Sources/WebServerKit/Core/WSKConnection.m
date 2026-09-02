@@ -565,6 +565,16 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
     return YES;
 }
 
+// RFC 9112 §6.3 rule 1: a 1xx, 204 or 304 response ends at the first empty line after its header
+// fields, "regardless of the header fields present in the message". Its length is settled by the
+// STATUS, so it delimits itself with no Content-Length and cannot desynchronize a reused
+// connection — the one case where the length test below has nothing to test.
+static BOOL _StatusDelimitsItself(NSInteger statusCode) {
+    return ((statusCode >= 100) && (statusCode < 200)) ||
+           (statusCode == kWSKHTTPStatusCode_NoContent) ||
+           (statusCode == kWSKHTTPStatusCode_NotModified);
+}
+
 // Every condition that must hold for this connection to carry another request. Evaluated once, with
 // the response in hand, immediately before the header block that announces the decision goes out.
 - (BOOL)_shouldKeepConnectionAlive {
@@ -596,9 +606,16 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
     }
 
     // The response must state its own length, or the client cannot tell where it ends without
-    // waiting for the close that reuse is avoiding. A chunked response frames itself; anything
-    // else needs Content-Length.
-    if (![self _shouldChunkResponse] && (_response.contentLength == NSUIntegerMax)) {
+    // waiting for the close that reuse is avoiding. A chunked response frames itself; a 304 or 204
+    // is framed by its status; anything else needs Content-Length.
+    //
+    // The status clause is not a refinement — without it the substituted 304 (minted bare, so it
+    // states no length) closed every connection it went out on, which is precisely the
+    // revalidation traffic reuse exists to serve: files are no-cache by default, so a browser
+    // re-viewing a page of images conditionally re-requests each one and paid a new connection for
+    // every 304 it got back.
+    if (![self _shouldChunkResponse] && (_response.contentLength == NSUIntegerMax) &&
+        !_StatusDelimitsItself(_response.statusCode)) {
         return NO;
     }
 
