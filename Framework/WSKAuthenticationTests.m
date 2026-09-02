@@ -133,6 +133,62 @@
     [server stop];
 }
 
+// HEAD is mapped to GET before anything else runs — that is what WSKOption_AutomaticallyMapHEADToGET
+// is for, and it defaults to YES — so by the time preflight computes HA2 the request's method reads
+// "GET" while the client hashed the "HEAD" it actually sent. The two digests can never agree, so a
+// HEAD with perfectly good credentials was answered 401, re-challenged, and answered 401 again:
+// unauthenticable, permanently, on every Digest deployment. It fails closed, but it fails a method
+// clients lean on — `curl -I`, and the probe a WebDAV or sync client issues before a large download.
+//
+// HA2 must therefore be computed over the method that arrived on the WIRE. -isVirtualHEAD is what
+// the request keeps that distinction in.
+- (void)testDigestAuthenticatesAHEADMappedToGET {
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[WSKRequest class]
+                          processBlock:^WSKResponse*(WSKRequest* request) {
+                              return [WSKDataResponse responseWithText:@"secret-body"];
+                          }];
+    NSDictionary* options = @{
+        WSKOption_Port : @0,
+        WSKOption_BindToLocalhost : @YES,
+        WSKOption_AuthenticationMethod : WSKAuthenticationMethod_DigestAccess,
+        WSKOption_AuthenticationRealm : @"test",
+        WSKOption_AuthenticationAccounts : @{@"user" : @"pass"}
+    };
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* challenge = SendRawRequest(server.port, @"HEAD /secret HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([challenge containsString:@"401"], @"an unauthenticated HEAD is challenged: %@", challenge);
+    NSString* nonce = QuotedParam(challenge, @"nonce");
+    XCTAssertNotNil(nonce, @"no nonce in challenge: %@", challenge);
+
+    // What every conformant client computes for this request: RFC 7616 §3.4.3 makes A2 the method
+    // as sent, so "HEAD:/secret".
+    NSString* ha1 = WSKComputeMD5Digest(@"%@:%@:%@", @"user", @"test", @"pass");
+    NSString* ha2 = WSKComputeMD5Digest(@"%@:%@", @"HEAD", @"/secret");
+    NSString* response = WSKComputeMD5Digest(@"%@:%@:%@", ha1, nonce, ha2);
+    NSString* authorization = [NSString stringWithFormat:@"Authorization: Digest username=\"user\", realm=\"test\", nonce=\"%@\", uri=\"/secret\", response=\"%@\"", nonce, response];
+
+    NSString* reply = SendRawRequest(server.port, [NSString stringWithFormat:@"HEAD /secret HTTP/1.1\r\nHost: localhost\r\n%@\r\n\r\n", authorization]);
+    XCTAssertTrue([reply containsString:@"200"], @"a HEAD digest hashed over HEAD must authenticate: %@", reply);
+    XCTAssertFalse([reply containsString:@"secret-body"], @"…and a HEAD still carries no body: %@", reply);
+
+    // The mirror: a digest computed over GET must NOT authenticate a HEAD once the wire method is
+    // what binds, or the fix would just move the mismatch rather than close it.
+    NSString* ha2AsGet = WSKComputeMD5Digest(@"%@:%@", @"GET", @"/secret");
+    NSString* responseAsGet = WSKComputeMD5Digest(@"%@:%@:%@", ha1, nonce, ha2AsGet);
+    NSString* mismatched = [NSString stringWithFormat:@"Authorization: Digest username=\"user\", realm=\"test\", nonce=\"%@\", uri=\"/secret\", response=\"%@\"", nonce, responseAsGet];
+    NSString* refused = SendRawRequest(server.port, [NSString stringWithFormat:@"HEAD /secret HTTP/1.1\r\nHost: localhost\r\n%@\r\n\r\n", mismatched]);
+    XCTAssertTrue([refused containsString:@"401"], @"a GET-computed digest must not authenticate a HEAD: %@", refused);
+
+    // And the GET path itself is untouched.
+    NSString* getReply = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /secret HTTP/1.1\r\nHost: localhost\r\n%@\r\n\r\n", mismatched]);
+    XCTAssertTrue([getReply containsString:@"secret-body"], @"GET with a GET-computed digest must still work: %@", getReply);
+
+    [server stop];
+}
+
 // A header parameter name must match at a token boundary. A plain substring search finds
 // "name=" inside "filename=" and "nonce=" inside "cnonce=", so a client could pick which
 // value the server read just by reordering the parameters — which broke Digest auth for
