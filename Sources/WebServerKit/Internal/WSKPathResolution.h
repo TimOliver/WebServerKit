@@ -71,6 +71,25 @@ NSString *_Nullable WSKResolvedPathRelativeToDirectory(NSString *path, NSString 
  */
 BOOL WSKResolvedPathHasHiddenComponent(NSString *path, NSString *directory);
 
+/**
+ *  Does this single NAME start with a dot — the whole hidden-name rule, in one place?
+ *
+ *  Every site that asks this used `-hasPrefix:@"."`, which is REPRESENTATION-dependent: three
+ *  NSStrings with byte-identical UTF-16 content answer differently, because the default search
+ *  honours composed character sequences and a combining mark straight after the dot absorbs it
+ *  into one grapheme cluster. Measured on Darwin 25.6 for ".<U+0301>x.txt": an ordinary
+ *  __NSCFString answers YES, and the NSPathStore2 that `-lastPathComponent` returns answers NO.
+ *
+ *  The uploader asked exactly that question about exactly that string — its `/upload` name is
+ *  `[file.fileName lastPathComponent]` — so a share refusing hidden items accepted a name the
+ *  filesystem then wrote as a real dot-file, invisible to its own listing and therefore
+ *  undeletable through its own UI.
+ *
+ *  Reading the first character cannot disagree with itself, so that is what this does. An empty
+ *  name is not hidden (and `-characterAtIndex:` would raise on it).
+ */
+BOOL WSKNameIsHidden(NSString *_Nullable name);
+
 #pragma mark - Header-field and host-name internals
 
 // Also formerly public. No caller outside the core target and no plausible host-app use: these are

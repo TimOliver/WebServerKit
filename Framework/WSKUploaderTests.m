@@ -465,4 +465,55 @@ static BOOL WSKInjectingMove(id self, SEL _cmd, NSString* src, NSString* dst, NS
     [fm removeItemAtPath:dir error:NULL];
 }
 
+// -hasPrefix: is REPRESENTATION-dependent, and the hidden-name rule was asked with it. Three
+// NSStrings with byte-identical UTF-16 content — "." then U+0301 then a name — answer differently:
+// an ordinary __NSCFString says YES, and the NSPathStore2 that -lastPathComponent returns says NO.
+// Measured on this OS, not inferred; the default search honours composed character sequences, so
+// the dot is read as part of the grapheme cluster the combining mark forms.
+//
+// /upload asks exactly that question about exactly that string: fileName is
+// [file.fileName lastPathComponent]. So a share configured to refuse hidden items accepted a name
+// the filesystem then wrote as a real dot-file — invisible to ls, to Finder, and to the uploader's
+// own listing, which cannot show it and therefore cannot delete it either. One-way litter, created
+// remotely, in a share whose owner has said "no hidden items".
+//
+// The predicate now reads the first character, which no representation can disagree about.
+- (void)testUploadRefusesADotNameHiddenBehindACombiningMark {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    WSKWebUploader* server = [[WSKWebUploader alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    unichar markedChars[] = {'.', 0x0301, 'u', 'p', '.', 't', 'x', 't'};  // "." + combining acute + "up.txt"
+    NSString* marked = [NSString stringWithCharacters:markedChars length:8];
+
+    NSString* (^upload)(NSString*) = ^(NSString* name) {
+        NSString* boundary = @"----wskdotmark";
+        NSString* body = [NSString stringWithFormat:
+            @"--%@\r\nContent-Disposition: form-data; name=\"files[]\"; filename=\"%@\"\r\nContent-Type: text/plain\r\n\r\nPAYLOAD\r\n--%@--\r\n", boundary, name, boundary];
+        return SendRawRequest(server.port, [NSString stringWithFormat:
+            @"POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data; boundary=%@\r\nContent-Length: %lu\r\n\r\n%@",
+            boundary, (unsigned long)strlen(body.UTF8String), body]);
+    };
+
+    // The control: a plain dot-name is refused, which is the rule this share is running under.
+    XCTAssertTrue([upload(@".plain.txt") hasPrefix:@"HTTP/1.1 403"], @"a plain dot-name must be refused");
+
+    NSString* reply = upload(marked);
+    XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 403"], @"a dot-name carrying a combining mark must be refused too: %@", [reply substringToIndex:MIN((NSUInteger)50, reply.length)]);
+
+    // What the refusal is FOR: nothing dot-prefixed may appear on disk.
+    for (NSString* entry in [fm contentsOfDirectoryAtPath:dir error:NULL]) {
+        XCTAssertNotEqual([entry characterAtIndex:0], (unichar)'.', @"a hidden file was created in a share that refuses them: %@", entry);
+    }
+
+    // And an ordinary name still uploads, so the tightened predicate refuses nothing it should not.
+    XCTAssertTrue([upload(@"ordinary.txt") hasPrefix:@"HTTP/1.1 200"], @"an ordinary upload must still be accepted");
+    XCTAssertTrue([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"ordinary.txt"]]);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 @end

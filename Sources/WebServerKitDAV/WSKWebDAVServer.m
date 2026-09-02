@@ -2043,7 +2043,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
         }
 
         for (NSString *item in items) {
-            if (_allowHiddenItems || ![item hasPrefix:@"."]) {
+            if (_allowHiddenItems || !WSKNameIsHidden(item)) {
                 [self _addPropertyResponseForItem:[absolutePath stringByAppendingPathComponent:item] resource:[relativePath stringByAppendingString:item] properties:properties kind:kind unsupported:unsupported lockCapable:lockCapable xmlString:xmlString];
             }
         }
