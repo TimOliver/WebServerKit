@@ -2327,6 +2327,37 @@ static NSString *_DigestURIPath(NSString *uri) {
     return WSKUnescapeURLString(target);
 }
 
+// The other half of the same target: everything from the first "?" up to any fragment, RAW. Raw
+// because both sides of the comparison are verbatim wire text — the client's own uri directive and
+// the request line it sent — so unescaping either could fold two distinct spellings into one.
+static NSString *_DigestURIQuery(NSString *uri) {
+    if (uri == nil) {
+        return nil;
+    }
+
+    // Literal, for the reason _DigestURIPath states above its own searches.
+    NSRange const mark = [uri rangeOfString:@"?" options:NSLiteralSearch];
+
+    if (mark.location == NSNotFound) {
+        return nil;
+    }
+
+    NSString *const rest = [uri substringFromIndex:(mark.location + 1)];
+    NSRange const fragment = [rest rangeOfString:@"#" options:NSLiteralSearch];
+    return (fragment.location != NSNotFound) ? [rest substringToIndex:fragment.location] : rest;
+}
+
+// Absent on both sides is a match; absent on one is not. Spelled out rather than left to
+// -isEqualToString: on a nil receiver, which answers NO by accident of messaging nil rather than by
+// decision — a distinction that has cost this codebase real defects.
+static BOOL _DigestTargetPartsAgree(NSString *fromCredential, NSString *fromRequest) {
+    if ((fromCredential == nil) || (fromRequest == nil)) {
+        return (fromCredential == nil) && (fromRequest == nil);
+    }
+
+    return [fromCredential isEqualToString:fromRequest];
+}
+
 // https://tools.ietf.org/html/rfc2617
 - (WSKResponse *)preflightRequest:(WSKRequest *)request {
     WSK_LOG_DEBUG(@"Connection on socket %i preflighting request \"%@ %@\" with %lu bytes body", _socket, _virtualHEAD ? @"HEAD" : _request.method, _request.path, (unsigned long)_totalBytesRead);
@@ -2393,7 +2424,16 @@ static NSString *_DigestURIPath(NSString *uri) {
                         // digest as the literal "(null)", whose every input is attacker-known
                         // (nonce and realm are disclosed in the 401; method and uri are
                         // attacker-chosen), forging a valid response with no password at all.
-                        if ((ha1 != nil) && [_DigestURIPath(uri) isEqualToString:request.path]) {
+                        // Both halves of the request target, because RFC 7616 §3.4.6 asks whether
+                        // the uri directive designates the same RESOURCE as the request line, and
+                        // request.path never carries a query — so comparing paths alone left the
+                        // query covered by nothing. On the uploader that is where every operation
+                        // names its target (/list?path=, /download?path=), so one captured exchange
+                        // authorized that endpoint against any argument until the nonce expired.
+                        NSString *const requestQuery = CFBridgingRelease(CFURLCopyQueryString((CFURLRef)request.URL, NULL));
+
+                        if ((ha1 != nil) && [_DigestURIPath(uri) isEqualToString:request.path] &&
+                            _DigestTargetPartsAgree(_DigestURIQuery(uri), requestQuery)) {
                             // RFC 7616 §3.4.3 computes A2 from the method the CLIENT sent. A mapped
                             // HEAD has already been rewritten to GET before preflight runs (that
                             // rewrite is the point of WSKOption_AutomaticallyMapHEADToGET, on by

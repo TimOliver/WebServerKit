@@ -189,6 +189,65 @@
     [server stop];
 }
 
+// The binding check compared only the PATH of the client's "uri" against request.path, and
+// request.path never carries a query — so the query string was covered by nothing. RFC 7616 §3.4.6
+// requires the server to verify that the uri directive designates the same resource as the request
+// line, and on the uploader every operation names its target in exactly the part that went
+// unchecked: /list?path=, /download?path=. One captured exchange therefore authorized that endpoint
+// against ANY argument for as long as the nonce lived.
+//
+// This is the same class as the cross-resource replay the test above pins, in the spelling that
+// escaped it.
+- (void)testDigestBindsTheQueryStringNotJustThePath {
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[WSKRequest class]
+                          processBlock:^WSKResponse*(WSKRequest* request) {
+                              return [WSKDataResponse responseWithText:[NSString stringWithFormat:@"served:%@", request.query[@"file"] ?: @"none"]];
+                          }];
+    NSDictionary* options = @{
+        WSKOption_Port : @0,
+        WSKOption_BindToLocalhost : @YES,
+        WSKOption_AuthenticationMethod : WSKAuthenticationMethod_DigestAccess,
+        WSKOption_AuthenticationRealm : @"test",
+        WSKOption_AuthenticationAccounts : @{@"user" : @"pass"}
+    };
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* challenge = SendRawRequest(server.port, @"GET /read?file=mine HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString* nonce = QuotedParam(challenge, @"nonce");
+    XCTAssertNotNil(nonce, @"no nonce in challenge: %@", challenge);
+
+    // A credential computed for the whole target, exactly as a conformant client computes it.
+    NSString* ha1 = WSKComputeMD5Digest(@"%@:%@:%@", @"user", @"test", @"pass");
+    NSString* ha2 = WSKComputeMD5Digest(@"%@:%@", @"GET", @"/read?file=mine");
+    NSString* response = WSKComputeMD5Digest(@"%@:%@:%@", ha1, nonce, ha2);
+    NSString* authorization = [NSString stringWithFormat:@"Authorization: Digest username=\"user\", realm=\"test\", nonce=\"%@\", uri=\"/read?file=mine\", response=\"%@\"", nonce, response];
+
+    // It must authenticate the request it was computed for — the half a binding fix can break.
+    NSString* ok = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /read?file=mine HTTP/1.1\r\nHost: localhost\r\n%@\r\n\r\n", authorization]);
+    XCTAssertTrue([ok containsString:@"200"], @"a digest covering the full target must authenticate it: %@", ok);
+    XCTAssertTrue([ok containsString:@"served:mine"], @"…and reach the handler with its own arguments: %@", ok);
+
+    // Replayed verbatim with a substituted argument: same path, same method, different resource.
+    NSString* substituted = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /read?file=yours HTTP/1.1\r\nHost: localhost\r\n%@\r\n\r\n", authorization]);
+    XCTAssertTrue([substituted containsString:@"401"], @"a digest computed for one query must not authenticate another: %@", substituted);
+    XCTAssertFalse([substituted containsString:@"served:yours"], @"the substituted argument reached the handler: %@", substituted);
+
+    // A query stripped entirely is also a different resource.
+    NSString* stripped = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /read HTTP/1.1\r\nHost: localhost\r\n%@\r\n\r\n", authorization]);
+    XCTAssertTrue([stripped containsString:@"401"], @"dropping the query must not authenticate either: %@", stripped);
+
+    // And a target with no query at all still works, computed over just the path.
+    NSString* plainHa2 = WSKComputeMD5Digest(@"%@:%@", @"GET", @"/read");
+    NSString* plainResponse = WSKComputeMD5Digest(@"%@:%@:%@", ha1, nonce, plainHa2);
+    NSString* plainAuthorization = [NSString stringWithFormat:@"Authorization: Digest username=\"user\", realm=\"test\", nonce=\"%@\", uri=\"/read\", response=\"%@\"", nonce, plainResponse];
+    NSString* plain = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /read HTTP/1.1\r\nHost: localhost\r\n%@\r\n\r\n", plainAuthorization]);
+    XCTAssertTrue([plain containsString:@"200"], @"a query-less target must still authenticate: %@", plain);
+
+    [server stop];
+}
+
 // A header parameter name must match at a token boundary. A plain substring search finds
 // "name=" inside "filename=" and "nonce=" inside "cnonce=", so a client could pick which
 // value the server read just by reordering the parameters — which broke Digest auth for
