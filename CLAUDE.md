@@ -3,9 +3,10 @@
 A fork of GCDWebServer with additional features for iOS/macOS web serving.
 
 This is the CONDENSED institutional memory (condensed 2026-08-17 from the full 21-pass audit
-record). The complete record — every measurement, justification, and the pass-by-pass
-appendix — lives in git history: `git show 09416c2:CLAUDE.md`. Consult it before re-auditing
-a subsystem or reversing anything under "Settled decisions".
+record; a 22nd pass — spec conformance, 2026-09-02 — is folded in place rather than appended).
+The complete record — every measurement, justification, and the pass-by-pass appendix — lives in
+git history: `git show 09416c2:CLAUDE.md`. Consult it before re-auditing a subsystem or reversing
+anything under "Settled decisions".
 
 ## Build Commands
 
@@ -80,6 +81,12 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
 - SSE wire contract: `event: change` with JSON
   `{"type":"upload"|"delete"|"create"|"external","path":...}` or
   `{"type":"move","oldPath":...,"newPath":...}`; directory paths end `/`; 15 s heartbeats.
+  **CORRECTION 2026-09-02: "directory paths end `/`" is aspirational, not what ships.** Only
+  `/create` and the external coalesced producer append it; `/delete` broadcasts the relative path
+  verbatim (though `isDirectory` is known at that point) and `/move` broadcasts both paths bare.
+  Demonstrated by one resource, two spellings: `POST /create path=/Dir2` emits `"/Dir2/"` and
+  deleting that same directory moments later emits `"/Dir2"`. Unfixed — `index.js` has no test
+  harness, so a client-visible contract change needs a Chromium probe against both builds.
 - iOS Files app: `UIFileSharingEnabled` + `LSSupportsOpeningDocumentsInPlace`; background
   serving via `WSKOption_AutomaticallySuspendInBackground: false` (~30 s).
 - **Finder Network-sidebar presence is a Bonjour type, not a feature**: advertise
@@ -115,8 +122,29 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
 - **Symlinks are aliases** (owner decision): destructive verbs act on the named entry
   (`DELETE /latest` removes the link); reads still follow. Root destruction is impossible by
   construction — the pinning test asserts contents SURVIVE, not that the request refuses.
+  That held only while the target EXISTED until 2026-09-02: DELETE asked
+  `-fileExistsAtPath:` about the named entry, which FOLLOWS the final link, so a DANGLING alias
+  answered 404 and stayed — and every write verb then refused the name because it did exist.
+  The name was wedged, clearable only from the filesystem, and a dangling alias is the ordinary
+  end state of the publish-by-symlink pattern (replace the build, the alias outlives it). Now
+  `lstat`; `isDirectory` comes from the same observation, so a link is never a collection and
+  `DELETE /dirlink` with `Depth: 0` removes the alias instead of answering 400 for a subtree it
+  never touches. Recurring shape 8.
+- **"Is this name hidden?" has ONE home, `WSKNameIsHidden`, and it reads the first character.**
+  `-hasPrefix:@"."` is REPRESENTATION-dependent: for `"." + U+0301 + "x.txt"` an ordinary
+  `__NSCFString` answers YES and the `NSPathStore2` that `-lastPathComponent` returns answers NO,
+  on byte-identical UTF-16 (measured Darwin 25.6). `/upload` asked exactly that of exactly that
+  string (`[file.fileName lastPathComponent]`), so a share refusing hidden items accepted a real
+  dot-file — invisible to its own listing, therefore undeletable through its own UI. All twelve
+  sites swept 2026-09-02; only `/upload` was reachable (directory enumeration hands out
+  `__NSCFString`), the rest are drift insurance. NINTH combining-mark recurrence, and the first
+  where the blind API was a PREFIX TEST rather than a search — assume any `-hasPrefix:` on a
+  path or name shares it.
 - **Listings advertise iff served**: one classifier, `WSKServableFileTypeAtPath()`, feeds all
-  three enumerators (PROPFIND, uploader `/list`, base-path index) so they cannot drift.
+  three enumerators (PROPFIND, uploader `/list`, base-path index) so they cannot drift. It also
+  hands BACK the path it observed (`outResolvedPath`, added 2026-09-02) so a caller can derive
+  the metadata it publishes from the SAME observation that classified the entry — see the
+  PROPFIND entry under WebDAV for what a second observation cost.
 - The extension allow-list judges BOTH names a symlink presents — alias AND resolved target
   (`WSKEntryPassesExtensionAllowList`, one home).
 - The uploader's mutating endpoints hold `_fileOperationLock` (four sites; any new
@@ -184,9 +212,10 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   `NSLiteralSearch` anyway, as a statement of intent that does not depend on that decoding
   staying as it is. The distinction that decides reachability: `request.path` IS percent-decoded
   into real Unicode (`WSKConnection.m:1207`), header values are not.
-- **The site sweep for this class is complete (2026-08-19): EVERY structural-delimiter search
-  is now literal, all measured UNREACHABLE — same intent-only status as the two above, no test
-  possible.** Multipart part-header (`\r\n`→CRLF char-set, `:`→literal), the shared header
+- **The 2026-08-19 sweep of this class — recorded at the time as COMPLETE, which the CORRECTION
+  below disproves. Read both.** What it genuinely established: the sites named here are literal
+  and measured UNREACHABLE, same intent-only status as the two above, no test possible.
+  Multipart part-header (`\r\n`→CRLF char-set, `:`→literal), the shared header
   helpers it calls (`WSKTruncateHeaderValue` `;`, `WSKExtractHeaderValueParameter` token,
   `WSKSplitAuthority` `]`/`:`), the DAV Clark-key `}` split, and the DAV Destination `#` guard.
   Why none is reachable: a mark after a delimiter attaches to the NEXT token's first char, so
@@ -195,8 +224,20 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   libxml2 (RECOVER) leaves the QName unbound (`n->name`=`Z:̌name`, no namespace) — probed
   directly. Header-value sites are additionally Latin-1-decoded (marks arrive as two chars).
   The Destination `#` guard was worth the most care — it is a REFUSAL that fails OPEN if a `#`
-  is hidden. `componentsSeparatedByString:@"/"` is zero tree-wide; the one remaining non-literal
-  search is the test-only trace comparator (multi-char token, server-generated XML).
+  is hidden. `componentsSeparatedByString:@"/"` is zero tree-wide.
+- **CORRECTION 2026-09-02: the two sentences that used to end the entry above — "the site sweep
+  for this class is COMPLETE" and "the one remaining non-literal search is the test-only trace
+  comparator" — were both FALSE.** A dedicated pass found non-literal structural searches still
+  live at, among others, `WSKRequest.m:302` (`componentsSeparatedByString:@","`), `:304` (`;`),
+  `:376`/`:377` (Accept-Encoding), `:422` (Content-Encoding), `:523`/`:526` (Range),
+  `WSKConnection.m:594` (case-insensitive `close`), `:2413` (If-None-Match `,` split),
+  `WSKValidators.m:65` (entity-tag `,` split) and `WSKFunctions.m:127` — whose SIBLING
+  `WSKTruncateHeaderValue` at `:141` is literal, the sharpest evidence that the sweep was
+  believed complete while it was not. All are on HEADER values, which CFHTTPMessage decodes as
+  Latin-1, so none is reachable by the same argument the entry above already makes — the defect
+  is in the RECORD, not in the code, and it is the sixth time this file has claimed a class
+  closed that was not. Left unfixed deliberately (unreachable, and churn in the framing parsers
+  is its own risk); what matters is that "complete" no longer appears here.
 
 ### Validators and conditional requests
 
@@ -208,6 +249,14 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   issue-time withholding is the WHOLE protection; do not try to "strengthen" the resume-path
   check. PROPFIND's `getlastmodified` shares the seal.
 - `If-Modified-Since` uses EXACT equality; `If-None-Match` takes precedence (RFC 9110).
+- **Only step 2 of RFC 9110 §13.2.2 is conditional on step 1.** If-Unmodified-Since is skipped
+  when If-Match is present; If-None-Match (step 3) is evaluated whatever the earlier steps
+  answered. The WebDAV write-verb chain was one `else if` ladder, so a SATISFIED If-Match
+  skipped the client's If-None-Match entirely — `If-Match: <current tag>` + `If-None-Match: *`
+  answered 204 and replaced the file, telling the client a condition it stated was met when it
+  was not (the lost-update shape the If-Unmodified-Since gap was fixed for). Fixed 2026-09-02 at
+  the one chain all three write verbs share; the nil check on the list is explicit at the call
+  site rather than left to messaging nil.
 - `If-Match`/`If-Unmodified-Since` are enforced BEFORE any destructive step (PUT, DELETE,
   MOVE, COPY) and ALSO on reads — gated to GET/HEAD 2xx deliberately (ungating turns every
   successful conditional write into a 412). `If-Match` on a MISSING resource answers 404 —
@@ -257,6 +306,18 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
 - Digest auth works over full bytes (never `-UTF8String`+`strlen`); header-parameter
   extraction requires a token boundary (`nonce=` matches inside `cnonce=` otherwise);
   `filename*` uses an escaper that covers `;`.
+- **The verified digest binds the WIRE method and the WHOLE request target** (both 2026-09-02).
+  HA2 was computed from `request.method`, which a mapped HEAD has already rewritten to GET
+  before preflight runs — so the server compared a GET digest against the client's HEAD one and
+  they could never agree: HEAD was permanently unauthenticable on both Digest servers
+  (`curl --digest -I` → 401, retried → 401, while GET of the same URL → 200). Now
+  `request.isVirtualHEAD ? @"HEAD" : request.method`. Separately, the target check compared only
+  `_DigestURIPath(uri)` against `request.path`, and `request.path` never carries a query — so the
+  query was covered by NOTHING, which on the uploader is where every operation names its target
+  (`/list?path=`, `/download?path=`). A credential captured from real curl for
+  `?path=/mine.txt` served `/yours.txt` on replay; now 401. Both halves compared RAW (each side is
+  verbatim wire text); absent-on-both-sides is a match, spelled out rather than left to
+  messaging nil. Real clients DO put the query in the uri directive — verified, no over-refusal.
 - The `SO_NOSIGPIPE` result is checked and the socket dropped on failure — never remove
   (SIGPIPE once killed the process roughly every 15–25 abortive closes).
 - `WSK_DCHECK` is a no-op in Release; `WSK_DNOT_REACHED()` aborts in Debug — remote-input
@@ -280,6 +341,8 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
 ### File serving and connection reuse
 
 - EVERY file-vending surface honours `Range`/`If-Range`, including uploader `/download`.
+  (Honours, but does not ADVERTISE: neither DAV GET nor uploader `/download`/`/preview` sends
+  `Accept-Ranges: bytes`, only the base-path handler does — see "Still open at tip".)
 - `/download` is always an attachment (stored-XSS defence — the uploader's one-click buttons
   run in the server's origin); `/preview` serves an inert-media ALLOW-list inline with
   `nosniff` + subresource-denying CSP — SVG and PDF excluded deliberately (both carry
@@ -291,6 +354,22 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   reads a body cannot be desynchronized), not "we parse carefully". Eligibility reads the
   RAW header names, never `-hasBody` (which misses `Transfer-Encoding: identity` — exactly
   the TE.CL desync shape).
+- **A 1xx, 204 or 304 delimits itself by STATUS** (RFC 9112 §6.3 rule 1: terminated at the first
+  empty line "regardless of the header fields present"), so it satisfies the reuse length test
+  with no `Content-Length`. Before 2026-09-02 it did not: the substituted 304 is minted bare, so
+  every revalidation closed its connection — precisely the traffic reuse exists for, since files
+  are `no-cache` by default and a re-viewed page of thumbnails revalidates every one of them. NOT
+  widened to bare 400/404/416, which state no length and nothing in their status says so; and the
+  serializer is unchanged, so a 304 gains no `Content-Length` and trace bytes are untouched.
+  Soaked per the connection-layer rule: 7,200 revalidations, 0 errors, descriptors flat, and
+  connections still retire at `kMaxRequestsPerConnection` (101 served, then close).
+- **The handler array is part of the accept-time snapshot** (2026-09-02). It was the one piece of
+  server config a live connection read from the server on every request. `-stop` does not wait on
+  connections and handlers may be re-registered once stopped (the header forbids it only "while
+  running", and `-stop` nils the options the assertion checks), so a kept-alive connection
+  outlived the stop and enumerated an array being rewritten: a request answered by handlers
+  registered AFTER that connection was accepted, and — with 24 connections live — SIGSEGV on 3 of
+  3 runs. Copied at accept, the same probe survives ~1M mutation loops.
 - A request served from `_carryOverData` must be marked non-idle at the point the carry-over
   is consumed, or the keep-alive reaper cuts its response off mid-body.
 - Bytes past `Content-Length` are TRIMMED, never refused (TCP segmentation isn't the
@@ -332,6 +411,15 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   deliberately unlimited.
 - Idle timeout: hard header-phase deadline; body phase uses a byte-RATE floor; response phase
   is any-byte-is-progress (SSE-safe); handler time never counts.
+- **Dead-property storage: 64 KB per RESOURCE** (`kDAVMaxDeadPropertyStorageLength`, 2026-09-02),
+  judged on the serialized plist after the merge. `kDAVMaxRequestBodyLength` bounds one request;
+  nothing bounded what those requests accumulate into, so ordinary legal PROPPATCHes grew the
+  xattr without limit — 329,223 bytes on a 4-byte file across 40 requests, and the audit reached
+  1.28 MB answered by a 1.29 MB allprop PROPFIND. It survives restarts and every allprop echoes
+  it back amplified, which is exactly the Shape A accumulation shape. Over the cap it reports
+  EDQUOT and PROPPATCH answers **507** (ENOSPC too — a full disk previously said 403, sending the
+  client back to retry what could not succeed); ENOTSUP stays 403. A removal shrinks the plist so
+  it can never be refused: a full store must always be emptyable (measured 57,617 → 49,402).
 
 ### WebDAV
 
@@ -341,6 +429,28 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   skipped by BOTH dead-property loops (allprop and `<propname/>`); the derived fallback comes
   from the resource path the client used, which arrives ALREADY unescaped — do not unescape
   again (`50%.txt` once published EMPTY). The root's displayname is deliberately empty.
+- **A Depth:1 entry describes what a GET of it SERVES, which for a symlink is the target.**
+  The enumeration hands the property builder a raw child name, and its observers split three
+  ways on it: `-attributesOfItemAtPath:` does not follow a FINAL link (so size and dates came
+  from the link inode), `stat()` does (so the TARGET's entity tag went out beside them), and
+  `open(O_NOFOLLOW)` failed ELOOP so `getlastmodified` was omitted entirely. Measured: a 3 MB
+  build behind an alias published `getcontentlength` 9 — the length of "build.ipa" — with the
+  target's etag. A PROPFIND-driven client sizes its copy from the listing, so mount_webdav and
+  rclone truncated the build silently, with no date validator published to notice by. Depth:0 was
+  always right (performPROPFIND hands in the follow-resolver's answer); Depth:1 now reads
+  `WSKServableFileTypeAtPath`'s `outResolvedPath`, so ONE observation feeds every published
+  metadatum. Fixed 2026-09-02; the code comments at the old sites asserted the opposite of the
+  measured behaviour. Recurring shape 6.
+- **A property name carrying an UNDECLARED namespace prefix is refused 400 by both parsers.**
+  libxml2 runs with `XML_PARSE_RECOVER` (settled), so `<Z:note>` with no `xmlns:Z` survives with
+  the prefix baked into the local name — `node->name` is literally `"Z:note"`, `node->ns` NULL.
+  Emitting that is not XML, and STORING it poisons persistently: every later allprop PROPFIND of
+  the resource re-emits it, INCLUDING the Depth:1 listing of its parent, so one poisoned file
+  makes the whole folder unparseable. Three paths were affected (PROPPATCH response, allprop
+  readback, the 404 propstat of a PROPFIND naming one). Both parsers judge it alike — teaching
+  one and not the other just moves the way in. `_DeadPropertyElement` also returns nil for a key
+  it cannot represent and every call site skips it, so a share poisoned by an OLDER build heals
+  on upgrade (verified by staging with the old binary and serving with the new).
 - A `Destination` naming another server answers 502; compared by host NAME only — scheme and
   port deliberately ignored (TLS terminates upstream, ports may translate). A value starting
   `//` is a network-path reference and CARRIES an authority; `///path` parses with an EMPTY
@@ -549,6 +659,62 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
   Invisible in the default configuration (no allow-list ⇒ walk returns nil).
 - **Lingering close** (Core invariants → File serving and connection reuse) fixes the body-loss
   case this line named, and corrects its claim that the status was always safe.
+- **From the 2026-09-02 audit: confirmed on the wire, deliberately NOT fixed.** Each was
+  reproduced against a live Release build and judged low-value for these deployments; the ten
+  that WERE fixed are recorded in the invariant sections above. Grouped so a future pass can pick
+  a theme rather than a line.
+  - *Advertisement and negotiation.* Neither DAV GET nor uploader `/download`/`/preview` sends
+    `Accept-Ranges: bytes` though all honour Range — a client that gates resume on the
+    advertisement restarts from zero. `HEAD` + `Range` answers 206 + `Content-Range` (§14.2
+    defines Range for GET only; internally consistent, and `curl -I -r` expects exactly this).
+    Opt-in gzip reuses the identity representation's strong ETag and no response ever carries
+    `Vary: Accept-Encoding`; outbound gzip is applied on the handler's flag without consulting
+    `Accept-Encoding` at all. 415 for an undecodable `Content-Encoding` omits `Accept-Encoding`.
+  - *Cache metadata.* A 304 drops the 200's `Cache-Control`, `Vary` and additionalHeaders (the
+    `cacheControlMaxAge` copied onto it is dead code); non-2xx responses carry no cache metadata,
+    leaving error pages heuristically cacheable; `public` is emitted unconditionally with any
+    positive max-age; max-age formats through an `(int)` cast (negative above INT_MAX).
+  - *Conditionals.* If-None-Match is never evaluated when the 2xx carries no ETag, so
+    `If-None-Match: *` cannot fire against an ETag-less representation. On non-GET/HEAD the read
+    -side check runs AFTER the handler, so a 412 can follow a side effect that already happened.
+    An unsatisfiable Range bypasses precondition evaluation entirely (416 even when If-Match
+    fails).
+  - *Framing and dispatch corners.* `Transfer-Encoding: identity` alone is processed as "no body"
+    rather than the 400 §6.3 rule 3 owes (both in-tree handlers fail closed: 411/403). Legal BWS
+    before a chunk extension (`5 ;x=y`) answers 400. Two or more empty lines before the request
+    line answer 400 (one is skipped, per §2.2's "at least one"). An authority-form or opaque
+    target (`GET example.com:443`) is dispatched as `/` rather than refused. `Expect` is compared
+    as a whole value, not a list. Client EOF mid-request is answered and LOGGED as a fabricated
+    500 rather than treated as the disconnect it is.
+  - *Security-adjacent, judged acceptable on a trusted LAN.* **Unmatched requests (the 404/501
+    path) bypass Host validation, the auth preflight and the PUT `Content-Range` refusal** — on an
+    auth-enabled server an unauthenticated client can still distinguish "method registered" from
+    "no handler anywhere" (404 vs 501) and reach DAV OPTIONS. Digest is qop-less RFC 2069 (so no
+    nc/cnonce, so no replay counting — a captured header is reusable for the nonce's 300 s
+    lifetime), `stale=TRUE` is asserted without validating the presented credential, the
+    auth-scheme token is compared case-sensitively, non-ASCII usernames cannot work (Latin-1
+    header decode vs UTF-8 HA1), and unknown-username short-circuits measurably.
+  - *WebDAV.* Named PROPFIND matches the nine live properties by LOCAL NAME only, so a
+    foreign-namespace `getetag` gets the DAV value; a requested live property that is
+    conditionally unavailable (a sealed date) is silently omitted instead of getting a 404
+    propstat; PROPPATCH's response href is not percent-encoded; PROPPATCH flattens dead-property
+    VALUES to text (child elements, attributes, `xml:lang` lost); duplicate instructions for one
+    property repeat the element inside one propstat; PROPFIND of a FIFO/socket returns a 207 with
+    zero responses instead of 404; COPY/MOVE never produce the §9.8.3 207 for a member failure
+    (every non-ENOSPC errno becomes 403, and a partial destination can be left behind); Depth:0
+    COPY of a collection drops its dead properties; a path-absolute `Destination` treats a query
+    string as literal filename characters; LOCK refresh (bodiless LOCK) answers 400; PUT carrying
+    a `Range` header answers 400 where §14.2 wants it ignored; MKCOL evaluates no preconditions;
+    `getlastmodified` publishes a date from one stat while judging the seal on a second.
+  - *Uploader and lifecycle.* `/events`' triple defence is bypassable by a pre-Sec-Fetch browser
+    (a no-cors GET with `referrerPolicy: no-referrer` sends neither Origin nor Referer, and the
+    Origin check only refuses when an authority was extracted); the `Accept` gate passes when the
+    header is ABSENT (zeroed-NSRange shape). The 129th connection at the cap is accepted and hard
+    -closed (usually RST, never an HTTP status). The Bonjour registration callback reads
+    `_resolutionService` on the main thread outside `_stateQueue`. Response-phase progress is
+    measured per write-buffer completion, so a reader slower than ~bufferSize/timeout can be cut.
+    `WSKParseURLEncodedForm` lets a valueless parameter absorb the following pair (`?flag&path=x`
+    loses `path`), and a leading `=` discards the whole remainder.
 - **ENAMETOOLONG answers 500, both servers.** A filename ≥ NAME_MAX (a 300-char component
   measured 500 on `/upload` AND WebDAV PUT) is client-supplied input the filesystem cannot store,
   so 4xx is owed, not a server fault. Not fixed with the disk-full pass deliberately: the status is
@@ -579,6 +745,28 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
   `retry: 30000` refusal stream, reclaim on next failed write).
 - Verification gap: the duplicate-`webServerDidStop:` fix is `#if TARGET_OS_IPHONE` and the
   Mac suite is structurally blind to it; only the single delivery site is established.
+- **REFUTED 2026-09-02 — plausible on paper, killed by measurement. Do not re-find these.**
+  - *HTTP date formatters are NOT vulnerable to the user's 12/24-hour override.* The four
+    formatters use `en_US` rather than `en_US_POSIX`, which looks like the classic QA1480 bug,
+    but the ICU rewrite consults the preference snapshot attached to the formatter's LOCALE
+    OBJECT and an explicitly-allocated locale carries no user prefs — POSIX-ness is not the
+    operative distinction. Proven with the oracle validated first: under
+    `AppleICUForce12HourTime=1` a current-locale control corrupted to "2:23:45 PM" and failed to
+    parse, while the shipped construction stayed byte-correct on macOS and on iOS 18.6 and 27.0
+    simulators. A `th_TH` Buddhist-calendar control was likewise unaffected.
+  - *Exact-case header subscripting is safe.* `CFHTTPMessageCopyAllHeaderFields` canonicalizes
+    every parsed tchar name generically, so `if-match:`, `iF-nOnE-mAtCh:` and `range:` all reach
+    the exact-spelling lookups (wire-proved: lowercase `if-match` still produced 412, lowercase
+    `if-range` still suppressed the range). The two in-code comments claiming otherwise overstate
+    CF's behaviour.
+  - *EMFILE does not busy-spin the accept source.* GCD's READ source fires once per arrival, not
+    per level condition: 200 connections held in a starved backlog for 10 s produced exactly 200
+    error lines and 20 ms of CPU. XNU's `accept` also dequeues and CLOSES the pending connection
+    on EMFILE, so nothing survives to refire on. Self-recovering.
+  - *U+FFFE/U+FFFF in a filename cannot reach the XML writer.* APFS refuses creation (EILSEQ),
+    and exFAT/HFS+ percent-encode the name in the kernel, so the enumerator never sees one.
+  - The `If:` header being ignored, LOCK on an unmapped URL answering 404, and UNLOCK answering
+    204 for any token are RESTATEMENTS of the settled lock-stub decision, not findings.
 
 ## Lessons (the ones that cost real time)
 
@@ -600,10 +788,33 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
 - A green oracle you have not proved sensitive proves nothing — inject the defect first. A
   RED from an unvalidated oracle is worth exactly as much as a green. Ask what configuration
   the defect NEEDS (a real defect read 0 at realistic timeouts until the reads were paced).
+  **The library you reach for to CHECK conformance may not check it.** `NSXMLParser` accepts an
+  undeclared namespace prefix even with `shouldProcessNamespaces = YES`, so it stayed green
+  against a response that was not XML at all — the exact defect under test. The replacement
+  asserts every prefix used in the body is declared in it, and was proven sensitive (3 failures
+  became 6, the new ones being the corrupted listings). Prefer an oracle you can state as a rule
+  over one you inherit from a framework.
+- **A predicate can answer differently on the same bytes.** `-hasPrefix:@"."` depends on which
+  NSString subclass holds the string: `NSPathStore2` (what `-lastPathComponent` returns) says NO
+  where `__NSCFString` says YES, on identical UTF-16. Nothing warns, both look correct in
+  isolation, and the disagreement only appears where the two representations meet. When a rule
+  must hold everywhere, read the primary source (a code unit, a `struct stat`) rather than asking
+  a convenience API — and give the rule one home so the question is asked once.
 - Verify batches together, not per-fix; periodically run every technique family against tip.
 - `-stop` is NOT a barrier over connection teardown — poll for the event, never read state
   straight after `-stop`. Two timing tests flake under load; re-run a failure in isolation
   before believing it. Don't overlap `Run-Tests.sh` with a running soak (SIGSTOP it).
+- **`Run-Tests.sh` can exit 70 with every test green.** Xcode's tvOS destination enumeration
+  flaps on a machine with no tvOS SIMULATOR RUNTIME installed (the SDK alone is not enough):
+  `generic/platform=tvOS Simulator` intermittently resolves to nothing and the script fails after
+  the test phase. Observed alternating on the SAME tree within minutes, and the tvOS Release build
+  succeeds when invoked directly. Diagnose it the way any other failure is diagnosed — run the
+  step standalone, and run it on a clean `main` worktree as a control — rather than assuming
+  either "environment" or "my change". Installing the runtime restores the gate's meaning.
+- **A comma inside `[]` splits an XCTest macro's arguments** (parentheses protect, brackets do
+  not), so `XCTAssertFalse([x containsString:[NSString stringWithFormat:@"a%lu", n]], …)` fails to
+  compile with errors pointing anywhere but the comma. Hoist the expression into a local. Fifth
+  recurrence; the existing tests carry the same warning about dictionary literals.
 - Warning counts need a clean `-derivedDataPath` and must include the TESTS target; the bar
   is ZERO compile warnings across `build-for-testing`.
 - Measure memory with `phys_footprint` or `leaks(1)`, never `resident_size` (page cache grew
@@ -625,6 +836,28 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
   scalar defects are the valid probe; and UBSan reports do NOT fail the run (suite exits 0
   while reporting), so grep the log for `runtime error`, never trust exit codes. The scheme
   runs ASan already; UBSan is not wired into `Run-Tests.sh`.
+- **Spec-conformance audit, 2026-09-02 (22nd pass; 30 agents, ~4.5M tokens).** Twelve dimension
+  finders (RFC 9110/9111/9112 message syntax, framing, codings, methods, conditionals, Range,
+  connection management, caching, concurrency, the uploader surface, RFC 4918 properties and
+  namespace operations), then sixteen adversarial verifiers with a LIVE probe rig — every
+  finding reproduced on the wire or refuted, none accepted on reading alone. 92 raw findings →
+  **63 confirmed, 6 adjusted, 9 refuted** (an 11% kill rate, consistent with the ~1-in-3 lore for
+  UNVERIFIED findings). Ten were fixed and merged; the rest are grouped under "Still open at
+  tip", the refutations above them. What the pass ESTABLISHED, beyond the defects: no
+  smuggling-class or corruption-class defect exists at tip (CL+TE, duplicate/list/negative
+  Content-Length, obs-fold, bare LF, space-before-colon all refused; chunked decodes correctly
+  and hostile chunk trailers are discarded); the §13 conditional matrix behaves; `curl -C -`
+  resume is byte-exact; XXE is dead at every libxml2 site; hrefs percent-encode and round-trip
+  including NFC/NFD spellings; and browser-shaped concurrency is clean — 4,100+ checksum-verified
+  fetches over 6 keep-alive connections at ~9 ms per page (1 HTML + 40 images), byte-exact
+  concurrent Range chunks against a 64 MB file, three 48-way cold-start bursts, 140 connections
+  degrading gracefully, descriptors flat throughout. The torn-read defence was confirmed live: an
+  in-place rewrite mid-download cut the stream at 524 KB of a promised 64 MB. **Not covered** (the
+  completeness critic's list, worth a future pass): no REAL client touched tip — Finder /
+  mount_webdav, rclone and litmus were last run 2026-08-18, before the lingering-close change; no
+  reverse-proxy topology (Shape A always has Tailscale Serve in front, h2 → HTTP/1.1); no
+  iOS/tvOS runtime (all rigs were macOS, so the background-task paths stay simulator-unverified);
+  and no start/stop churn under load, which is Shape B's stated priority.
 - **Fuzzing, one bounded pass, 2026-08-18 (~79M executions, harness deliberately NOT kept).**
   libFuzzer + ASan + UBSan, 10 in-process targets over the pure parsers, the containment
   resolvers against a symlink/dot-dir fixture farm, and the framing parsers. CLEAN at:
@@ -669,3 +902,10 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
     on a possibly-nil receiver.
 11. A status that differs by what the filesystem holds is an answer about the filesystem —
     ask the question after resolution, on the RESOLVED path.
+12. A predicate whose answer depends on WHICH REPRESENTATION holds the bytes
+    (`-hasPrefix:@"."` on `NSPathStore2` vs `__NSCFString`) — read the primary source, and give
+    the rule one home so two spellings of the question cannot coexist.
+13. Storing what cannot be read back. A value accepted into persistent state must survive the
+    round trip: an unrepresentable XML name stored as a dead property made every later listing
+    of that resource — and of its PARENT — unparseable. Validate on the way IN, and keep the
+    writer able to skip what an older build let through.
