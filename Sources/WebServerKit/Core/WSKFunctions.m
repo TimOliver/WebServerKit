@@ -124,7 +124,13 @@ void WSKInitializeFunctions(void) {
 
 NSString *WSKNormalizeHeaderValue(NSString *value) {
     if (value) {
-        NSRange const range = [value rangeOfString:@";"];  // Assume part before ";" separator is case-insensitive
+        // NSLiteralSearch: the default search honours composed character sequences, so a combining
+        // mark straight after a ";" hides it. This is the ONE member of that class that reaches
+        // client input — multipart PART headers are decoded as UTF-8 (WSKMultiPartFormRequest.m),
+        // unlike top-level headers, which CFHTTPMessage decodes as Latin-1 so no composed sequence
+        // can form. Hide every ";" in a Content-Disposition and the whole value is lowercased
+        // rather than just its prefix: filename="MixedFour.TXT" was stored as "mixedfour.txt".
+        NSRange const range = [value rangeOfString:@";" options:NSLiteralSearch];  // Assume part before ";" separator is case-insensitive
 
         if (range.location != NSNotFound) {
             value = [[[value substringToIndex:range.location] lowercaseString] stringByAppendingString:[value substringFromIndex:range.location]];

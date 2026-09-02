@@ -1886,4 +1886,40 @@
     [fm removeItemAtPath:dir error:NULL];
 }
 
+// Honouring Range and ADVERTISING it are two different promises. This surface has always honoured
+// it, but said nothing, so a client that decides whether to even ATTEMPT a resume by looking for
+// Accept-Ranges — which is what the header is for (RFC 9110 §14.3) — restarts a multi-hundred-MB
+// build from zero instead. Only the base-path handler advertised; DAV GET and the uploader's
+// download surfaces did not. The plain GET matters most: that is the response a client sees BEFORE
+// it has any reason to send a Range.
+- (void)testDAVGetAdvertisesByteRangeSupport {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    XCTAssertTrue([@"0123456789" writeToFile:[dir stringByAppendingPathComponent:@"f.bin"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* plain = SendRawRequest(server.port, @"GET /f.bin HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([plain hasPrefix:@"HTTP/1.1 200"], @"%@", [plain substringToIndex:MIN((NSUInteger)40, plain.length)]);
+    XCTAssertTrue([plain rangeOfString:@"Accept-Ranges: bytes" options:NSCaseInsensitiveSearch].location != NSNotFound,
+                  @"a plain DAV GET must advertise range support — that is when a client decides whether resume is possible: %@", plain);
+
+    // The ranged and unsatisfiable answers advertise too, matching the base-path handler.
+    NSString* ranged = SendRawRequest(server.port, @"GET /f.bin HTTP/1.1\r\nHost: localhost\r\nRange: bytes=2-5\r\n\r\n");
+    XCTAssertTrue([ranged hasPrefix:@"HTTP/1.1 206"], @"%@", [ranged substringToIndex:MIN((NSUInteger)40, ranged.length)]);
+    XCTAssertTrue([ranged rangeOfString:@"Accept-Ranges: bytes" options:NSCaseInsensitiveSearch].location != NSNotFound, @"the 206 must advertise too: %@", ranged);
+
+    NSString* unsatisfiable = SendRawRequest(server.port, @"GET /f.bin HTTP/1.1\r\nHost: localhost\r\nRange: bytes=999-\r\n\r\n");
+    XCTAssertTrue([unsatisfiable hasPrefix:@"HTTP/1.1 416"], @"%@", [unsatisfiable substringToIndex:MIN((NSUInteger)40, unsatisfiable.length)]);
+    XCTAssertTrue([unsatisfiable rangeOfString:@"Accept-Ranges: bytes" options:NSCaseInsensitiveSearch].location != NSNotFound, @"the 416 must advertise too: %@", unsatisfiable);
+
+    // Ranges still WORK — the point is the advertisement, not a behaviour change.
+    XCTAssertTrue([ranged hasSuffix:@"2345"], @"the ranged body must still be the requested bytes: %@", ranged);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 @end

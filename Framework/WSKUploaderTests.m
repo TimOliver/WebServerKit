@@ -516,4 +516,82 @@ static BOOL WSKInjectingMove(id self, SEL _cmd, NSString* src, NSString* dst, NS
     [fm removeItemAtPath:dir error:NULL];
 }
 
+// The other half of the Accept-Ranges gap: /download and /preview honour Range and never said so.
+// /download is the endpoint a browser or download manager pulls a multi-hundred-MB build through,
+// which is exactly where a client decides whether an interrupted transfer can be resumed.
+- (void)testDownloadAndPreviewAdvertiseByteRangeSupport {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    XCTAssertTrue([@"0123456789" writeToFile:[dir stringByAppendingPathComponent:@"f.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([[NSData dataWithBytes:"\x89PNG\r\n\x1a\n" length:8] writeToFile:[dir stringByAppendingPathComponent:@"i.png"] atomically:YES]);
+
+    WSKWebUploader* server = [[WSKWebUploader alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* download = SendRawRequest(server.port, @"GET /download?path=%2Ff.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([download hasPrefix:@"HTTP/1.1 200"], @"%@", [download substringToIndex:MIN((NSUInteger)40, download.length)]);
+    XCTAssertTrue([download rangeOfString:@"Accept-Ranges: bytes" options:NSCaseInsensitiveSearch].location != NSNotFound, @"/download must advertise range support: %@", download);
+    XCTAssertTrue([download rangeOfString:@"attachment" options:NSCaseInsensitiveSearch].location != NSNotFound, @"…and stay an attachment: %@", download);
+
+    // HEAD, not GET: a PNG body is not valid UTF-8, so SendRawRequest's string decode would return
+    // nil and the assertion would read as a failure that has nothing to do with the header.
+    NSString* preview = SendRawRequest(server.port, @"HEAD /preview?path=%2Fi.png HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([preview hasPrefix:@"HTTP/1.1 200"], @"%@", [preview substringToIndex:MIN((NSUInteger)40, preview.length)]);
+    XCTAssertTrue([preview rangeOfString:@"Accept-Ranges: bytes" options:NSCaseInsensitiveSearch].location != NSNotFound, @"/preview must advertise range support: %@", preview);
+
+    NSString* ranged = SendRawRequest(server.port, @"GET /download?path=%2Ff.txt HTTP/1.1\r\nHost: localhost\r\nRange: bytes=3-5\r\n\r\n");
+    XCTAssertTrue([ranged hasPrefix:@"HTTP/1.1 206"], @"%@", [ranged substringToIndex:MIN((NSUInteger)40, ranged.length)]);
+    XCTAssertTrue([ranged hasSuffix:@"345"], @"the ranged body must still be the requested bytes: %@", ranged);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// WSKNormalizeHeaderValue lowercases the part of a header value BEFORE the first ";", leaving
+// parameters alone — that is what keeps an uploaded filename's case. The ";" search was not
+// literal, so a combining mark straight after each ";" hides every one of them from it, the whole
+// value is lowercased instead of just its prefix, and the file lands under a case-mangled name.
+// Measured before the fix: filename="MixedFour.TXT" stored as "mixedfour.txt".
+//
+// This is the one member of the non-literal-search list that reaches client input: multipart PART
+// headers are decoded as UTF-8 (WSKMultiPartFormRequest.m), unlike top-level headers, which
+// CFHTTPMessage decodes as Latin-1 so no composed sequence can form.
+- (void)testUploadPreservesFilenameCaseWhenSemicolonsCarryCombiningMarks {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+
+    WSKWebUploader* server = [[WSKWebUploader alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    unichar markChars[] = {0x0301};  // combining acute, directly after a ";"
+    NSString* mark = [NSString stringWithCharacters:markChars length:1];
+    NSString* (^upload)(NSString*) = ^(NSString* disposition) {
+        NSString* boundary = @"----wskmark";
+        NSString* body = [NSString stringWithFormat:@"--%@\r\n%@\r\nContent-Type: text/plain\r\n\r\nDATA\r\n--%@--\r\n", boundary, disposition, boundary];
+        NSString* request = [NSString stringWithFormat:
+            @"POST /upload HTTP/1.1\r\nHost: localhost:%lu\r\nOrigin: http://localhost:%lu\r\nContent-Type: multipart/form-data; boundary=%@\r\nContent-Length: %lu\r\n\r\n%@",
+            (unsigned long)server.port, (unsigned long)server.port, boundary, (unsigned long)strlen(body.UTF8String), body];
+        return SendRawRequest(server.port, request);
+    };
+
+    // Control: no marks, mixed-case name preserved. This is the property under test, stated twice.
+    XCTAssertTrue([upload(@"Content-Disposition: form-data; name=\"files[]\"; filename=\"Plain.TXT\"") hasPrefix:@"HTTP/1.1 200"]);
+    XCTAssertTrue([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"Plain.TXT"]], @"the control upload lost its case");
+
+    NSString* marked = [NSString stringWithFormat:@"Content-Disposition: form-data;%@ name=\"files[]\";%@ filename=\"MixedFour.TXT\"", mark, mark];
+    XCTAssertTrue([upload(marked) hasPrefix:@"HTTP/1.1 200"], @"the marked upload must still be accepted");
+
+    // The directory LISTING, never -fileExistsAtPath:. The temp volume is case-insensitive, so
+    // fileExistsAtPath: answers YES for "mixedfour.txt" whatever case is actually stored — an
+    // oracle that cannot see the defect it is meant to catch.
+    NSArray<NSString*>* entries = [fm contentsOfDirectoryAtPath:dir error:NULL];
+    XCTAssertTrue([entries containsObject:@"MixedFour.TXT"],
+                  @"a combining mark after each \";\" case-mangled the stored name; share holds: %@", entries);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 @end
