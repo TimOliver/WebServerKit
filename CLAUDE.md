@@ -701,11 +701,17 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
     Finder is unaffected (it deletes via the PROPFIND href, which is the on-disk NFD spelling);
     a client that builds the NFC name itself is not, and NFC is what most web clients normalize
     to. Fix shape: remove via `unlink(2)`/`rmdir(2)` on the already-resolved path — which is what
-    the removability walk already reasons about — and stop mapping the failure to 500. NOT done
-    as a drive-by: it changes the primitive under the most destructive verb in the library, whose
-    partial-destruction guard is carefully built, so it needs its own measured pass. Pairs
-    naturally with the ENAMETOOLONG status question above, which is the same "a filesystem error
-    is not a server fault" decision.
+    the removability walk already reasons about — and stop mapping the failure to 500. **OWNER
+    RULING 2026-09-02: not worth fixing.** It needs three things at once — an exFAT share (APFS
+    and HFS+ are both fine), a name with decomposable non-ASCII characters, and a client that
+    builds the NFC spelling itself rather than using the one the server listed. Neither deployment
+    shape can reach it: Shape A vends from APFS, and Shape B is iOS, which has been APFS-only
+    since 10.3. Against that, the fix swaps the primitive under the most destructive verb in the
+    library, behind a partial-destruction guard built precisely because `removeItemAtPath:`
+    deletes as it walks — and this codebase's measured rate is ~1 new defect per 5 fixed,
+    clustered in what the fix touched. Revisit only if a share on removable media becomes a real
+    configuration, and then together with the ENAMETOOLONG status question, which is the same
+    "a filesystem error is not a server fault" decision.
   - *Multipart part-header normalisation.* `WSKNormalizeHeaderValue`'s `;` search is non-literal
     and its input IS UTF-8-decoded, so a combining mark after the `;` in a part's
     `Content-Disposition` lowercases the entire value and the upload lands under a case-mangled
@@ -926,10 +932,14 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
   - *Wire corners*: a chunked trailer carrying a hostile `Content-Length` smuggles nothing;
     absolute-form target 200; duplicate `Host` 400; NUL in a header value 400; 64 KB header 431;
     `Expect: 100-continue` on a bodiless GET 200.
-  - **STILL not covered: litmus.** Both source URLs 404 from this environment, so the last
-    conformance run remains 2026-08-18 — before the lingering-close change and before the ten
-    2026-09-02 fixes. rclone and a real browser also remain unexercised. This is now the largest
-    single hole in the verification story.
+  - **STILL not covered: litmus** — and OWNER RULING 2026-09-02: not worth chasing. Both source
+    URLs 404 from this environment, so the last conformance run remains 2026-08-18, before the
+    lingering-close change and before the ten fixes of that day; rclone and a real browser are
+    likewise unexercised. What makes the gap acceptable rather than merely unclosed: the DAV
+    surface HAS since been driven by a real client (mount_webdav, above), every one of the ten
+    fixes carries its own pinning test, and the wire matrices were replayed both directly and
+    through a reverse proxy. Do not spend a future pass obtaining litmus on general principle —
+    re-run it only if the DAV property or namespace code changes substantially.
 - **Fuzzing, one bounded pass, 2026-08-18 (~79M executions, harness deliberately NOT kept).**
   libFuzzer + ASan + UBSan, 10 in-process targets over the pure parsers, the containment
   resolvers against a symlink/dot-dir fixture farm, and the framing parsers. CLEAN at:
