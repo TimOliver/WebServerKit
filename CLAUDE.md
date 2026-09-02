@@ -89,6 +89,43 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   harness, so a client-visible contract change needs a Chromium probe against both builds.
 - iOS Files app: `UIFileSharingEnabled` + `LSSupportsOpeningDocumentsInPlace`; background
   serving via `WSKOption_AutomaticallySuspendInBackground: false` (~30 s).
+- **tvOS is a THIRD deployment shape (Shape C), and three of its rules invert the iOS ones.**
+  Intended use is a control surface — an Apple TV app driven by iPhones on the LAN — with document
+  access as a secondary offer. Verified 2026-09-02 on an Apple TV 4K simulator (tvOS 26.4): the
+  framework and example build warning-free, the uploader serves its page, `/list`, `/upload` and
+  `/download`, and the server is reachable from the host.
+  - **Storage: use `Library/Caches`, never Documents.** tvOS guarantees an app 500 KB of
+    persistent storage (via `NSUserDefaults`) and nothing more; everything else "must be purgeable
+    by the operating system" when the app is not running, and on real hardware Documents is not
+    reliably writable at all. Caches IS writable, so a tvOS share lives there and accepts that its
+    contents can vanish between launches. **The SIMULATOR hides all of this** — it inherits the
+    host Mac's filesystem, so serving Documents works there perfectly; measured doing exactly that
+    before the example was corrected. Design consequence: an Apple TV can VEND what was just
+    pushed to it, or anything the app can re-fetch; it cannot KEEP a library, and the Shape A
+    atomic-publish model presumes durable files tvOS does not offer. (The 500 KB figure is from a
+    guide archived in 2017 and is the only number Apple has ever committed to — no current page
+    restates or rescinds it. The qualitative rule is well corroborated; the number is not fresh.)
+  - **Do NOT set `WSKOption_AutomaticallySuspendInBackground: false` on tvOS.** The iOS recipe
+    above buys a ~30 s drain window; tvOS has no grace period worth draining into, and
+    `BGContinuedProcessingTask` — the iOS 26 possibility noted under Long-lived surfaces — is
+    explicitly `API_UNAVAILABLE(tvos)`. Worse, per TN2277 a suspended app that still holds a
+    listening socket leaves the kernel ACCEPTING connections nothing will service, so clients hang
+    instead of being refused. The default (YES) is correct here and was measured: backgrounding
+    the tvOS app makes connections fail instantly (connect 0.0000 s), not hang.
+  - **Local network privacy does not exist on tvOS** (TN3179's platform table; no Privacy entry in
+    tvOS Settings), so advertising `_http._tcp` / `_webdav._tcp` from the Apple TV needs no keys
+    and no permission. Two things follow. First, the general rule this establishes for the whole
+    library: LISTENING and ACCEPTING never require the permission on any platform — only outbound
+    connections and Bonjour do. Second, the exposure moves to the iPhone CLIENT that browses for
+    the service: it needs `NSBonjourServices` AND `NSLocalNetworkUsageDescription`, and **must be
+    tested on a real device, because the simulator does not enforce local network privacy** — so
+    the Bonjour verification recorded below, being simulator-only, says nothing about it. Declare
+    both keys in the tvOS Info.plist anyway: zero cost, and insurance if Apple ever enforces there.
+  - Bonjour registration failure is LOG-ONLY: `webServerDidCompleteBonjourRegistration:` fires only
+    on success, so an app cannot tell "still registering" from "will never register". On iOS the
+    missing-keys case is `kCFNetServicesErrorMissingRequiredConfiguration` (-72008), which is
+    exactly the actionable one — surfacing it would let a client say "grant Local Network access"
+    instead of showing an empty list. Not built; recorded as the obvious next hardening step.
 - **Finder Network-sidebar presence is a Bonjour type, not a feature**: advertise
   `_webdav._tcp` (+ TXT `path=/`) on a WSKWebDAVServer and NetFS lists the device;
   double-click mounts via mount_webdav. `_http._tcp` only reaches Safari's Bonjour menu.

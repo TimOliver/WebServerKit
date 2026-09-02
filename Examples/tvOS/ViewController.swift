@@ -35,8 +35,21 @@ class ViewController: UIViewController {
   override func viewWillAppear(_ animated: Bool) {
     super.viewWillAppear(animated)
 
-    let documentsPath = NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true).first!
-    webServer = WSKWebUploader(uploadDirectory: documentsPath)
+    // Caches, not Documents — this is the one place a tvOS example must differ from the iOS one.
+    // tvOS gives an app 500 KB of persistent storage (via UserDefaults) and nothing else: on real
+    // hardware Documents is not reliably writable, and everything outside that 500 KB is purgeable
+    // by the system whenever the app is not running. Library/Caches IS writable, so it is where a
+    // tvOS share has to live — while accepting that its contents can vanish between launches.
+    //
+    // The trap this avoids is that the SIMULATOR does not enforce any of it. A tvOS simulator
+    // inherits the host Mac's filesystem, so serving Documents there works perfectly and teaches a
+    // pattern that fails on an Apple TV. Measured: the uploader ran, accepted a POST /upload and
+    // served it back from Documents, on the simulator, with no hint of the device restriction.
+    //
+    // Design consequence worth stating: an Apple TV is a viable place to VEND what the user just
+    // pushed to it, or anything the app can re-fetch. It is not a viable place to KEEP a library.
+    let sharePath = NSSearchPathForDirectoriesInDomains(.cachesDirectory, .userDomainMask, true).first!
+    webServer = WSKWebUploader(uploadDirectory: sharePath)
     webServer.delegate = self
 
     // The server is reachable by anything on the same network. To require a password,
