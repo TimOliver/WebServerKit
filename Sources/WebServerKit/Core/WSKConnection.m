@@ -917,7 +917,14 @@ static BOOL _StatusDelimitsItself(NSInteger statusCode) {
             CFHTTPMessageSetHeaderFieldValue(_responseMessage, CFSTR("ETag"), (__bridge CFStringRef)_response.eTag);
         }
 
-        if ((_response.statusCode >= 200) && (_response.statusCode < 300)) {
+        // 304 joins the 2xx range because RFC 9110 §15.4.5 asks a Not Modified to carry the header
+        // fields a 200 would have, naming Cache-Control among them: a cache UPDATES its stored
+        // entry from the 304, so omitting the directive silently weakens the freshness the 200
+        // stated. The substituted response already copies cacheControlMaxAge across (see
+        // -overrideResponse:), so this gate was the only thing standing between that value and the
+        // wire — it made the copy dead code.
+        if (((_response.statusCode >= 200) && (_response.statusCode < 300)) ||
+            (_response.statusCode == kWSKHTTPStatusCode_NotModified)) {
             if (_response.cacheControlMaxAge > 0) {
                 CFHTTPMessageSetHeaderFieldValue(_responseMessage, CFSTR("Cache-Control"), (__bridge CFStringRef)[NSString stringWithFormat:@"max-age=%i, public", (int)_response.cacheControlMaxAge]);
             } else {

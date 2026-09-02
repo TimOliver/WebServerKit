@@ -1218,6 +1218,10 @@ static BOOL _MimeTypeIsInertMedia(NSString *mimeType) {
         [response setValue:@"default-src 'none'; sandbox; frame-ancestors 'none'" forAdditionalHeader:@"Content-Security-Policy"];
     }
 
+    // Advertise what this surface has honoured since the range work above: a client decides
+    // whether an interrupted download can be resumed by looking for this header (RFC 9110 §14.3),
+    // and /download is how a browser or download manager pulls a multi-hundred-MB build.
+    [response setValue:@"bytes" forAdditionalHeader:@"Accept-Ranges"];
     response.cacheControlMaxAge = _fileCacheControlMaxAge;
     return response;
 }

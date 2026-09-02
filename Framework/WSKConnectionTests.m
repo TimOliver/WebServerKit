@@ -546,6 +546,55 @@
     [fm removeItemAtPath:dir error:NULL];
 }
 
+// RFC 9110 §15.4.5: a 304 SHOULD carry the header fields a 200 would have, "Cache-Control" named
+// explicitly among them — a cache updates its stored entry from the 304, so a revalidation that
+// omits the directive silently weakens whatever freshness the 200 stated. The substituted 304
+// already COPIES cacheControlMaxAge from the response it replaces (and its ETag and
+// Last-Modified go out), but the writer was gated to 2xx, so the copied value could never be
+// emitted — dead code standing where the header should be.
+- (void)testNotModifiedCarriesTheCacheControlOfTheResponseItReplaces {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    XCTAssertTrue([@"CACHED" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    // cacheAge 0 is the shipped default and yields "no-cache"; the max-age case is asserted below
+    // through a second handler so both spellings are pinned.
+    [server addGETHandlerForBasePath:@"/f/" directoryPath:dir indexFilename:nil cacheAge:0 allowRangeRequests:YES];
+    [server addGETHandlerForBasePath:@"/aged/" directoryPath:dir indexFilename:nil cacheAge:3600 allowRangeRequests:YES];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* (^cacheControlOf)(NSString*) = ^(NSString* reply) {
+        NSRange label = [reply rangeOfString:@"Cache-Control: " options:NSCaseInsensitiveSearch];
+        if (label.location == NSNotFound) {
+            return (NSString*)nil;
+        }
+        NSString* rest = [reply substringFromIndex:NSMaxRange(label)];
+        return [rest substringToIndex:[rest rangeOfString:@"\r\n"].location];
+    };
+    NSString* (^etagOf)(NSString*) = ^(NSString* reply) {
+        NSRange label = [reply rangeOfString:@"Etag: " options:NSCaseInsensitiveSearch];
+        NSString* rest = [reply substringFromIndex:NSMaxRange(label)];
+        return [rest substringToIndex:[rest rangeOfString:@"\r\n"].location];
+    };
+
+    for (NSString* base in @[ @"/f/", @"/aged/" ]) {
+        NSString* full = SendRawRequest(server.port, [NSString stringWithFormat:@"GET %@a.txt HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", base]);
+        XCTAssertTrue([full hasPrefix:@"HTTP/1.1 200"], @"%@", [full substringToIndex:MIN((NSUInteger)40, full.length)]);
+        NSString* expected = cacheControlOf(full);
+        XCTAssertNotNil(expected, @"the 200 must state a Cache-Control to compare against: %@", full);
+
+        NSString* revalidated = SendRawRequest(server.port, [NSString stringWithFormat:@"GET %@a.txt HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: %@\r\nConnection: close\r\n\r\n", base, etagOf(full)]);
+        XCTAssertTrue([revalidated hasPrefix:@"HTTP/1.1 304"], @"%@", [revalidated substringToIndex:MIN((NSUInteger)40, revalidated.length)]);
+        XCTAssertEqualObjects(cacheControlOf(revalidated), expected,
+                              @"the 304 must carry the same Cache-Control the 200 did (%@ base): %@", base, revalidated);
+    }
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 // The option defaults to off, so every existing deployment keeps serving exactly one request per
 // connection until it opts in. Worth pinning: the whole feature is new machinery in the most
 // security-critical file in the library, and "the default did not change" is the property that

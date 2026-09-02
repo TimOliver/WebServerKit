@@ -718,11 +718,17 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
     // ".svg") downloads it instead of rendering it inline as active content on our own
     // origin. WebDAV clients read the body regardless of the disposition, so this does
     // not affect normal file access.
-    if ([request hasByteRange]) {
-        return [WSKFileResponse responseWithFile:absolutePath byteRange:request.byteRange isAttachment:YES ifRange:request.ifRange];
-    }
+    WSKFileResponse *const response = [request hasByteRange]
+                                          ? [WSKFileResponse responseWithFile:absolutePath byteRange:request.byteRange isAttachment:YES ifRange:request.ifRange]
+                                          : [WSKFileResponse responseWithFile:absolutePath isAttachment:YES];
 
-    return [WSKFileResponse responseWithFile:absolutePath isAttachment:YES];
+    // Honouring Range and ADVERTISING it are different promises, and only the base-path handler
+    // made the second one. A client decides whether an interrupted transfer can be resumed by
+    // looking for this header (RFC 9110 §14.3) — and it looks on the PLAIN response, before it has
+    // any reason to send a Range — so a multi-hundred-MB build restarted from zero for want of one
+    // header. Set on both shapes, including the 416, matching what the base-path handler emits.
+    [response setValue:@"bytes" forAdditionalHeader:@"Accept-Ranges"];
+    return response;
 }
 
 - (WSKResponse *)performPUT:(WSKFileRequest *)request {
