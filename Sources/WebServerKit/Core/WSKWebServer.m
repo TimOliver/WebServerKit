@@ -1696,7 +1696,7 @@ static NSString *_EscapeHTMLString(NSString *string) {
         // The index must agree with what the handler will actually serve — "advertise iff
         // served", in both directions: neither serving what the listing hides nor listing
         // what the handler refuses.
-        if (includeHiddenItems || ![entry hasPrefix:@"."]) {
+        if (includeHiddenItems || !WSKNameIsHidden(entry)) {
             // Classified by what a symlink points at, so the index describes what is actually
             // served. A link out of the served root, or a dangling one, classifies as nothing
             // and stays unlisted, because that is what the handler would refuse.
@@ -1807,7 +1807,7 @@ static NSString *_EscapeHTMLString(NSString *string) {
                 // ends, and one wrong spelling is how the next reader learns the wrong one.
                 if (!allowHiddenItems) {
                     for (NSString *component in WSKPathComponentsSeparatedBySlash(relativePath)) {
-                        if ([component hasPrefix:@"."]) {
+                        if (WSKNameIsHidden(component)) {
                             WSK_LOG_WARNING(@"Refusing to serve \"%@\": \"%@\" is a hidden item", relativePath, component);
                             return [WSKResponse responseWithStatusCode:kWSKHTTPStatusCode_NotFound];
                         }
@@ -1843,7 +1843,7 @@ static NSString *_EscapeHTMLString(NSString *string) {
                 // as an escape rather than mislabelled a hidden item.
                 if (!allowHiddenItems) {
                     for (NSString *component in [resolvedRelativePath pathComponents]) {
-                        if ([component hasPrefix:@"."]) {
+                        if (WSKNameIsHidden(component)) {
                             WSK_LOG_WARNING(@"Refusing to serve \"%@\": it resolves inside a hidden item", relativePath);
                             return [WSKResponse responseWithStatusCode:kWSKHTTPStatusCode_NotFound];
                         }

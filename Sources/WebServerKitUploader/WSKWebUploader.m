@@ -1058,7 +1058,7 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
     NSMutableArray *const array = [NSMutableArray array];
 
     for (NSString *item in [contents sortedArrayUsingSelector:@selector(localizedStandardCompare:)]) {
-        if (_allowHiddenItems || ![item hasPrefix:@"."]) {
+        if (_allowHiddenItems || !WSKNameIsHidden(item)) {
             NSString *const itemPath = [absolutePath stringByAppendingPathComponent:item];
             // Classified by what a symlink points at, so the listing describes what is served.
             // The size comes from the classifier's own resolved path — a symlink's unresolved
@@ -1317,7 +1317,7 @@ static NSString *_OriginAuthority(NSString *value) {
     // fields were guarded then, this one was missed because it arrives through the multipart
     // parser rather than the request arguments.
     if ((fileName.length == 0) || [fileName containsString:@"/"] || WSKPathContainsNULByte(fileName) || [fileName isEqualToString:@"."] || [fileName isEqualToString:@".."] ||
-        (!_allowHiddenItems && [fileName hasPrefix:@"."]) || ![self _checkFileExtension:fileName]) {
+        (!_allowHiddenItems && WSKNameIsHidden(fileName)) || ![self _checkFileExtension:fileName]) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Uploaded file name \"%@\" is not allowed", file.fileName];
     }
 

@@ -88,6 +88,12 @@ NSString *WSKNormalizePath(NSString *path) {
     return [components componentsJoinedByString:@"/"];
 }
 
+BOOL WSKNameIsHidden(NSString *name) {
+    // The first code unit, never -hasPrefix:@"." — see the header for the measurement. Guarded
+    // because -characterAtIndex: raises on an empty string, and nothing in Sources/ catches that.
+    return (name.length > 0) && ([name characterAtIndex:0] == '.');
+}
+
 BOOL WSKPathIsInsideDirectory(NSString *path, NSString *directory) {
     if ((path.length == 0) || (directory.length == 0)) {
         return NO;
@@ -334,7 +340,7 @@ NSString *WSKFirstUnvettableItemAtPath(NSString *absolutePath, BOOL isDirectory,
     for (NSString *subpath in enumerator) {
         NSString *const subpathType = [enumerator fileAttributes][NSFileType];
 
-        if ([[subpath lastPathComponent] hasPrefix:@"."]) {
+        if (WSKNameIsHidden([subpath lastPathComponent])) {
             // -skipDescendants is defined for the most recently returned SUBDIRECTORY. Calling it
             // for a dot-named FILE pops the enclosing level instead, switching the allow-list off
             // for everything after the first dot-name in readdir order — and a ".DS_Store" sits
@@ -384,14 +390,14 @@ NSString *WSKNamedEntryPathForRelativePath(NSString *relativePath, NSString *dir
 
     if (outHidden && !allowHiddenItems) {
         for (NSString *component in [normalizedPath pathComponents]) {
-            if ([component hasPrefix:@"."]) {
+            if (WSKNameIsHidden(component)) {
                 *outHidden = YES;
                 return namedPath;
             }
         }
 
         for (NSString *component in [namedRelativePath pathComponents]) {
-            if ([component hasPrefix:@"."]) {
+            if (WSKNameIsHidden(component)) {
                 *outHidden = YES;
                 return namedPath;
             }
@@ -437,14 +443,14 @@ NSString *WSKResolvedPathForRelativePath(NSString *relativePath, NSString *direc
 
     if (outHidden && !allowHiddenItems) {
         for (NSString *component in [normalizedPath pathComponents]) {
-            if ([component hasPrefix:@"."]) {
+            if (WSKNameIsHidden(component)) {
                 *outHidden = YES;
                 return resolvedPath;
             }
         }
 
         for (NSString *component in [resolvedRelativePath pathComponents]) {
-            if ([component hasPrefix:@"."]) {
+            if (WSKNameIsHidden(component)) {
                 *outHidden = YES;
                 return resolvedPath;
             }
@@ -535,7 +541,7 @@ BOOL WSKResolvedPathHasHiddenComponent(NSString *path, NSString *directory) {
     // needed — this one alone would miss nothing here, but it costs a realpath, so callers keep
     // their cheap textual walk in front of it.
     for (NSString *component in [relativePath pathComponents]) {
-        if ([component hasPrefix:@"."]) {
+        if (WSKNameIsHidden(component)) {
             return YES;
         }
     }
