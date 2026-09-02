@@ -1759,4 +1759,48 @@
                   @"the alias entry published no date validator at all: %@", entry);
 }
 
+// RFC 9110 §13.2.2 orders the precondition steps but does not make step 3 conditional on steps 1
+// and 2: only If-Unmodified-Since is skipped when If-Match is present. If-None-Match is evaluated
+// whatever came before it. The chain here was written as one else-if ladder, so a request carrying
+// a SATISFIED If-Match never reached its If-None-Match at all and the write went through.
+//
+// "If-Match: <current tag>, If-None-Match: *" is not a contrived pairing: it is how a client says
+// "replace this exact version, and only if it still exists" — and the two together are also how a
+// client checks its own assumptions. Answering 2xx tells it a condition it stated was met when it
+// was not, which is the same lost-update shape the If-Unmodified-Since gap was fixed for.
+- (void)testDAVWriteEvaluatesIfNoneMatchEvenWhenIfMatchIsPresent {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    NSString* path = [dir stringByAppendingPathComponent:@"a.txt"];
+    XCTAssertTrue([@"ORIGINAL" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* head = SendRawRequest(server.port, @"HEAD /a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSRange tagLabel = [head rangeOfString:@"Etag: " options:NSCaseInsensitiveSearch];
+    XCTAssertTrue(tagLabel.location != NSNotFound, @"the file must publish a validator to condition on: %@", head);
+    NSString* afterLabel = [head substringFromIndex:NSMaxRange(tagLabel)];
+    NSString* etag = [afterLabel substringToIndex:[afterLabel rangeOfString:@"\r\n"].location];
+
+    // If-Match holds (that IS the current tag), so step 1 passes; If-None-Match: * matches the
+    // existing resource, so step 3 must fail the request with 412 and touch nothing.
+    NSString* request = [NSString stringWithFormat:@"PUT /a.txt HTTP/1.1\r\nHost: localhost\r\nIf-Match: %@\r\nIf-None-Match: *\r\nContent-Length: 9\r\n\r\nREPLACED!", etag];
+    NSString* reply = SendRawRequest(server.port, request);
+
+    XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 412"], @"a matching If-None-Match must fail the write even behind a satisfied If-Match: %@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+    XCTAssertEqualObjects([NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:NULL], @"ORIGINAL",
+                          @"the refused write must not have replaced the file");
+
+    // The half a naive fix breaks: If-Match alone, with no If-None-Match, must still succeed.
+    NSString* plain = [NSString stringWithFormat:@"PUT /a.txt HTTP/1.1\r\nHost: localhost\r\nIf-Match: %@\r\nContent-Length: 8\r\n\r\nACCEPTED", etag];
+    NSString* plainReply = SendRawRequest(server.port, plain);
+    XCTAssertTrue([plainReply hasPrefix:@"HTTP/1.1 2"], @"a satisfied If-Match with no other condition must still write: %@", [plainReply substringToIndex:MIN((NSUInteger)40, plainReply.length)]);
+    XCTAssertEqualObjects([NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:NULL], @"ACCEPTED");
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 @end
