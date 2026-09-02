@@ -1803,4 +1803,87 @@
     [fm removeItemAtPath:dir error:NULL];
 }
 
+// libxml2 parses with XML_PARSE_RECOVER (a settled choice), so a property element whose namespace
+// prefix was never declared survives parsing with the prefix baked into its LOCAL NAME — node->name
+// is literally "Z:note" and node->ns is NULL. Nothing downstream noticed: the name was stored under
+// that key and echoed back as <Z:note/>, with no declaration for Z anywhere in the response.
+//
+// That is not a cosmetic defect. The response is not XML — a conformant client cannot parse it at
+// all — and once such a property is STORED the damage is persistent and spreads: every allprop
+// PROPFIND of that resource is unparseable from then on, including the Depth:1 listing of its
+// PARENT, so one poisoned file takes out the whole folder's listing. Three paths were affected
+// (the PROPPATCH response, the allprop readback, and a PROPFIND naming such a property).
+//
+// A prefixed name with no declaration is not well-formed XML in the first place — only RECOVER let
+// it through — so the request is refused rather than half-honoured.
+- (void)testDAVRefusesAPropertyNameWithAnUndeclaredNamespacePrefix {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    XCTAssertTrue([@"data" writeToFile:[dir stringByAppendingPathComponent:@"f.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* (^send)(NSString*, NSString*) = ^(NSString* method, NSString* body) {
+        return SendRawRequest(server.port, [NSString stringWithFormat:@"%@ /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@", method, (unsigned long)body.length, body]);
+    };
+    // Every namespace prefix an element uses must be declared somewhere in the same document.
+    // NSXMLParser is NOT the oracle here: it accepts an undeclared prefix even with
+    // shouldProcessNamespaces set, so it stays green against the very defect this pins (measured).
+    BOOL (^bodyParses)(NSString*) = ^(NSString* reply) {
+        NSRange const split = [reply rangeOfString:@"\r\n\r\n"];
+        if (split.location == NSNotFound) {
+            return NO;
+        }
+        NSString* const body = [reply substringFromIndex:NSMaxRange(split)];
+        NSRegularExpression* const uses = [NSRegularExpression regularExpressionWithPattern:@"</?([A-Za-z_][A-Za-z0-9_.-]*):" options:0 error:NULL];
+
+        for (NSTextCheckingResult* match in [uses matchesInString:body options:0 range:NSMakeRange(0, body.length)]) {
+            NSString* const prefix = [body substringWithRange:[match rangeAtIndex:1]];
+            NSString* const declaration = [NSString stringWithFormat:@"xmlns:%@=", prefix];
+
+            if (![body containsString:declaration]) {
+                return NO;  // An element names a prefix the document never declares: not XML.
+            }
+        }
+
+        return YES;
+    };
+
+    // Storing one must be refused outright, not stored and reported as applied.
+    NSString* stored = send(@"PROPPATCH", @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\"><D:set><D:prop><Z:note>v</Z:note></D:prop></D:set></D:propertyupdate>");
+    XCTAssertTrue([stored hasPrefix:@"HTTP/1.1 400"], @"a property name with an undeclared prefix must be refused: %@", [stored substringToIndex:MIN((NSUInteger)40, stored.length)]);
+
+    // Nothing was stored, so an ordinary listing stays parseable — the property that matters most,
+    // because this is the one that used to spread to the parent directory.
+    NSString* readback = SendRawRequest(server.port, @"PROPFIND /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
+    XCTAssertTrue(bodyParses(readback), @"allprop PROPFIND is not well-formed XML after the refusal: %@", readback);
+    XCTAssertFalse([readback containsString:@"Z:note"], @"the refused property was stored anyway: %@", readback);
+
+    NSString* listing = SendRawRequest(server.port, @"PROPFIND / HTTP/1.1\r\nHost: localhost\r\nDepth: 1\r\nContent-Length: 0\r\n\r\n");
+    XCTAssertTrue(bodyParses(listing), @"the parent listing is not well-formed XML: %@", listing);
+
+    // Asking for one in a PROPFIND is the same malformed name in the same position.
+    NSString* asked = send(@"PROPFIND", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:prop><Q:thing/></D:prop></D:propfind>");
+    XCTAssertTrue([asked hasPrefix:@"HTTP/1.1 400"], @"asking for an undeclared-prefix property must be refused: %@", [asked substringToIndex:MIN((NSUInteger)40, asked.length)]);
+
+    // What must keep working: a properly DECLARED foreign namespace, which is the ordinary case.
+    NSString* declared = send(@"PROPPATCH", @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:Z=\"urn:example\"><D:set><D:prop><Z:note>v</Z:note></D:prop></D:set></D:propertyupdate>");
+    XCTAssertTrue([declared containsString:@"200 OK"], @"a declared foreign namespace must still store: %@", declared);
+    XCTAssertTrue(bodyParses(declared), @"the PROPPATCH response is not well-formed XML: %@", declared);
+
+    NSString* declaredBack = SendRawRequest(server.port, @"PROPFIND /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
+    XCTAssertTrue(bodyParses(declaredBack), @"the readback of a declared property is not well-formed: %@", declaredBack);
+    XCTAssertTrue([declaredBack containsString:@"urn:example"], @"the stored property lost its namespace: %@", declaredBack);
+
+    // A property in NO namespace at all carries no prefix and stays representable.
+    NSString* bare = send(@"PROPPATCH", @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\"><D:set><D:prop><plain>v</plain></D:prop></D:set></D:propertyupdate>");
+    XCTAssertTrue([bare containsString:@"200 OK"], @"a no-namespace property must still store: %@", bare);
+    XCTAssertTrue(bodyParses(bare), @"the no-namespace response is not well-formed XML: %@", bare);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 @end
