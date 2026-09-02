@@ -1722,4 +1722,41 @@
     [fm removeItemAtPath:dir error:NULL];
 }
 
+// A Depth:1 listing must describe a symlink child by what a GET of it serves — the target —
+// because "symlinks are aliases" makes reads follow. The enumeration handed the raw child name
+// to the property builder, whose four observers then split: attributesOfItemAtPath: (no final-link
+// traversal) published the LINK inode's byte count and dates, stat() published the TARGET's etag
+// beside them, and open(O_NOFOLLOW) failed ELOOP so no getlastmodified went out at all. A
+// PROPFIND-driven client (Finder, rclone) sizing its copy of the alias from the listing truncated
+// a multi-hundred-MB build to the link's own length. Depth:0 of the alias URI was always correct
+// (the follow-resolver hands that path in already resolved); this pins Depth:1 to the same answer.
+- (void)testDAVDepthOnePublishesTargetMetadataForASymlinkAlias {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    NSString* target = [dir stringByAppendingPathComponent:@"build.bin"];
+    XCTAssertTrue([[NSMutableData dataWithLength:1024] writeToFile:target atomically:YES]);
+    // An mtime safely outside its timestamp bucket, so the seal cannot be the reason a date is absent.
+    XCTAssertTrue([fm setAttributes:@{NSFileModificationDate : [NSDate dateWithTimeIntervalSinceNow:-3600]} ofItemAtPath:target error:NULL]);
+    XCTAssertTrue([fm createSymbolicLinkAtPath:[dir stringByAppendingPathComponent:@"alias.bin"] withDestinationPath:@"build.bin" error:NULL]);
+
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* listing = SendRawRequest(server.port, @"PROPFIND / HTTP/1.1\r\nHost: localhost\r\nDepth: 1\r\nContent-Length: 0\r\n\r\n");
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+
+    NSRange aliasHref = [listing rangeOfString:@"<D:href>/alias.bin</D:href>"];
+    XCTAssertTrue(aliasHref.location != NSNotFound, @"the alias vanished from the listing: %@", listing);
+    NSString* tail = [listing substringFromIndex:NSMaxRange(aliasHref)];
+    NSRange entryEnd = [tail rangeOfString:@"</D:response>"];
+    XCTAssertTrue(entryEnd.location != NSNotFound);
+    NSString* entry = [tail substringToIndex:entryEnd.location];
+    XCTAssertTrue([entry containsString:@"<D:getcontentlength>1024</D:getcontentlength>"],
+                  @"the alias's getcontentlength must be the 1,024 bytes a GET serves, not the link inode's: %@", entry);
+    XCTAssertTrue([entry containsString:@"<D:getlastmodified>"],
+                  @"the alias entry published no date validator at all: %@", entry);
+}
+
 @end

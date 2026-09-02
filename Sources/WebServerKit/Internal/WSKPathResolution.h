@@ -131,7 +131,7 @@ BOOL WSKTransferEncodingIsUnsupported(NSString *header);
 #pragma mark - Path, validator and vetting internals
 
 // The audit-shaped half of what used to be WSKFunctions.h. These carry contracts that changed
-// repeatedly through the audit programme — WSKServableFileTypeAtPath gained two parameters, the
+// repeatedly through the audit programme — WSKServableFileTypeAtPath gained three parameters, the
 // resolvers were merged from four copies, the allow-list predicate learned a second name — and
 // every one of those was a source break for anyone who had bound to them. They were only public
 // because the sibling targets could not see this header; they can now.
@@ -307,8 +307,16 @@ NSString *_Nullable WSKResolveNamedEntryWithinDirectory(NSString *path, NSString
  *  A link is only classified when its target resolves INSIDE `directory` — otherwise it would be
  *  advertised and then refused on access, which is the same disagreement with the sign flipped. A
  *  dangling link resolves to nothing and is likewise not classified.
+ *
+ *  `outResolvedPath` is the path the classified TYPE was observed at — `path` itself for anything
+ *  but a symlink, the link's resolved target for a symlink (nil when that resolution fails, in
+ *  which case the type is nil too and there is nothing to describe). It exists so an enumeration
+ *  can derive the metadata it publishes (size, dates, entity tag) from the SAME observation that
+ *  classified the entry: PROPFIND once published the link inode's byte count beside the target's
+ *  entity tag because its property builder asked the filesystem again with the unresolved name —
+ *  recurring shape 6, two observations that need not agree. Callers must not resolve again.
  */
-NSString *_Nullable WSKServableFileTypeAtPath(NSString *path, NSString *directory, BOOL allowHiddenItems, NSString *_Nullable __autoreleasing *_Nullable outResolvedName);
+NSString *_Nullable WSKServableFileTypeAtPath(NSString *path, NSString *directory, BOOL allowHiddenItems, NSString *_Nullable __autoreleasing *_Nullable outResolvedName, NSString *_Nullable __autoreleasing *_Nullable outResolvedPath);
 
 /**
  *  Returns the first item at or under `absolutePath` that could not be removed, expressed relative

@@ -229,15 +229,24 @@ NSString *WSKResolveWithinDirectory(NSString *path, NSString *directory, NSStrin
     return resolvedPath;
 }
 
-NSString *WSKServableFileTypeAtPath(NSString *path, NSString *directory, BOOL allowHiddenItems, NSString *__autoreleasing *outResolvedName) {
+NSString *WSKServableFileTypeAtPath(NSString *path, NSString *directory, BOOL allowHiddenItems, NSString *__autoreleasing *outResolvedName, NSString *__autoreleasing *outResolvedPath) {
     if (outResolvedName) {
         *outResolvedName = nil;
+    }
+
+    if (outResolvedPath) {
+        *outResolvedPath = nil;
     }
 
     NSDictionary *const attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:NULL];
     NSString *const type = attributes[NSFileType];
 
     if (![type isEqualToString:NSFileTypeSymbolicLink]) {
+        // Not a link: the type was observed at `path` itself, so that IS the resolved path.
+        if (outResolvedPath) {
+            *outResolvedPath = path;
+        }
+
         return type;
     }
 
@@ -262,12 +271,19 @@ NSString *WSKServableFileTypeAtPath(NSString *path, NSString *directory, BOOL al
 
     // Derived here and handed out precisely so no caller resolves a second time: two observations
     // of a filesystem that need not agree is the class behind the retargeted-symlink escapes.
-    if (outResolvedName) {
+    if (outResolvedName || outResolvedPath) {
         char resolvedBuffer[PATH_MAX];
 
         if (realpath([path fileSystemRepresentation], resolvedBuffer) != NULL) {
             NSString *const resolved = [[NSFileManager defaultManager] stringWithFileSystemRepresentation:resolvedBuffer length:strlen(resolvedBuffer)];
-            *outResolvedName = [resolved lastPathComponent];
+
+            if (outResolvedName) {
+                *outResolvedName = [resolved lastPathComponent];
+            }
+
+            if (outResolvedPath) {
+                *outResolvedPath = resolved;
+            }
         }
     }
 

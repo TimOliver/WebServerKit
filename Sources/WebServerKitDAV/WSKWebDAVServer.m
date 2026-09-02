@@ -1460,12 +1460,23 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
     NSString *const escapedPath = [resourcePath stringByAddingPercentEncodingWithAllowedCharacters:allowed];
 
     if (escapedPath) {
-        NSDictionary *const attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:itemPath error:NULL];
         // Classified by what a symlink points at, so the listing describes what is actually served.
         NSString *resolvedName = nil;
-        NSString *const type = WSKServableFileTypeAtPath(itemPath, _uploadDirectory, _allowHiddenItems, &resolvedName);
+        NSString *resolvedItemPath = nil;
+        NSString *const type = WSKServableFileTypeAtPath(itemPath, _uploadDirectory, _allowHiddenItems, &resolvedName, &resolvedItemPath);
         BOOL const isFile = [type isEqualToString:NSFileTypeRegular];
         BOOL isDirectory = [type isEqualToString:NSFileTypeDirectory];
+
+        // EVERY published metadatum below reads metadataPath — the classifier's own observation,
+        // which for a symlink child is the target a GET of this entry serves. The Depth:1
+        // enumeration hands in the raw child name, and deriving attributes from it split one
+        // propstat between two inodes: attributesOfItemAtPath: (which does not follow a final
+        // link) published the LINK's byte count and dates while stat() published the TARGET's
+        // entity tag beside them, and open(O_NOFOLLOW) failed ELOOP so no getlastmodified went
+        // out at all — a PROPFIND-driven copy of the alias truncated to the link inode's length.
+        // The itemPath fallback only matters when type is nil, and then nothing is published.
+        NSString *const metadataPath = resolvedItemPath ?: itemPath;
+        NSDictionary *const attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:metadataPath error:NULL];
 
         if ((isFile && [self _checkFileExtensionForName:[itemPath lastPathComponent] resolvedName:resolvedName]) || isDirectory) {
             [xmlString appendString:@"<D:response>"];
@@ -1495,7 +1506,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
                     [xmlString appendString:@"<D:getcontenttype/>"];
                 }
 
-                for (NSString *key in _DeadPropertiesAtPath(itemPath)) {
+                for (NSString *key in _DeadPropertiesAtPath(metadataPath)) {
                     if ([key isEqualToString:displayNameKey]) {
                         continue;  // Already listed above
                     }
@@ -1512,7 +1523,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
             [xmlString appendString:@"<D:prop>"];
 
             // Read before the property block because displayname consults it for a stored value.
-            NSDictionary<NSString *, NSString *> *const dead = _DeadPropertiesAtPath(itemPath);
+            NSDictionary<NSString *, NSString *> *const dead = _DeadPropertiesAtPath(metadataPath);
 
             if (properties & kDAVProperty_ResourceType) {
                 if (isDirectory) {
@@ -1537,8 +1548,11 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
                 // Opened O_NOFOLLOW because the containment and hidden-item rules have already
                 // judged the resolved path; this only needs the descriptor to ask the filesystem
                 // its timestamp granularity. If it cannot be opened the property is omitted, which
-                // is the same fail-closed direction as an unsealed date.
-                int const descriptor = open([itemPath fileSystemRepresentation], O_RDONLY | O_NOFOLLOW);
+                // is the same fail-closed direction as an unsealed date. metadataPath, not
+                // itemPath: a symlink child made this open fail ELOOP on every request, so the
+                // alias never published a date at all — O_NOFOLLOW is only compatible with a
+                // path whose final component is already resolved.
+                int const descriptor = open([metadataPath fileSystemRepresentation], O_RDONLY | O_NOFOLLOW);
 
                 if (descriptor >= 0) {
                     struct stat info;
@@ -1567,7 +1581,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
             if ((properties & kDAVProperty_ETag) && isFile) {
                 struct stat info;
 
-                if (stat([itemPath fileSystemRepresentation], &info) == 0) {
+                if (stat([metadataPath fileSystemRepresentation], &info) == 0) {
                     [xmlString appendFormat:@"<D:getetag>%@</D:getetag>", WSKEntityTagForFileInfo(&info)];
                 }
             }
@@ -1576,7 +1590,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
             // PROPFIND must not describe a resource differently from the GET that serves it.
             // Collections have no content type and say nothing rather than guessing one.
             if ((properties & kDAVProperty_ContentType) && isFile) {
-                NSString *const mimeType = WSKGetMimeTypeForExtension([itemPath pathExtension], nil);
+                NSString *const mimeType = WSKGetMimeTypeForExtension([metadataPath pathExtension], nil);
 
                 if (mimeType.length) {
                     [xmlString appendFormat:@"<D:getcontenttype>%@</D:getcontenttype>", _XMLEscape(mimeType)];
