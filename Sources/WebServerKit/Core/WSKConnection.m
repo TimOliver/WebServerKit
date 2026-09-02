@@ -2394,7 +2394,17 @@ static NSString *_DigestURIPath(NSString *uri) {
                         // (nonce and realm are disclosed in the 401; method and uri are
                         // attacker-chosen), forging a valid response with no password at all.
                         if ((ha1 != nil) && [_DigestURIPath(uri) isEqualToString:request.path]) {
-                            NSString *const ha2 = WSKComputeMD5Digest(@"%@:%@", request.method, uri);  // Use "uri" not "request.path": the query string is part of the client's digest
+                            // RFC 7616 §3.4.3 computes A2 from the method the CLIENT sent. A mapped
+                            // HEAD has already been rewritten to GET before preflight runs (that
+                            // rewrite is the point of WSKOption_AutomaticallyMapHEADToGET, on by
+                            // default), so hashing request.method compared the client's HEAD digest
+                            // against a GET one: they can never agree, and every HEAD carrying
+                            // correct credentials was answered 401 with a fresh challenge, forever.
+                            // Fails closed, but it makes a method real clients probe with —
+                            // `curl -I`, the HEAD a sync client issues before a large download —
+                            // permanently unauthenticable.
+                            NSString *const wireMethod = request.isVirtualHEAD ? @"HEAD" : request.method;
+                            NSString *const ha2 = WSKComputeMD5Digest(@"%@:%@", wireMethod, uri);  // Use "uri" not "request.path": the query string is part of the client's digest
                             NSString *const expectedResponse = WSKComputeMD5Digest(@"%@:%@:%@", ha1, nonce, ha2);
 
                             if (_ConstantTimeEqualStrings(actualResponse, expectedResponse)) {
