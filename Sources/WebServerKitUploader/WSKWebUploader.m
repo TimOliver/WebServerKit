@@ -1060,16 +1060,15 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
     for (NSString *item in [contents sortedArrayUsingSelector:@selector(localizedStandardCompare:)]) {
         if (_allowHiddenItems || ![item hasPrefix:@"."]) {
             NSString *const itemPath = [absolutePath stringByAppendingPathComponent:item];
-            NSDictionary *const attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:itemPath error:NULL];
             // Classified by what a symlink points at, so the listing describes what is served.
+            // The size comes from the classifier's own resolved path — a symlink's unresolved
+            // attributes report the length of its target PATH, not the file, and asking the
+            // filesystem again with a second, differently-spelled resolution is the
+            // two-observations class this codebase keeps refinding.
             NSString *resolvedName = nil;
-            NSString *const type = WSKServableFileTypeAtPath(itemPath, _uploadDirectory, _allowHiddenItems, &resolvedName);
-            // A symlink's own attributes report the length of its target PATH, not the file, so
-            // ask again through the link for anything classified as a regular file.
-            NSString *const rawType = attributes[NSFileType];
-            NSDictionary *const effective = [rawType isEqualToString:NSFileTypeSymbolicLink]
-                                                ? [[NSFileManager defaultManager] attributesOfItemAtPath:[itemPath stringByResolvingSymlinksInPath] error:NULL]
-                                                : attributes;
+            NSString *resolvedItemPath = nil;
+            NSString *const type = WSKServableFileTypeAtPath(itemPath, _uploadDirectory, _allowHiddenItems, &resolvedName, &resolvedItemPath);
+            NSDictionary *const effective = [[NSFileManager defaultManager] attributesOfItemAtPath:(resolvedItemPath ?: itemPath) error:NULL];
             NSNumber *const size = effective[NSFileSize];  // Nil if the item vanished between the listing and this stat; must not reach the literal below.
 
             if ([type isEqualToString:NSFileTypeRegular] && size && [self _checkFileExtensionForName:item resolvedName:resolvedName]) {

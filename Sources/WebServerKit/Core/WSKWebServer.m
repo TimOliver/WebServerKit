@@ -1700,7 +1700,7 @@ static NSString *_EscapeHTMLString(NSString *string) {
             // Classified by what a symlink points at, so the index describes what is actually
             // served. A link out of the served root, or a dangling one, classifies as nothing
             // and stays unlisted, because that is what the handler would refuse.
-            NSString *const type = WSKServableFileTypeAtPath([path stringByAppendingPathComponent:entry], path, includeHiddenItems, NULL);
+            NSString *const type = WSKServableFileTypeAtPath([path stringByAppendingPathComponent:entry], path, includeHiddenItems, NULL, NULL);
 
             // Any process can delete the entry between the directory read above and this
             // stat, so a missing type is an ordinary race, not a logic error to assert on.
