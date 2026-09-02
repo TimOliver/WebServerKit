@@ -3,6 +3,8 @@
 // Split out of the single Tests.m that held all 159 tests; the grouping is by subject, not by
 // the pass that added each test.
 
+#import <sys/xattr.h>
+
 #import "TestsSupport.h"
 
 @interface WSKWebDAVTests : XCTestCase
@@ -1647,6 +1649,74 @@
     NSString* etagBody = @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\"><D:set><D:prop><D:getetag>x</D:getetag></D:prop></D:set></D:propertyupdate>";
     NSString* etagRequest = [NSString stringWithFormat:@"PROPPATCH /plain.txt HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)etagBody.length, etagBody];
     XCTAssertTrue([SendRawRequest(server.port, etagRequest) containsString:@"403 Forbidden"], @"getetag must stay protected");
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// Dead-property storage had a per-REQUEST bound (kDAVMaxRequestBodyLength) and no cumulative one,
+// so a client could keep adding properties and the extended attribute grew without limit — measured
+// at 1.28 MB on a 19-byte file, after which one allprop PROPFIND assembled a 1.29 MB response in
+// memory, 67,000x the file it described. On a server measured in weeks with no rate limiting, an
+// unbounded store that survives restarts is the accumulation this deployment cares most about.
+//
+// The bound belongs at the storage call, which is the one place every write passes through. Over it,
+// the write is refused whole: PROPPATCH is atomic per §9.2, so a request that would cross the cap
+// stores nothing at all rather than filling to the brim.
+- (void)testDAVProppatchBoundsCumulativeDeadPropertyStorage {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    NSString* path = [dir stringByAppendingPathComponent:@"f.txt"];
+    XCTAssertTrue([@"data" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* (^proppatch)(NSString*) = ^(NSString* body) {
+        return SendRawRequest(server.port, [NSString stringWithFormat:@"PROPPATCH /f.txt HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)body.length, body]);
+    };
+    NSString* (^store)(NSString*, NSUInteger) = ^(NSString* name, NSUInteger valueLength) {
+        NSString* value = [@"" stringByPaddingToLength:valueLength withString:@"x" startingAtIndex:0];
+        return proppatch([NSString stringWithFormat:@"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:X=\"urn:example\"><D:set><D:prop><X:%@>%@</X:%@></D:prop></D:set></D:propertyupdate>", name, value, name]);
+    };
+
+    // A small property still stores, so the bound has not simply broken the feature.
+    XCTAssertTrue([store(@"small", 32) containsString:@"200 OK"], @"an ordinary dead property must still store");
+
+    // Fill past the cap. Each request stays well under the per-request body limit, so only a
+    // CUMULATIVE bound can stop this; without one every one of these succeeds.
+    NSString* lastReply = nil;
+    BOOL refused = NO;
+    NSUInteger stored = 0;
+
+    for (NSUInteger i = 0; (i < 40) && !refused; i++) {
+        lastReply = store([NSString stringWithFormat:@"bulk%lu", (unsigned long)i], 8 * 1024);
+        refused = [lastReply containsString:@"507"];
+
+        if (!refused) {
+            stored += 1;
+        }
+    }
+
+    XCTAssertTrue(refused, @"40 x 8 KB of dead properties were all accepted — storage is unbounded (last reply: %@)", [lastReply substringToIndex:MIN((NSUInteger)120, lastReply.length)]);
+    XCTAssertTrue([lastReply hasPrefix:@"HTTP/1.1 207"], @"the refusal is still a multistatus: %@", [lastReply substringToIndex:MIN((NSUInteger)40, lastReply.length)]);
+
+    // Atomic: the request that crossed the cap stored nothing, while everything before it survives.
+    NSString* readback = SendRawRequest(server.port, @"PROPFIND /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
+    // Hoisted: a comma inside brackets splits the macro's arguments (the project's recurring trap).
+    NSString* refusedName = [NSString stringWithFormat:@"bulk%lu", (unsigned long)stored];
+    XCTAssertFalse([readback containsString:refusedName], @"the refused property was stored anyway: %@", readback);
+    XCTAssertTrue([readback containsString:@"small"], @"a property stored before the cap was lost: %@", readback);
+
+    // The attribute on disk is bounded, which is the property that actually matters for a
+    // long-lived server.
+    ssize_t const attributeSize = getxattr([path fileSystemRepresentation], "com.webserverkit.dav.deadproperties", NULL, 0, 0, 0);
+    XCTAssertLessThanOrEqual(attributeSize, (ssize_t)(64 * 1024), @"stored dead properties exceeded the cap: %zd bytes", attributeSize);
+
+    // Removal still works at the cap — the store must not become unshrinkable once full.
+    NSString* removal = proppatch(@"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:X=\"urn:example\"><D:remove><D:prop><X:bulk0/></D:prop></D:remove></D:propertyupdate>");
+    XCTAssertTrue([removal containsString:@"200 OK"], @"a removal must still apply when storage is full: %@", removal);
 
     [server stop];
     [fm removeItemAtPath:dir error:NULL];

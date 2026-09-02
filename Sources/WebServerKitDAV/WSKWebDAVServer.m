@@ -341,9 +341,21 @@ static NSDictionary<NSString *, NSString *> *_DeadPropertiesAtPath(NSString *pat
     return [stored isKindOfClass:[NSDictionary class]] ? (NSDictionary<NSString *, NSString *> *)stored : @{};
 }
 
+// What one resource may accumulate in dead properties, across every PROPPATCH ever sent to it.
+// kDAVMaxRequestBodyLength bounds a single request; this bounds the STORE, which is the quantity
+// that outlives the request — it survives restarts, it is echoed back amplified by every allprop
+// PROPFIND, and nothing else reclaims it. Without it a client could keep adding properties
+// indefinitely: measured at 1.28 MB on a 19-byte file, answered by a 1.29 MB PROPFIND response.
+//
+// 64 KB is far above what real clients store here (Finder's dead properties are tens of bytes) and
+// small enough that a Depth:1 listing of a large directory cannot be inflated into a memory problem.
+#define kDAVMaxDeadPropertyStorageLength (64 * 1024)
+
 // NO on failure, with errno left as the filesystem set it. Filesystems that cannot store extended
 // attributes at all — exFAT among them — report ENOTSUP, and the caller turns that into a
-// per-property 403 rather than pretending the property was stored.
+// per-property 403 rather than pretending the property was stored. Over the storage cap it reports
+// EDQUOT, which the caller maps to 507: "no room" is what happened, and it is not the client's
+// request that was forbidden.
 static BOOL _SetDeadPropertiesAtPath(NSString *path, NSDictionary<NSString *, NSString *> *properties) {
     const char *const filePath = [path fileSystemRepresentation];
 
@@ -355,6 +367,14 @@ static BOOL _SetDeadPropertiesAtPath(NSString *path, NSDictionary<NSString *, NS
 
     if (data == nil) {
         errno = EINVAL;
+        return NO;
+    }
+
+    // Judged on the SERIALIZED whole, after the merge, so it bounds what the resource ends up
+    // holding rather than the size of any one instruction. A removal shrinks the plist and so can
+    // never be refused by this: a full store must stay possible to empty.
+    if (data.length > kDAVMaxDeadPropertyStorageLength) {
+        errno = EDQUOT;
         return NO;
     }
 
@@ -1763,10 +1783,23 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
 
     xmlFreeDoc(document);
 
+    // The status the refused group carries. 403 is right for a property this server will not let a
+    // client set; a storage failure is a different answer, and saying "forbidden" for one sends the
+    // client back to retry a request that was never the problem.
+    NSString *refusalStatus = @"HTTP/1.1 403 Forbidden";
+
     // Atomic: nothing is written when any instruction was refused, and the applied ones become 424.
     if ((refused.count == 0) && changed && !_SetDeadPropertiesAtPath(absolutePath, properties)) {
         int const failure = errno;
         [self logWarning:@"Failed storing DAV properties for \"%@\" (errno %i)", relativePath, failure];
+
+        // Out of room — the per-resource cap, a full disk, or the user's quota — is 507, the same
+        // answer PUT/MKCOL/COPY/MOVE already give for ENOSPC and EDQUOT. Anything else (ENOTSUP on
+        // a filesystem with no extended attributes) stays 403.
+        if ((failure == EDQUOT) || (failure == ENOSPC)) {
+            refusalStatus = @"HTTP/1.1 507 Insufficient Storage";
+        }
+
         [refused addObjectsFromArray:applied];
         [applied removeAllObjects];
     }
@@ -1783,7 +1816,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
             [xmlString appendString:element];
         }
 
-        [xmlString appendString:@"</D:prop><D:status>HTTP/1.1 403 Forbidden</D:status></D:propstat>"];
+        [xmlString appendFormat:@"</D:prop><D:status>%@</D:status></D:propstat>", refusalStatus];
 
         if (applied.count > 0) {
             [xmlString appendString:@"<D:propstat><D:prop>"];
