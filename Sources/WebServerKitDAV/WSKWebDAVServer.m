@@ -874,9 +874,25 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
 
     absolutePath = resolvedPath;
 
-    if (![[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory]) {
+    // lstat, not -fileExistsAtPath:. This verb acts on the entry the client NAMED — the resolver
+    // above returned the alias itself, deliberately — and -fileExistsAtPath: follows the final
+    // link, so it answers about the TARGET. A dangling alias therefore read as "does not exist":
+    // DELETE said 404 while the link stayed, and every write verb refused the name because it did
+    // exist. The name was wedged, clearable only from the filesystem. A dangling alias is the
+    // ordinary end state of the publish-by-symlink pattern this library supports (the target is
+    // replaced or removed and the alias outlives it), and DELETE is exactly how a client tidies
+    // one up.
+    //
+    // isDirectory follows from the same observation: a symlink is not a collection, whatever it
+    // points at. That keeps this verb consistent with what it will actually remove — the link —
+    // rather than vetting and Depth-checking a subtree it never touches.
+    struct stat namedInfo;
+
+    if (lstat([absolutePath fileSystemRepresentation], &namedInfo) != 0) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
     }
+
+    isDirectory = ((namedInfo.st_mode & S_IFMT) == S_IFDIR);
 
     if (isHidden) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not allowed", relativePath];
