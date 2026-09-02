@@ -243,8 +243,12 @@ static inline BOOL _HeaderTokenIs(NSString *value, NSString *token) {
     BOOL const exists = stated && ((info.st_mode & S_IFMT) == S_IFREG);
     NSString *const currentTag = exists ? WSKEntityTagForFileInfo(&info) : nil;
 
-    // Evaluation order is RFC 9110 §13.2.2: If-Match, then If-Unmodified-Since only in its
-    // absence, then If-None-Match. If-Modified-Since plays no part in a state-changing method.
+    // Evaluation order is RFC 9110 §13.2.2: If-Match, then If-Unmodified-Since ONLY in its absence,
+    // then If-None-Match — which step 3 evaluates whatever the earlier steps did. Only step 2 is
+    // conditional on step 1; writing all three as one else-if ladder made a satisfied If-Match skip
+    // the client's If-None-Match entirely, so "replace this exact version, but only if it is still
+    // there" performed the write and reported success on a condition it never checked.
+    // If-Modified-Since plays no part in a state-changing method.
     if (ifMatch != nil) {
         if (!WSKEntityTagMatchesList(stated, currentTag, ifMatch, YES)) {
             return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_PreconditionFailed message:@"\"If-Match\" precondition failed for \"%@\"", request.path];
@@ -265,7 +269,12 @@ static inline BOOL _HeaderTokenIs(NSString *value, NSString *token) {
         if (stated && (limit != nil) && ((time_t)limitSeconds < info.st_mtimespec.tv_sec)) {
             return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_PreconditionFailed message:@"\"If-Unmodified-Since\" precondition failed for \"%@\"", request.path];
         }
-    } else if (WSKEntityTagMatchesList(stated, currentTag, ifNoneMatch, NO)) {
+    }
+
+    // Step 3, reached however steps 1 and 2 were answered. The nil check is explicit rather than
+    // left to the matcher: a nil list reaching it relies on messaging nil, which this codebase has
+    // been bitten by often enough to spell out at the call site.
+    if ((ifNoneMatch != nil) && WSKEntityTagMatchesList(stated, currentTag, ifNoneMatch, NO)) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_PreconditionFailed message:@"\"If-None-Match\" precondition failed for \"%@\"", request.path];
     }
 
