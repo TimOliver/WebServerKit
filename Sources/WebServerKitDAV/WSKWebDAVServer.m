@@ -396,16 +396,38 @@ static NSString *_DeadPropertyKey(NSString *namespaceHref, NSString *localName) 
     return namespaceHref.length ? [NSString stringWithFormat:@"{%@}%@", namespaceHref, localName] : localName;
 }
 
-static NSString *_DeadPropertyElement(NSString *key) {
+// Can this local name be written back as an XML element name? A colon cannot appear in an NCName,
+// and one arrives here for exactly one reason: the parse ran with XML_PARSE_RECOVER (a settled
+// choice), so a property whose namespace prefix was never DECLARED survives with the prefix baked
+// into node->name — "Z:note", with node->ns NULL and nothing anywhere declaring Z.
+//
+// Emitting that produces a document no conformant client can parse. Worse, storing it makes the
+// damage persistent and contagious: every later allprop PROPFIND of the resource re-emits the key,
+// so the Depth:1 listing of the PARENT directory is unparseable too — one poisoned file takes out
+// the folder. Such a name is refused rather than stored, and any key already on disk from before
+// this check is skipped when writing a response instead of corrupting it.
+static BOOL _PropertyLocalNameIsRepresentable(NSString *localName) {
+    return (localName.length > 0) && ([localName rangeOfString:@":" options:NSLiteralSearch].location == NSNotFound);
+}
+
+// nil for a key whose local name cannot be an element name — see _PropertyLocalNameIsRepresentable.
+// Requests carrying one are refused before anything is stored, so this only meets keys written by
+// an older build; skipping them keeps the rest of the document well-formed, which is the difference
+// between one lost property and an unparseable listing. Every call site must handle nil.
+static NSString *_Nullable _DeadPropertyElement(NSString *key) {
     // Literal: a combining mark starting the localname hides the "}" from the default search.
     NSRange const close = [key rangeOfString:@"}" options:NSLiteralSearch];
 
     if (![key hasPrefix:@"{"] || (close.location == NSNotFound)) {
-        return [NSString stringWithFormat:@"<%@/>", _XMLEscape(key)];
+        return _PropertyLocalNameIsRepresentable(key) ? [NSString stringWithFormat:@"<%@/>", _XMLEscape(key)] : nil;
     }
 
     NSString *const href = [key substringWithRange:NSMakeRange(1, close.location - 1)];
     NSString *const name = [key substringFromIndex:(close.location + 1)];
+
+    if (!_PropertyLocalNameIsRepresentable(name)) {
+        return nil;
+    }
 
     if ([href isEqualToString:@"DAV:"]) {
         return [NSString stringWithFormat:@"<D:%@/>", _XMLEscape(name)];
@@ -1520,7 +1542,11 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
                         continue;  // Already listed above
                     }
 
-                    [xmlString appendString:_DeadPropertyElement(key)];
+                    NSString *const element = _DeadPropertyElement(key);
+
+                    if (element) {  // nil only for an unrepresentable key stored by an older build
+                        [xmlString appendString:element];
+                    }
                 }
 
                 [xmlString appendString:@"</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>"];
@@ -1665,15 +1691,20 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
                         continue;
                     }
 
-                    [xmlString appendFormat:@"%@%@%@", [_DeadPropertyElement(key) stringByReplacingOccurrencesOfString:@"/>" withString:@">"], _XMLEscape(dead[key]), [self _closingElementForDeadPropertyKey:key]];
+                    NSString *const element = _DeadPropertyElement(key);
+
+                    if (element) {
+                        [xmlString appendFormat:@"%@%@%@", [element stringByReplacingOccurrencesOfString:@"/>" withString:@">"], _XMLEscape(dead[key]), [self _closingElementForDeadPropertyKey:key]];
+                    }
                 }
             } else {
                 for (NSString *key in unsupported) {
                     NSString *const value = dead[key];
+                    NSString *const element = _DeadPropertyElement(key);
 
-                    if (value) {
-                        [xmlString appendFormat:@"%@%@%@", [_DeadPropertyElement(key) stringByReplacingOccurrencesOfString:@"/>" withString:@">"], _XMLEscape(value), [self _closingElementForDeadPropertyKey:key]];
-                    } else {
+                    if (value && element) {
+                        [xmlString appendFormat:@"%@%@%@", [element stringByReplacingOccurrencesOfString:@"/>" withString:@">"], _XMLEscape(value), [self _closingElementForDeadPropertyKey:key]];
+                    } else if (element) {
                         [notFound addObject:key];
                     }
                 }
@@ -1692,7 +1723,11 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
                 [xmlString appendString:@"<D:propstat><D:prop>"];
 
                 for (NSString *key in notFound) {
-                    [xmlString appendString:_DeadPropertyElement(key)];
+                    NSString *const element = _DeadPropertyElement(key);
+
+                    if (element) {
+                        [xmlString appendString:element];
+                    }
                 }
 
                 [xmlString appendString:@"</D:prop><D:status>HTTP/1.1 404 Not Found</D:status></D:propstat>"];
@@ -1784,6 +1819,17 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
 
             if (localName.length == 0) {
                 continue;
+            }
+
+            // A prefixed name whose prefix was never declared is not well-formed XML — only
+            // XML_PARSE_RECOVER let it reach here, with the prefix baked into the local name. It
+            // cannot be written back, and STORING it would make every later allprop PROPFIND of
+            // this resource (and the Depth:1 listing of its parent) unparseable. Refuse the
+            // request rather than half-honour it.
+            if (!_PropertyLocalNameIsRepresentable(localName)) {
+                xmlFreeDoc(document);
+                return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest
+                                                         message:@"Property name \"%@\" is not a valid XML name (an undeclared namespace prefix?)", localName];
             }
 
             // A live property is computed from the filesystem, so it cannot be stored. RFC 4918
@@ -1960,6 +2006,15 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
                         // namespace must see that name back, not a DAV:-qualified guess at it.
                         NSString *const localName = [NSString stringWithUTF8String:(const char *)node->name];
                         const char *const href = (node->ns && node->ns->href) ? (const char *)node->ns->href : NULL;
+
+                        // Same refusal as PROPPATCH, for the same reason: a name carrying an
+                        // undeclared prefix cannot be echoed back into a well-formed 404 propstat,
+                        // and this is where such a name would be echoed. Both parsers must judge
+                        // it alike or one of them becomes the way in.
+                        if (!_PropertyLocalNameIsRepresentable(localName)) {
+                            success = NO;
+                            break;
+                        }
 
                         if (localName.length) {
                             // The SAME convention PROPPATCH keys by — a property in no namespace
