@@ -689,6 +689,23 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
     -side check runs AFTER the handler, so a 412 can follow a side effect that already happened.
     An unsatisfiable Range bypasses precondition evaluation entirely (416 even when If-Match
     fails).
+  - *exFAT + an NFC-spelled name: DELETE answers 500 and the file SURVIVES.* Found 2026-09-02 by
+    the normalization pass the audit never owned; PRE-EXISTING (identical on a0de1ac), both
+    servers. A file created with an NFC name is stored NFD by exFAT and HFS+ alike. Everything
+    else resolves the client's NFC spelling — `GET` 200, `MOVE` 201, `DELETE` of a DIRECTORY 204,
+    and HFS+ deletes files correctly too — but on exFAT `-[NSFileManager removeItemAtPath:]`
+    answers `NSFileNoSuchFileError` for a path that `lstat(2)` AND `unlink(2)` both resolve
+    (proved directly). Foundation and POSIX disagree about whether the name exists: recurring
+    shape 6, one layer below where it usually appears. The file is listed and readable but
+    undeletable through that spelling, and 500 blames the server for something no retry fixes.
+    Finder is unaffected (it deletes via the PROPFIND href, which is the on-disk NFD spelling);
+    a client that builds the NFC name itself is not, and NFC is what most web clients normalize
+    to. Fix shape: remove via `unlink(2)`/`rmdir(2)` on the already-resolved path — which is what
+    the removability walk already reasons about — and stop mapping the failure to 500. NOT done
+    as a drive-by: it changes the primitive under the most destructive verb in the library, whose
+    partial-destruction guard is carefully built, so it needs its own measured pass. Pairs
+    naturally with the ENAMETOOLONG status question above, which is the same "a filesystem error
+    is not a server fault" decision.
   - *Multipart part-header normalisation.* `WSKNormalizeHeaderValue`'s `;` search is non-literal
     and its input IS UTF-8-decoded, so a combining mark after the `;` in a part's
     `Content-Disposition` lowercases the entire value and the upload lands under a case-mangled
@@ -869,12 +886,50 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
   fetches over 6 keep-alive connections at ~9 ms per page (1 HTML + 40 images), byte-exact
   concurrent Range chunks against a 64 MB file, three 48-way cold-start bursts, 140 connections
   degrading gracefully, descriptors flat throughout. The torn-read defence was confirmed live: an
-  in-place rewrite mid-download cut the stream at 524 KB of a promised 64 MB. **Not covered** (the
-  completeness critic's list, worth a future pass): no REAL client touched tip — Finder /
-  mount_webdav, rclone and litmus were last run 2026-08-18, before the lingering-close change; no
-  reverse-proxy topology (Shape A always has Tailscale Serve in front, h2 → HTTP/1.1); no
-  iOS/tvOS runtime (all rigs were macOS, so the background-task paths stay simulator-unverified);
-  and no start/stop churn under load, which is Shape B's stated priority.
+  in-place rewrite mid-download cut the stream at 524 KB of a promised 64 MB.
+- **The gaps that pass left open were then closed, 2026-09-02 (same day, after the fixes landed).**
+  A completeness critic listed what the audit had NOT touched; all but one is now measured, and
+  the results are NEGATIVE except where noted. Recorded so nobody re-runs them speculatively.
+  - *Real WebDAV client at tip.* Mounted with macOS's own `mount_webdav` and driven as a
+    filesystem. `ls -l` reports the ALIAS at its target's size (10,485,760 B) and copying it out
+    yields a byte-identical 10 MB file — the PROPFIND-metadata fix confirmed through the real
+    client stack, on the exact operation that used to truncate. Write, move, mkdir, rmdir and
+    delete all round-trip. `cp` reports "could not copy extended attributes": WebDAVFS implements
+    no `setxattr` at all (`xattr -w` on a mounted file fails EPERM), identical on the pre-fix
+    build — a client limitation, not ours.
+  - *Server lifecycle under load* (Shape B's stated priority, previously unowned): 200 start/stop
+    cycles on one port while 6 readers and 2 refused-mid-upload (lingering-close) clients ran
+    against it — 0 start failures, 2,447 GETs and 168 refusals completed, descriptors 5 → 4,
+    reserved budget 0 at rest after EVERY cycle.
+  - *Reverse-proxy topology* (Shape A always has Tailscale Serve in front): caddy in front,
+    keep-alive HTTP/1.1 to the backend. Status, body and `Content-Range` agree direct vs proxied
+    on every case; 16 MB reassembled from Range chunks over reused backend connections with zero
+    errors; 12 concurrent clients × 6 ranged requests clean. No desync where a framing defect
+    would show.
+  - *iOS runtime* (all previous rigs were macOS): framework builds warning-free; the example app
+    serves its page, `/list` and `/upload` from the simulator. Backgrounding while IDLE suspends
+    at once — correct, since the task is taken "iff connected". With a transfer in flight a 5 MB
+    download at 100 KB/s completed BYTE-IDENTICAL across ~45 s of background, and the log names
+    the mechanism: `taskName = Called by WebServerKit, from -[WSKWebServer _didEnterBackground:]`.
+  - *Evidence tier of the 249 "verified correct" properties*: a stratified 10% sample (25 claims)
+    was re-verified adversarially. **20 HOLD, 5 PARTIAL, 0 FAIL.** Every narrowing is a claim
+    stated more broadly than the behaviour, not a defect: `displayname` is deliberately settable
+    (§15.2) so "live properties are refused" is false as written, and refusal is by a fixed NAME
+    list — an undefined `DAV:`-namespace name like `<D:foo>` stores as a dead property under
+    `{DAV:}foo`; `Range: bytes=-0` is ignored (200) rather than 416, which §14.2 permits since
+    ignoring Range is always allowed; the HEAD-body case needs `AutomaticallyMapHEADToGET: NO`,
+    already recorded as a known deviation; `Content-Encoding: identity` is accepted rather than
+    415 (RFC-correct — identity is the no-op coding) and the coding check sits inside the
+    has-body branch, so a BODILESS request carrying one answers 200; and the accept-time snapshot
+    covers the eleven ivars `-initWithServer:` captures, not a subclass's own mutable properties.
+    Useful as a calibration: claims written from reading tend to be too broad rather than wrong.
+  - *Wire corners*: a chunked trailer carrying a hostile `Content-Length` smuggles nothing;
+    absolute-form target 200; duplicate `Host` 400; NUL in a header value 400; 64 KB header 431;
+    `Expect: 100-continue` on a bodiless GET 200.
+  - **STILL not covered: litmus.** Both source URLs 404 from this environment, so the last
+    conformance run remains 2026-08-18 — before the lingering-close change and before the ten
+    2026-09-02 fixes. rclone and a real browser also remain unexercised. This is now the largest
+    single hole in the verification story.
 - **Fuzzing, one bounded pass, 2026-08-18 (~79M executions, harness deliberately NOT kept).**
   libFuzzer + ASan + UBSan, 10 in-process targets over the pure parsers, the containment
   resolvers against a symlink/dot-dir fixture farm, and the framing parsers. CLEAN at:
