@@ -428,6 +428,46 @@
     [fm removeItemAtPath:parent error:NULL];
 }
 
+// "Symlinks are aliases, and destructive verbs act on the named entry" stopped being true the
+// moment the target went away. The existence check ahead of DELETE was -fileExistsAtPath:, which
+// FOLLOWS the final link, so a dangling one reported "does not exist" and the request answered 404
+// while the link sat there — recurring shape 8, a derived predicate standing in for the primary
+// source. The name is then wedged: DELETE says it is not there, and every write verb refuses it
+// because it IS. Only local filesystem access clears it.
+//
+// A dangling link is the ordinary end state of the alias pattern this project supports: publish
+// "latest -> build-123", remove the old build, and the alias outlives its target.
+- (void)testDeletingADanglingSymlinkRemovesTheAlias {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    NSString* link = [dir stringByAppendingPathComponent:@"latest"];
+    XCTAssertTrue([fm createSymbolicLinkAtPath:link withDestinationPath:@"build-that-is-gone" error:NULL]);
+
+    struct stat info;
+    XCTAssertEqual(lstat([link fileSystemRepresentation], &info), 0, @"the fixture link was not created");
+    XCTAssertFalse([fm fileExistsAtPath:link], @"the fixture link must be dangling for this test to mean anything");
+
+    WSKWebDAVServer* dav = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([dav startWithOptions:options error:NULL]);
+
+    NSString* deleted = SendRawRequest(dav.port, @"DELETE /latest HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([deleted hasPrefix:@"HTTP/1.1 204"], @"deleting a dangling alias must remove it: %@", [deleted substringToIndex:MIN((NSUInteger)40, deleted.length)]);
+    XCTAssertNotEqual(lstat([link fileSystemRepresentation], &info), 0, @"the dangling link survived its own deletion");
+
+    // The wedge is what made this worth fixing: with the link gone the name is usable again.
+    NSString* recreated = SendRawRequest(dav.port, @"PUT /latest HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nFRESH");
+    XCTAssertTrue([recreated hasPrefix:@"HTTP/1.1 201"], @"the freed name must be writable again: %@", [recreated substringToIndex:MIN((NSUInteger)40, recreated.length)]);
+
+    // A name that genuinely holds nothing must still be 404 — the fix must not turn "absent" into
+    // "deleted something".
+    NSString* absent = SendRawRequest(dav.port, @"DELETE /never-existed HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([absent hasPrefix:@"HTTP/1.1 404"], @"deleting a name that holds nothing must still be 404: %@", [absent substringToIndex:MIN((NSUInteger)40, absent.length)]);
+
+    [dav stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 // -skipDescendants is defined for the most recently returned SUBDIRECTORY. Both subtree walks called
 // it for every dot-name including regular FILES, which popped the enclosing level instead — so every
 // entry after the first dot-name in that directory's readdir order was never vetted. A ".DS_Store"
