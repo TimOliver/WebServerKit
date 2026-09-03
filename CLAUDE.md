@@ -3,7 +3,9 @@
 A fork of GCDWebServer with additional features for iOS/macOS web serving.
 
 This is the CONDENSED institutional memory (condensed 2026-08-17 from the full 21-pass audit
-record; a 22nd pass — spec conformance, 2026-09-02 — is folded in place rather than appended).
+record; a 22nd pass — spec conformance, 2026-09-02 — and a 23rd — fresh-eyes, multi-core and
+packaging, 2026-09-02/03 — are folded in place rather than appended; the 23rd's unfixed remainder
+is grouped under "Still open at tip").
 The complete record — every measurement, justification, and the pass-by-pass appendix — lives in
 git history: `git show 09416c2:CLAUDE.md`. Consult it before re-auditing a subsystem or reversing
 anything under "Settled decisions".
@@ -408,8 +410,8 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
 ### File serving and connection reuse
 
 - EVERY file-vending surface honours `Range`/`If-Range`, including uploader `/download`.
-  (Honours, but does not ADVERTISE: neither DAV GET nor uploader `/download`/`/preview` sends
-  `Accept-Ranges: bytes`, only the base-path handler does — see "Still open at tip".)
+  (All of them ADVERTISE `Accept-Ranges: bytes` too since 7e6e74f — measured 2026-09-03 on
+  every DAV GET/HEAD/206/416 and on `/download`/`/preview`; this line claimed otherwise until then.)
 - `/download` is always an attachment (stored-XSS defence — the uploader's one-click buttons
   run in the server's origin); `/preview` serves an inert-media ALLOW-list inline with
   `nosniff` + subresource-denying CSP — SVG and PDF excluded deliberately (both carry
@@ -618,7 +620,10 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   measured pass.
 - The buffer change was re-soaked per the response-layer rule: 120 s, 3,349 complete +
   ~8k abortive transfers — descriptors flat, budget 0 at rest, RSS peak 31 MB. Eight
-  concurrent 512 MiB streams: 1,587 MB/s aggregate at 20 MB RSS. litmus and mount_webdav
+  concurrent 512 MiB streams: 1,587 MB/s aggregate at 20 MB RSS. (That aggregate being LOWER
+  than one stream is the kernel loopback path, not the server: a null C server containing no
+  WebServerKit falls from 5.07 to 2.87 GB/s across 1 → 8 streams, and WSK converges on the same
+  ceiling from 4 streams — measured 2026-09-03. Do not re-investigate it as a server property.) litmus and mount_webdav
   re-taken on the tuned tree, unchanged.
 - Perspective: Puck's network ceiling (Tailscale over WiFi) is ~30–60 MB/s; the server is not
   the bottleneck. Benchmarks live in the scratch harness (`bench.py` + `wskhost.m`).
@@ -760,9 +765,8 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
   reproduced against a live Release build and judged low-value for these deployments; the ten
   that WERE fixed are recorded in the invariant sections above. Grouped so a future pass can pick
   a theme rather than a line.
-  - *Advertisement and negotiation.* Neither DAV GET nor uploader `/download`/`/preview` sends
-    `Accept-Ranges: bytes` though all honour Range — a client that gates resume on the
-    advertisement restarts from zero. `HEAD` + `Range` answers 206 + `Content-Range` (§14.2
+  - *Advertisement and negotiation.* ~~Neither DAV GET nor uploader `/download`/`/preview` sends
+    `Accept-Ranges: bytes`~~ — fixed in 7e6e74f, verified on the wire 2026-09-03. `HEAD` + `Range` answers 206 + `Content-Range` (§14.2
     defines Range for GET only; internally consistent, and `curl -I -r` expects exactly this).
     Opt-in gzip reuses the identity representation's strong ETag and no response ever carries
     `Vary: Accept-Encoding`; outbound gzip is applied on the handler's flag without consulting
@@ -840,6 +844,16 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
     -closed (usually RST, never an HTTP status). The Bonjour registration callback reads
     `_resolutionService` on the main thread outside `_stateQueue`. Response-phase progress is
     measured per write-buffer completion, so a reader slower than ~bufferSize/timeout can be cut.
+    **Quantified 2026-09-03, and promoted to a P1 for Shape A:** at the default 30 s idle, readers
+    at 5–8 KB/s on a 20 MB file are cut at ~120 s after ~0.6–0.95 MB — exactly the socket send
+    high-water mark at that instant — while reading continuously; `-idle 5` moves the band to
+    20–40 KB/s (it scales as buffer ÷ timeout); race-dependent, so non-monotonic (5 KB/s survived
+    one run and died the next). Mechanism, confirmed with `netstat -anv`: the kernel send buffer
+    auto-grows toward 4 MB, and a `dispatch_write` that stays pending across two ticks registers
+    zero progress because progress is counted at write COMPLETION. A phone on a Tailscale relay
+    path pulling a build is exactly this client; it is also the cause of the CI flake. Fix: count
+    movement of `_totalBytesWritten` (bytes the socket accepted), or exempt a connection whose
+    only pending I/O is a partially drained outbound write.
     `WSKParseURLEncodedForm` lets a valueless parameter absorb the following pair (`?flag&path=x`
     loses `path`), and a leading `=` discards the whole remainder.
 - **ENAMETOOLONG answers 500, both servers.** A filename ≥ NAME_MAX (a 300-char component
@@ -885,7 +899,14 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
     every parsed tchar name generically, so `if-match:`, `iF-nOnE-mAtCh:` and `range:` all reach
     the exact-spelling lookups (wire-proved: lowercase `if-match` still produced 412, lowercase
     `if-range` still suppressed the range). The two in-code comments claiming otherwise overstate
-    CF's behaviour.
+    CF's behaviour. **Mechanism corrected 2026-09-03 (outcome unchanged):** CF canonicalizes only
+    names it KNOWS — `depth`, `destination`, `overwrite`, `te`, `if-unmodified-since` keep the wire
+    spelling, and a case-variant duplicate keeps the LAST spelling. The lookups work because the
+    returned `__NSCFDictionary` has case-insensitive key callbacks, which `-copy`/`-mutableCopy`
+    preserve and `+dictionaryWithDictionary:` (a re-hash into a plain NSDictionary) or a Swift
+    `[String: String]` silently drop — any such copy makes every exact-spelling lookup
+    case-sensitive. The tree never re-hashes today; the comment at `WSKConnection.m:1217` ("will
+    standardize the common ones") is the accurate statement.
   - *EMFILE does not busy-spin the accept source.* GCD's READ source fires once per arrival, not
     per level condition: 200 connections held in a starved backlog for 10 s produced exactly 200
     error lines and 20 ms of CPU. XNU's `accept` also dequeues and CLOSES the pending connection
@@ -894,6 +915,150 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
     and exFAT/HFS+ percent-encode the name in the kernel, so the enumerator never sees one.
   - The `If:` header being ignored, LOCK on an unmapped URL answering 404, and UNLOCK answering
     204 for any token are RESTATEMENTS of the settled lock-stub decision, not findings.
+- **From the 23rd pass (2026-09-02/03; eight agents with live rigs, every P1 reproduced twice) —
+  confirmed on the wire, NOT yet fixed.** Full report: the "WebServerKit 23rd Pass" artifact.
+  Already fixed on branches: the two quadratic parsers and the loopback 413
+  (`fix/parsers-linear`, recorded under Headers and framing) and the Xcode-generator link
+  failure, the Swift 6 trap, the pod's public Internal headers and the version strings
+  (`fix/packaging`, recorded under API shape). What remains, in the suggested order:
+  - *WebDAV.* **(P1) A property namespace URI containing `}` poisons the dead-property store.**
+    `_DeadPropertyKey` (`WSKWebDAVServer.m:395`) builds `{href}local` unchecked and
+    `_DeadPropertyElement`/`_closingElementForDeadPropertyKey` (`:419`, `:1483`) split at the
+    FIRST `}`, while both parsers (`:1823-1855`, `:2013-2030`) validate only the local name:
+    `xmlns:Z="urn:a}b"` stores `{urn:a}b}note`, emitted as `<W:b}note xmlns:W="urn:a"/>`, so
+    the resource's allprop AND its parent's Depth:1 listing are not well-formed, persistently
+    (xattr) — the sibling of the undeclared-prefix fix, recurring shapes 2 and 13. `urn:a&amp;b`
+    is also re-emitted as `urn:a&amp;#38;b`. Fix: validate the URI beside
+    `_PropertyLocalNameIsRepresentable` in both parsers, and make `_DeadPropertyElement` return
+    nil for a key whose derived local name is not an NCName so a store poisoned by this build
+    heals on upgrade. **(P1) The qop-less RFC 2069 Digest challenge (`WSKConnection.m:2470`)
+    is refused outright by every neon client** — cadaver "legacy Digest challenge not
+    supported", davfs2, litmus, sitecopy — proven with a positive-control server sending
+    `qop="auth", algorithm=MD5`; curl and WebDAVFS accept the legacy form; rclone has no Digest
+    at all (client limitation). Fix: emit qop/algorithm (+opaque) and verify the RFC 7616
+    response form beside the legacy one; this also closes the recorded no-nc/cnonce replay
+    item. (P2) Concurrent PROPPATCHes on one resource lose updates while both answer 200: an
+    unlocked read-modify-write of the xattr plist (`:1799` read … `:1883` write; 106/200 and
+    53/150 rounds lost a write). Fix: serialize PROPPATCH per server or per resolved path. (P2)
+    MOVE/COPY do not honour alias semantics for a DANGLING alias — only DELETE was fixed:
+    `-fileExistsAtPath:` at `:1254`/`:1279` follows the link, so MOVE/COPY of a dangling alias
+    → 404, MOVE onto its name with `Overwrite: T` → 403 (`renamex_np` EEXIST) and without → 403
+    where 412 is owed, and the name is invisible in listings so the client cannot tell why.
+    Fix: `lstat` for both existence tests in `performCOPY:isMove:` (a link is never a
+    collection) and hand the link's identity to the swap. (P2) Bodiless 2xx responses state no
+    `Content-Length` (`WSKConnection.m:939`; `_StatusDelimitsItself` `:573` covers 1xx/204/304
+    only), so on a keep-alive server every DAV OPTIONS, MKCOL, COPY/MOVE 201 and collection GET
+    closes the connection — the sibling of the 304 fix one status class over; Finder's own
+    `Content-Length: 0` on OPTIONS/MKCOL/MOVE/DELETE additionally excludes those requests on the
+    request side (the deliberate structural line). Fix: `Content-Length: 0` on a bodiless
+    response whose status is not 1xx/204/304 (a serializer change → the proven-additive corpus
+    edit). P3: LOCK `lockroot` href is `http://host//path` (`:2273`) and `<D:timeout>` echoes
+    the whole list (`:2265`); RFC 4331 quota properties answer 404 so `df` and Finder's Get Info
+    show a zero-byte volume (fix: `statfs` on the share root); chunked empty-body MKCOL → 415
+    (`:1010` tests `contentLength > 0`, the chunked sentinel); `PUT /` and `MKCOL /` → 403 while
+    other collections get 405; a named PROPFIND matching no live property emits an empty 200
+    propstat before the 404 one; no `MS-Author-Via`. Hypotheses, unmeasured: a case-only MOVE
+    may be safe to allow now that MOVE stages (`:1340` predates staging); `-allowHidden` mount
+    sessions would litter `._*` AppleDouble files; the allow-list vetting walk reaches THROUGH a
+    symlink-to-directory destination on overwrite (a fourth site of the "walk judges the
+    target" ruling).
+  - *Connection.* **(P1 for Shape A) The slow-reader cut** — quantified in the corrected line
+    under "Uploader and lifecycle" above, fix direction there; fixing it also un-flakes CI.
+    (P2, owner ruling requested) An async handler that KEEPS its completion block and never
+    calls it holds its slot until process exit even after the client disconnects: no read is
+    posted during a handler (`WSKConnection.m:843-877`), so a peer FIN/RST is never observed,
+    and `_checkIdleTimeout` cannot fire with `_pendingIOCount == 0` — 128 parked, and three
+    minutes after every client left the server still refuses every connection. A handler that
+    DROPS the block does not park (dealloc closes the socket), but silently: no log line, no
+    500 (P3). The built-in servers are unaffected (every handler completes synchronously); a
+    host-registered route awaiting a backend that never answers is the realistic shape. Fix
+    direction: post a one-byte read while a handler is outstanding so peer EOF tears the
+    connection down (cheap, non-breaking); a `WSKOption_HandlerTimeout` answering 503 is the
+    heavier option; "handler time never counts" stays right for the idle timer itself. (P2)
+    Three lifecycle edges: `[::]:port` held elsewhere while `0.0.0.0:port` is free aborts the
+    whole start with EADDRINUSE and closes the good v4 listener, never naming the family
+    (`WSKWebServer.m:829-840`; fix: v4-only with a warning, or name the family); a NEGATIVE
+    `ConnectionIdleTimeout`/`ConnectionKeepAliveTimeout` passes `_ValidateOptions` (class check
+    only) and `idleTimeout > 0.0` then creates NO idle timer — five idle sockets still open at
+    70 s (`:882-883`, `WSKConnection.m:1448`; fix: reject or clamp); `addHandler…`/
+    `removeAllHandlers` while running SIGSEGVs in Release (3/3) because the unlocked
+    `_handlers` mutation (`:448-457`) races the accept-time copy (`WSKConnection.m:1435`) —
+    Debug aborts by design; fix: guard both under `_syncQueue` so misuse is a benign no-op.
+    (P3) `webServerDidCompleteBonjourRegistration:` fires 2–3× per start, once per resolved
+    address (`:477-493`). (P3, efficiency, not defects) `_dateFormatterQueue` is a measurable
+    serialization point (~280k formats/s cap; one worker in six waiting at saturation) but
+    costs ≤6 % at any reachable rate; ~470 µs of CPU per static 4 KB GET, dominated by
+    `attributesOfItemAtPath:` (getattrlist/xattr 18 %) and per-chunk 256 KB buffer churn —
+    invisible at LAN or tailnet rates. (P3) In-memory request classes send `100 Continue` for
+    a declared `Content-Length` they cannot hold and accept up to the cap before 413; a 4 GiB
+    declaration parks the slot until the idle window with no status at all
+    (`WSKDataRequest.m:44-51`, `WSKConnection.m:1297-1301`; fix: refuse in `-[WSKDataRequest
+    open:]` before the `Expect` branch, beside the Content-Encoding check). (P3) Request-target
+    leniencies, none browser-reachable: `GET ?q=1` dispatched as `/`; `//sub/file` parsed as
+    authority + path; `https://`, `ftp://` and userinfo absolute-forms accepted; `Host:
+    [1.2.3.4]` and port 99999 admitted (`WSKConnection.m:1612, 1229, 315, 420`). Nits:
+    `Connection: disclose` closes (substring test at `:605`); `Keep-Alive: max=100` but 101
+    served; base-path text/html and text/plain carry no charset; chunked trailers are not
+    validated; the header goes out as `Etag`; `Range: bytes=0-18446744073709551615` is ignored
+    (the sentinel).
+  - *Host-app safety, docs, hygiene.* **(P1) Changing a host-settable property while the server
+    runs is a use-after-free**: `allowedFileExtensions`, `allowHiddenItems`, `title`/`header`/
+    `prologue`/`epilogue`/`footer`, `fileCacheControlMaxAge`, `serverSentEventsEnabled` are
+    plain nonatomic ivars read on connection threads (`WSKWebUploader.m:880-1633`,
+    `WSKWebDAVServer.m:285-2107`) and the headers state no set-before-start rule. Release, a
+    thread flipping `allowedFileExtensions` every 1 ms under 16 listing clients: dead in 4–6 s
+    (SIGSEGV or uncaught NSException in `WSKEntryPassesExtensionAllowList` ← `listDirectory:`);
+    every 1 s → roughly 1 % per flip. Not remotely triggerable; a Shape B settings screen is the
+    exposure. Fix: atomic accessors or a per-request snapshot for the object-typed properties,
+    or document set-before-start and assert in the setters. (P2) Access-log CRLF/ANSI injection
+    via the percent-decoded path: `-_flushRequestRecordAndLog` (`WSKConnection.m:2655`) logs
+    `_request.path` unsanitised, so `/a%0d%0aFAKE…` forges a line and `%1b%5b31m` drives the
+    operator's terminal (the HTML reflection of the same path IS escaped). Fix: strip or
+    re-encode C0 and DEL at that one site. (P2) A sandboxed macOS host fails to start with a
+    bare `NSPOSIXErrorDomain 1` and nothing documents `com.apple.security.network.server` (plus
+    `network.client` for NAT-PMP and Bonjour resolution) — Shape A is a sandboxed GUI app.
+    (P2, UX) The uploader's trash icon deletes on ONE click with no confirmation and no undo
+    (`index.js` has no confirm anywhere), beside the move icon, on a phone. (P3) Uploader
+    `/create`, `/upload`, `/move` answer 500 for a client-named missing parent — ENOENT is not
+    in `WSKServerErrorStatusCodeForError` (`WSKWebUploader.m:1747, 1391, 1538`); DAV answers
+    409 for the same. (P3) The extension allow-list (uploader `:1324`, DAV PUT
+    `WSKWebDAVServer.m:791`) and `_rejectIfCrossOrigin:` (`:1293`) run only AFTER the whole
+    body: with `Expect: 100-continue` a refused 100 MB PUT or upload and a cross-origin POST all
+    receive `100 Continue` and stream everything before the 403, while auth, 415 and
+    Content-Range refuse with 0 body bytes; the DAV PUT name and the Origin are knowable
+    pre-body, so move those two into `-preflightRequest:` (the uploader's filename genuinely is
+    not). (P3) Bundle assets are `cacheAge:0` (`WSKWebUploader.m:230-234`) and
+    `fileCacheControlMaxAge` never reaches them; nothing is gzipped (jquery.min.js 87 KB raw);
+    the JS client shows only the reason phrase on failure (`_showError(…, errorThrown)` discards
+    `responseText`), and uploads are one un-chunked, un-resumable POST per file, strictly
+    sequential, with no retry. (P3) `-[WSKDataResponse initWithHTMLTemplate:variables:]`
+    substitutes verbatim with no HTML escaping and the header does not say so
+    (`WSKDataResponse.m:137`; the uploader defends by hand). (P3) A huge
+    `ConnectionIdleTimeout` (≳1.8e10 s) saturates the nanosecond conversion
+    (`WSKConnection.m:1450`) and disables the reaper; `timeout=%i` clamps for keep-alive ≥ 2^31
+    (`:959`); `_ScanHexNumber`'s "cannot overflow" holds only on LP64. (P3) `Examples/tvOS/
+    Info.plist` lacks `NSBonjourServices`/`NSLocalNetworkUsageDescription` although the example
+    advertises Bonjour; `Examples/iOS/Info.plist` declares `UIRequiredDeviceCapabilities =
+    armv7` on an arm64-only app; the Mac example hard-codes port 8080, and its Debug `Delete
+    WSKWebUploader.bundle` script phase (no outputs) alternates with CopyFiles so every SECOND
+    Debug build ships without the bundle and `-mode webUploader` exits −1 silently. Warnings:
+    the two dead flags `-Wno-implicit-int-enum-cast`/`-Wno-implicit-void-ptr-cast` (four
+    `WARNING_CFLAGS` blocks) emit 2 per compiled file, hiding 4 real framework warnings and 2 in
+    the tests (`WSKServerLifecycleTests.m:413` shadow, `WSKAuthenticationTests.m:206` gnu `?:`);
+    CI's warning step counts them but is `continue-on-error`. Docs: README carries ~20 stale
+    statements (swisspol URLs, `WSKWebServer` pod names, `import WSKWebServer`, `runWithPort:`,
+    "keep-alive not supported", a Carthage section, samples at L451/L470 that do not compile)
+    and nothing on `AllowedHostNames`, the idle/keep-alive timeouts, hidden items,
+    `isVirtualHEAD`, `#` → `%23`, atomic publishing, iOS client local-network keys, App Sandbox,
+    the tvOS storage rule, background serving, the two-server composition, `_webdav._tcp`, or
+    `reservedInMemoryByteCount` as the Shape A health metric — a "Deployment" section
+    transcribed from "Deployment requirements" above would cover it. Hygiene:
+    `docs/superpowers/` (two tool-generated plan/spec files) is TRACKED against the
+    never-commit-tool-artefacts rule; `Serve.xcodeproj/` is an unignored rename leftover that
+    `git status` hides because its only contents match ignore rules; `Tests (Mac)` deployment
+    target is 14.6 against 12.0 everywhere else; LICENSE years disagree with the headers; CI
+    runs macos-15/Xcode 16.4 with `actions/checkout@v4` deprecation warnings and no caching; the
+    4.0.0 tag the podspec and README now both name does not exist yet.
 
 ## Lessons (the ones that cost real time)
 
@@ -929,7 +1094,10 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
   a convenience API — and give the rule one home so the question is asked once.
 - Verify batches together, not per-fix; periodically run every technique family against tip.
 - `-stop` is NOT a barrier over connection teardown — poll for the event, never read state
-  straight after `-stop`. Two timing tests flake under load; re-run a failure in isolation
+  straight after `-stop`. Two timing tests flake under load — and a THIRD,
+  `testPipelinedRequestIsNotReclaimedWhileItsResponseIsStillStreaming`, is the one that actually
+  fails CI (8 of the last 30 runs as of 2026-09-03, half of them on its CONTROL assertion: the
+  slow-reader cut on a slow runner; it passes locally 3/3). Re-run a failure in isolation
   before believing it. Don't overlap `Run-Tests.sh` with a running soak (SIGSTOP it).
 - **`Run-Tests.sh` can exit 70 with every test green.** Xcode's tvOS destination enumeration
   flaps on a machine with no tvOS SIMULATOR RUNTIME installed (the SDK alone is not enough):
@@ -1049,6 +1217,48 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
   executed count" rule, caught only because the count was checked). See "Verified clean" in the
   archived record before re-testing anything speculatively; re-run only when the layer a
   result covers changes.
+- **Fresh-eyes audit, 2026-09-02/03 (23rd pass; eight agents with live probe rigs, ~3.0M
+  tokens, every P1 reproduced a second time by the orchestrator on a fresh host, plus a real
+  Chromium session against the uploader).** Report: the "WebServerKit 23rd Pass" artifact; the
+  findings sit above under "Still open at tip" and, where fixed, in the invariant sections.
+  What it ESTABLISHED beyond the defects — do not re-measure speculatively: the request path
+  scales linearly to the eight P-cores under keep-alive (4,360 → 16,700 req/s on 4 KB files,
+  1.0 → 7.9 cores busy; the 1,000-entry `/list` and `PROPFIND` scale the same way) and nothing
+  in the library serializes it (accept path, `_syncQueue`, `@synchronized`: 0 % of a saturated
+  profile); one connection is one serial queue and so one core at most (2.28 GB/s single
+  stream, 0.47 s CPU/GB); blocking file reads do NOT starve the GCD pool (120 downloads from an
+  emulated 5 MB/s volume grew the pool to 129 threads and a new connection still answered in
+  ~1 ms — XNU charges only runnable threads against the 64 constrained allowance); serving never
+  depends on the main thread (10 s block: all three servers answer in 1–9 ms, delegates arrive
+  when it unblocks; no `dispatch_sync` to main exists); `DispatchQueuePriority` changes
+  throughput ≤3 %; TSan over the suite and ~5 minutes of mixed traffic against an instrumented
+  host reported zero races in `Sources/`; containment held on every entry point including from
+  a real browser, and COPY of an outside-pointing symlink yields an inert alias, never the
+  target's bytes; every 2026-09-02 fix holds on the wire; WebDAVFS, cadaver (anonymous) and
+  rclone all round-trip; 500 start/stop cycles with 0 failures; reserved bytes 0 at rest after
+  every experiment; the 2026-08-01 external audit's "likely P0" nil-scanner crash answers 403
+  with the server alive. **Corrections to this record it produced** (each measured, each
+  applied above): "Mac framework is warning-clean" is false on Xcode 26.3 (48 in Mac Debug, 44
+  from two dead flags, 4 real, plus 2 in the tests; Release is clean everywhere); the test that
+  fails CI is a THIRD timing test, not one of the recorded two; "an external SwiftPM consumer
+  building clean" caught nothing under Xcode's generator; "Internal/ never installed" was true
+  of the framework and false of the pod; the "8 × 512 MiB < one stream" figure is the kernel
+  loopback path; the header-subscripting refutation's MECHANISM was wrong; the
+  `WSKMultiPartFormRequest.m` "only limits data genuinely held" comment was false for a read
+  above 16 MB; the exit-70 tvOS flap did not reproduce with runtimes installed and never
+  happened in CI. Harness lessons: `proc_pidinfo(PROC_PIDLISTFDS, NULL, 0)` returns the
+  fd-TABLE capacity (120 → 220 → 420, never shrinks), not open descriptors — count real entries
+  or use `lsof`, and read every "fds flat" claim from that day as "the table did not grow"; a
+  `pkill wskhost` from one agent killed every other agent's servers mid-run (kill by PID); the
+  harness refuses a subagent's report-file write, so require the report in the final message;
+  Xcode 26's script sandbox refuses its own script phase when derived data lives under /tmp
+  (`ENABLE_USER_SCRIPT_SANDBOXING=NO`); `WSKLogMessage` is gated on `isatty(STDERR)`, so capture
+  the access log under `script -q -F`; a probe host that registers two default POST handlers
+  routes multipart bodies to the LAST registered one (reverse match order). Not covered: the
+  iOS example at runtime (the simulator wedged under fleet load), Cyberduck/Transmit/davfs2/
+  litmus, a reverse proxy in front for the slow-reader cut, E-core participation, exFAT/HFS+/
+  network volumes, 10,000-deep MKCOL, and the four recorded `-stop` TSan false positives (not
+  re-observed).
 
 ## Recurring defect shapes (check all new code against these)
 
