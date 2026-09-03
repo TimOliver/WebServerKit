@@ -957,28 +957,25 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
   - The `If:` header being ignored, LOCK on an unmapped URL answering 404, and UNLOCK answering
     204 for any token are RESTATEMENTS of the settled lock-stub decision, not findings.
 - **From the 23rd pass (2026-09-02/03; eight agents with live rigs, every P1 reproduced twice) —
-  confirmed on the wire, NOT yet fixed.** Full report: the "WebServerKit 23rd Pass" artifact.
-  Already fixed on branches: the two quadratic parsers and the loopback 413
-  (`fix/parsers-linear`, recorded under Headers and framing) and the Xcode-generator link
-  failure, the Swift 6 trap, the pod's public Internal headers and the version strings
-  (`fix/packaging`, recorded under API shape). What remains, in the suggested order:
-  - *WebDAV.* **(P1) A property namespace URI containing `}` poisons the dead-property store.**
-    `_DeadPropertyKey` (`WSKWebDAVServer.m:395`) builds `{href}local` unchecked and
-    `_DeadPropertyElement`/`_closingElementForDeadPropertyKey` (`:419`, `:1483`) split at the
-    FIRST `}`, while both parsers (`:1823-1855`, `:2013-2030`) validate only the local name:
-    `xmlns:Z="urn:a}b"` stores `{urn:a}b}note`, emitted as `<W:b}note xmlns:W="urn:a"/>`, so
-    the resource's allprop AND its parent's Depth:1 listing are not well-formed, persistently
-    (xattr) — the sibling of the undeclared-prefix fix, recurring shapes 2 and 13. `urn:a&amp;b`
-    is also re-emitted as `urn:a&amp;#38;b`. Fix: validate the URI beside
-    `_PropertyLocalNameIsRepresentable` in both parsers, and make `_DeadPropertyElement` return
-    nil for a key whose derived local name is not an NCName so a store poisoned by this build
-    heals on upgrade. **(P1) The qop-less RFC 2069 Digest challenge (`WSKConnection.m:2470`)
-    is refused outright by every neon client** — cadaver "legacy Digest challenge not
-    supported", davfs2, litmus, sitecopy — proven with a positive-control server sending
-    `qop="auth", algorithm=MD5`; curl and WebDAVFS accept the legacy form; rclone has no Digest
-    at all (client limitation). Fix: emit qop/algorithm (+opaque) and verify the RFC 7616
-    response form beside the legacy one; this also closes the recorded no-nc/cnonce replay
-    item. (P2) Concurrent PROPPATCHes on one resource lose updates while both answer 200: an
+  confirmed on the wire; the two WebDAV P1s are fixed, the remainder is not.** Full report: the
+  "WebServerKit 23rd Pass" artifact.
+  **Both WebDAV P1s are now FIXED and merged (2026-09-03)** — the `}`-in-namespace poisoning and the
+  qop-less Digest challenge; each is recorded as an invariant, under WebDAV and under Headers and
+  framing respectively, and each was re-measured live at tip before being touched (0 of the 11
+  items probed that day had evaporated, and the PROPPATCH race was WORSE than recorded). Also
+  already fixed: the two quadratic parsers and the loopback 413 (`fix/parsers-linear`, under
+  Headers and framing) and the Xcode-generator link failure, the Swift 6 trap, the pod's public
+  Internal headers and the version strings (`fix/packaging`, under API shape). One correction the
+  P1 work forced: the Digest finding claimed its fix "also closes the recorded no-nc/cnonce replay
+  item" — it does NOT, and the invariant entry says why. What remains, in the suggested order:
+  - *WebDAV.* ~~(P1) A property namespace URI containing `}` poisons the dead-property store.~~
+    ~~(P1) The qop-less RFC 2069 Digest challenge is refused outright by every neon client.~~ Both
+    fixed 2026-09-03; see the invariants. Note for anyone re-reading the originals in git history:
+    the namespace finding's `urn:a&amp;b` → `urn:a&amp;#38;b` half had the wrong mechanism
+    attributed to it (it is libxml2's own escaping of `&` inside `ns->href`, not anything this
+    code does), and the Digest fix needed one thing the finding did not mention — `qop`/`nc`
+    arrive UNQUOTED, so the shared header-parameter reader hands back `auth,` and `00000001,`.
+    (P2) Concurrent PROPPATCHes on one resource lose updates while both answer 200: an
     unlocked read-modify-write of the xattr plist (`:1799` read … `:1883` write; 106/200 and
     53/150 rounds lost a write). Fix: serialize PROPPATCH per server or per resolved path. (P2)
     MOVE/COPY do not honour alias semantics for a DANGLING alias — only DELETE was fixed:
