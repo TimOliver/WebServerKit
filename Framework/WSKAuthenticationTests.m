@@ -133,6 +133,86 @@
     [server stop];
 }
 
+// The challenge offered no "qop", which makes it the RFC 2069 form RFC 7616 §3.3 calls obsolete.
+// curl and macOS's own WebDAVFS accept it, so every in-house probe passed — but every neon-based
+// client refuses it outright rather than falling back ("legacy Digest challenge not supported"),
+// which is cadaver, davfs2, sitecopy and litmus: the conformance suite this project reaches for
+// could not even authenticate. Offering qop="auth" also gives the exchange its nc and cnonce, so
+// the response is no longer a value that depends on nothing the client contributes.
+//
+// The legacy form must keep working beside it: a client that ignores the qop we offer is still
+// entitled to the RFC 2069 computation (§3.4.6 selects the form by whether the CLIENT sent qop).
+- (void)testDigestOffersAndVerifiesQualityOfProtection {
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[WSKRequest class]
+                          processBlock:^WSKResponse*(WSKRequest* request) {
+                              return [WSKDataResponse responseWithText:@"secret-body"];
+                          }];
+    NSDictionary* options = @{
+        WSKOption_Port : @0,
+        WSKOption_BindToLocalhost : @YES,
+        WSKOption_AuthenticationMethod : WSKAuthenticationMethod_DigestAccess,
+        WSKOption_AuthenticationRealm : @"test",
+        WSKOption_AuthenticationAccounts : @{@"user" : @"pass"}
+    };
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* challenge = SendRawRequest(server.port, @"GET /secret HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    XCTAssertTrue([challenge containsString:@"401"], @"expected a 401 challenge, got: %@", challenge);
+    XCTAssertTrue([challenge containsString:@"qop=\"auth\""], @"the challenge must offer qop=\"auth\": %@", challenge);
+    XCTAssertTrue([challenge containsString:@"algorithm=MD5"], @"the challenge must name its algorithm: %@", challenge);
+
+    NSString* nonce = QuotedParam(challenge, @"nonce");
+    XCTAssertNotNil(nonce, @"no nonce in challenge: %@", challenge);
+
+    NSString* const ha1 = WSKComputeMD5Digest(@"%@:%@:%@", @"user", @"test", @"pass");
+    NSString* const ha2 = WSKComputeMD5Digest(@"%@:%@", @"GET", @"/secret");
+    // Exactly the header shape a real client sends: qop and nc UNQUOTED, cnonce quoted, every
+    // parameter comma-separated. The unquoted ones are what make this more than a hashing change —
+    // an unquoted value does not stop at a comma, so "auth," and "00000001," reach the digest
+    // unless the Digest reader cuts them there.
+    NSString* (^authorization)(NSString*, NSString*, NSString*) = ^(NSString* nc, NSString* cnonce, NSString* digest) {
+        return [NSString stringWithFormat:@"Authorization: Digest username=\"user\", realm=\"test\", nonce=\"%@\", uri=\"/secret\", qop=auth, nc=%@, cnonce=\"%@\", response=\"%@\"", nonce, nc, cnonce, digest];
+    };
+    NSString* (^get)(NSString*) = ^(NSString* header) {
+        return SendRawRequest(server.port, [NSString stringWithFormat:@"GET /secret HTTP/1.1\r\nHost: localhost\r\n%@\r\n\r\n", header]);
+    };
+
+    NSString* const qopResponse = WSKComputeMD5Digest(@"%@:%@:%@:%@:%@:%@", ha1, nonce, @"00000001", @"0a4f113b", @"auth", ha2);
+    NSString* ok = get(authorization(@"00000001", @"0a4f113b", qopResponse));
+    XCTAssertTrue([ok containsString:@"200"], @"an RFC 7616 qop=auth credential must authenticate, got: %@", ok);
+    XCTAssertTrue([ok containsString:@"secret-body"], @"expected the body with valid credentials, got: %@", ok);
+
+    // The nonce count and client nonce must be part of what is hashed, not decoration: a header
+    // whose nc says one thing while the digest was computed over another must not authenticate.
+    NSString* wrongCount = get(authorization(@"00000002", @"0a4f113b", qopResponse));
+    XCTAssertTrue([wrongCount containsString:@"401"], @"the nonce count is not bound into the digest: %@", wrongCount);
+
+    NSString* wrongClientNonce = get(authorization(@"00000001", @"deadbeef", qopResponse));
+    XCTAssertTrue([wrongClientNonce containsString:@"401"], @"the client nonce is not bound into the digest: %@", wrongClientNonce);
+
+    // The password still has to be right, with qop in play as without it.
+    NSString* const wrongHA1 = WSKComputeMD5Digest(@"%@:%@:%@", @"user", @"test", @"wrong");
+    NSString* const wrongDigest = WSKComputeMD5Digest(@"%@:%@:%@:%@:%@:%@", wrongHA1, nonce, @"00000001", @"0a4f113b", @"auth", ha2);
+    NSString* wrongPassword = get(authorization(@"00000001", @"0a4f113b", wrongDigest));
+    XCTAssertTrue([wrongPassword containsString:@"401"], @"a wrong password authenticated under qop: %@", wrongPassword);
+
+    // A client that sends no qop of its own still gets the RFC 2069 computation it used.
+    NSString* const legacyResponse = WSKComputeMD5Digest(@"%@:%@:%@", ha1, nonce, ha2);
+    NSString* legacyHeader = [NSString stringWithFormat:@"Authorization: Digest username=\"user\", realm=\"test\", nonce=\"%@\", uri=\"/secret\", response=\"%@\"", nonce, legacyResponse];
+    NSString* legacy = get(legacyHeader);
+    XCTAssertTrue([legacy containsString:@"200"], @"the RFC 2069 form must keep working beside qop: %@", legacy);
+
+    // A qop this server never offered cannot be honoured: auth-int hashes the body, which is not
+    // what HA2 above is, so accepting it would be authenticating against the wrong digest.
+    NSString* authIntHeader = [NSString stringWithFormat:@"Authorization: Digest username=\"user\", realm=\"test\", nonce=\"%@\", uri=\"/secret\", qop=auth-int, nc=00000001, cnonce=\"0a4f113b\", response=\"%@\"", nonce, qopResponse];
+    NSString* authInt = get(authIntHeader);
+    XCTAssertTrue([authInt containsString:@"401"], @"an unoffered qop must not authenticate: %@", authInt);
+
+    [server stop];
+}
+
 // HEAD is mapped to GET before anything else runs — that is what WSKOption_AutomaticallyMapHEADToGET
 // is for, and it defaults to YES — so by the time preflight computes HA2 the request's method reads
 // "GET" while the client hashed the "HEAD" it actually sent. The two digests can never agree, so a

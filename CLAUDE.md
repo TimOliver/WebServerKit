@@ -387,6 +387,27 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   `?path=/mine.txt` served `/yours.txt` on replay; now 401. Both halves compared RAW (each side is
   verbatim wire text); absent-on-both-sides is a match, spelled out rather than left to
   messaging nil. Real clients DO put the query in the uri directive — verified, no over-refusal.
+- **The challenge is RFC 7616 (`qop="auth", algorithm=MD5`) since 2026-09-03, not the RFC 2069 form
+  it sent before.** Not a conformance nicety: every neon-based client — cadaver, davfs2, sitecopy,
+  and litmus, the conformance suite this project reaches for — REFUSES a qop-less challenge outright
+  ("legacy Digest challenge not supported") rather than falling back, so not one of them could
+  authenticate, while curl and CFNetwork accept either form and made every in-house probe pass.
+  Verified across three client families with the unfixed build as the control: cadaver (neon 0.37.1)
+  went from that refusal to a working PROPFIND/MKCOL/PUT session; curl and CFNetwork answer 200
+  against both. Which computation applies is chosen by what the CLIENT sent (§3.4.6), so the RFC
+  2069 form still verifies beside it and nothing that worked stopped working. `auth-int` is refused
+  (it folds a hash of the BODY into HA2, which this HA2 is not), and `qop` without `nc`/`cnonce` is
+  refused rather than defaulted. No `opaque`: there is no per-nonce server state to check one
+  against, so it would be a value echoed and never read.
+  **This does NOT close the replay item** recorded under "Still open at tip", whatever the finding
+  said: qop supplies `nc`, but nothing counts it, so a captured header stays replayable for the
+  nonce's 300 s lifetime. Counting needs per-nonce state with eviction — its own decision.
+  The trap inside the fix, worth knowing before touching any Digest parameter: `qop`, `nc` and
+  `algorithm` arrive UNQUOTED, and `WSKExtractHeaderValueParameter` deliberately does NOT end an
+  unquoted value at a comma (RFC 2046 lets a multipart boundary contain one; terminating there
+  truncated real uploads). So it hands back `auth,` and `00000001,` from a real client's
+  comma-separated header, and every qop credential fails on a hash of the wrong bytes. `_DigestToken`
+  cuts at the comma at the one place these are read, rather than reopening that settled decision.
 - The `SO_NOSIGPIPE` result is checked and the socket dropped on failure — never remove
   (SIGPIPE once killed the process roughly every 15–25 abortive closes).
 - `WSK_DCHECK` is a no-op in Release; `WSK_DNOT_REACHED()` aborts in Debug — remote-input
