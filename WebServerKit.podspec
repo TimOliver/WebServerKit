@@ -24,7 +24,10 @@ Pod::Spec.new do |s|
     # WebServerKit module (see Package.swift). CocoaPods reads the real files directly and
     # would otherwise see each header twice.
     cs.exclude_files = 'Sources/WebServerKit/include/**/*'
-    cs.private_header_files = 'Sources/WebServerKit/Core/WSKPrivate.h'
+    # Internal/ holds the audit-shaped functions and the private prelude; the framework never
+    # installs them and the pod must not publish them either (the pattern used to name a file
+    # that had moved, matched nothing, and so exported all five as public headers).
+    cs.private_header_files = 'Sources/WebServerKit/Internal/*.h'
     cs.requires_arc = true
     cs.library = 'z'
     # UniformTypeIdentifiers is present on every OS this ships against, so it is a hard
@@ -43,8 +46,8 @@ Pod::Spec.new do |s|
   s.subspec 'WebUploader' do |cs|
     cs.dependency 'WebServerKit/Core'
     cs.source_files = 'Sources/WebServerKitUploader/*.{h,m}'
-    # Implementation detail of the SSE endpoint, not part of the public API.
-    cs.private_header_files = 'Sources/WebServerKitUploader/WSKWebUploaderSSEChannel.h'
+    # Implementation details of the SSE endpoint, not part of the public API.
+    cs.private_header_files = 'Sources/WebServerKitUploader/WSKWebUploaderSSE*.h'
     cs.requires_arc = true
     cs.resources = 'Sources/WebServerKitUploader/WSKWebUploader.bundle'
   end

@@ -86,5 +86,13 @@ echo "=== Swift Package Manager ==="
 # two paths makes clang report duplicate interfaces. Building here catches that.
 swift build
 
+# The package as an app consumes it (Scripts/SwiftConsumer), in Swift 6 language mode. Two
+# things a library-only `swift build` can never show: an executable has to LINK, which is
+# where the resource-bundle accessor goes missing — SwiftPM's and Xcode's generators name it
+# differently, so it is built with both — and a handler closure registered from main-actor
+# code has to survive being CALLED on a connection queue, which only a request shows.
+swift run --package-path Scripts/SwiftConsumer --scratch-path "$BUILD_DIR/SwiftConsumer" SwiftConsumer
+(cd Scripts/SwiftConsumer && xcodebuild build -scheme SwiftConsumer -destination 'platform=macOS' -derivedDataPath "$BUILD_DIR/SwiftConsumerXcode" "${SIGNING[@]}")
+
 echo ""
 echo "All tests completed successfully."

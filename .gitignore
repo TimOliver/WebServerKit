@@ -4,6 +4,6 @@ project.xcworkspace
 /build
 /Carthage/Build
 /.claude
-/.build
-/.swiftpm
+.build/
+.swiftpm/
 /AUDIT.md

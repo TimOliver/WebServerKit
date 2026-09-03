@@ -50,10 +50,10 @@ Download or check out the [latest release](https://github.com/swisspol/GCDWebSer
 Alternatively, add it with the [Swift Package Manager](https://swift.org/package-manager/) by pointing Xcode at this repository, or by adding it to your `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/TimOliver/WebServerKit.git", from: "3.5.5")
+.package(url: "https://github.com/TimOliver/WebServerKit.git", from: "4.0.0")
 ```
 
-The `WebServerKit` product provides everything. If you would rather not link libxml2 or ship the uploader's web assets, depend on `WSKCore`, `WSKWebDAVServer` or `WSKWebUploader` individually — they mirror the CocoaPods subspecs.
+The `WebServerKit` product provides everything. If you would rather not link libxml2 or ship the uploader's web assets, depend on `WebServerKitCore`, `WebServerKitDAV` or `WebServerKitUploader` individually — they mirror the CocoaPods subspecs.
 
 Or install using [CocoaPods](http://cocoapods.org/) by simply adding this line to your Podfile:
 ```

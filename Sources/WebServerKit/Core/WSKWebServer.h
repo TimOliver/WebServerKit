@@ -41,6 +41,11 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+// Every block type here is NS_SWIFT_SENDABLE. Swift 6 language mode treats a block formed
+// in a main-actor context — top-level code, any view controller — as main-actor-isolated
+// unless its type is Sendable, and inserts an executor check that traps when a connection
+// queue calls it. That crashed every Swift 6 host app on its first request. The blocks run
+// on connection queues by design; marking them Sendable is stating that contract.
 /**
  *  The WSKMatchBlock is called for every handler added to the
  *  WSKWebServer whenever a new HTTP request has started (i.e. HTTP headers have
@@ -51,7 +56,7 @@ NS_ASSUME_NONNULL_BEGIN
  *  WSKRequest instance created with the same basic info.
  *  Otherwise, it simply returns nil.
  */
-typedef WSKRequest *_Nullable (^WSKMatchBlock)(NSString *requestMethod, NSURL *requestURL, NSDictionary<NSString *, NSString *> *requestHeaders, NSString *urlPath, NSDictionary<NSString *, NSString *> *urlQuery);
+typedef WSKRequest *_Nullable (^WSKMatchBlock)(NSString *requestMethod, NSURL *requestURL, NSDictionary<NSString *, NSString *> *requestHeaders, NSString *urlPath, NSDictionary<NSString *, NSString *> *urlQuery) NS_SWIFT_SENDABLE;
 
 /**
  *  The WSKProcessBlock is called after the HTTP request has been fully
@@ -63,7 +68,7 @@ typedef WSKRequest *_Nullable (^WSKMatchBlock)(NSString *requestMethod, NSURL *r
  *  recommended to return a WSKErrorResponse on error so more useful
  *  information can be returned to the client.
  */
-typedef WSKResponse *_Nullable (^WSKProcessBlock)(__kindof WSKRequest *request);
+typedef WSKResponse *_Nullable (^WSKProcessBlock)(__kindof WSKRequest *request) NS_SWIFT_SENDABLE;
 
 /**
  *  The WSKAsynchronousProcessBlock works like the WSKProcessBlock
@@ -75,15 +80,15 @@ typedef WSKResponse *_Nullable (^WSKProcessBlock)(__kindof WSKRequest *request);
  *  It's however recommended to return a WSKErrorResponse on error so more
  *  useful information can be returned to the client.
  */
-typedef void (^WSKCompletionBlock)(WSKResponse *_Nullable response);
-typedef void (^WSKAsyncProcessBlock)(__kindof WSKRequest *request, WSKCompletionBlock completionBlock);
+typedef void (^WSKCompletionBlock)(WSKResponse *_Nullable response) NS_SWIFT_SENDABLE;
+typedef void (^WSKAsyncProcessBlock)(__kindof WSKRequest *request, WSKCompletionBlock completionBlock) NS_SWIFT_SENDABLE;
 
 /**
  *  The WSKBuiltInLoggerBlock is used to override the built-in logger at runtime.
  *  The block will be passed the log level and the log message, see setLogLevel for
  *  documentation of the log levels for the built-in logger.
  */
-typedef void (^WSKBuiltInLoggerBlock)(int level, NSString *_Nonnull message);
+typedef void (^WSKBuiltInLoggerBlock)(int level, NSString *_Nonnull message) NS_SWIFT_SENDABLE;
 
 /**
  *  The WSKWebServer class listens for incoming HTTP requests on a given port,
