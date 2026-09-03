@@ -582,4 +582,105 @@
     XCTAssertEqual(argument.data.length, (NSUInteger)0, @"a blank field's value is empty data");
 }
 
+// The 8 KB cap on a part's header block was checked only once the blank line ending the block
+// had been seen, so a block that never ends grew to the 16 MB working buffer — and every
+// appended byte rescanned all of it, which is quadratic and reachable by any client that
+// segments the body. The cap must be judged on the bytes buffered, terminator or not.
+- (void)testMultiPartRefusesAnUnterminatedPartHeaderBlockAtTheHeaderCap {
+    WSKMultiPartFormRequest* request = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
+    NSError* error = nil;
+    XCTAssertTrue([request performWriteData:SSEData(@"--X\r\n") error:&error]);
+
+    NSData* one = SSEData(@"a");  // a header block that never reaches its blank line
+    NSUInteger accepted = 0;
+    while (accepted < 9000 && [request performWriteData:one error:&error]) {
+        accepted++;
+    }
+
+    XCTAssertGreaterThanOrEqual(accepted, (NSUInteger)8000, @"a header block within the cap must be accepted");
+    XCTAssertLessThan(accepted, (NSUInteger)9000, @"the header block grew past the cap without being refused");
+}
+
+// The boundary search restarted from the front of the working buffer on every append, so an
+// argument value delivered a few bytes at a time — a slow client, a proxy, or a hostile one —
+// cost time quadratic in its length. Only bytes that could still complete a boundary need
+// re-examining. The equality check proves a boundary straddling every append edge is still
+// found and the value arrives whole.
+- (void)testMultiPartArgumentDeliveredOneByteAtATimeCostsLinearTime {
+    WSKMultiPartFormRequest* request = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
+    NSError* error = nil;
+    XCTAssertTrue([request performWriteData:SSEData(@"--X\r\nContent-Disposition: form-data; name=\"big\"\r\n\r\n") error:&error]);
+
+    NSMutableData* value = [NSMutableData dataWithLength:(64 * 1024)];
+    memset(value.mutableBytes, 'v', value.length);
+    NSMutableData* rest = [NSMutableData dataWithData:value];
+    [rest appendData:SSEData(@"\r\n--X--\r\n")];
+
+    NSTimeInterval cpuBefore = ProcessCPUSeconds();
+    const unsigned char* bytes = rest.bytes;
+    for (NSUInteger i = 0; i < rest.length; i++) {
+        if (![request performWriteData:[NSData dataWithBytes:(bytes + i) length:1] error:&error]) {
+            XCTFail(@"write %lu refused: %@", (unsigned long)i, error);
+            return;
+        }
+    }
+    XCTAssertTrue([request performClose:&error], @"%@", error);
+    NSTimeInterval cpuSpent = ProcessCPUSeconds() - cpuBefore;
+
+    WSKMultiPartArgument* argument = [request firstArgumentForControlName:@"big"];
+    XCTAssertEqualObjects(argument.data, value, @"the value must arrive whole and exact");
+    XCTAssertLessThan(cpuSpent, 1.0, @"a %lu byte value written one byte at a time cost %.2f s of CPU: the parser is not linear", (unsigned long)value.length, cpuSpent);
+}
+
+// Bytes before the first boundary are a preamble the RFC says to ignore, but the parser kept
+// them in its working buffer and rescanned them on every append: a preamble longer than the
+// in-memory cap failed the request, and a shorter one cost quadratic time. Discard it as it
+// streams, keeping only enough to recognise a boundary that straddles two appends.
+- (void)testMultiPartDiscardsThePreambleWithoutBufferingIt {
+    WSKSetMemoryLimitsForTesting(1024 * 1024, 16 * 1024 * 1024, 64 * 1024 * 1024);
+    [self addTeardownBlock:^{
+        WSKSetMemoryLimitsForTesting(0, 0, 0);
+    }];
+
+    WSKMultiPartFormRequest* request = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
+    NSError* error = nil;
+    NSMutableData* junk = [NSMutableData dataWithLength:(64 * 1024)];
+    memset(junk.mutableBytes, 'z', junk.length);
+    for (NSUInteger written = 0; written < 4 * 1024 * 1024; written += junk.length) {  // four times the cap
+        if (![request performWriteData:junk error:&error]) {
+            XCTFail(@"the preamble was buffered instead of discarded: refused after %lu bytes (%@)", (unsigned long)written, error);
+            return;
+        }
+    }
+
+    XCTAssertTrue([request performWriteData:SSEData(@"\r\n--X\r\nContent-Disposition: form-data; name=\"k\"\r\n\r\nv\r\n--X--\r\n") error:&error], @"%@", error);
+    XCTAssertTrue([request performClose:&error], @"%@", error);
+    XCTAssertEqualObjects([request firstArgumentForControlName:@"k"].data, SSEData(@"v"), @"the part after the preamble must still parse");
+}
+
+// The working-buffer cap was applied to the size of a single socket read, before the file
+// content in that read had drained to disk — so a 1 GB upload over loopback, or through a
+// reverse proxy on the same host, answered 413 whenever the kernel handed the server more than
+// 16 MB at once. Only bytes the parser genuinely retains may count against the cap.
+- (void)testMultiPartAcceptsASingleWriteLargerThanTheInMemoryCapForFileContent {
+    WSKSetMemoryLimitsForTesting(1024 * 1024, 16 * 1024 * 1024, 64 * 1024 * 1024);
+    [self addTeardownBlock:^{
+        WSKSetMemoryLimitsForTesting(0, 0, 0);
+    }];
+
+    WSKMultiPartFormRequest* request = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
+    NSError* error = nil;
+    XCTAssertTrue([request performWriteData:SSEData(@"--X\r\nContent-Disposition: form-data; name=\"f\"; filename=\"big.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n") error:&error]);
+
+    NSMutableData* write = [NSMutableData dataWithLength:(3 * 1024 * 1024)];  // three times the cap, in ONE write
+    [write appendData:SSEData(@"\r\n--X--\r\n")];
+    XCTAssertTrue([request performWriteData:write error:&error], @"a single write of file content larger than the cap must drain to disk, not be refused: %@", error);
+    XCTAssertTrue([request performClose:&error], @"%@", error);
+
+    WSKMultiPartFile* file = [request firstFileForControlName:@"f"];
+    XCTAssertNotNil(file);
+    NSDictionary* attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:file.temporaryPath error:&error];
+    XCTAssertEqual(attributes.fileSize, (unsigned long long)(3 * 1024 * 1024), @"the file part must land whole (%@)", error);
+}
+
 @end

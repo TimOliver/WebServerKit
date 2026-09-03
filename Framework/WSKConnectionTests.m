@@ -260,6 +260,69 @@
     [server stop];
 }
 
+// Decoding a chunked body must cost time proportional to its bytes, not to its chunk count.
+// Consuming each chunk by moving the rest of the buffer down made a body of tiny chunks
+// quadratic: a few megabytes of one-byte chunks pinned a core for over a minute, from any LAN
+// peer, on every body-accepting endpoint — and a DAV PUT streams to disk, so no size cap
+// bounded it. The bound is on CPU time, which a loaded machine cannot inflate; the data check
+// proves the decoder still hands every byte over intact.
+- (void)testChunkedBodyOfManyTinyChunksDecodesInLinearTime {
+    WSKWebServer* server = [[WSKWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"POST"
+                          requestClass:[WSKDataRequest class]
+                          processBlock:^WSKResponse*(WSKRequest* request) {
+                              NSData* body = [(WSKDataRequest*)request data];
+                              const unsigned char* bytes = body.bytes;
+                              NSUInteger intact = 0;
+                              for (NSUInteger i = 0; i < body.length; i++) {
+                                  if (bytes[i] == 'A') {
+                                      intact++;
+                                  }
+                              }
+                              return [WSKDataResponse responseWithText:[NSString stringWithFormat:@"%lu/%lu", (unsigned long)intact, (unsigned long)body.length]];
+                          }];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES, WSKOption_ConnectionIdleTimeout : @30.0};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    const NSUInteger kChunks = 300000;  // ~1.8 MB on the wire: seconds of CPU when quadratic, milliseconds when linear
+    NSMutableData* body = [NSMutableData dataWithCapacity:(kChunks * 6 + 8)];
+    for (NSUInteger i = 0; i < kChunks; i++) {
+        [body appendBytes:"1\r\nA\r\n" length:6];
+    }
+    [body appendBytes:"0\r\n\r\n" length:5];
+
+    int fd = ConnectToLocalhostPort(server.port);
+    XCTAssertGreaterThan(fd, 0);
+    const char* head = "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\n\r\n";
+    XCTAssertEqual(send(fd, head, strlen(head), 0), (ssize_t)strlen(head));
+
+    NSTimeInterval cpuBefore = ProcessCPUSeconds();
+    // The socket buffers cannot hold the whole body, so the send has to interleave with the
+    // server's reads; do it off the main thread and read the reply from here once it lands.
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        const char* bytes = body.bytes;
+        NSUInteger sent = 0;
+        while (sent < body.length) {
+            ssize_t n = send(fd, bytes + sent, body.length - sent, 0);
+            if (n <= 0) {
+                break;
+            }
+            sent += (NSUInteger)n;
+        }
+    });
+
+    BOOL sawEOF = NO;
+    NSString* reply = [[NSString alloc] initWithData:ReadToEOF(fd, &sawEOF) encoding:NSUTF8StringEncoding];
+    NSTimeInterval cpuSpent = ProcessCPUSeconds() - cpuBefore;
+    close(fd);
+    [server stop];
+
+    XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 200"], @"the body was not accepted (reply: %@)", reply);
+    NSString* expected = [NSString stringWithFormat:@"%lu/%lu", (unsigned long)kChunks, (unsigned long)kChunks];
+    XCTAssertTrue([reply hasSuffix:expected], @"the decoded body was not %@ intact bytes (reply: %@)", expected, reply);
+    XCTAssertLessThan(cpuSpent, 1.0, @"decoding %lu one-byte chunks cost %.2f s of CPU: the decoder is not linear in chunk count", (unsigned long)kChunks, cpuSpent);
+}
+
 // A slowloris that dribbles one byte per tick keeps "bytes moving", so the
 // zero-progress idle check never fires — but the request headers never complete.
 // The header-phase deadline must still close such a connection so it cannot hold a

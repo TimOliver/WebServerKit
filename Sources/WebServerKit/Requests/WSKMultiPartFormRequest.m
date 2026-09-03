@@ -164,6 +164,12 @@ static NSData *_dashNewlineData = nil;
     NSString *_defaultcontrolName;
     ParserState _state;
     NSMutableData *_data;
+    // Where the next search of _data starts. Every search used to start at zero, so a value
+    // arriving a few bytes at a time — or a preamble, or a part header that never ends — was
+    // rescanned in full on every append: quadratic in its length, from any client. Only the
+    // bytes that could still begin the token being looked for need re-examining. Reset to zero
+    // whenever bytes are dropped from the front of the buffer.
+    NSUInteger _scanOffset;
     NSMutableArray<WSKMultiPartArgument *> *_arguments;
     NSMutableArray<WSKMultiPartFile *> *_files;
 
@@ -267,8 +273,12 @@ static NSData *_dashNewlineData = nil;
     // many tiny parts delivered in a single read would otherwise recurse thousands
     // of frames deep and overflow the worker-thread stack.
     while (1) {
+        if (_scanOffset > _data.length) {
+            _scanOffset = 0;
+        }
+
         if (_state == kParserState_Headers) {
-            NSRange const range = [_data rangeOfData:_newlinesData options:0 range:NSMakeRange(0, _data.length)];
+            NSRange const range = [_data rangeOfData:_newlinesData options:0 range:NSMakeRange(_scanOffset, _data.length - _scanOffset)];
 
             if (range.location != NSNotFound) {
                 // Bound the part's header block. The budget below charges only part *content*,
@@ -363,12 +373,24 @@ static NSData *_dashNewlineData = nil;
                 }
 
                 [_data replaceBytesInRange:NSMakeRange(0, range.location + range.length) withBytes:NULL length:0];
+                _scanOffset = 0;
                 _state = kParserState_Content;
+            } else {
+                // The block has not ended yet. The cap is judged on the bytes buffered, not only
+                // once the blank line arrives: a block that never ends otherwise grew to the
+                // working buffer's 16 MB cap, rescanned in full on every append.
+                if (_data.length > kMultiPartMaxHeadersLength) {
+                    WSK_LOG_ERROR(@"Headers of a part of 'multipart/form-data' exceed the %i byte limit", (int)kMultiPartMaxHeadersLength);
+                    _failureCode = kWSKRequestBodyError_TooLarge;
+                    return NO;
+                }
+
+                _scanOffset = (_data.length > 3) ? (_data.length - 3) : 0;  // Only the last three bytes can still begin the four-byte terminator
             }
         }
 
         if ((_state == kParserState_Start) || (_state == kParserState_Content)) {
-            NSRange const range = [_data rangeOfData:_boundary options:0 range:NSMakeRange(0, _data.length)];
+            NSRange const range = [_data rangeOfData:_boundary options:0 range:NSMakeRange(_scanOffset, _data.length - _scanOffset)];
 
             if (range.location != NSNotFound) {
                 NSRange const subRange = NSMakeRange(range.location + range.length, _data.length - range.location - range.length);
@@ -472,13 +494,22 @@ static NSData *_dashNewlineData = nil;
 
                     if (subRange1.location != NSNotFound) {
                         [_data replaceBytesInRange:NSMakeRange(0, subRange1.location + subRange1.length) withBytes:NULL length:0];
+                        _scanOffset = 0;
                         _state = kParserState_Headers;
                         continue;  // Parse the next part on the next loop iteration (was a recursive -_parseData call).
                     } else {
                         _state = kParserState_End;
                     }
+                } else {
+                    // The token is here but what follows it has not arrived yet, or is not a
+                    // delimiter (a stalled stream, which the buffer cap refuses in time). Either
+                    // way the next pass need only look from the token again, not from the front.
+                    _scanOffset = range.location;
                 }
             } else {
+                // No delimiter in the buffer. Hand on or throw away what can be, keeping only the
+                // margin in which a delimiter could still straddle the next append; what must stay
+                // (an argument value, held until its delimiter arrives) is not rescanned.
                 NSUInteger const margin = 2 * _boundary.length;
 
                 if (_data.length > margin) {
@@ -487,6 +518,7 @@ static NSData *_dashNewlineData = nil;
                     if (_subParser) {
                         if ([_subParser appendBytes:_data.bytes length:length]) {
                             [_data replaceBytesInRange:NSMakeRange(0, length) withBytes:NULL length:0];
+                            _scanOffset = 0;
                         } else {
                             // The sub-parser rejected the streamed nested content (depth or
                             // buffer cap) — expected on malicious input, so fail without abort.
@@ -497,12 +529,21 @@ static NSData *_dashNewlineData = nil;
 
                         if (result == (ssize_t)length) {
                             [_data replaceBytesInRange:NSMakeRange(0, length) withBytes:NULL length:0];
+                            _scanOffset = 0;
                         } else {
                             // As above: a short write means the temporary directory filled up.
                             WSK_LOG_ERROR(@"Failed streaming part of 'multipart/form-data' to disk: %s (%i)", strerror(errno), errno);
                             _failureError = WSKMakePosixError(errno);
                             success = NO;
                         }
+                    } else if (_state == kParserState_Start) {
+                        // A preamble, which RFC 2046 §5.1.1 says to ignore. Discard it as it
+                        // streams: kept, it reached the in-memory cap and failed the request,
+                        // and cost quadratic time getting there.
+                        [_data replaceBytesInRange:NSMakeRange(0, length) withBytes:NULL length:0];
+                        _scanOffset = 0;
+                    } else {
+                        _scanOffset = length;  // An argument value stays: only the margin can still begin a delimiter
                     }
                 }
             }
@@ -514,29 +555,49 @@ static NSData *_dashNewlineData = nil;
 }
 
 - (BOOL)appendBytes:(const void *)bytes length:(NSUInteger)length {
-    // Bound the parser's working buffer. File-part content is drained to disk as it
-    // arrives, so this only limits data genuinely held in memory: an oversized
-    // argument part, or a malformed stream whose content contains the boundary token
-    // without the trailing CRLF (which otherwise wedges the parser and grows the
-    // buffer without bound).
-    if (_data.length + length > WSKMaxInMemoryBodyLength()) {
-        WSK_LOG_ERROR(@"Multipart form data buffered in memory exceeds the %lu byte limit", (unsigned long)WSKMaxInMemoryBodyLength());
-        _failureCode = kWSKRequestBodyError_TooLarge;
-        return NO;
-    }
+    // Feed the bytes in bounded slices, parsing after each, so the cap below is judged on
+    // what the parser genuinely retains: an oversized argument part, or a malformed stream
+    // whose content contains the boundary token without the trailing CRLF (which wedges the
+    // parser and grows the buffer without bound). File-part content drains to disk as each
+    // slice is parsed. Judged on the whole read instead, one loopback or same-host-proxy read
+    // of more than 16 MB of file content — which the kernel does hand over — was refused as
+    // if it were retained, and a 1 GB upload answered 413.
+    const unsigned char *cursor = (const unsigned char *)bytes;
+    NSUInteger remaining = length;
 
-    if (![_workingReservation reserveBytes:(_data.length + length)]) {
-        WSK_LOG_ERROR(@"Refusing multipart data: the server is already holding its %lu byte in-memory limit across all connections", (unsigned long)kWSKMaxTotalInMemoryLength);
-        _failureCode = kWSKRequestBodyError_ServerAtCapacity;
-        return NO;
-    }
+    do {
+        NSUInteger const slice = MIN(remaining, (NSUInteger)kMultiPartBufferSize);
 
-    [_data appendBytes:bytes length:length];
-    BOOL success = [self _parseData];
-    // -_parseData drains whatever it consumed, so give the difference straight back rather
-    // than letting this parser's reservation ratchet upward across a long body.
-    [_workingReservation reserveBytes:_data.length];
-    return success;
+        if (_data.length + slice > WSKMaxInMemoryBodyLength()) {
+            WSK_LOG_ERROR(@"Multipart form data buffered in memory exceeds the %lu byte limit", (unsigned long)WSKMaxInMemoryBodyLength());
+            _failureCode = kWSKRequestBodyError_TooLarge;
+            return NO;
+        }
+
+        if (![_workingReservation reserveBytes:(_data.length + slice)]) {
+            WSK_LOG_ERROR(@"Refusing multipart data: the server is already holding its %lu byte in-memory limit across all connections", (unsigned long)kWSKMaxTotalInMemoryLength);
+            _failureCode = kWSKRequestBodyError_ServerAtCapacity;
+            return NO;
+        }
+
+        if (slice) {
+            [_data appendBytes:cursor length:slice];
+        }
+
+        BOOL const success = [self _parseData];
+        // -_parseData drains whatever it consumed, so give the difference straight back rather
+        // than letting this parser's reservation ratchet upward across a long body.
+        [_workingReservation reserveBytes:_data.length];
+
+        if (!success) {
+            return NO;
+        }
+
+        cursor += slice;
+        remaining -= slice;
+    } while (remaining > 0);
+
+    return YES;
 }
 
 - (BOOL)isAtEnd {

@@ -1976,15 +1976,22 @@ static inline NSUInteger _ScanHexNumber(const void *bytes, NSUInteger size) {
 - (void)readNextBodyChunk:(NSMutableData *)chunkData completionBlock:(ReadBodyCompletionBlock)block {
     WSK_DCHECK([_request hasBody] && [_request usesChunkedTransferEncoding]);
 
+    // Consumed chunks are skipped with a cursor and dropped from the buffer once per read,
+    // never once per chunk. Dropping each chunk from the front moved every remaining byte
+    // down, so one read holding thousands of tiny chunks cost time quadratic in their count:
+    // a few megabytes of one-byte chunks pinned a core for over a minute, from any LAN peer,
+    // on every body-accepting endpoint (a DAV PUT streams to disk, so no size cap bounded it).
+    NSUInteger offset = 0;
+
     while (1) {
-        NSRange range = [chunkData rangeOfData:_CRLFData options:0 range:NSMakeRange(0, chunkData.length)];
+        NSRange range = [chunkData rangeOfData:_CRLFData options:0 range:NSMakeRange(offset, chunkData.length - offset)];
 
         if (range.location == NSNotFound) {
             break;
         }
 
-        NSRange const extensionRange = [chunkData rangeOfData:[NSData dataWithBytes:";" length:1] options:0 range:NSMakeRange(0, range.location)];  // Ignore chunk extensions
-        NSUInteger length = _ScanHexNumber((char *)chunkData.bytes, extensionRange.location != NSNotFound ? extensionRange.location : range.location);
+        NSRange const extensionRange = [chunkData rangeOfData:[NSData dataWithBytes:";" length:1] options:0 range:NSMakeRange(offset, range.location - offset)];  // Ignore chunk extensions
+        NSUInteger length = _ScanHexNumber((const char *)chunkData.bytes + offset, (extensionRange.location != NSNotFound ? extensionRange.location : range.location) - offset);
 
         if (length != NSNotFound) {
             if (length) {
@@ -2008,7 +2015,7 @@ static inline NSUInteger _ScanHexNumber(const void *bytes, NSUInteger size) {
                     NSError *error = nil;
 
                     if ([_request performWriteData:[chunkData subdataWithRange:NSMakeRange(range.location + range.length, length)] error:&error]) {
-                        [chunkData replaceBytesInRange:NSMakeRange(0, range.location + range.length + length + 2) withBytes:NULL length:0];
+                        offset = range.location + range.length + length + 2;
                     } else {
                         WSK_LOG_ERROR(@"Failed writing request body on socket %i: %@", _socket, error);
                         [self _noteBodyFailure:error];
@@ -2038,6 +2045,13 @@ static inline NSUInteger _ScanHexNumber(const void *bytes, NSUInteger size) {
             block(NO);
             return;
         }
+    }
+
+    // Drop everything the loop consumed in one move. Each byte is moved at most once per read
+    // it survives, and only a read that completed a chunk moves anything at all, so the cost
+    // stays proportional to the bytes received.
+    if (offset) {
+        [chunkData replaceBytesInRange:NSMakeRange(0, offset) withBytes:NULL length:0];
     }
 
     // Every loop break above falls through to here to read more bytes into the same
