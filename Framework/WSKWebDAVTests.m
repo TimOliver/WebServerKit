@@ -1886,6 +1886,96 @@
     [fm removeItemAtPath:dir error:NULL];
 }
 
+// The sibling of the undeclared-prefix defect above, one field over: that one validated the LOCAL
+// NAME, this one is the NAMESPACE URI. A dead property is keyed "{href}localname" and read back by
+// splitting at the FIRST "}", so a namespace URI that itself contains "}" splits in the wrong
+// place: xmlns:Z="urn:a}b" stores {urn:a}b}note and is emitted as <W:b}note xmlns:W="urn:a"/>.
+// The prefix IS declared, so the previous test's oracle passes it — but "b}note" is not a legal
+// XML name, so the document is not well-formed, and being stored in an xattr the damage is
+// persistent and takes the PARENT directory's Depth:1 listing with it. Recurring shapes 2 (a class
+// closed at only some of the sites it applies to) and 13 (storing what cannot be read back).
+//
+// The second half is a round trip that libxml2 quietly breaks: it escapes "&" to "&#38;" inside
+// ns->href and nothing else does (measured across &, <, >, ", ', tab and newline), so a namespace
+// containing an ampersand was stored mangled and echoed back as "urn:a&amp;#38;b" — well-formed,
+// but not the namespace the client asked for, so the property it stored can never be named again.
+- (void)testDAVRefusesAPropertyNamespaceThatCannotBeWrittenBack {
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* dir = MakeTempDirectory();
+    NSString* path = [dir stringByAppendingPathComponent:@"f.txt"];
+    XCTAssertTrue([@"data" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString* (^send)(NSString*, NSString*, NSString*) = ^(NSString* method, NSString* target, NSString* body) {
+        return SendRawRequest(server.port, [NSString stringWithFormat:@"%@ %@ HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@", method, target, (unsigned long)body.length, body]);
+    };
+    // An element NAME cannot be escaped into legality, so the previous test's prefix-declaration
+    // rule cannot see this defect: parse the body properly. Proven sensitive by running every
+    // assertion here against the unfixed source first.
+    BOOL (^bodyIsXML)(NSString*) = ^(NSString* reply) {
+        NSRange const split = [reply rangeOfString:@"\r\n\r\n"];
+        if (split.location == NSNotFound) {
+            return NO;
+        }
+        NSData* const body = [[reply substringFromIndex:NSMaxRange(split)] dataUsingEncoding:NSUTF8StringEncoding];
+        NSXMLParser* const parser = [[NSXMLParser alloc] initWithData:body];
+        parser.shouldProcessNamespaces = YES;
+        return [parser parse];
+    };
+
+    // Storing one must be refused, not stored and reported as applied.
+    NSString* const poison = @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:Z=\"urn:a}b\"><D:set><D:prop><Z:note>v</Z:note></D:prop></D:set></D:propertyupdate>";
+    NSString* stored = send(@"PROPPATCH", @"/f.txt", poison);
+    XCTAssertTrue([stored hasPrefix:@"HTTP/1.1 400"], @"a namespace URI containing \"}\" must be refused: %@", [stored substringToIndex:MIN((NSUInteger)40, stored.length)]);
+
+    NSString* readback = SendRawRequest(server.port, @"PROPFIND /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
+    XCTAssertTrue(bodyIsXML(readback), @"allprop PROPFIND is not well-formed XML after the refusal: %@", readback);
+
+    NSString* listing = SendRawRequest(server.port, @"PROPFIND / HTTP/1.1\r\nHost: localhost\r\nDepth: 1\r\nContent-Length: 0\r\n\r\n");
+    XCTAssertTrue(bodyIsXML(listing), @"the parent listing is not well-formed XML: %@", listing);
+
+    // Both parsers must judge it alike, or the one that does not becomes the way in.
+    NSString* asked = send(@"PROPFIND", @"/f.txt", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\" xmlns:Z=\"urn:a}b\"><D:prop><Z:note/></D:prop></D:propfind>");
+    XCTAssertTrue([asked hasPrefix:@"HTTP/1.1 400"], @"asking for a property in such a namespace must be refused: %@", [asked substringToIndex:MIN((NSUInteger)40, asked.length)]);
+
+    // A store poisoned by an OLDER build must heal rather than stay unreadable: the key is skipped
+    // when writing the response, so one property is lost instead of the whole listing.
+    NSDictionary* const legacy = @{@"{urn:a}b}note" : @"v", @"{urn:ok}fine" : @"w"};
+    NSData* const plist = [NSPropertyListSerialization dataWithPropertyList:legacy format:NSPropertyListBinaryFormat_v1_0 options:0 error:NULL];
+    XCTAssertEqual(setxattr([path fileSystemRepresentation], "com.webserverkit.dav.deadproperties", plist.bytes, plist.length, 0, 0), 0);
+
+    NSString* healed = SendRawRequest(server.port, @"PROPFIND /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
+    XCTAssertTrue(bodyIsXML(healed), @"a store poisoned by an older build must not make the response unparseable: %@", healed);
+    XCTAssertTrue([healed containsString:@"urn:ok"], @"the readable properties beside it must still be published: %@", healed);
+
+    NSString* healedListing = SendRawRequest(server.port, @"PROPFIND / HTTP/1.1\r\nHost: localhost\r\nDepth: 1\r\nContent-Length: 0\r\n\r\n");
+    XCTAssertTrue(bodyIsXML(healedListing), @"the parent listing must survive a legacy poisoned entry: %@", healedListing);
+    XCTAssertEqual(removexattr([path fileSystemRepresentation], "com.webserverkit.dav.deadproperties", 0), 0);
+
+    // A namespace carrying an ampersand is ordinary and legal; it must come back as it went in.
+    NSString* amp = send(@"PROPPATCH", @"/f.txt", @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:Z=\"urn:a&amp;b\"><D:set><D:prop><Z:note>v</Z:note></D:prop></D:set></D:propertyupdate>");
+    XCTAssertTrue([amp containsString:@"200 OK"], @"a namespace containing \"&\" must still store: %@", amp);
+
+    NSString* ampBack = SendRawRequest(server.port, @"PROPFIND /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
+    XCTAssertTrue(bodyIsXML(ampBack), @"the readback is not well-formed XML: %@", ampBack);
+    XCTAssertTrue([ampBack containsString:@"xmlns:W=\"urn:a&amp;b\""], @"the namespace did not round-trip: %@", ampBack);
+    XCTAssertFalse([ampBack containsString:@"&amp;#38;"], @"libxml2's escaped ampersand was published verbatim: %@", ampBack);
+
+    // What must keep working: an ordinary declared namespace, and a "{" that needs no escaping.
+    NSString* brace = send(@"PROPPATCH", @"/f.txt", @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:Z=\"urn:a{b\"><D:set><D:prop><Z:kept>v</Z:kept></D:prop></D:set></D:propertyupdate>");
+    XCTAssertTrue([brace containsString:@"200 OK"], @"only \"}\" breaks the key encoding; \"{\" must still store: %@", brace);
+
+    NSString* braceBack = SendRawRequest(server.port, @"PROPFIND /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
+    XCTAssertTrue(bodyIsXML(braceBack), @"the readback is not well-formed XML: %@", braceBack);
+    XCTAssertTrue([braceBack containsString:@"urn:a{b"], @"the \"{\" namespace lost its URI: %@", braceBack);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 // Honouring Range and ADVERTISING it are two different promises. This surface has always honoured
 // it, but said nothing, so a client that decides whether to even ATTEMPT a resume by looking for
 // Accept-Ranges — which is what the header is for (RFC 9110 §14.3) — restarts a multi-hundred-MB

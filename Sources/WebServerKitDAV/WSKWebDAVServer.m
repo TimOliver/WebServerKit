@@ -396,18 +396,61 @@ static NSString *_DeadPropertyKey(NSString *namespaceHref, NSString *localName) 
     return namespaceHref.length ? [NSString stringWithFormat:@"{%@}%@", namespaceHref, localName] : localName;
 }
 
-// Can this local name be written back as an XML element name? A colon cannot appear in an NCName,
-// and one arrives here for exactly one reason: the parse ran with XML_PARSE_RECOVER (a settled
-// choice), so a property whose namespace prefix was never DECLARED survives with the prefix baked
-// into node->name — "Z:note", with node->ns NULL and nothing anywhere declaring Z.
+// Can this local name be written back as an XML element name? Neither a colon nor a closing brace
+// can appear in an NCName, and each arrives here for exactly one reason.
 //
-// Emitting that produces a document no conformant client can parse. Worse, storing it makes the
-// damage persistent and contagious: every later allprop PROPFIND of the resource re-emits the key,
-// so the Depth:1 listing of the PARENT directory is unparseable too — one poisoned file takes out
-// the folder. Such a name is refused rather than stored, and any key already on disk from before
-// this check is skipped when writing a response instead of corrupting it.
+// A COLON: the parse ran with XML_PARSE_RECOVER (a settled choice), so a property whose namespace
+// prefix was never DECLARED survives with the prefix baked into node->name — "Z:note", with
+// node->ns NULL and nothing anywhere declaring Z.
+//
+// A BRACE: the name was not parsed at all but DERIVED, by splitting a "{href}localname" key at its
+// first "}" — so a key written by an older build from a namespace URI containing one splits in the
+// wrong place and hands back "b}note". Refusing the URI on the way in (see
+// _PropertyNamespaceIsRepresentable) stops new ones; refusing the derived name here is what lets a
+// store already poisoned heal on upgrade instead of staying unreadable forever.
+//
+// Emitting either produces a document no conformant client can parse, and an element NAME cannot be
+// escaped into legality the way a value can. Worse, storing one makes the damage persistent and
+// contagious: every later allprop PROPFIND of the resource re-emits the key, so the Depth:1 listing
+// of the PARENT directory is unparseable too — one poisoned file takes out the folder. Such a name
+// is refused rather than stored, and any key already on disk from before these checks is skipped
+// when writing a response instead of corrupting it.
 static BOOL _PropertyLocalNameIsRepresentable(NSString *localName) {
-    return (localName.length > 0) && ([localName rangeOfString:@":" options:NSLiteralSearch].location == NSNotFound);
+    return (localName.length > 0) && ([localName rangeOfString:@":" options:NSLiteralSearch].location == NSNotFound) &&
+           ([localName rangeOfString:@"}" options:NSLiteralSearch].location == NSNotFound);
+}
+
+// The same question about the other half of the key. "{href}localname" is read back by splitting at
+// the FIRST "}", so a URI containing one splits in the wrong place — xmlns:Z="urn:a}b" stores
+// {urn:a}b}note and emits <W:b}note xmlns:W="urn:a"/>, whose prefix IS declared and whose name is
+// still not XML. "{" needs no guard: the split looks for "}" only, so a URI containing one is
+// keyed and read back correctly.
+static BOOL _PropertyNamespaceIsRepresentable(NSString *namespaceHref) {
+    return [namespaceHref rangeOfString:@"}" options:NSLiteralSearch].location == NSNotFound;
+}
+
+// The namespace URI of a property element, with libxml2's own escaping undone — ONE home, because
+// both parsers ask this question and a disagreement between them means a property can be stored
+// under a key the other can never name.
+//
+// libxml2 writes every "&" in a namespace URI as "&#38;" while parsing the attribute value, and
+// does it to nothing else (measured across &, <, >, ", ' and whitespace). Left alone it goes into
+// the key and is published verbatim, so a client declaring xmlns:Z="urn:a&b" is told its property
+// lives in "urn:a&#38;b". Undoing it is exactly inverse — every "&" was escaped, so every "&#38;"
+// came from one — and therefore lossless: a URI whose literal text is "&#38;" arrives as
+// "&#38;#38;" and comes back out whole.
+static NSString *_PropertyNamespaceHref(xmlNodePtr node) {
+    if (!node->ns || !node->ns->href) {
+        return @"";  // A property in no namespace at all, keyed by its bare local name.
+    }
+
+    NSString *const href = [NSString stringWithUTF8String:(const char *)node->ns->href];
+
+    if (href == nil) {
+        return @"";  // Not valid UTF-8; nothing may reach the key formatter as nil.
+    }
+
+    return [href stringByReplacingOccurrencesOfString:@"&#38;" withString:@"&" options:NSLiteralSearch range:NSMakeRange(0, href.length)];
 }
 
 // nil for a key whose local name cannot be an element name — see _PropertyLocalNameIsRepresentable.
@@ -1821,7 +1864,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
             }
 
             NSString *const localName = [NSString stringWithUTF8String:(const char *)node->name];
-            NSString *const href = (node->ns && node->ns->href) ? [NSString stringWithUTF8String:(const char *)node->ns->href] : @"";
+            NSString *const href = _PropertyNamespaceHref(node);
 
             if (localName.length == 0) {
                 continue;
@@ -1836,6 +1879,14 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
                 xmlFreeDoc(document);
                 return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest
                                                          message:@"Property name \"%@\" is not a valid XML name (an undeclared namespace prefix?)", localName];
+            }
+
+            // The same refusal for the namespace half of the key, which is stored and echoed with
+            // the name and breaks the document in exactly the same way.
+            if (!_PropertyNamespaceIsRepresentable(href)) {
+                xmlFreeDoc(document);
+                return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest
+                                                         message:@"Property namespace \"%@\" cannot be stored (it contains \"}\")", href];
             }
 
             // A live property is computed from the filesystem, so it cannot be stored. RFC 4918
@@ -2011,13 +2062,13 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
                         // The namespace travels with it: a client asking for a property in its own
                         // namespace must see that name back, not a DAV:-qualified guess at it.
                         NSString *const localName = [NSString stringWithUTF8String:(const char *)node->name];
-                        const char *const href = (node->ns && node->ns->href) ? (const char *)node->ns->href : NULL;
+                        NSString *const href = _PropertyNamespaceHref(node);
 
-                        // Same refusal as PROPPATCH, for the same reason: a name carrying an
-                        // undeclared prefix cannot be echoed back into a well-formed 404 propstat,
-                        // and this is where such a name would be echoed. Both parsers must judge
-                        // it alike or one of them becomes the way in.
-                        if (!_PropertyLocalNameIsRepresentable(localName)) {
+                        // Same refusal as PROPPATCH, for the same reasons: neither a name carrying
+                        // an undeclared prefix nor a namespace containing "}" can be echoed back
+                        // into a well-formed 404 propstat, and this is where such a name would be
+                        // echoed. Both parsers must judge them alike or one becomes the way in.
+                        if (!_PropertyLocalNameIsRepresentable(localName) || !_PropertyNamespaceIsRepresentable(href)) {
                             success = NO;
                             break;
                         }
@@ -2027,7 +2078,7 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
                             // keys by its bare name. Defaulting to "DAV:" here instead made the two
                             // parsers disagree, so a no-namespace property could be stored and then
                             // never read back. litmus's propnullns/propget pair found it.
-                            [unsupported addObject:_DeadPropertyKey(href ? [NSString stringWithUTF8String:href] : @"", localName)];
+                            [unsupported addObject:_DeadPropertyKey(href, localName)];
                         }
                     }
 
