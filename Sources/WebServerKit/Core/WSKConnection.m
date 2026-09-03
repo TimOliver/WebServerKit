@@ -2368,6 +2368,25 @@ static NSString *_DigestURIQuery(NSString *uri) {
     return (fragment.location != NSNotFound) ? [rest substringToIndex:fragment.location] : rest;
 }
 
+// An UNQUOTED Digest parameter — qop, nc and algorithm are all sent bare, while everything else is
+// quoted. Authorization parameters are comma-separated, but WSKExtractHeaderValueParameter
+// deliberately does NOT end an unquoted value at a comma: RFC 2046 lets a multipart boundary
+// contain one, and terminating there truncated real uploads. A digest token never can — "," is not
+// a tchar — so cut there here, at the one place these parameters are read, rather than reopening
+// that decision for every caller. Without this, "qop=auth, nc=00000001" hands back "auth," and
+// "00000001,", both of which go straight into the hash and make every qop credential fail.
+static NSString *_Nullable _DigestToken(NSString *header, NSString *name) {
+    NSString *const value = WSKExtractHeaderValueParameter(header, name);
+
+    if (value == nil) {
+        return nil;  // Never ask a nil receiver for a range: it answers a ZEROED one, not NSNotFound.
+    }
+
+    NSRange const comma = [value rangeOfString:@"," options:NSLiteralSearch];
+
+    return (comma.location == NSNotFound) ? value : [value substringToIndex:comma.location];
+}
+
 // Absent on both sides is a match; absent on one is not. Spelled out rather than left to
 // -isEqualToString: on a nil receiver, which answers NO by accident of messaging nil rather than by
 // decision — a distinction that has cost this codebase real defects.
@@ -2466,9 +2485,29 @@ static BOOL _DigestTargetPartsAgree(NSString *fromCredential, NSString *fromRequ
                             // permanently unauthenticable.
                             NSString *const wireMethod = request.isVirtualHEAD ? @"HEAD" : request.method;
                             NSString *const ha2 = WSKComputeMD5Digest(@"%@:%@", wireMethod, uri);  // Use "uri" not "request.path": the query string is part of the client's digest
-                            NSString *const expectedResponse = WSKComputeMD5Digest(@"%@:%@:%@", ha1, nonce, ha2);
+                            // RFC 7616 §3.4.6 picks the computation by what the CLIENT sent, not by
+                            // what the challenge offered — so a client that ignores our qop still
+                            // gets the RFC 2069 form it used, and both stay supported.
+                            NSString *const qop = _DigestToken(authorizationHeader, @"qop");
+                            NSString *expectedResponse = nil;
 
-                            if (_ConstantTimeEqualStrings(actualResponse, expectedResponse)) {
+                            if (qop.length) {
+                                NSString *const nonceCount = _DigestToken(authorizationHeader, @"nc");
+                                NSString *const clientNonce = WSKExtractHeaderValueParameter(authorizationHeader, @"cnonce");
+
+                                // Only "auth" is offered, and only "auth" can be honoured: "auth-int"
+                                // folds a hash of the request BODY into HA2, which the HA2 above is
+                                // not, so accepting it would be checking against a digest neither
+                                // side computed. nc and cnonce are required with qop (§3.4) and are
+                                // hashed verbatim, so a missing one cannot be defaulted.
+                                if (([qop caseInsensitiveCompare:@"auth"] == NSOrderedSame) && nonceCount.length && clientNonce.length) {
+                                    expectedResponse = WSKComputeMD5Digest(@"%@:%@:%@:%@:%@:%@", ha1, nonce, nonceCount, clientNonce, qop, ha2);
+                                }
+                            } else {
+                                expectedResponse = WSKComputeMD5Digest(@"%@:%@:%@", ha1, nonce, ha2);
+                            }
+
+                            if ((expectedResponse != nil) && _ConstantTimeEqualStrings(actualResponse, expectedResponse)) {
                                 authenticated = YES;
                             }
                         }
@@ -2481,7 +2520,18 @@ static BOOL _DigestTargetPartsAgree(NSString *fromCredential, NSString *fromRequ
 
         if (!authenticated) {
             response = [WSKResponse responseWithStatusCode:kWSKHTTPStatusCode_Unauthorized];
-            [response setValue:[NSString stringWithFormat:@"Digest realm=\"%@\", nonce=\"%@\"%@", _authenticationRealm, _GenerateDigestNonce(_digestAuthenticationSecret), isStaled ? @", stale=TRUE" : @""] forAdditionalHeader:@"WWW-Authenticate"];  // TODO: Support Quality of Protection ("qop")
+            // qop and algorithm are what make this an RFC 7616 challenge rather than the RFC 2069
+            // one §3.3 calls obsolete. That distinction is not cosmetic: every neon-based client —
+            // cadaver, davfs2, sitecopy, and litmus, the conformance suite this project reaches for
+            // — REFUSES a qop-less challenge outright ("legacy Digest challenge not supported")
+            // instead of falling back, so none of them could authenticate at all. curl and macOS's
+            // own WebDAVFS accept either form, which is why every in-house probe passed.
+            //
+            // No "opaque": the server keeps no per-nonce state to correlate it with, so emitting
+            // one would be a value echoed back and never checked. The nonce already carries the
+            // integrity protection (see _GenerateDigestNonce). "stale" stays spelled TRUE — §3.3
+            // compares it case-insensitively, and clients in the field have only ever seen it so.
+            [response setValue:[NSString stringWithFormat:@"Digest realm=\"%@\", qop=\"auth\", algorithm=MD5, nonce=\"%@\"%@", _authenticationRealm, _GenerateDigestNonce(_digestAuthenticationSecret), isStaled ? @", stale=TRUE" : @""] forAdditionalHeader:@"WWW-Authenticate"];
         }
     }
 
