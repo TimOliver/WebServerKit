@@ -1627,8 +1627,8 @@ static NSString *_OriginAuthority(NSString *value) {
     // operations: a concurrent /move can relocate a whole *directory* into this tree —
     // and directories skip the extension check — so a tree that vetted clean can hold
     // disallowed files by the time it is destroyed. Take the same lock they do.
-    NSError *error = nil;
     BOOL removed;
+    int removalErrno = 0;
 
     @synchronized(_fileOperationLock) {
         // Deleting a directory removes its whole subtree, which must not become a way to destroy
@@ -1660,11 +1660,19 @@ static NSString *_OriginAuthority(NSString *value) {
             return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not permitted", relativePath];
         }
 
-        removed = [[NSFileManager defaultManager] removeItemAtPath:absolutePath error:&error];
+        // See WSKRemoveItemAtPath: the walk above vets a snapshot, and the racing writer here is
+        // typically the WebDAV server on the SAME folder, which _fileOperationLock cannot serialise.
+        removed = WSKRemoveItemAtPath(absolutePath, &removalErrno);
     }
 
     if (!removed) {
-        return [WSKErrorResponse responseWithServerError:kWSKHTTPStatusCode_InternalServerError underlyingError:error message:@"Failed deleting \"%@\"", relativePath];
+        NSInteger const status = WSKStatusCodeForRemovalErrno(removalErrno);
+
+        if (status < 500) {
+            return [WSKErrorResponse responseWithClientError:(WSKClientErrorHTTPStatusCode)status message:@"Failed deleting \"%@\": %s", relativePath, strerror(removalErrno)];
+        }
+
+        return [WSKErrorResponse responseWithServerError:(WSKServerErrorHTTPStatusCode)status underlyingError:WSKMakePosixError(removalErrno) message:@"Failed deleting \"%@\"", relativePath];
     }
 
     if ([self.delegate respondsToSelector:@selector(webUploader:didDeleteItemAtPath:)]) {

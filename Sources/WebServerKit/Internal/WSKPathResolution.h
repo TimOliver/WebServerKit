@@ -364,4 +364,32 @@ NSString *_Nullable WSKServableFileTypeAtPath(NSString *path, NSString *director
  */
 NSString *_Nullable WSKFirstUnremovableItemAtPath(NSString *absolutePath);
 
+/**
+ *  Removes an item — a file, a symlink, or an entire collection — as one observable event, and
+ *  reports a POSIX errno in `outErrno` rather than a Foundation error.
+ *
+ *  A collection is renamed to a hidden sibling first and only then removed. That is what makes the
+ *  removal atomic from a client's point of view: -[NSFileManager removeItemAtPath:] deletes as it
+ *  WALKS, so a member another client creates into a directory the walk has already emptied makes
+ *  it stop and keep everything it already destroyed. WSKFirstUnremovableItemAtPath vets a snapshot
+ *  and cannot close that window; the rename can, because afterwards no path this server serves
+ *  leads into the tree. Call the vetting walk first anyway — it is what refuses a tree this server
+ *  must not destroy at all, before anything is moved.
+ *
+ *  Both primitives are POSIX, which also settles the exFAT case where -removeItemAtPath: cannot
+ *  delete an NFC-spelled name that lstat(2) and unlink(2) both resolve.
+ *
+ *  Returns NO only when NOTHING has been touched. A removal that fails after the rename has
+ *  succeeded still answers YES: the resource is gone from every path the server serves, and the
+ *  dot-named remainder is logged.
+ */
+BOOL WSKRemoveItemAtPath(NSString *absolutePath, int *_Nullable outErrno);
+
+/**
+ *  The status a failed WSKRemoveItemAtPath() owes the client. Losing a race to another client is
+ *  not a server fault — deliberately separate from WSKServerErrorStatusCodeForError(), which maps
+ *  server errors only.
+ */
+NSInteger WSKStatusCodeForRemovalErrno(int failure);
+
 NS_ASSUME_NONNULL_END

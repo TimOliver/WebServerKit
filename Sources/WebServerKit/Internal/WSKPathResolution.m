@@ -34,6 +34,7 @@
 #import <stdlib.h>
 #import <sys/param.h>
 #import <sys/stat.h>
+#import <unistd.h>
 
 #import "WSKPrivate.h"
 
@@ -602,4 +603,101 @@ NSString *WSKFirstUnremovableItemAtPath(NSString *absolutePath) {
     }
 
     return nil;
+}
+
+// Removes an item — a file, a symlink, or a whole collection — as ONE observable event, answering
+// with a POSIX errno rather than a Foundation error. Two defects share this primitive.
+//
+// PARTIAL DESTRUCTION. -[NSFileManager removeItemAtPath:] deletes as it WALKS, and
+// WSKFirstUnremovableItemAtPath can only vet a SNAPSHOT: a member another client creates after
+// that walk, into a directory the removal has already emptied, makes rmdir(2) answer ENOTEMPTY,
+// and the removal abandons the tree keeping everything it has already destroyed. Measured on the
+// wire: a PUT into an 800-member collection ~45 ms into its DELETE left 161 members and answered
+// 500 — with Foundation reporting that ENOTEMPTY as NSFileWriteNoPermissionError ("you don't have
+// permission to access it"), a diagnostic that sends an operator to audit file modes. Both servers
+// shared the walk, so both shared the window. A snapshot cannot close a window against a
+// concurrent writer; a rename can. Moving the tree to a hidden sibling first makes the resource
+// vanish from the namespace in a single syscall, and after it no path this server serves leads
+// into the tree — so the removal that follows cannot be raced at all.
+//
+// exFAT AND NFC. -removeItemAtPath: answers NSFileNoSuchFileError on exFAT for an NFC-spelled name
+// that lstat(2) and unlink(2) both resolve, so a file created with a decomposable name was listed,
+// readable, and undeletable through the spelling most web clients normalise to. Both primitives
+// used below are POSIX and resolve it; the collection path renames by the client's spelling and
+// only then removes, by a name this function chose.
+//
+// The rename is within the SAME parent directory, so it cannot fail EXDEV and needs exactly the
+// permissions the removal itself needs. If the rename fails nothing has been touched. If the
+// removal that follows fails, the resource is nonetheless gone from every path the server serves —
+// the client is told the truth — and what remains is a dot-named directory the callers' listings
+// already hide. That residue is the one thing this trades for atomicity; it needs the removal to
+// fail after a rename succeeded, which no client can now cause.
+BOOL WSKRemoveItemAtPath(NSString *absolutePath, int *outErrno) {
+    const char *const path = [absolutePath fileSystemRepresentation];
+    struct stat info;
+
+    if (lstat(path, &info) != 0) {  // lstat, not stat: a symlink is an alias, and DELETE removes the alias
+        if (outErrno) {
+            *outErrno = errno;
+        }
+
+        return NO;
+    }
+
+    if (!S_ISDIR(info.st_mode)) {
+        if (unlink(path) != 0) {
+            if (outErrno) {
+                *outErrno = errno;
+            }
+
+            return NO;
+        }
+
+        return YES;
+    }
+
+    NSString *const parent = [absolutePath stringByDeletingLastPathComponent];
+    NSString *const name = [@".wsk-delete-" stringByAppendingString:[[NSProcessInfo processInfo] globallyUniqueString]];
+    NSString *const aside = [parent stringByAppendingPathComponent:name];
+
+    if (rename(path, [aside fileSystemRepresentation]) != 0) {
+        if (outErrno) {
+            *outErrno = errno;
+        }
+
+        return NO;  // Nothing has been touched.
+    }
+
+    NSError *removalError = nil;
+
+    if (![[NSFileManager defaultManager] removeItemAtPath:aside error:&removalError]) {
+        // Unreachable through the server now, so this cannot be a race; report the residue rather
+        // than telling the client its DELETE failed when the resource is gone.
+        WSK_LOG_ERROR(@"Removed \"%@\" from the share but could not delete its contents at \"%@\": %@", absolutePath, aside, removalError);
+    }
+
+    return YES;
+}
+
+// What a failed removal means to the CLIENT. Losing a race is not a server fault: a resource
+// another client deleted first answered 500, which blames the server and invites a retry that can
+// never succeed. Kept separate from WSKServerErrorStatusCodeForError, which is a server-error
+// mapper by contract — widening that one into a client/server mapper is its own decision (see the
+// ENAMETOOLONG item in the record).
+NSInteger WSKStatusCodeForRemovalErrno(int failure) {
+    switch (failure) {
+    case ENOENT:
+    case ENOTDIR:  // A path component stopped being a directory: the resource named is not there
+        return kWSKHTTPStatusCode_NotFound;
+    case EACCES:
+    case EPERM:
+    case EROFS:
+        return kWSKHTTPStatusCode_Forbidden;
+    case ENOTEMPTY:
+    case EEXIST:
+    case EBUSY:
+        return kWSKHTTPStatusCode_Conflict;  // Retryable, and not the server's doing
+    default:
+        return kWSKHTTPStatusCode_InternalServerError;
+    }
 }

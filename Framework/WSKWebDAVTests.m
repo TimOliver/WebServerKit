@@ -24,16 +24,16 @@
 // old code removed the destination then moved the (now-deleted) source, losing the
 // only copy of the file.
 - (void)testDAVMoveOntoItselfPreservesFile {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
-    NSString* path = [dir stringByAppendingPathComponent:@"a.txt"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    NSString *path = [dir stringByAppendingPathComponent:@"a.txt"];
     XCTAssertTrue([@"important" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* reply = SendRawRequest(server.port, @"MOVE /a.txt HTTP/1.1\r\nHost: localhost\r\nDestination: http://localhost/a.txt\r\nOverwrite: T\r\n\r\n");
+    NSString *reply = SendRawRequest(server.port, @"MOVE /a.txt HTTP/1.1\r\nHost: localhost\r\nDestination: http://localhost/a.txt\r\nOverwrite: T\r\n\r\n");
     XCTAssertNotNil(reply);
     XCTAssertTrue([fm fileExistsAtPath:path], @"a self-MOVE must not destroy the only copy; reply: %@", reply);
 
@@ -44,21 +44,21 @@
 // COPY onto an existing destination (with overwrite permitted) must replace it, not
 // fail. The old code never removed the existing destination, so copyItem always failed.
 - (void)testDAVCopyOverExistingReplacesContent {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
-    NSString* srcPath = [dir stringByAppendingPathComponent:@"a.txt"];
-    NSString* dstPath = [dir stringByAppendingPathComponent:@"b.txt"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    NSString *srcPath = [dir stringByAppendingPathComponent:@"a.txt"];
+    NSString *dstPath = [dir stringByAppendingPathComponent:@"b.txt"];
     XCTAssertTrue([@"source" writeToFile:srcPath atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
     XCTAssertTrue([@"destination" writeToFile:dstPath atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* reply = SendRawRequest(server.port, @"COPY /a.txt HTTP/1.1\r\nHost: localhost\r\nDestination: http://localhost/b.txt\r\nOverwrite: T\r\n\r\n");
+    NSString *reply = SendRawRequest(server.port, @"COPY /a.txt HTTP/1.1\r\nHost: localhost\r\nDestination: http://localhost/b.txt\r\nOverwrite: T\r\n\r\n");
     XCTAssertNotNil(reply);
     XCTAssertTrue([fm fileExistsAtPath:srcPath], @"source should remain after a copy; reply: %@", reply);
-    NSString* dstContent = [NSString stringWithContentsOfFile:dstPath encoding:NSUTF8StringEncoding error:NULL];
+    NSString *dstContent = [NSString stringWithContentsOfFile:dstPath encoding:NSUTF8StringEncoding error:NULL];
     XCTAssertEqualObjects(dstContent, @"source", @"copy-over-existing should replace the destination; reply: %@", reply);
 
     [server stop];
@@ -68,21 +68,21 @@
 // Regression guard: a MOVE onto a *different* existing destination (Overwrite: T)
 // must still replace it and remove the source.
 - (void)testDAVMoveOverExistingReplacesContent {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
-    NSString* srcPath = [dir stringByAppendingPathComponent:@"a.txt"];
-    NSString* dstPath = [dir stringByAppendingPathComponent:@"b.txt"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    NSString *srcPath = [dir stringByAppendingPathComponent:@"a.txt"];
+    NSString *dstPath = [dir stringByAppendingPathComponent:@"b.txt"];
     XCTAssertTrue([@"source" writeToFile:srcPath atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
     XCTAssertTrue([@"destination" writeToFile:dstPath atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* reply = SendRawRequest(server.port, @"MOVE /a.txt HTTP/1.1\r\nHost: localhost\r\nDestination: http://localhost/b.txt\r\nOverwrite: T\r\n\r\n");
+    NSString *reply = SendRawRequest(server.port, @"MOVE /a.txt HTTP/1.1\r\nHost: localhost\r\nDestination: http://localhost/b.txt\r\nOverwrite: T\r\n\r\n");
     XCTAssertNotNil(reply);
     XCTAssertFalse([fm fileExistsAtPath:srcPath], @"source should be gone after a move; reply: %@", reply);
-    NSString* dstContent = [NSString stringWithContentsOfFile:dstPath encoding:NSUTF8StringEncoding error:NULL];
+    NSString *dstContent = [NSString stringWithContentsOfFile:dstPath encoding:NSUTF8StringEncoding error:NULL];
     XCTAssertEqualObjects(dstContent, @"source", @"move-over-existing should replace the destination; reply: %@", reply);
 
     [server stop];
@@ -92,23 +92,23 @@
 // End-to-end: the data-destroying case. A PUT whose gzip body is truncated must
 // leave the existing file byte-identical and must not answer 2xx.
 - (void)testDAVPutWithTruncatedGZipBodyPreservesExistingFile {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
-    NSString* path = [dir stringByAppendingPathComponent:@"keep.txt"];
-    NSData* original = SSEData(@"the original contents, which must survive a refused PUT");
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    NSString *path = [dir stringByAppendingPathComponent:@"keep.txt"];
+    NSData *original = SSEData(@"the original contents, which must survive a refused PUT");
     XCTAssertTrue([original writeToFile:path atomically:YES]);
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSData* full = GZipCompress([NSMutableData dataWithLength:(50 * 1024)]);
-    NSData* truncated = [full subdataWithRange:NSMakeRange(0, 20)];
-    NSMutableData* raw = [NSMutableData data];
+    NSData *full = GZipCompress([NSMutableData dataWithLength:(50 * 1024)]);
+    NSData *truncated = [full subdataWithRange:NSMakeRange(0, 20)];
+    NSMutableData *raw = [NSMutableData data];
     [raw appendData:SSEData([NSString stringWithFormat:@"PUT /keep.txt HTTP/1.1\r\nHost: localhost\r\nContent-Encoding: gzip\r\nContent-Length: %lu\r\n\r\n", (unsigned long)truncated.length])];
     [raw appendData:truncated];
 
-    NSString* reply = SendRawDataRequest(server.port, raw);
+    NSString *reply = SendRawDataRequest(server.port, raw);
     XCTAssertNotNil(reply);
     XCTAssertFalse([reply hasPrefix:@"HTTP/1.1 2"], @"a truncated gzip body must not be accepted: %@", reply);
     XCTAssertEqualObjects([NSData dataWithContentsOfFile:path], original, @"the existing file must be untouched; reply: %@", reply);
@@ -126,20 +126,20 @@
 // took the process from 5 MB to 561 MB and still answered 207. Oversized bodies must be
 // refused before they are parsed.
 - (void)testDAVRefusesOversizedRequestBody {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSMutableString* body = [NSMutableString stringWithString:@"<?xml version=\"1.0\"?><propfind xmlns=\"DAV:\"><prop>"];
+    NSMutableString *body = [NSMutableString stringWithString:@"<?xml version=\"1.0\"?><propfind xmlns=\"DAV:\"><prop>"];
     while (body.length < (512 * 1024)) {
         [body appendString:@"<a/>"];
     }
     [body appendString:@"</prop></propfind>"];
 
-    NSString* request = [NSString stringWithFormat:@"PROPFIND / HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Type: text/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)body.length, body];
-    NSString* reply = SendRawRequest(server.port, request);
+    NSString *request = [NSString stringWithFormat:@"PROPFIND / HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Type: text/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)body.length, body];
+    NSString *reply = SendRawRequest(server.port, request);
     XCTAssertNotNil(reply);
     XCTAssertTrue([reply containsString:@"413"], @"an oversized DAV body must be refused with 413, got: %@", [reply substringToIndex:MIN((NSUInteger)80, reply.length)]);
 
@@ -152,19 +152,19 @@
 // request answered 403 while leaving ~250 nested directories the server could no longer
 // delete — a refused transaction must leave nothing behind.
 - (void)testDAVCopyIntoOwnSubtreeIsRefusedAndLeavesNothingBehind {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
-    NSString* sub = [dir stringByAppendingPathComponent:@"d"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    NSString *sub = [dir stringByAppendingPathComponent:@"d"];
     XCTAssertTrue([fm createDirectoryAtPath:sub withIntermediateDirectories:YES attributes:nil error:NULL]);
     XCTAssertTrue([[NSMutableData dataWithLength:(2 * 1024 * 1024)] writeToFile:[sub stringByAppendingPathComponent:@"f.bin"] atomically:YES]);
 
-    NSArray* before = [fm subpathsOfDirectoryAtPath:dir error:NULL];
+    NSArray *before = [fm subpathsOfDirectoryAtPath:dir error:NULL];
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* reply = SendRawRequest(server.port, @"COPY /d HTTP/1.1\r\nHost: localhost\r\nDestination: /d/sub\r\nOverwrite: T\r\n\r\n");
+    NSString *reply = SendRawRequest(server.port, @"COPY /d HTTP/1.1\r\nHost: localhost\r\nDestination: /d/sub\r\nOverwrite: T\r\n\r\n");
     XCTAssertNotNil(reply);
     XCTAssertTrue([reply containsString:@"403"], @"copying into its own subtree must be refused: %@", reply);
 
@@ -175,7 +175,7 @@
     // still remove that tree depended on how long the share's own path was.
     XCTAssertTrue([reply containsString:@"into its own subtree"], @"must be refused up front, not by the copy failing: %@", reply);
 
-    NSArray* after = [fm subpathsOfDirectoryAtPath:dir error:NULL];
+    NSArray *after = [fm subpathsOfDirectoryAtPath:dir error:NULL];
     XCTAssertEqualObjects([NSSet setWithArray:after], [NSSet setWithArray:before], @"the refused COPY left entries behind (%lu vs %lu)", (unsigned long)after.count, (unsigned long)before.count);
 
     [server stop];
@@ -183,23 +183,23 @@
 }
 
 - (void)testDAVMoveWithoutHostHeaderDoesNotCrash {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
-    NSString* path = [dir stringByAppendingPathComponent:@"a.txt"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    NSString *path = [dir stringByAppendingPathComponent:@"a.txt"];
     XCTAssertTrue([@"data" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     // Destination present, Host absent (HTTP/1.0 so CFHTTPMessage accepts no Host).
-    NSString* reply = SendRawRequest(server.port, @"MOVE /a.txt HTTP/1.0\r\nDestination: http://localhost/b.txt\r\nOverwrite: T\r\n\r\n");
+    NSString *reply = SendRawRequest(server.port, @"MOVE /a.txt HTTP/1.0\r\nDestination: http://localhost/b.txt\r\nOverwrite: T\r\n\r\n");
     XCTAssertNotNil(reply);
     XCTAssertTrue([reply containsString:@"400"], @"missing Host must yield 400, got: %@", reply);
     XCTAssertTrue([fm fileExistsAtPath:path], @"file must be untouched; reply: %@", reply);
 
     // The process must still be alive: a fresh, well-formed request must get a reply.
-    NSString* reply2 = SendRawRequest(server.port, @"OPTIONS / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *reply2 = SendRawRequest(server.port, @"OPTIONS / HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertNotNil(reply2, @"server appears to have crashed after the malformed request");
     XCTAssertTrue([reply2 containsString:@"200"], @"server did not respond normally after the malformed request: %@", reply2);
 
@@ -212,15 +212,15 @@
 // DELETE /Folder answered 204 and destroyed both "id_rsa" and ".env" — each of which the same
 // server refuses with 403 when addressed directly.
 - (void)testDAVRecursiveDeleteRespectsExtensionAllowList {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    server.allowedFileExtensions = @[ @"txt" ];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    server.allowedFileExtensions = @[@"txt"];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* guarded = [dir stringByAppendingPathComponent:@"Guarded"];
+    NSString *guarded = [dir stringByAppendingPathComponent:@"Guarded"];
     XCTAssertTrue([fm createDirectoryAtPath:guarded withIntermediateDirectories:YES attributes:nil error:NULL]);
     XCTAssertTrue([@"ok" writeToFile:[guarded stringByAppendingPathComponent:@"note.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
     XCTAssertTrue([@"KEYDATA" writeToFile:[guarded stringByAppendingPathComponent:@"id_rsa"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
@@ -229,18 +229,18 @@
     // request means two different things.
     XCTAssertTrue([SendRawRequest(server.port, @"DELETE /Guarded/id_rsa HTTP/1.1\r\nHost: localhost\r\n\r\n") hasPrefix:@"HTTP/1.1 403"], @"a direct delete of a disallowed file should be refused");
 
-    NSString* refused = SendRawRequest(server.port, @"DELETE /Guarded HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *refused = SendRawRequest(server.port, @"DELETE /Guarded HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertTrue([refused hasPrefix:@"HTTP/1.1 403"], @"expected 403 for a collection holding a disallowed file: %@", [refused substringToIndex:MIN((NSUInteger)40, refused.length)]);
     XCTAssertTrue([fm fileExistsAtPath:[guarded stringByAppendingPathComponent:@"id_rsa"]], @"the recursive delete destroyed a file a direct delete refuses");
 
     // A folder whose only extra entry is filesystem noise must still be deletable, or every
     // macOS folder becomes permanently undeletable by its own .DS_Store.
-    NSString* ordinary = [dir stringByAppendingPathComponent:@"Ordinary"];
+    NSString *ordinary = [dir stringByAppendingPathComponent:@"Ordinary"];
     XCTAssertTrue([fm createDirectoryAtPath:ordinary withIntermediateDirectories:YES attributes:nil error:NULL]);
     XCTAssertTrue([@"ok" writeToFile:[ordinary stringByAppendingPathComponent:@"note.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
     XCTAssertTrue([@"junk" writeToFile:[ordinary stringByAppendingPathComponent:@".DS_Store"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    NSString* allowed = SendRawRequest(server.port, @"DELETE /Ordinary HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *allowed = SendRawRequest(server.port, @"DELETE /Ordinary HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertFalse([allowed hasPrefix:@"HTTP/1.1 403"], @"a .DS_Store must not make an ordinary folder undeletable: %@", [allowed substringToIndex:MIN((NSUInteger)40, allowed.length)]);
     XCTAssertFalse([fm fileExistsAtPath:ordinary], @"the deletable folder was not removed: %@", allowed);
 
@@ -260,22 +260,22 @@
 // The uploader needs no equivalent: -moveItem: routes around a collision with
 // -_uniquePathForPath: and never overwrites, so it has no destructive-overwrite path at all.
 - (void)testDAVOverwriteRespectsExtensionAllowList {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    server.allowedFileExtensions = @[ @"txt" ];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    server.allowedFileExtensions = @[@"txt"];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* (^overwrite)(NSString*, NSString*, NSString*) = ^(NSString* method, NSString* source, NSString* destination) {
+    NSString * (^overwrite)(NSString *, NSString *, NSString *) = ^(NSString *method, NSString *source, NSString *destination) {
         return SendRawRequest(server.port, [NSString stringWithFormat:@"%@ %@ HTTP/1.1\r\nHost: localhost\r\nDestination: %@\r\nOverwrite: T\r\n\r\n", method, source, destination]);
     };
 
-    NSString* source = [dir stringByAppendingPathComponent:@"Src"];
-    NSString* guarded = [dir stringByAppendingPathComponent:@"Dst"];
-    NSString* key = [guarded stringByAppendingPathComponent:@"id_rsa"];
-    NSString* secret = [dir stringByAppendingPathComponent:@"secret.pem"];
+    NSString *source = [dir stringByAppendingPathComponent:@"Src"];
+    NSString *guarded = [dir stringByAppendingPathComponent:@"Dst"];
+    NSString *key = [guarded stringByAppendingPathComponent:@"id_rsa"];
+    NSString *secret = [dir stringByAppendingPathComponent:@"secret.pem"];
 
     void (^rebuild)(void) = ^{
         [fm removeItemAtPath:source error:NULL];
@@ -294,14 +294,14 @@
     XCTAssertTrue([SendRawRequest(server.port, @"DELETE /secret.pem HTTP/1.1\r\nHost: localhost\r\n\r\n") hasPrefix:@"HTTP/1.1 403"], @"a direct delete of a disallowed file should be refused");
     XCTAssertTrue([SendRawRequest(server.port, @"DELETE /Dst HTTP/1.1\r\nHost: localhost\r\n\r\n") hasPrefix:@"HTTP/1.1 403"], @"a recursive delete of a collection holding a disallowed file should be refused");
 
-    for (NSString* method in @[ @"MOVE", @"COPY" ]) {
+    for (NSString *method in @[@"MOVE", @"COPY"]) {
         rebuild();
-        NSString* ontoCollection = overwrite(method, @"/Src", @"/Dst");
+        NSString *ontoCollection = overwrite(method, @"/Src", @"/Dst");
         XCTAssertTrue([ontoCollection hasPrefix:@"HTTP/1.1 403"], @"%@ over a collection holding a disallowed file should be refused: %@", method, [ontoCollection substringToIndex:MIN((NSUInteger)40, ontoCollection.length)]);
         XCTAssertEqualObjects([NSString stringWithContentsOfFile:key encoding:NSUTF8StringEncoding error:NULL], @"KEYDATA", @"%@ destroyed a file a direct delete refuses", method);
 
         rebuild();
-        NSString* ontoFile = overwrite(method, @"/Src", @"/secret.pem");
+        NSString *ontoFile = overwrite(method, @"/Src", @"/secret.pem");
         XCTAssertTrue([ontoFile hasPrefix:@"HTTP/1.1 403"], @"%@ over a disallowed file should be refused: %@", method, [ontoFile substringToIndex:MIN((NSUInteger)40, ontoFile.length)]);
         // The path survives a rename-over as a *directory*, so assert the type as well as the
         // bytes — merely existing does not mean the file is still there.
@@ -313,13 +313,13 @@
     // The same hole with the checks the other way round: a *file* source does run the
     // destination-name check, but a destination *collection* named "Backup.txt" passes it — and
     // the collection being destroyed holds a file the allow-list refuses.
-    for (NSString* method in @[ @"MOVE", @"COPY" ]) {
+    for (NSString *method in @[@"MOVE", @"COPY"]) {
         rebuild();
-        NSString* backup = [dir stringByAppendingPathComponent:@"Backup.txt"];
+        NSString *backup = [dir stringByAppendingPathComponent:@"Backup.txt"];
         XCTAssertTrue([fm createDirectoryAtPath:backup withIntermediateDirectories:YES attributes:nil error:NULL]);
         XCTAssertTrue([@"KEYDATA" writeToFile:[backup stringByAppendingPathComponent:@"id_rsa"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-        NSString* ontoNamedCollection = overwrite(method, @"/Src/ok.txt", @"/Backup.txt");
+        NSString *ontoNamedCollection = overwrite(method, @"/Src/ok.txt", @"/Backup.txt");
         XCTAssertTrue([ontoNamedCollection hasPrefix:@"HTTP/1.1 403"], @"%@ over a collection whose name passes the allow-list should be refused: %@", method, [ontoNamedCollection substringToIndex:MIN((NSUInteger)40, ontoNamedCollection.length)]);
         XCTAssertEqualObjects([NSString stringWithContentsOfFile:[backup stringByAppendingPathComponent:@"id_rsa"] encoding:NSUTF8StringEncoding error:NULL], @"KEYDATA", @"%@ destroyed a file a direct delete refuses", method);
         [fm removeItemAtPath:backup error:NULL];
@@ -329,7 +329,7 @@
     // destination whose only extra entry is filesystem noise stays replaceable — the same two
     // judgement calls the recursive DELETE makes, for the same reasons.
     rebuild();
-    NSString* renamed = overwrite(@"MOVE", @"/Src", @"/Fresh");
+    NSString *renamed = overwrite(@"MOVE", @"/Src", @"/Fresh");
     XCTAssertTrue([renamed hasPrefix:@"HTTP/1.1 201"], @"moving a collection to an unused name stopped working: %@", [renamed substringToIndex:MIN((NSUInteger)40, renamed.length)]);
     XCTAssertTrue([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"Fresh/ok.txt"]], @"the moved collection did not arrive");
     [fm removeItemAtPath:[dir stringByAppendingPathComponent:@"Fresh"] error:NULL];
@@ -337,7 +337,7 @@
     rebuild();
     XCTAssertTrue([@"junk" writeToFile:[guarded stringByAppendingPathComponent:@".DS_Store"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
     XCTAssertTrue([fm removeItemAtPath:key error:NULL]);
-    NSString* ordinary = overwrite(@"MOVE", @"/Src", @"/Dst");
+    NSString *ordinary = overwrite(@"MOVE", @"/Src", @"/Dst");
     XCTAssertFalse([ordinary hasPrefix:@"HTTP/1.1 403"], @"a .DS_Store must not make an ordinary folder unreplaceable: %@", [ordinary substringToIndex:MIN((NSUInteger)40, ordinary.length)]);
     XCTAssertTrue([fm fileExistsAtPath:[guarded stringByAppendingPathComponent:@"ok.txt"]], @"the permitted overwrite did not happen: %@", ordinary);
 
@@ -349,54 +349,54 @@
 // "DAV: 1". Dead properties are stored in one extended attribute holding a plist keyed in Clark
 // notation, so a set of them is written in a single call and cannot half-apply.
 - (void)testDAVProppatchStoresAndRemovesDeadProperties {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
     XCTAssertTrue([@"data" writeToFile:[dir stringByAppendingPathComponent:@"f.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* (^send)(NSString*, NSString*) = ^(NSString* method, NSString* body) {
+    NSString * (^send)(NSString *, NSString *) = ^(NSString *method, NSString *body) {
         return SendRawRequest(server.port, [NSString stringWithFormat:@"%@ /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@", method, (unsigned long)body.length, body]);
     };
 
     // Set two dead properties, one in a foreign namespace.
-    NSString* set = send(@"PROPPATCH", @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:X=\"urn:example\"><D:set><D:prop><X:colour>blue</X:colour><X:rating>5</X:rating></D:prop></D:set></D:propertyupdate>");
+    NSString *set = send(@"PROPPATCH", @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:X=\"urn:example\"><D:set><D:prop><X:colour>blue</X:colour><X:rating>5</X:rating></D:prop></D:set></D:propertyupdate>");
     XCTAssertTrue([set hasPrefix:@"HTTP/1.1 207"], @"PROPPATCH should answer 207: %@", [set substringToIndex:MIN((NSUInteger)40, set.length)]);
     XCTAssertTrue([set containsString:@"200 OK"], @"the set should have applied: %@", set);
 
     // ...and read them back, by name and via allprop.
-    NSString* named = send(@"PROPFIND", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\" xmlns:X=\"urn:example\"><D:prop><X:colour/></D:prop></D:propfind>");
+    NSString *named = send(@"PROPFIND", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\" xmlns:X=\"urn:example\"><D:prop><X:colour/></D:prop></D:propfind>");
     XCTAssertTrue([named containsString:@"blue"], @"a stored property must be readable by name: %@", named);
     XCTAssertFalse([named containsString:@"404"], @"a stored property must not be reported missing: %@", named);
 
-    NSString* all = send(@"PROPFIND", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:allprop/></D:propfind>");
+    NSString *all = send(@"PROPFIND", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:allprop/></D:propfind>");
     XCTAssertTrue([all containsString:@"blue"], @"allprop must include stored properties: %@", all);
     XCTAssertTrue([all containsString:@"urn:example"], @"the namespace must survive the round trip");
 
     // Remove one; the other survives.
-    NSString* removed = send(@"PROPPATCH", @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:X=\"urn:example\"><D:remove><D:prop><X:colour/></D:prop></D:remove></D:propertyupdate>");
+    NSString *removed = send(@"PROPPATCH", @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:X=\"urn:example\"><D:remove><D:prop><X:colour/></D:prop></D:remove></D:propertyupdate>");
     XCTAssertTrue([removed hasPrefix:@"HTTP/1.1 207"], @"remove should answer 207");
-    NSString* after = send(@"PROPFIND", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:allprop/></D:propfind>");
+    NSString *after = send(@"PROPFIND", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:allprop/></D:propfind>");
     XCTAssertFalse([after containsString:@"blue"], @"the removed property is still there: %@", after);
     XCTAssertTrue([after containsString:@"5"], @"removing one property destroyed the other: %@", after);
 
     // A live property is derived from the filesystem and cannot be set: 403, and ATOMIC, so the
     // dead property alongside it must NOT have been stored either.
-    NSString* live = send(@"PROPPATCH", @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:X=\"urn:example\"><D:set><D:prop><D:getcontentlength>99</D:getcontentlength><X:sneaked>yes</X:sneaked></D:prop></D:set></D:propertyupdate>");
+    NSString *live = send(@"PROPPATCH", @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:X=\"urn:example\"><D:set><D:prop><D:getcontentlength>99</D:getcontentlength><X:sneaked>yes</X:sneaked></D:prop></D:set></D:propertyupdate>");
     XCTAssertTrue([live containsString:@"403 Forbidden"], @"a live property must be refused: %@", live);
     XCTAssertTrue([live containsString:@"424 Failed Dependency"], @"the rest of an atomic update must report 424: %@", live);
-    NSString* unchanged = send(@"PROPFIND", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:allprop/></D:propfind>");
+    NSString *unchanged = send(@"PROPFIND", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:allprop/></D:propfind>");
     XCTAssertFalse([unchanged containsString:@"sneaked"], @"a refused PROPPATCH still stored a property — it is not atomic: %@", unchanged);
 
     // propname lists the stored names, and the live ones.
-    NSString* names = send(@"PROPFIND", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:propname/></D:propfind>");
+    NSString *names = send(@"PROPFIND", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:propname/></D:propfind>");
     XCTAssertTrue([names containsString:@"rating"], @"propname must list stored property names: %@", names);
     XCTAssertTrue([names containsString:@"getcontentlength"], @"propname must still list the live names");
 
     // And a property this server has never been told about is still a 404, not a silent omission.
-    NSString* missing = send(@"PROPFIND", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\" xmlns:X=\"urn:example\"><D:prop><X:nosuch/></D:prop></D:propfind>");
+    NSString *missing = send(@"PROPFIND", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\" xmlns:X=\"urn:example\"><D:prop><X:nosuch/></D:prop></D:propfind>");
     XCTAssertTrue([missing containsString:@"404 Not Found"], @"an unknown property must still be reported missing: %@", missing);
 
     [server stop];
@@ -406,22 +406,22 @@
 // RFC 4918 class 1 completeness, minus PROPPATCH which needs storage of its own. Each of these was
 // a documented MUST that this server did not meet while OPTIONS advertised "DAV: 1".
 - (void)testDAVClassOnePropfindAndDepthSemantics {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
     XCTAssertTrue([@"data" writeToFile:[dir stringByAppendingPathComponent:@"f.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
     XCTAssertTrue([fm createDirectoryAtPath:[dir stringByAppendingPathComponent:@"coll"] withIntermediateDirectories:YES attributes:nil error:NULL]);
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* (^propfind)(NSString*, NSString*) = ^(NSString* depth, NSString* body) {
+    NSString * (^propfind)(NSString *, NSString *) = ^(NSString *depth, NSString *body) {
         return SendRawRequest(server.port, [NSString stringWithFormat:@"PROPFIND /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: %@\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@", depth, (unsigned long)body.length, body]);
     };
 
     // A property that cannot be returned gets its own propstat with 404, rather than being dropped
     // from a <prop> the response then declares "200 OK".
-    NSString* mixed = propfind(@"0", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:prop><D:getcontentlength/><D:getetag/><X:custom xmlns:X=\"urn:example\"/></D:prop></D:propfind>");
+    NSString *mixed = propfind(@"0", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:prop><D:getcontentlength/><D:getetag/><X:custom xmlns:X=\"urn:example\"/></D:prop></D:propfind>");
     XCTAssertTrue([mixed hasPrefix:@"HTTP/1.1 207"], @"PROPFIND stopped working: %@", [mixed substringToIndex:MIN((NSUInteger)40, mixed.length)]);
     XCTAssertTrue([mixed containsString:@"getcontentlength"], @"the supported property is missing");
     XCTAssertTrue([mixed containsString:@"404 Not Found"], @"an unavailable property must be reported in a 404 propstat: %@", mixed);
@@ -429,13 +429,13 @@
     XCTAssertTrue([mixed containsString:@"urn:example"], @"a foreign namespace must survive into the 404 propstat");
 
     // <propname/> returns the names with empty values, and used to be refused with 400.
-    NSString* names = propfind(@"0", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:propname/></D:propfind>");
+    NSString *names = propfind(@"0", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:propname/></D:propfind>");
     XCTAssertTrue([names hasPrefix:@"HTTP/1.1 207"], @"propname should be supported: %@", [names substringToIndex:MIN((NSUInteger)40, names.length)]);
     XCTAssertTrue([names containsString:@"getcontentlength"], @"propname must list the property names");
     XCTAssertFalse([names containsString:@"404"], @"propname reports names, not failures: %@", names);
 
     // Depth: infinity is refused with the machine-readable precondition RFC 4918 §9.1 defines.
-    NSString* infinite = propfind(@"infinity", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:allprop/></D:propfind>");
+    NSString *infinite = propfind(@"infinity", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:allprop/></D:propfind>");
     XCTAssertTrue([infinite hasPrefix:@"HTTP/1.1 403"], @"an infinite-depth PROPFIND should be 403: %@", [infinite substringToIndex:MIN((NSUInteger)40, infinite.length)]);
     XCTAssertTrue([infinite containsString:@"propfind-finite-depth"], @"the refusal must carry the precondition element: %@", infinite);
 
@@ -446,10 +446,10 @@
     XCTAssertTrue([SendRawRequest(server.port, @"DELETE /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 7\r\n\r\n") hasPrefix:@"HTTP/1.1 400"], @"an unrecognised Depth should still be refused");
 
     // Allow, on OPTIONS and on the 405.
-    NSString* opts = SendRawRequest(server.port, @"OPTIONS / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *opts = SendRawRequest(server.port, @"OPTIONS / HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertTrue([opts containsString:@"Allow:"], @"OPTIONS should advertise Allow: %@", opts);
     XCTAssertTrue([opts containsString:@"PROPFIND"], @"Allow should name the DAV methods");
-    NSString* onCollection = SendRawRequest(server.port, @"PUT /coll HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1\r\n\r\nx");
+    NSString *onCollection = SendRawRequest(server.port, @"PUT /coll HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1\r\n\r\nx");
     XCTAssertTrue([onCollection hasPrefix:@"HTTP/1.1 405"], @"PUT onto a collection should still be 405");
     XCTAssertTrue([onCollection containsString:@"Allow:"], @"a 405 must carry Allow (RFC 9110 §15.5.6): %@", onCollection);
 
@@ -467,45 +467,45 @@
 // And `If-Match: *` was keyed on the entity tag, which is only minted for a regular file, so it
 // always failed for a collection: a conditional DELETE/MOVE/COPY of a folder could never succeed.
 - (void)testTwelfthPassFixesDoNotOverRefuse {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     // An extracted archive leaving a read-only EMPTY directory behind.
-    NSString* build = [dir stringByAppendingPathComponent:@"Build"];
-    NSString* empty = [build stringByAppendingPathComponent:@"Empty"];
+    NSString *build = [dir stringByAppendingPathComponent:@"Build"];
+    NSString *empty = [build stringByAppendingPathComponent:@"Empty"];
     XCTAssertTrue([fm createDirectoryAtPath:empty withIntermediateDirectories:YES attributes:nil error:NULL]);
     XCTAssertTrue([@"data" writeToFile:[build stringByAppendingPathComponent:@"f.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
     XCTAssertEqual(chmod(empty.fileSystemRepresentation, 0555), 0, @"could not make the directory read-only");
 
-    NSString* deleted = SendRawRequest(server.port, @"DELETE /Build HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *deleted = SendRawRequest(server.port, @"DELETE /Build HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertTrue([deleted hasPrefix:@"HTTP/1.1 204"], @"a read-only EMPTY directory must not make its parent undeletable: %@", [deleted substringToIndex:MIN((NSUInteger)40, deleted.length)]);
     XCTAssertFalse([fm fileExistsAtPath:build], @"the tree was not removed");
 
     // A read-only NON-empty directory genuinely cannot be emptied, so it must still be refused.
-    NSString* guarded = [dir stringByAppendingPathComponent:@"Guarded"];
-    NSString* inner = [guarded stringByAppendingPathComponent:@"Inner"];
+    NSString *guarded = [dir stringByAppendingPathComponent:@"Guarded"];
+    NSString *inner = [guarded stringByAppendingPathComponent:@"Inner"];
     XCTAssertTrue([fm createDirectoryAtPath:inner withIntermediateDirectories:YES attributes:nil error:NULL]);
     XCTAssertTrue([@"data" writeToFile:[inner stringByAppendingPathComponent:@"stuck.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
     XCTAssertEqual(chmod(inner.fileSystemRepresentation, 0555), 0);
 
-    NSString* refused = SendRawRequest(server.port, @"DELETE /Guarded HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *refused = SendRawRequest(server.port, @"DELETE /Guarded HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertTrue([refused hasPrefix:@"HTTP/1.1 403"], @"a genuinely unremovable tree must still be refused: %@", [refused substringToIndex:MIN((NSUInteger)40, refused.length)]);
     XCTAssertTrue([fm fileExistsAtPath:[inner stringByAppendingPathComponent:@"stuck.txt"]], @"the refused delete still destroyed part of the tree");
     chmod(inner.fileSystemRepresentation, 0755);
 
     // If-Match: * must succeed against a collection, which has no entity tag.
-    NSString* coll = [dir stringByAppendingPathComponent:@"Coll"];
+    NSString *coll = [dir stringByAppendingPathComponent:@"Coll"];
     XCTAssertTrue([fm createDirectoryAtPath:coll withIntermediateDirectories:YES attributes:nil error:NULL]);
-    NSString* conditional = SendRawRequest(server.port, @"DELETE /Coll HTTP/1.1\r\nHost: localhost\r\nIf-Match: *\r\n\r\n");
+    NSString *conditional = SendRawRequest(server.port, @"DELETE /Coll HTTP/1.1\r\nHost: localhost\r\nIf-Match: *\r\n\r\n");
     XCTAssertTrue([conditional hasPrefix:@"HTTP/1.1 204"], @"If-Match: * should succeed against an existing collection: %@", [conditional substringToIndex:MIN((NSUInteger)40, conditional.length)]);
     XCTAssertFalse([fm fileExistsAtPath:coll], @"the conditional delete did not happen");
 
     // And must still fail against something that does not exist.
-    NSString* absent = SendRawRequest(server.port, @"DELETE /Nope HTTP/1.1\r\nHost: localhost\r\nIf-Match: *\r\n\r\n");
+    NSString *absent = SendRawRequest(server.port, @"DELETE /Nope HTTP/1.1\r\nHost: localhost\r\nIf-Match: *\r\n\r\n");
     XCTAssertFalse([absent hasPrefix:@"HTTP/1.1 2"], @"If-Match: * should not succeed against an absent resource: %@", [absent substringToIndex:MIN((NSUInteger)40, absent.length)]);
 
     [server stop];
@@ -518,19 +518,19 @@
 // validator a PROPFIND-driven client could obtain. A later If-Range resume with it spliced two
 // builds under one 206.
 - (void)testDAVPropfindWithholdsAnUnsealedLastModified {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* propfind = @"PROPFIND /fresh.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\n\r\n";
+    NSString *propfind = @"PROPFIND /fresh.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\n\r\n";
 
     // Written and asked for in the same instant: the GET path would withhold the date here, so
     // PROPFIND must too, or the two surfaces disagree about what may be issued.
     XCTAssertTrue([@"BUILD-A" writeToFile:[dir stringByAppendingPathComponent:@"fresh.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
-    NSString* unsealed = SendRawRequest(server.port, propfind);
+    NSString *unsealed = SendRawRequest(server.port, propfind);
     XCTAssertTrue([unsealed hasPrefix:@"HTTP/1.1 207"], @"PROPFIND stopped working: %@", [unsealed substringToIndex:MIN((NSUInteger)40, unsealed.length)]);
     XCTAssertFalse([unsealed containsString:@"getlastmodified"], @"PROPFIND published a Last-Modified the GET path withholds");
     // The rest of the property set must be unaffected.
@@ -539,7 +539,7 @@
     // Once the bucket has closed the date must be published again, or this is a permanent
     // regression rather than a one-second delay. Two seconds, because FAT's bucket is two.
     [NSThread sleepForTimeInterval:2.2];
-    NSString* sealed = SendRawRequest(server.port, propfind);
+    NSString *sealed = SendRawRequest(server.port, propfind);
     XCTAssertTrue([sealed containsString:@"getlastmodified"], @"PROPFIND never publishes a Last-Modified at all: %@", sealed);
 
     [server stop];
@@ -556,19 +556,19 @@
 // taken. The cleanup then unlinked the client's link and the request answered 403 — a refusal
 // that mutates the tree, which the design priorities forbid outright.
 - (void)testDAVCopyOntoADanglingSymlinkRefusesWithoutRemovingIt {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     XCTAssertTrue([@"PAYLOAD" writeToFile:[dir stringByAppendingPathComponent:@"src.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    NSString* link = [dir stringByAppendingPathComponent:@"latest"];
+    NSString *link = [dir stringByAppendingPathComponent:@"latest"];
     XCTAssertTrue([fm createSymbolicLinkAtPath:link withDestinationPath:@"builds/current" error:NULL], @"could not create the dangling link");
 
-    NSString* reply = SendRawRequest(server.port, @"COPY /src.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /latest\r\n\r\n");
+    NSString *reply = SendRawRequest(server.port, @"COPY /src.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /latest\r\n\r\n");
     XCTAssertFalse([reply hasPrefix:@"HTTP/1.1 2"], @"a COPY onto an occupied name should refuse: %@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
 
     // The assertion that matters: the refusal left the tree exactly as it was. -fileExistsAtPath:
@@ -578,7 +578,7 @@
 
     // A COPY onto a genuinely free name must still work, or the assertion above is satisfied by a
     // server that refuses everything.
-    NSString* ok = SendRawRequest(server.port, @"COPY /src.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /copy.txt\r\n\r\n");
+    NSString *ok = SendRawRequest(server.port, @"COPY /src.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /copy.txt\r\n\r\n");
     XCTAssertTrue([ok hasPrefix:@"HTTP/1.1 201"], @"an ordinary COPY stopped working: %@", [ok substringToIndex:MIN((NSUInteger)40, ok.length)]);
     XCTAssertEqualObjects([NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:@"copy.txt"] encoding:NSUTF8StringEncoding error:NULL], @"PAYLOAD");
 
@@ -594,11 +594,11 @@
 // slow to produce the interleaving yields a false negative, never a false failure. That matters
 // because two wall-clock-sensitive tests in this suite already fail under parallel load.
 - (void)testDAVCopyRacingACreationNeverDestroysTheWinner {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
     XCTAssertTrue([@"PAYLOAD" writeToFile:[dir stringByAppendingPathComponent:@"src.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
@@ -608,9 +608,9 @@
     NSUInteger created = 0;
 
     for (NSUInteger round = 0; round < 60; round++) {
-        NSString* name = [NSString stringWithFormat:@"Target-%lu", (unsigned long)round];
-        __block NSString* copyReply = nil;
-        __block NSString* mkcolReply = nil;
+        NSString *name = [NSString stringWithFormat:@"Target-%lu", (unsigned long)round];
+        __block NSString *copyReply = nil;
+        __block NSString *mkcolReply = nil;
 
         dispatch_group_t group = dispatch_group_create();
         dispatch_group_async(group, queue, ^{
@@ -650,31 +650,31 @@
 // case-folded here too, in the same edit, because leaving one of a matched pair is how the next
 // pass finds it.
 - (void)testDAVOverwriteAndDepthAreCaseInsensitive {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* destination = [dir stringByAppendingPathComponent:@"dst.txt"];
+    NSString *destination = [dir stringByAppendingPathComponent:@"dst.txt"];
     void (^rebuild)(void) = ^{
         XCTAssertTrue([@"SOURCE" writeToFile:[dir stringByAppendingPathComponent:@"src.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
         XCTAssertTrue([@"ORIGINAL" writeToFile:destination atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
     };
 
     // Both spellings of "do not overwrite" must refuse and leave the destination alone.
-    for (NSString* no in @[ @"F", @"f" ]) {
+    for (NSString *no in @[@"F", @"f"]) {
         rebuild();
-        NSString* reply = SendRawRequest(server.port, [NSString stringWithFormat:@"COPY /src.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /dst.txt\r\nOverwrite: %@\r\n\r\n", no]);
+        NSString *reply = SendRawRequest(server.port, [NSString stringWithFormat:@"COPY /src.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /dst.txt\r\nOverwrite: %@\r\n\r\n", no]);
         XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 412"], @"Overwrite: %@ should refuse: %@", no, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
         XCTAssertEqualObjects([NSString stringWithContentsOfFile:destination encoding:NSUTF8StringEncoding error:NULL], @"ORIGINAL", @"Overwrite: %@ clobbered the destination", no);
     }
 
     // Both spellings of "overwrite" must still work, or this becomes an over-refusal.
-    for (NSString* yes in @[ @"T", @"t" ]) {
+    for (NSString *yes in @[@"T", @"t"]) {
         rebuild();
-        NSString* reply = SendRawRequest(server.port, [NSString stringWithFormat:@"MOVE /src.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /dst.txt\r\nOverwrite: %@\r\n\r\n", yes]);
+        NSString *reply = SendRawRequest(server.port, [NSString stringWithFormat:@"MOVE /src.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /dst.txt\r\nOverwrite: %@\r\n\r\n", yes]);
         XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 204"], @"Overwrite: %@ should replace: %@", yes, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
         XCTAssertEqualObjects([NSString stringWithContentsOfFile:destination encoding:NSUTF8StringEncoding error:NULL], @"SOURCE", @"Overwrite: %@ did not replace the destination", yes);
     }
@@ -682,7 +682,7 @@
     // Depth: the RFC's own spelling with a capital I must be accepted, not refused.
     rebuild();
     XCTAssertTrue([fm createDirectoryAtPath:[dir stringByAppendingPathComponent:@"Coll"] withIntermediateDirectories:YES attributes:nil error:NULL]);
-    NSString* deleted = SendRawRequest(server.port, @"DELETE /Coll HTTP/1.1\r\nHost: localhost\r\nDepth: Infinity\r\n\r\n");
+    NSString *deleted = SendRawRequest(server.port, @"DELETE /Coll HTTP/1.1\r\nHost: localhost\r\nDepth: Infinity\r\n\r\n");
     XCTAssertTrue([deleted hasPrefix:@"HTTP/1.1 204"], @"Depth: Infinity should be accepted: %@", [deleted substringToIndex:MIN((NSUInteger)40, deleted.length)]);
 
     [server stop];
@@ -698,19 +698,19 @@
 // cannot copy into a folder that exists. An existing FILE at the name takes the same path and is
 // also a 405 case, which the finding as reported missed.
 - (void)testDAVMKCOLOnAnExistingResourceAnswersMethodNotAllowed {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
     XCTAssertTrue([fm createDirectoryAtPath:[dir stringByAppendingPathComponent:@"Coll"] withIntermediateDirectories:YES attributes:nil error:NULL]);
     XCTAssertTrue([@"FILE" writeToFile:[dir stringByAppendingPathComponent:@"file.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     // Both spellings of "something is already here" answer 405, and RFC 9110 §15.5.6 makes Allow
     // mandatory on one.
-    for (NSString* existing in @[ @"/Coll", @"/file.txt" ]) {
-        NSString* reply = SendRawRequest(server.port, [NSString stringWithFormat:@"MKCOL %@ HTTP/1.1\r\nHost: localhost\r\n\r\n", existing]);
+    for (NSString *existing in @[@"/Coll", @"/file.txt"]) {
+        NSString *reply = SendRawRequest(server.port, [NSString stringWithFormat:@"MKCOL %@ HTTP/1.1\r\nHost: localhost\r\n\r\n", existing]);
         XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 405"], @"MKCOL on the existing %@ should be 405: %@", existing, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
         XCTAssertTrue([reply containsString:@"Allow:"], @"a 405 must carry Allow (RFC 9110 §15.5.6): %@", existing);
     }
@@ -723,13 +723,13 @@
 
     // And what must keep working: a brand-new name is still created. This is the half a guard
     // written for one failure mode is most likely to break.
-    NSString* created = SendRawRequest(server.port, @"MKCOL /Fresh HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *created = SendRawRequest(server.port, @"MKCOL /Fresh HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertTrue([created hasPrefix:@"HTTP/1.1 201"], @"a brand-new collection must still be created: %@", [created substringToIndex:MIN((NSUInteger)40, created.length)]);
     XCTAssertTrue([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"Fresh"] isDirectory:&isDirectory] && isDirectory);
 
     // A missing intermediate collection is 409 and must NOT be absorbed into the new 405 branch;
     // the two answers mean different things to a client walking a tree.
-    NSString* orphan = SendRawRequest(server.port, @"MKCOL /Nope/Deep HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *orphan = SendRawRequest(server.port, @"MKCOL /Nope/Deep HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertTrue([orphan hasPrefix:@"HTTP/1.1 409"], @"a missing parent is still 409: %@", [orphan substringToIndex:MIN((NSUInteger)40, orphan.length)]);
 
     [server stop];
@@ -742,32 +742,32 @@
 // telling a client its perfectly legal request was malformed rather than that it should retry with
 // a bounded depth. Same rule, one of its two spellings, which is this codebase's signature shape.
 - (void)testDAVPropfindWithoutDepthRefusesAsIfInfinite {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
     XCTAssertTrue([@"DATA" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     // Absent must answer exactly as explicit "infinity" does, precondition element and all.
-    NSString* absent = SendRawRequest(server.port, @"PROPFIND / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *absent = SendRawRequest(server.port, @"PROPFIND / HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertTrue([absent hasPrefix:@"HTTP/1.1 403"], @"an absent Depth means infinity, so 403: %@", [absent substringToIndex:MIN((NSUInteger)40, absent.length)]);
     XCTAssertTrue([absent containsString:@"propfind-finite-depth"], @"the refusal must carry the precondition that tells the client what to do instead");
 
-    NSString* infinite = SendRawRequest(server.port, @"PROPFIND / HTTP/1.1\r\nHost: localhost\r\nDepth: infinity\r\n\r\n");
+    NSString *infinite = SendRawRequest(server.port, @"PROPFIND / HTTP/1.1\r\nHost: localhost\r\nDepth: infinity\r\n\r\n");
     XCTAssertTrue([infinite hasPrefix:@"HTTP/1.1 403"], @"explicit infinity is unchanged");
     XCTAssertTrue([infinite containsString:@"propfind-finite-depth"]);
 
     // The depths every real client actually sends must keep working — this is what a careless
     // reordering of the branch would break.
-    for (NSString* depth in @[ @"0", @"1" ]) {
-        NSString* reply = SendRawRequest(server.port, [NSString stringWithFormat:@"PROPFIND / HTTP/1.1\r\nHost: localhost\r\nDepth: %@\r\n\r\n", depth]);
+    for (NSString *depth in @[@"0", @"1"]) {
+        NSString *reply = SendRawRequest(server.port, [NSString stringWithFormat:@"PROPFIND / HTTP/1.1\r\nHost: localhost\r\nDepth: %@\r\n\r\n", depth]);
         XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 207"], @"Depth: %@ must still enumerate: %@", depth, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
     }
 
     // A genuinely unparseable Depth is still malformed, and must not be folded into the 403.
-    NSString* garbage = SendRawRequest(server.port, @"PROPFIND / HTTP/1.1\r\nHost: localhost\r\nDepth: sideways\r\n\r\n");
+    NSString *garbage = SendRawRequest(server.port, @"PROPFIND / HTTP/1.1\r\nHost: localhost\r\nDepth: sideways\r\n\r\n");
     XCTAssertTrue([garbage hasPrefix:@"HTTP/1.1 400"], @"an unrecognised Depth is still 400: %@", [garbage substringToIndex:MIN((NSUInteger)40, garbage.length)]);
 
     [server stop];
@@ -780,26 +780,26 @@
 // PROPPATCH was unavailable and never tried it. And the non-Finder LOCK/UNLOCK refusals answered
 // 405 with no Allow at all, which RFC 9110 §15.5.6 makes mandatory.
 - (void)testDAVAllowAdvertisesEveryImplementedMethodAndAccompaniesEvery405 {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
     XCTAssertTrue([@"DATA" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* discovered = SendRawRequest(server.port, @"OPTIONS / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *discovered = SendRawRequest(server.port, @"OPTIONS / HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertTrue([discovered containsString:@"PROPPATCH"], @"OPTIONS must advertise PROPPATCH, which this server implements: %@", discovered);
 
     // Every method named in Allow must actually route, or the advertisement is the lie in the
     // other direction. PROPPATCH with an empty body is refused on its merits, not with 501.
-    NSString* proppatch = SendRawRequest(server.port, @"PROPPATCH /a.txt HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
+    NSString *proppatch = SendRawRequest(server.port, @"PROPPATCH /a.txt HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
     XCTAssertFalse([proppatch hasPrefix:@"HTTP/1.1 501"], @"a method named in Allow must be routed: %@", [proppatch substringToIndex:MIN((NSUInteger)40, proppatch.length)]);
 
     // The LOCK/UNLOCK 405s: this client is not Finder, so both refuse — and both must say what is
     // allowed instead.
-    for (NSString* method in @[ @"LOCK", @"UNLOCK" ]) {
-        NSString* reply = SendRawRequest(server.port, [NSString stringWithFormat:@"%@ /a.txt HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n", method]);
+    for (NSString *method in @[@"LOCK", @"UNLOCK"]) {
+        NSString *reply = SendRawRequest(server.port, [NSString stringWithFormat:@"%@ /a.txt HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n", method]);
         XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 405"], @"%@ is refused for a non-Finder client: %@", method, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
         XCTAssertTrue([reply containsString:@"Allow:"], @"the %@ 405 must carry Allow (RFC 9110 §15.5.6)", method);
     }
@@ -815,17 +815,17 @@
 // refuses everywhere else, and for Shape A a collection of builds is not a cheap thing to duplicate
 // by accident.
 - (void)testDAVShallowCopyOfCollectionOmitsMembers {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
     XCTAssertTrue([fm createDirectoryAtPath:[dir stringByAppendingPathComponent:@"Coll/Inner"] withIntermediateDirectories:YES attributes:nil error:NULL]);
     XCTAssertTrue([@"MEMBER" writeToFile:[dir stringByAppendingPathComponent:@"Coll/member.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
     XCTAssertTrue([@"DEEP" writeToFile:[dir stringByAppendingPathComponent:@"Coll/Inner/deep.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* shallow = SendRawRequest(server.port, @"COPY /Coll HTTP/1.1\r\nHost: localhost\r\nDestination: /Shallow\r\nDepth: 0\r\n\r\n");
+    NSString *shallow = SendRawRequest(server.port, @"COPY /Coll HTTP/1.1\r\nHost: localhost\r\nDestination: /Shallow\r\nDepth: 0\r\n\r\n");
     XCTAssertTrue([shallow hasPrefix:@"HTTP/1.1 201"], @"a shallow collection copy still succeeds: %@", [shallow substringToIndex:MIN((NSUInteger)40, shallow.length)]);
 
     BOOL isDirectory = NO;
@@ -835,18 +835,18 @@
 
     // Depth: infinity and an absent header both still copy everything (§9.8.3 makes absent mean
     // infinity), which is what a naive fix that shallow-copied unconditionally would destroy.
-    NSString* deep = SendRawRequest(server.port, @"COPY /Coll HTTP/1.1\r\nHost: localhost\r\nDestination: /Deep\r\nDepth: infinity\r\n\r\n");
+    NSString *deep = SendRawRequest(server.port, @"COPY /Coll HTTP/1.1\r\nHost: localhost\r\nDestination: /Deep\r\nDepth: infinity\r\n\r\n");
     XCTAssertTrue([deep hasPrefix:@"HTTP/1.1 201"], @"a deep copy still succeeds: %@", [deep substringToIndex:MIN((NSUInteger)40, deep.length)]);
     XCTAssertEqualObjects([NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:@"Deep/Inner/deep.txt"] encoding:NSUTF8StringEncoding error:NULL], @"DEEP", @"Depth: infinity must copy the whole subtree");
 
-    NSString* absent = SendRawRequest(server.port, @"COPY /Coll HTTP/1.1\r\nHost: localhost\r\nDestination: /Absent\r\n\r\n");
+    NSString *absent = SendRawRequest(server.port, @"COPY /Coll HTTP/1.1\r\nHost: localhost\r\nDestination: /Absent\r\n\r\n");
     XCTAssertTrue([absent hasPrefix:@"HTTP/1.1 201"], @"an absent Depth still succeeds: %@", [absent substringToIndex:MIN((NSUInteger)40, absent.length)]);
     XCTAssertEqualObjects([NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:@"Absent/member.txt"] encoding:NSUTF8StringEncoding error:NULL], @"MEMBER", @"an absent Depth means infinity, so members are copied");
 
     // Depth: 0 on a plain FILE is meaningless and must keep working — a resource with no internal
     // members cannot mean anything else, and refusing it would break a client that sets Depth
     // uniformly. This is the case the thirteenth pass deliberately opened up.
-    NSString* file = SendRawRequest(server.port, @"COPY /Coll/member.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /leaf.txt\r\nDepth: 0\r\n\r\n");
+    NSString *file = SendRawRequest(server.port, @"COPY /Coll/member.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /leaf.txt\r\nDepth: 0\r\n\r\n");
     XCTAssertTrue([file hasPrefix:@"HTTP/1.1 201"], @"Depth: 0 on a plain file is still fine: %@", [file substringToIndex:MIN((NSUInteger)40, file.length)]);
     XCTAssertEqualObjects([NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:@"leaf.txt"] encoding:NSUTF8StringEncoding error:NULL], @"MEMBER");
 
@@ -855,37 +855,37 @@
 }
 
 - (void)testUploaderRecursiveDeleteRespectsExtensionAllowList {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
 
-    WSKWebUploader* server = [[WSKWebUploader alloc] initWithUploadDirectory:dir];
-    server.allowedFileExtensions = @[ @"txt" ];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebUploader *server = [[WSKWebUploader alloc] initWithUploadDirectory:dir];
+    server.allowedFileExtensions = @[@"txt"];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
-    NSString* host = [NSString stringWithFormat:@"localhost:%lu", (unsigned long)server.port];
+    NSString *host = [NSString stringWithFormat:@"localhost:%lu", (unsigned long)server.port];
 
-    NSString* (^deleteFolder)(NSString*) = ^(NSString* name) {
-        NSString* body = [NSString stringWithFormat:@"path=/%@", name];
+    NSString * (^deleteFolder)(NSString *) = ^(NSString *name) {
+        NSString *body = [NSString stringWithFormat:@"path=/%@", name];
         return SendRawRequest(server.port, [NSString stringWithFormat:@"POST /delete HTTP/1.1\r\nHost: %@\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %lu\r\n\r\n%@", host, (unsigned long)body.length, body]);
     };
 
     // A folder holding a file the client may not address must not be destroyed wholesale.
-    NSString* guarded = [dir stringByAppendingPathComponent:@"Guarded"];
+    NSString *guarded = [dir stringByAppendingPathComponent:@"Guarded"];
     XCTAssertTrue([fm createDirectoryAtPath:guarded withIntermediateDirectories:YES attributes:nil error:NULL]);
     XCTAssertTrue([@"ok" writeToFile:[guarded stringByAppendingPathComponent:@"note.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
     XCTAssertTrue([@"secret" writeToFile:[guarded stringByAppendingPathComponent:@"id_rsa"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    NSString* refused = deleteFolder(@"Guarded");
+    NSString *refused = deleteFolder(@"Guarded");
     XCTAssertTrue([refused containsString:@"403"], @"expected 403 for a folder containing a disallowed file, got: %@", refused);
     XCTAssertTrue([fm fileExistsAtPath:[guarded stringByAppendingPathComponent:@"id_rsa"]], @"recursive delete destroyed a file a direct delete would refuse");
 
     // A folder whose only extra entry is filesystem noise must still be deletable.
-    NSString* ordinary = [dir stringByAppendingPathComponent:@"Ordinary"];
+    NSString *ordinary = [dir stringByAppendingPathComponent:@"Ordinary"];
     XCTAssertTrue([fm createDirectoryAtPath:ordinary withIntermediateDirectories:YES attributes:nil error:NULL]);
     XCTAssertTrue([@"ok" writeToFile:[ordinary stringByAppendingPathComponent:@"note.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
     XCTAssertTrue([@"junk" writeToFile:[ordinary stringByAppendingPathComponent:@".DS_Store"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    NSString* allowed = deleteFolder(@"Ordinary");
+    NSString *allowed = deleteFolder(@"Ordinary");
     XCTAssertFalse([allowed containsString:@"403"], @"a .DS_Store must not make an ordinary folder undeletable, got: %@", allowed);
     XCTAssertFalse([fm fileExistsAtPath:ordinary], @"the deletable folder was not removed: %@", allowed);
 
@@ -900,23 +900,23 @@
 // LOCK path missed. Every other precondition here is attacker-supplied: the Mac Finder
 // User-Agent, Depth: 0, and an exclusive/write lockinfo body.
 - (void)testDAVLockWithoutHostHeaderDoesNotCrash {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* body = @"<?xml version=\"1.0\" encoding=\"utf-8\"?><D:lockinfo xmlns:D=\"DAV:\"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>";
+    NSString *body = @"<?xml version=\"1.0\" encoding=\"utf-8\"?><D:lockinfo xmlns:D=\"DAV:\"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>";
     // HTTP/1.0 so CFHTTPMessage accepts the absent Host. Target "/" (the upload
     // directory itself), which always exists and skips the extension check.
-    NSString* request = [NSString stringWithFormat:@"LOCK / HTTP/1.0\r\nUser-Agent: WebDAVFS/3.0.0\r\nDepth: 0\r\nContent-Type: text/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)body.length, body];
-    NSString* reply = SendRawRequest(server.port, request);
+    NSString *request = [NSString stringWithFormat:@"LOCK / HTTP/1.0\r\nUser-Agent: WebDAVFS/3.0.0\r\nDepth: 0\r\nContent-Type: text/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)body.length, body];
+    NSString *reply = SendRawRequest(server.port, request);
     XCTAssertNotNil(reply, @"server appears to have crashed handling LOCK with no Host header");
     XCTAssertTrue([reply containsString:@"400"], @"missing Host must yield 400, got: %@", reply);
 
     // The process must still be alive: a fresh, well-formed request must get a reply.
-    NSString* reply2 = SendRawRequest(server.port, @"OPTIONS / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *reply2 = SendRawRequest(server.port, @"OPTIONS / HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertNotNil(reply2, @"server appears to have crashed after the malformed request");
     XCTAssertTrue([reply2 containsString:@"200"], @"server did not respond normally after the malformed request: %@", reply2);
 
@@ -927,17 +927,17 @@
 // A LOCK that does carry a Host must still succeed, and must report a lockroot built
 // from it — guarding the rewritten interpolation against a behavior change.
 - (void)testDAVLockWithHostHeaderReportsLockRoot {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
     XCTAssertTrue([@"data" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* body = @"<?xml version=\"1.0\" encoding=\"utf-8\"?><D:lockinfo xmlns:D=\"DAV:\"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>";
-    NSString* request = [NSString stringWithFormat:@"LOCK /a.txt HTTP/1.1\r\nHost: localhost\r\nUser-Agent: WebDAVFS/3.0.0\r\nDepth: 0\r\nContent-Type: text/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)body.length, body];
-    NSString* reply = SendRawRequest(server.port, request);
+    NSString *body = @"<?xml version=\"1.0\" encoding=\"utf-8\"?><D:lockinfo xmlns:D=\"DAV:\"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>";
+    NSString *request = [NSString stringWithFormat:@"LOCK /a.txt HTTP/1.1\r\nHost: localhost\r\nUser-Agent: WebDAVFS/3.0.0\r\nDepth: 0\r\nContent-Type: text/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)body.length, body];
+    NSString *reply = SendRawRequest(server.port, request);
     XCTAssertNotNil(reply);
     XCTAssertTrue([reply containsString:@"200"], @"a well-formed LOCK should succeed, got: %@", reply);
     XCTAssertTrue([reply containsString:@"<D:lockroot><D:href>http://localhost//a.txt</D:href></D:lockroot>"], @"lockroot not built from the Host header: %@", reply);
@@ -949,17 +949,17 @@
 // End to end: a WebDAV GET that reaches a file outside the share through a symlink
 // planted inside it must be refused rather than serving the file's contents.
 - (void)testDAVGetThroughEscapingSymlinkIsRefused {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
-    NSString* outside = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    NSString *outside = MakeTempDirectory();
     XCTAssertTrue([@"TOP-SECRET-PAYLOAD" writeToFile:[outside stringByAppendingPathComponent:@"secret.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
     XCTAssertTrue([fm createSymbolicLinkAtPath:[dir stringByAppendingPathComponent:@"Escape"] withDestinationPath:outside error:NULL]);
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* reply = SendRawRequest(server.port, @"GET /Escape/secret.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *reply = SendRawRequest(server.port, @"GET /Escape/secret.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertNotNil(reply);
     XCTAssertFalse([reply containsString:@"TOP-SECRET-PAYLOAD"], @"a file outside the share was served through a symlink: %@", reply);
     XCTAssertTrue([reply containsString:@"403"], @"expected the traversal to be refused, got: %@", reply);
@@ -974,31 +974,31 @@
 // we declare as application/xml that no conforming parser accepts, breaking that resource
 // for every client.
 - (void)testDAVResponseOmitsCharactersIllegalInXML {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
-    NSString* name = [NSString stringWithFormat:@"a%Cb.txt", (unichar)0x01];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    NSString *name = [NSString stringWithFormat:@"a%Cb.txt", (unichar)0x01];
     XCTAssertTrue([@"data" writeToFile:[dir stringByAppendingPathComponent:name] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     // LOCK is the case that reaches the wire raw: PROPFIND percent-encodes its href, but
     // <D:lockroot> interpolates the relative path through _XMLEscape only.
-    NSString* lockBody = @"<?xml version=\"1.0\" encoding=\"utf-8\"?><D:lockinfo xmlns:D=\"DAV:\"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>";
+    NSString *lockBody = @"<?xml version=\"1.0\" encoding=\"utf-8\"?><D:lockinfo xmlns:D=\"DAV:\"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>";
     // Percent-encoded, because a raw control byte in the request-target is now itself a 400.
-    NSString* request = [NSString stringWithFormat:@"LOCK /a%%01b.txt HTTP/1.1\r\nHost: localhost\r\nUser-Agent: WebDAVFS/3.0.0\r\nDepth: 0\r\nContent-Type: text/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)lockBody.length, lockBody];
-    NSString* reply = SendRawRequest(server.port, request);
+    NSString *request = [NSString stringWithFormat:@"LOCK /a%%01b.txt HTTP/1.1\r\nHost: localhost\r\nUser-Agent: WebDAVFS/3.0.0\r\nDepth: 0\r\nContent-Type: text/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)lockBody.length, lockBody];
+    NSString *reply = SendRawRequest(server.port, request);
     XCTAssertNotNil(reply);
     XCTAssertTrue([reply containsString:@"200"], @"%@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
 
     NSRange body = [reply rangeOfString:@"\r\n\r\n"];
     XCTAssertNotEqual(body.location, (NSUInteger)NSNotFound);
-    NSString* xml = [reply substringFromIndex:(body.location + body.length)];
-    NSString* illegal = [NSString stringWithFormat:@"%C", (unichar)0x01];
+    NSString *xml = [reply substringFromIndex:(body.location + body.length)];
+    NSString *illegal = [NSString stringWithFormat:@"%C", (unichar)0x01];
     XCTAssertFalse([xml containsString:illegal], @"the emitted XML must not contain a raw 0x01");
 
-    NSXMLParser* parser = [[NSXMLParser alloc] initWithData:UTF8Data(xml)];
+    NSXMLParser *parser = [[NSXMLParser alloc] initWithData:UTF8Data(xml)];
     XCTAssertTrue([parser parse], @"the emitted document must be well-formed XML: %@", parser.parserError);
 
     [server stop];
@@ -1010,18 +1010,18 @@
 // because the collection is there. "A transaction leaves nothing behind" applies to the
 // failure paths too, so the collection is removed before the error goes out.
 - (void)testMKCOLLeavesNothingBehindWhenItFailsAfterCreating {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     // An unparseable creation date fails the step that runs after the directory is made.
-    NSString* response = SendRawRequest(server.port, @"MKCOL /NewFolder HTTP/1.1\r\nHost: localhost\r\nX-WebServerKit-CreationDate: not-a-date\r\n\r\n");
+    NSString *response = SendRawRequest(server.port, @"MKCOL /NewFolder HTTP/1.1\r\nHost: localhost\r\nX-WebServerKit-CreationDate: not-a-date\r\n\r\n");
     BOOL const refused = ![response containsString:@" 201"];
     BOOL const present = [fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"NewFolder"]];
 
-    NSString* const detail = [NSString stringWithFormat:@"refused=%d present=%d response=%@", refused, present, [response substringToIndex:MIN((NSUInteger)40, response.length)]];
+    NSString *const detail = [NSString stringWithFormat:@"refused=%d present=%d response=%@", refused, present, [response substringToIndex:MIN((NSUInteger)40, response.length)]];
     XCTAssertFalse(refused && present, @"a refused MKCOL must not leave the collection behind: %@", detail);
 
     [server stop];
@@ -1033,22 +1033,22 @@
 // spellings have to be read — NSFileManager reports a full volume as a Cocoa error, while
 // EDQUOT only ever arrives as a POSIX errno under NSUnderlyingError.
 - (void)testFullVolumeErrorsMapToInsufficientStorage {
-    NSError* cocoa = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileWriteOutOfSpaceError userInfo:nil];
+    NSError *cocoa = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileWriteOutOfSpaceError userInfo:nil];
     XCTAssertEqual(WSKServerErrorStatusCodeForError(cocoa), kWSKHTTPStatusCode_InsufficientStorage);
 
-    NSError* posix = [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOSPC userInfo:nil];
+    NSError *posix = [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOSPC userInfo:nil];
     XCTAssertEqual(WSKServerErrorStatusCodeForError(posix), kWSKHTTPStatusCode_InsufficientStorage);
 
-    NSError* quota = [NSError errorWithDomain:NSPOSIXErrorDomain code:EDQUOT userInfo:nil];
+    NSError *quota = [NSError errorWithDomain:NSPOSIXErrorDomain code:EDQUOT userInfo:nil];
     XCTAssertEqual(WSKServerErrorStatusCodeForError(quota), kWSKHTTPStatusCode_InsufficientStorage);
 
     // The errno is usually buried under a Cocoa wrapper rather than at the top level.
-    NSDictionary* wrapped = @{NSUnderlyingErrorKey : [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOSPC userInfo:nil]};
-    NSError* nested = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileWriteUnknownError userInfo:wrapped];
+    NSDictionary *wrapped = @{NSUnderlyingErrorKey: [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOSPC userInfo:nil]};
+    NSError *nested = [NSError errorWithDomain:NSCocoaErrorDomain code:NSFileWriteUnknownError userInfo:wrapped];
     XCTAssertEqual(WSKServerErrorStatusCodeForError(nested), kWSKHTTPStatusCode_InsufficientStorage);
 
     // Everything else must stay 500, or this would relabel every failure as a full disk.
-    NSError* permissions = [NSError errorWithDomain:NSPOSIXErrorDomain code:EACCES userInfo:nil];
+    NSError *permissions = [NSError errorWithDomain:NSPOSIXErrorDomain code:EACCES userInfo:nil];
     XCTAssertEqual(WSKServerErrorStatusCodeForError(permissions), kWSKHTTPStatusCode_InternalServerError);
     XCTAssertEqual(WSKServerErrorStatusCodeForError(nil), kWSKHTTPStatusCode_InternalServerError);
 }
@@ -1069,46 +1069,46 @@
 // already accepted for DELETE, and consistency with it is the argument -- a client told it may not
 // move a file must not be able to move it by naming its parent.
 - (void)testCollectionMoveAndCopyAreVettedLikeTheDeleteThatWouldDestroyTheSameFiles {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
-    NSString* coll = [dir stringByAppendingPathComponent:@"Coll"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    NSString *coll = [dir stringByAppendingPathComponent:@"Coll"];
     XCTAssertTrue([fm createDirectoryAtPath:[coll stringByAppendingPathComponent:@"sub"] withIntermediateDirectories:YES attributes:nil error:NULL]);
     XCTAssertTrue([@"k" writeToFile:[coll stringByAppendingPathComponent:@"sub/secret.pem"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
     XCTAssertTrue([@"t" writeToFile:[coll stringByAppendingPathComponent:@"ok.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
     // A second collection holding ONLY allow-listed content: the half that must keep working.
-    NSString* clean = [dir stringByAppendingPathComponent:@"Clean"];
+    NSString *clean = [dir stringByAppendingPathComponent:@"Clean"];
     XCTAssertTrue([fm createDirectoryAtPath:[clean stringByAppendingPathComponent:@"sub"] withIntermediateDirectories:YES attributes:nil error:NULL]);
     XCTAssertTrue([@"t" writeToFile:[clean stringByAppendingPathComponent:@"sub/fine.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    server.allowedFileExtensions = @[ @"txt" ];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};  // Hoisted: commas split the macro
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    server.allowedFileExtensions = @[@"txt"];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};  // Hoisted: commas split the macro
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     // Control: the direct spelling is already refused, which is what makes the collection spelling
     // an inconsistency rather than a policy choice.
-    NSString* direct = SendRawRequest(server.port, @"MOVE /Coll/sub/secret.pem HTTP/1.1\r\nHost: localhost\r\nDestination: /taken.pem\r\nOverwrite: T\r\n\r\n");
+    NSString *direct = SendRawRequest(server.port, @"MOVE /Coll/sub/secret.pem HTTP/1.1\r\nHost: localhost\r\nDestination: /taken.pem\r\nOverwrite: T\r\n\r\n");
     XCTAssertTrue([direct hasPrefix:@"HTTP/1.1 403"], @"CONTROL: a direct MOVE of the file must already be refused: %@", direct);
 
-    NSString* moved = SendRawRequest(server.port, @"MOVE /Coll HTTP/1.1\r\nHost: localhost\r\nDestination: /Moved\r\nOverwrite: T\r\n\r\n");
+    NSString *moved = SendRawRequest(server.port, @"MOVE /Coll HTTP/1.1\r\nHost: localhost\r\nDestination: /Moved\r\nOverwrite: T\r\n\r\n");
     XCTAssertTrue([moved hasPrefix:@"HTTP/1.1 403"], @"MOVE of a collection must be vetted like the DELETE that would destroy the same files: %@", moved);
     XCTAssertTrue([fm fileExistsAtPath:[coll stringByAppendingPathComponent:@"sub/secret.pem"]], @"a refused MOVE must leave the file where it was");
     XCTAssertFalse([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"Moved"]], @"a refused MOVE must not create the destination");
 
-    NSString* copied = SendRawRequest(server.port, @"COPY /Coll HTTP/1.1\r\nHost: localhost\r\nDestination: /Copied\r\nOverwrite: T\r\n\r\n");
+    NSString *copied = SendRawRequest(server.port, @"COPY /Coll HTTP/1.1\r\nHost: localhost\r\nDestination: /Copied\r\nOverwrite: T\r\n\r\n");
     XCTAssertTrue([copied hasPrefix:@"HTTP/1.1 403"], @"COPY of a collection must be vetted too -- it duplicates what a direct request may not read: %@", copied);
     XCTAssertFalse([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"Copied"]], @"a refused COPY must leave nothing behind");
 
     // The half that must keep working, or the fix is "refuse every collection operation".
-    NSString* okMove = SendRawRequest(server.port, @"MOVE /Clean HTTP/1.1\r\nHost: localhost\r\nDestination: /CleanMoved\r\nOverwrite: T\r\n\r\n");
+    NSString *okMove = SendRawRequest(server.port, @"MOVE /Clean HTTP/1.1\r\nHost: localhost\r\nDestination: /CleanMoved\r\nOverwrite: T\r\n\r\n");
     XCTAssertTrue([okMove hasPrefix:@"HTTP/1.1 201"] || [okMove hasPrefix:@"HTTP/1.1 204"], @"a collection holding only allow-listed content must still move: %@", okMove);
     XCTAssertTrue([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"CleanMoved/sub/fine.txt"]], @"the permitted move must actually have happened");
 
-    NSString* okCopy = SendRawRequest(server.port, @"COPY /CleanMoved HTTP/1.1\r\nHost: localhost\r\nDestination: /CleanCopy\r\nOverwrite: T\r\n\r\n");
+    NSString *okCopy = SendRawRequest(server.port, @"COPY /CleanMoved HTTP/1.1\r\nHost: localhost\r\nDestination: /CleanCopy\r\nOverwrite: T\r\n\r\n");
     XCTAssertTrue([okCopy hasPrefix:@"HTTP/1.1 201"] || [okCopy hasPrefix:@"HTTP/1.1 204"], @"and must still copy: %@", okCopy);
 
     // And a plain allow-listed FILE is unaffected in both directions.
-    NSString* fileMove = SendRawRequest(server.port, @"MOVE /Coll/ok.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /ok2.txt\r\nOverwrite: T\r\n\r\n");
+    NSString *fileMove = SendRawRequest(server.port, @"MOVE /Coll/ok.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /ok2.txt\r\nOverwrite: T\r\n\r\n");
     XCTAssertTrue([fileMove hasPrefix:@"HTTP/1.1 201"] || [fileMove hasPrefix:@"HTTP/1.1 204"], @"an allow-listed file must still move: %@", fileMove);
 
     [server stop];
@@ -1128,17 +1128,17 @@
 // requests real clients send. Matching COPY exactly is the fix; the stricter rule is a separate
 // judgement with its own client risk.
 - (void)testMoveValidatesItsDepthHeaderLikeEveryOtherVerb {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};  // Hoisted: commas split the macro
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};  // Hoisted: commas split the macro
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     // Values MOVE must refuse, because every sibling verb refuses them.
-    for (NSString* bad in @[ @"banana", @"2", @"0,", @"infinite" ]) {
+    for (NSString *bad in @[@"banana", @"2", @"0,", @"infinite"]) {
         XCTAssertTrue([@"x" writeToFile:[dir stringByAppendingPathComponent:@"m.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
-        NSString* request = [NSString stringWithFormat:@"MOVE /m.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /moved.txt\r\nOverwrite: T\r\nDepth: %@\r\n\r\n", bad];
-        NSString* reply = SendRawRequest(server.port, request);
+        NSString *request = [NSString stringWithFormat:@"MOVE /m.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /moved.txt\r\nOverwrite: T\r\nDepth: %@\r\n\r\n", bad];
+        NSString *reply = SendRawRequest(server.port, request);
         XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 400"], @"MOVE with Depth: %@ must be refused as COPY refuses it: %@", bad, [reply substringToIndex:MIN((NSUInteger)32, reply.length)]);
         // "Refuse rather than half-succeed": the refusal must also have moved nothing.
         XCTAssertTrue([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"m.txt"]], @"a refused MOVE must leave the source in place (Depth: %@)", bad);
@@ -1147,17 +1147,17 @@
     }
 
     // And the spellings that MUST keep working, so the fix cannot be "refuse Depth on MOVE".
-    for (NSString* good in @[ @"infinity", @"0", @"Infinity" ]) {
+    for (NSString *good in @[@"infinity", @"0", @"Infinity"]) {
         XCTAssertTrue([@"x" writeToFile:[dir stringByAppendingPathComponent:@"k.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
-        NSString* request = [NSString stringWithFormat:@"MOVE /k.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /kept.txt\r\nOverwrite: T\r\nDepth: %@\r\n\r\n", good];
-        NSString* reply = SendRawRequest(server.port, request);
+        NSString *request = [NSString stringWithFormat:@"MOVE /k.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /kept.txt\r\nOverwrite: T\r\nDepth: %@\r\n\r\n", good];
+        NSString *reply = SendRawRequest(server.port, request);
         XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 201"] || [reply hasPrefix:@"HTTP/1.1 204"], @"MOVE with Depth: %@ must still succeed: %@", good, [reply substringToIndex:MIN((NSUInteger)32, reply.length)]);
         [fm removeItemAtPath:[dir stringByAppendingPathComponent:@"kept.txt"] error:NULL];
     }
 
     // No Depth header at all is the ordinary case and means infinity.
     XCTAssertTrue([@"x" writeToFile:[dir stringByAppendingPathComponent:@"n.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
-    NSString* plain = SendRawRequest(server.port, @"MOVE /n.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /plain.txt\r\nOverwrite: T\r\n\r\n");
+    NSString *plain = SendRawRequest(server.port, @"MOVE /n.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /plain.txt\r\nOverwrite: T\r\n\r\n");
     XCTAssertTrue([plain hasPrefix:@"HTTP/1.1 201"] || [plain hasPrefix:@"HTTP/1.1 204"], @"MOVE with no Depth must still succeed: %@", plain);
 
     [server stop];
@@ -1170,37 +1170,37 @@
 // list of the target's CURRENTLY SUPPORTED methods, and one shared constant meant the 405 a
 // non-Finder LOCK received listed LOCK inside its own refusal.
 - (void)testNonFinderClientsAreNotOfferedTheLockMethods {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* (^headerLine)(NSString*, NSString*) = ^NSString*(NSString* reply, NSString* name) {
+    NSString * (^headerLine)(NSString *, NSString *) = ^NSString *(NSString *reply, NSString *name) {
         NSRange start = [reply rangeOfString:[name stringByAppendingString:@": "] options:NSCaseInsensitiveSearch];
         if (start.location == NSNotFound) {
             return nil;
         }
-        NSString* rest = [reply substringFromIndex:NSMaxRange(start)];
+        NSString *rest = [reply substringFromIndex:NSMaxRange(start)];
         return [rest substringToIndex:[rest rangeOfString:@"\r\n"].location];
     };
 
-    NSString* genericOptions = SendRawRequest(server.port, @"OPTIONS / HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    NSString* genericAllow = headerLine(genericOptions, @"Allow");
+    NSString *genericOptions = SendRawRequest(server.port, @"OPTIONS / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *genericAllow = headerLine(genericOptions, @"Allow");
     XCTAssertNotNil(genericAllow, @"OPTIONS must carry Allow: %@", genericOptions);
     XCTAssertFalse([genericAllow containsString:@"LOCK"], @"a client whose LOCK answers 405 must not be offered it: %@", genericAllow);
     XCTAssertTrue([genericAllow containsString:@"PROPPATCH"], @"trimming LOCK must not drop the methods everyone gets: %@", genericAllow);
 
-    NSString* genericLock = SendRawRequest(server.port, @"LOCK / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
+    NSString *genericLock = SendRawRequest(server.port, @"LOCK / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
     XCTAssertTrue([genericLock hasPrefix:@"HTTP/1.1 405"], @"non-Finder LOCK stays 405: %@", [genericLock substringToIndex:MIN((NSUInteger)40, genericLock.length)]);
-    NSString* refusalAllow = headerLine(genericLock, @"Allow");
+    NSString *refusalAllow = headerLine(genericLock, @"Allow");
     XCTAssertNotNil(refusalAllow, @"RFC 9110 §15.5.6: the 405 must carry Allow: %@", genericLock);
     XCTAssertFalse([refusalAllow containsString:@"LOCK"], @"the 405 for LOCK listed LOCK as allowed: %@", refusalAllow);
 
-    NSString* finderOptions = SendRawRequest(server.port, @"OPTIONS / HTTP/1.1\r\nHost: localhost\r\nUser-Agent: WebDAVFS/3.0.1 (03018000) Darwin/13.1.0 (x86_64)\r\n\r\n");
-    NSString* finderAllow = headerLine(finderOptions, @"Allow");
+    NSString *finderOptions = SendRawRequest(server.port, @"OPTIONS / HTTP/1.1\r\nHost: localhost\r\nUser-Agent: WebDAVFS/3.0.1 (03018000) Darwin/13.1.0 (x86_64)\r\n\r\n");
+    NSString *finderAllow = headerLine(finderOptions, @"Allow");
     XCTAssertTrue([finderAllow containsString:@"UNLOCK"], @"Finder must keep being offered the lock methods: %@", finderAllow);
-    NSString* finderDAV = headerLine(finderOptions, @"DAV");
+    NSString *finderDAV = headerLine(finderOptions, @"DAV");
     XCTAssertEqualObjects(finderDAV, @"1, 2", @"Finder must keep seeing class 2: %@", finderOptions);
 
     [server stop];
@@ -1211,17 +1211,17 @@
 // header, not only inside the lockdiscovery body. Finder happens to read the body — the trace
 // corpus predates this header — but a conforming client is entitled to the header.
 - (void)testANewLockCarriesTheLockTokenResponseHeader {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
-    NSString* path = [dir stringByAppendingPathComponent:@"f.txt"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    NSString *path = [dir stringByAppendingPathComponent:@"f.txt"];
     XCTAssertTrue([@"LOCKED" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* body = @"<?xml version=\"1.0\" encoding=\"utf-8\"?><D:lockinfo xmlns:D=\"DAV:\"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>";
-    NSString* request = [NSString stringWithFormat:@"LOCK /f.txt HTTP/1.1\r\nHost: localhost\r\nUser-Agent: WebDAVFS/3.0.1 (03018000) Darwin/13.1.0 (x86_64)\r\nDepth: 0\r\nContent-Type: application/xml\r\nX-WebServerKit-LockToken: urn:uuid:AUDIT-LOCK-TOKEN\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)body.length, body];
-    NSString* reply = SendRawRequest(server.port, request);
+    NSString *body = @"<?xml version=\"1.0\" encoding=\"utf-8\"?><D:lockinfo xmlns:D=\"DAV:\"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>";
+    NSString *request = [NSString stringWithFormat:@"LOCK /f.txt HTTP/1.1\r\nHost: localhost\r\nUser-Agent: WebDAVFS/3.0.1 (03018000) Darwin/13.1.0 (x86_64)\r\nDepth: 0\r\nContent-Type: application/xml\r\nX-WebServerKit-LockToken: urn:uuid:AUDIT-LOCK-TOKEN\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)body.length, body];
+    NSString *reply = SendRawRequest(server.port, request);
     XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 200"], @"the Finder-shaped LOCK must succeed: %@", [reply substringToIndex:MIN((NSUInteger)60, reply.length)]);
 
     NSRange start = [reply rangeOfString:@"Lock-Token: " options:NSCaseInsensitiveSearch];
@@ -1233,8 +1233,8 @@
         return;
     }
 
-    NSString* rest = [reply substringFromIndex:NSMaxRange(start)];
-    NSString* token = [rest substringToIndex:[rest rangeOfString:@"\r\n"].location];
+    NSString *rest = [reply substringFromIndex:NSMaxRange(start)];
+    NSString *token = [rest substringToIndex:[rest rangeOfString:@"\r\n"].location];
     XCTAssertEqualObjects(token, @"<urn:uuid:AUDIT-LOCK-TOKEN>", @"the header must carry the minted token as a Coded-URL: %@", token);
     XCTAssertTrue([reply containsString:@"urn:uuid:AUDIT-LOCK-TOKEN"], @"the same token must appear in the lockdiscovery body");
 
@@ -1254,46 +1254,46 @@
 // either would refuse exactly that deployment. Same reasoning as the Host allow-list's removed
 // port comparison.
 - (void)testDestinationOnAnotherServerIsRefused {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* src = [dir stringByAppendingPathComponent:@"src.txt"];
-    NSString* exfil = [dir stringByAppendingPathComponent:@"exfil.txt"];
+    NSString *src = [dir stringByAppendingPathComponent:@"src.txt"];
+    NSString *exfil = [dir stringByAppendingPathComponent:@"exfil.txt"];
     XCTAssertTrue([@"SOURCE" writeToFile:src atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    NSString* (^verb)(NSString*, NSString*) = ^(NSString* method, NSString* destination) {
+    NSString * (^verb)(NSString *, NSString *) = ^(NSString *method, NSString *destination) {
         return SendRawRequest(server.port, [NSString stringWithFormat:@"%@ /src.txt HTTP/1.1\r\nHost: localhost\r\nDestination: %@\r\nOverwrite: T\r\n\r\n", method, destination]);
     };
 
-    NSArray<NSString*>* foreign = @[ @"http://evil.example/exfil.txt",
+    NSArray<NSString *> *foreign = @[@"http://evil.example/exfil.txt",
                                      @"http://evil.example:8080/exfil.txt",
                                      @"https://evil.example/exfil.txt",
-                                     @"http://127.0.0.1/exfil.txt" ];  // a different spelling is still not this Host
-    for (NSString* destination in foreign) {
-        NSString* copied = verb(@"COPY", destination);
+                                     @"http://127.0.0.1/exfil.txt"];  // a different spelling is still not this Host
+    for (NSString *destination in foreign) {
+        NSString *copied = verb(@"COPY", destination);
         XCTAssertTrue([copied hasPrefix:@"HTTP/1.1 502"], @"COPY to \"%@\" owes 502: %@", destination, [copied substringToIndex:MIN((NSUInteger)40, copied.length)]);
         XCTAssertFalse([fm fileExistsAtPath:exfil], @"COPY to \"%@\" created the file locally", destination);
     }
 
-    NSString* moved = verb(@"MOVE", @"http://elsewhere.example/gone.txt");
+    NSString *moved = verb(@"MOVE", @"http://elsewhere.example/gone.txt");
     XCTAssertTrue([moved hasPrefix:@"HTTP/1.1 502"], @"MOVE to another server owes 502: %@", [moved substringToIndex:MIN((NSUInteger)40, moved.length)]);
     XCTAssertTrue([fm fileExistsAtPath:src], @"a refused MOVE must leave the source alone");
     XCTAssertFalse([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"gone.txt"]], @"a refused MOVE must not write locally");
 
     // Every form a real client actually sends must keep working. All eight Destination values in
     // the recorded trace corpus are absolute URIs whose authority equals the request's Host.
-    NSString* sameAuthority = verb(@"COPY", @"http://localhost/copy1.txt");
+    NSString *sameAuthority = verb(@"COPY", @"http://localhost/copy1.txt");
     XCTAssertTrue([sameAuthority hasPrefix:@"HTTP/1.1 201"], @"an authority matching Host must be served: %@", [sameAuthority substringToIndex:MIN((NSUInteger)40, sameAuthority.length)]);
-    NSString* otherPort = verb(@"COPY", @"http://localhost:9999/copy2.txt");
+    NSString *otherPort = verb(@"COPY", @"http://localhost:9999/copy2.txt");
     XCTAssertTrue([otherPort hasPrefix:@"HTTP/1.1 201"], @"the port must not be compared (port-translating hop): %@", [otherPort substringToIndex:MIN((NSUInteger)40, otherPort.length)]);
-    NSString* otherScheme = verb(@"COPY", @"https://localhost/copy3.txt");
+    NSString *otherScheme = verb(@"COPY", @"https://localhost/copy3.txt");
     XCTAssertTrue([otherScheme hasPrefix:@"HTTP/1.1 201"], @"the scheme must not be compared (TLS terminated upstream): %@", [otherScheme substringToIndex:MIN((NSUInteger)40, otherScheme.length)]);
-    NSString* pathOnly = verb(@"COPY", @"/copy4.txt");
+    NSString *pathOnly = verb(@"COPY", @"/copy4.txt");
     XCTAssertTrue([pathOnly hasPrefix:@"HTTP/1.1 201"], @"a path-only Destination names this server: %@", [pathOnly substringToIndex:MIN((NSUInteger)40, pathOnly.length)]);
-    NSString* rootDotted = verb(@"COPY", @"http://localhost./copy5.txt");
+    NSString *rootDotted = verb(@"COPY", @"http://localhost./copy5.txt");
     XCTAssertTrue([rootDotted hasPrefix:@"HTTP/1.1 201"], @"the DNS root label must normalize: %@", [rootDotted substringToIndex:MIN((NSUInteger)40, rootDotted.length)]);
 
     [server stop];
@@ -1309,33 +1309,32 @@
 //
 // Refused on headers, before the body is read, so a large partial PUT never reaches the disk.
 - (void)testPUTCarryingContentRangeIsRefused {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* existing = [dir stringByAppendingPathComponent:@"existing.txt"];
+    NSString *existing = [dir stringByAppendingPathComponent:@"existing.txt"];
     XCTAssertTrue([@"ORIGINAL" writeToFile:existing atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    NSString* (^put)(NSString*, NSString*, NSString*) = ^(NSString* name, NSString* extra, NSString* body) {
+    NSString * (^put)(NSString *, NSString *, NSString *) = ^(NSString *name, NSString *extra, NSString *body) {
         return SendRawRequest(server.port, [NSString stringWithFormat:@"PUT /%@ HTTP/1.1\r\nHost: localhost\r\n%@Content-Length: %lu\r\n\r\n%@", name, extra, (unsigned long)body.length, body]);
     };
 
-    NSString* partial = put(@"partial.txt", @"Content-Range: bytes 0-2/10\r\n", @"abc");
+    NSString *partial = put(@"partial.txt", @"Content-Range: bytes 0-2/10\r\n", @"abc");
     XCTAssertTrue([partial hasPrefix:@"HTTP/1.1 400"], @"a PUT carrying Content-Range owes 400: %@", [partial substringToIndex:MIN((NSUInteger)40, partial.length)]);
     XCTAssertFalse([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"partial.txt"]], @"the refused PUT still created the file");
 
-    NSString* offset = put(@"existing.txt", @"Content-Range: bytes 5-7/10\r\n", @"xyz");
+    NSString *offset = put(@"existing.txt", @"Content-Range: bytes 5-7/10\r\n", @"xyz");
     XCTAssertTrue([offset hasPrefix:@"HTTP/1.1 400"], @"a PUT carrying Content-Range owes 400: %@", [offset substringToIndex:MIN((NSUInteger)40, offset.length)]);
-    XCTAssertEqualObjects([NSString stringWithContentsOfFile:existing encoding:NSUTF8StringEncoding error:NULL], @"ORIGINAL",
-                          @"the refused PUT truncated an existing file");
+    XCTAssertEqualObjects([NSString stringWithContentsOfFile:existing encoding:NSUTF8StringEncoding error:NULL], @"ORIGINAL", @"the refused PUT truncated an existing file");
 
     // An ordinary PUT is untouched, and so is a Content-Range on a method where it has no
     // defined meaning (RFC 9110 scopes the refusal to PUT).
-    NSString* plain = put(@"plain.txt", @"", @"whole");
+    NSString *plain = put(@"plain.txt", @"", @"whole");
     XCTAssertTrue([plain hasPrefix:@"HTTP/1.1 201"], @"an ordinary PUT must still succeed: %@", [plain substringToIndex:MIN((NSUInteger)40, plain.length)]);
-    NSString* getWithRange = SendRawRequest(server.port, @"GET /existing.txt HTTP/1.1\r\nHost: localhost\r\nContent-Range: bytes 0-2/10\r\n\r\n");
+    NSString *getWithRange = SendRawRequest(server.port, @"GET /existing.txt HTTP/1.1\r\nHost: localhost\r\nContent-Range: bytes 0-2/10\r\n\r\n");
     XCTAssertTrue([getWithRange hasPrefix:@"HTTP/1.1 200"], @"Content-Range on a GET is meaningless, not fatal: %@", [getWithRange substringToIndex:MIN((NSUInteger)40, getWithRange.length)]);
 
     [server stop];
@@ -1348,23 +1347,26 @@
 // valid on a plain FILE, where it genuinely means the same thing as infinity, which is why the two
 // halves are pinned together here.
 - (void)testDeleteRefusesDepthZeroOnACollectionButNotOnAFile {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    BOOL (^makeTree)(NSString*) = ^(NSString* name) {
-        NSString* path = [dir stringByAppendingPathComponent:name];
+    BOOL (^makeTree)(NSString *) = ^(NSString *name) {
+        NSString *path = [dir stringByAppendingPathComponent:name];
         return (BOOL)([fm createDirectoryAtPath:path withIntermediateDirectories:YES attributes:nil error:NULL] &&
-                      [@"inner" writeToFile:[path stringByAppendingPathComponent:@"inner.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+                      [@"inner" writeToFile:[path stringByAppendingPathComponent:@"inner.txt"]
+                                 atomically:YES
+                                   encoding:NSUTF8StringEncoding
+                                      error:NULL]);
     };
-    NSString* (^del)(NSString*, NSString*) = ^(NSString* name, NSString* extra) {
+    NSString * (^del)(NSString *, NSString *) = ^(NSString *name, NSString *extra) {
         return SendRawRequest(server.port, [NSString stringWithFormat:@"DELETE /%@ HTTP/1.1\r\nHost: localhost\r\n%@\r\n", name, extra]);
     };
 
     XCTAssertTrue(makeTree(@"shallow"));
-    NSString* refused = del(@"shallow", @"Depth: 0\r\n");
+    NSString *refused = del(@"shallow", @"Depth: 0\r\n");
     XCTAssertTrue([refused hasPrefix:@"HTTP/1.1 400"], @"DELETE of a collection with Depth:0 owes 400: %@", [refused substringToIndex:MIN((NSUInteger)40, refused.length)]);
     XCTAssertTrue([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"shallow/inner.txt"]], @"the refused DELETE destroyed the subtree anyway");
 
@@ -1377,7 +1379,7 @@
     XCTAssertFalse([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"infinite"]]);
 
     // A plain file has no internal members, so Depth:0 means exactly what infinity means.
-    NSString* leaf = [dir stringByAppendingPathComponent:@"leaf.txt"];
+    NSString *leaf = [dir stringByAppendingPathComponent:@"leaf.txt"];
     XCTAssertTrue([@"leaf" writeToFile:leaf atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
     XCTAssertTrue([del(@"leaf.txt", @"Depth: 0\r\n") hasPrefix:@"HTTP/1.1 204"], @"Depth:0 must still delete a plain file");
     XCTAssertFalse([fm fileExistsAtPath:leaf]);
@@ -1394,44 +1396,47 @@
 // getetag comes from WSKEntityTagForFileInfo — the same single formatter GET uses — so the equality
 // asserted here is the property that stops the two surfaces drifting apart again.
 - (void)testPropfindPublishesTheValidatorAndTypeProperties {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
-    NSString* file = [dir stringByAppendingPathComponent:@"page.html"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    NSString *file = [dir stringByAppendingPathComponent:@"page.html"];
     XCTAssertTrue([@"<b>hi</b>" writeToFile:file atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
-    NSDate* settled = [NSDate dateWithTimeIntervalSinceNow:-30.0];
-    XCTAssertTrue([fm setAttributes:@{NSFileModificationDate : settled} ofItemAtPath:file error:NULL]);
+    NSDate *settled = [NSDate dateWithTimeIntervalSinceNow:-30.0];
+    XCTAssertTrue([fm setAttributes:@{NSFileModificationDate: settled} ofItemAtPath:file error:NULL]);
     XCTAssertTrue([fm createDirectoryAtPath:[dir stringByAppendingPathComponent:@"folder"] withIntermediateDirectories:YES attributes:nil error:NULL]);
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* get = SendRawRequest(server.port, @"GET /page.html HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *get = SendRawRequest(server.port, @"GET /page.html HTTP/1.1\r\nHost: localhost\r\n\r\n");
     NSRange tagStart = [get rangeOfString:@"Etag: " options:NSCaseInsensitiveSearch];
     XCTAssertNotEqual(tagStart.location, (NSUInteger)NSNotFound, @"fixture GET carried no ETag: %@", get);
-    NSString* rest = [get substringFromIndex:NSMaxRange(tagStart)];
-    NSString* eTag = [rest substringToIndex:[rest rangeOfString:@"\r\n"].location];
+    NSString *rest = [get substringFromIndex:NSMaxRange(tagStart)];
+    NSString *eTag = [rest substringToIndex:[rest rangeOfString:@"\r\n"].location];
 
-    NSString* allprop = SendRawRequest(server.port, @"PROPFIND /page.html HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
+    NSString *allprop = SendRawRequest(server.port, @"PROPFIND /page.html HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
     XCTAssertTrue([allprop hasPrefix:@"HTTP/1.1 207"], @"%@", [allprop substringToIndex:MIN((NSUInteger)40, allprop.length)]);
     // Hoisted: a comma inside a bracketed expression still splits a macro's arguments.
-    NSString* expectedTagElement = [NSString stringWithFormat:@"<D:getetag>%@</D:getetag>", eTag];
+    NSString *expectedTagElement = [NSString stringWithFormat:@"<D:getetag>%@</D:getetag>", eTag];
     XCTAssertTrue([allprop containsString:expectedTagElement],
-                  @"PROPFIND must publish the same entity tag GET issues (%@): %@", eTag, allprop);
+                  @"PROPFIND must publish the same entity tag GET issues (%@): %@",
+                  eTag,
+                  allprop);
     XCTAssertTrue([allprop containsString:@"<D:getcontenttype>text/html</D:getcontenttype>"], @"getcontenttype missing: %@", allprop);
     XCTAssertTrue([allprop containsString:@"<D:displayname>page.html</D:displayname>"], @"displayname missing: %@", allprop);
     XCTAssertTrue([allprop containsString:@"<D:lockdiscovery/>"], @"lockdiscovery missing: %@", allprop);
 
     // Named requests must answer 200 for these now, not the 404 propstat they used to.
-    NSString* namedBody = @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:prop><D:getetag/><D:getcontenttype/><D:displayname/></D:prop></D:propfind>";
-    NSString* namedRequest = [NSString stringWithFormat:@"PROPFIND /page.html HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@",
-                                                        (unsigned long)namedBody.length, namedBody];
-    NSString* named = SendRawRequest(server.port, namedRequest);
+    NSString *namedBody = @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:prop><D:getetag/><D:getcontenttype/><D:displayname/></D:prop></D:propfind>";
+    NSString *namedRequest = [NSString stringWithFormat:@"PROPFIND /page.html HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@",
+                                                        (unsigned long)namedBody.length,
+                                                        namedBody];
+    NSString *named = SendRawRequest(server.port, namedRequest);
     XCTAssertFalse([named containsString:@"404 Not Found"], @"the named properties are implemented and must not be reported missing: %@", named);
     XCTAssertTrue([named containsString:eTag], @"a named getetag request must carry the tag: %@", named);
 
     // A collection has no entity tag and no content type, and must say so rather than inventing one.
-    NSString* collection = SendRawRequest(server.port, @"PROPFIND /folder HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
+    NSString *collection = SendRawRequest(server.port, @"PROPFIND /folder HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
     XCTAssertTrue([collection containsString:@"<D:displayname>folder</D:displayname>"], @"a collection owes a displayname: %@", collection);
     XCTAssertFalse([collection containsString:@"<D:getetag>"], @"a collection has no entity tag: %@", collection);
     XCTAssertFalse([collection containsString:@"<D:getcontenttype>"], @"a collection has no content type: %@", collection);
@@ -1439,7 +1444,7 @@
     // Class 2 is advertised to Finder alone (see -testNonFinderClientsAreNotOfferedTheLockMethods),
     // and RFC 4918 §18.2 makes DAV:supportedlock part of that compliance class. The lock stub
     // stores nothing, so an EMPTY lockdiscovery is the truthful answer for every client.
-    NSString* finder = SendRawRequest(server.port, @"PROPFIND /page.html HTTP/1.1\r\nHost: localhost\r\nUser-Agent: WebDAVFS/3.0.1 (03018000) Darwin/13.1.0 (x86_64)\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
+    NSString *finder = SendRawRequest(server.port, @"PROPFIND /page.html HTTP/1.1\r\nHost: localhost\r\nUser-Agent: WebDAVFS/3.0.1 (03018000) Darwin/13.1.0 (x86_64)\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
     XCTAssertTrue([finder containsString:@"<D:lockentry>"], @"a class-2 client owes a supportedlock entry: %@", finder);
     XCTAssertTrue([finder containsString:@"<D:exclusive/>"], @"the advertised lock scope is exclusive write: %@", finder);
     XCTAssertTrue([finder containsString:@"<D:lockdiscovery/>"], @"nothing is locked, because nothing is stored: %@", finder);
@@ -1457,15 +1462,15 @@
 // fix that created it. Asserted over every name rather than just displayname, so the next property
 // to gain a stored form cannot reintroduce it quietly.
 - (void)testPropnameListsEveryPropertyExactlyOnce {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
     XCTAssertTrue([@"payload" writeToFile:[dir stringByAppendingPathComponent:@"f.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSUInteger (^countOf)(NSString*, NSString*) = ^(NSString* haystack, NSString* needle) {
+    NSUInteger (^countOf)(NSString *, NSString *) = ^(NSString *haystack, NSString *needle) {
         NSUInteger found = 0;
         NSRange scan = NSMakeRange(0, haystack.length);
         while (scan.length > 0) {
@@ -1479,34 +1484,32 @@
         }
         return found;
     };
-    NSString* (^propname)(void) = ^{
-        NSString* body = @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:propname/></D:propfind>";
-        NSString* request = [NSString stringWithFormat:@"PROPFIND /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)body.length, body];
+    NSString * (^propname)(void) = ^{
+        NSString *body = @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:propname/></D:propfind>";
+        NSString *request = [NSString stringWithFormat:@"PROPFIND /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)body.length, body];
         return SendRawRequest(server.port, request);
     };
 
-    NSArray<NSString*>* names = @[ @"resourcetype", @"creationdate", @"displayname", @"supportedlock",
-                                   @"lockdiscovery", @"getlastmodified", @"getcontentlength",
-                                   @"getetag", @"getcontenttype" ];
+    NSArray<NSString *> *names = @[@"resourcetype", @"creationdate", @"displayname", @"supportedlock", @"lockdiscovery", @"getlastmodified", @"getcontentlength", @"getetag", @"getcontenttype"];
 
     // Nothing stored yet: the baseline every name must already satisfy.
-    NSString* before = propname();
+    NSString *before = propname();
     XCTAssertTrue([before hasPrefix:@"HTTP/1.1 207"], @"%@", [before substringToIndex:MIN((NSUInteger)40, before.length)]);
-    for (NSString* name in names) {
-        NSString* element = [NSString stringWithFormat:@"<D:%@/>", name];
+    for (NSString *name in names) {
+        NSString *element = [NSString stringWithFormat:@"<D:%@/>", name];
         XCTAssertEqual(countOf(before, element), (NSUInteger)1, @"%@ listed %lu times: %@", name, (unsigned long)countOf(before, element), before);
     }
 
     // Store a displayname AND a custom property, then ask again. Both must be listed once.
-    NSString* setBody = @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:z=\"urn:z\"><D:set><D:prop><D:displayname>Stored</D:displayname><z:custom>v</z:custom></D:prop></D:set></D:propertyupdate>";
-    NSString* patchRequest = [NSString stringWithFormat:@"PROPPATCH /f.txt HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)setBody.length, setBody];
-    NSString* patched = SendRawRequest(server.port, patchRequest);
+    NSString *setBody = @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:z=\"urn:z\"><D:set><D:prop><D:displayname>Stored</D:displayname><z:custom>v</z:custom></D:prop></D:set></D:propertyupdate>";
+    NSString *patchRequest = [NSString stringWithFormat:@"PROPPATCH /f.txt HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)setBody.length, setBody];
+    NSString *patched = SendRawRequest(server.port, patchRequest);
     XCTAssertTrue([patched hasPrefix:@"HTTP/1.1 207"], @"%@", [patched substringToIndex:MIN((NSUInteger)40, patched.length)]);
     XCTAssertFalse([patched containsString:@"403 Forbidden"], @"both properties are settable: %@", patched);
 
-    NSString* after = propname();
-    for (NSString* name in names) {
-        NSString* element = [NSString stringWithFormat:@"<D:%@/>", name];
+    NSString *after = propname();
+    for (NSString *name in names) {
+        NSString *element = [NSString stringWithFormat:@"<D:%@/>", name];
         XCTAssertEqual(countOf(after, element), (NSUInteger)1, @"with a value stored, %@ listed %lu times: %@", name, (unsigned long)countOf(after, element), after);
     }
     XCTAssertEqual(countOf(after, @"custom"), (NSUInteger)1, @"a stored custom property must be listed once: %@", after);
@@ -1525,44 +1528,44 @@
 // An EMPTY authority ("///path") means this server per §4.2 and must keep working, which is the case
 // a naive "reject anything starting with //" fix breaks.
 - (void)testProtocolRelativeDestinationIsJudgedLikeTheAbsoluteForm {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* src = [dir stringByAppendingPathComponent:@"src.txt"];
+    NSString *src = [dir stringByAppendingPathComponent:@"src.txt"];
     XCTAssertTrue([@"SOURCE" writeToFile:src atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    NSString* (^verb)(NSString*, NSString*) = ^(NSString* method, NSString* destination) {
+    NSString * (^verb)(NSString *, NSString *) = ^(NSString *method, NSString *destination) {
         return SendRawRequest(server.port, [NSString stringWithFormat:@"%@ /src.txt HTTP/1.1\r\nHost: localhost\r\nDestination: %@\r\nOverwrite: T\r\n\r\n", method, destination]);
     };
 
     // The collection the bypass needs, created exactly as a client would.
-    NSString* mkcol = SendRawRequest(server.port, @"MKCOL /evil.example HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
+    NSString *mkcol = SendRawRequest(server.port, @"MKCOL /evil.example HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
     XCTAssertTrue([mkcol hasPrefix:@"HTTP/1.1 201"], @"fixture MKCOL failed: %@", [mkcol substringToIndex:MIN((NSUInteger)40, mkcol.length)]);
 
-    NSString* copied = verb(@"COPY", @"//evil.example/stolen.txt");
+    NSString *copied = verb(@"COPY", @"//evil.example/stolen.txt");
     XCTAssertTrue([copied hasPrefix:@"HTTP/1.1 502"], @"a protocol-relative foreign authority owes 502: %@", [copied substringToIndex:MIN((NSUInteger)40, copied.length)]);
     XCTAssertFalse([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"evil.example/stolen.txt"]], @"the COPY was performed locally");
 
-    NSString* moved = verb(@"MOVE", @"//evil.example/moved.txt");
+    NSString *moved = verb(@"MOVE", @"//evil.example/moved.txt");
     XCTAssertTrue([moved hasPrefix:@"HTTP/1.1 502"], @"a protocol-relative foreign authority owes 502: %@", [moved substringToIndex:MIN((NSUInteger)40, moved.length)]);
     XCTAssertTrue([fm fileExistsAtPath:src], @"a refused MOVE must leave the source alone");
     XCTAssertFalse([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"evil.example/moved.txt"]], @"the MOVE was performed locally");
 
     // A protocol-relative destination naming THIS server is legitimate and must work.
-    NSString* ours = verb(@"COPY", @"//localhost/ours.txt");
+    NSString *ours = verb(@"COPY", @"//localhost/ours.txt");
     XCTAssertTrue([ours hasPrefix:@"HTTP/1.1 201"], @"a protocol-relative destination naming this Host must be served: %@", [ours substringToIndex:MIN((NSUInteger)40, ours.length)]);
     XCTAssertTrue([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"ours.txt"]]);
 
     // "///path" is an EMPTY authority, which per §4.2 means this server.
-    NSString* empty = verb(@"COPY", @"///empty-authority.txt");
+    NSString *empty = verb(@"COPY", @"///empty-authority.txt");
     XCTAssertTrue([empty hasPrefix:@"HTTP/1.1 201"], @"an empty authority names this server: %@", [empty substringToIndex:MIN((NSUInteger)40, empty.length)]);
     XCTAssertTrue([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"empty-authority.txt"]]);
 
     // And the plain path form, which carries no authority at all.
-    NSString* pathOnly = verb(@"COPY", @"/path-only.txt");
+    NSString *pathOnly = verb(@"COPY", @"/path-only.txt");
     XCTAssertTrue([pathOnly hasPrefix:@"HTTP/1.1 201"], @"a path-only Destination must be served: %@", [pathOnly substringToIndex:MIN((NSUInteger)40, pathOnly.length)]);
 
     [server stop];
@@ -1577,25 +1580,25 @@
 // says DAV:displayname "SHOULD NOT be protected", and pre-fix a client could PROPPATCH it and read
 // it back. A stored value now wins, with the derived name as the fallback.
 - (void)testDisplayNameIsTheRealNameAndRemainsSettable {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
 
     // Written without a format string: these names are all percent hazards.
-    NSArray<NSString*>* names = @[ @"100%20off.txt", @"50%.txt", @"%2Fnot-a-slash.txt", @"%%%.txt", @"plain.txt" ];
-    for (NSString* name in names) {
+    NSArray<NSString *> *names = @[@"100%20off.txt", @"50%.txt", @"%2Fnot-a-slash.txt", @"%%%.txt", @"plain.txt"];
+    for (NSString *name in names) {
         XCTAssertTrue([@"payload" writeToFile:[dir stringByAppendingPathComponent:name] atomically:YES encoding:NSUTF8StringEncoding error:NULL], @"fixture %@", name);
     }
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* listing = SendRawRequest(server.port, @"PROPFIND / HTTP/1.1\r\nHost: localhost\r\nDepth: 1\r\nContent-Length: 0\r\n\r\n");
+    NSString *listing = SendRawRequest(server.port, @"PROPFIND / HTTP/1.1\r\nHost: localhost\r\nDepth: 1\r\nContent-Length: 0\r\n\r\n");
     XCTAssertTrue([listing hasPrefix:@"HTTP/1.1 207"], @"%@", [listing substringToIndex:MIN((NSUInteger)40, listing.length)]);
 
-    for (NSString* name in names) {
+    for (NSString *name in names) {
         // The element carries the name verbatim; none of these need XML escaping.
-        NSString* expected = [[@"<D:displayname>" stringByAppendingString:name] stringByAppendingString:@"</D:displayname>"];
+        NSString *expected = [[@"<D:displayname>" stringByAppendingString:name] stringByAppendingString:@"</D:displayname>"];
         XCTAssertTrue([listing containsString:expected], @"displayname must be the name on disk (%@) — listing: %@", name, listing);
     }
     // Exactly one empty displayname is expected and correct: the share ROOT's. Its client-facing
@@ -1615,13 +1618,13 @@
     XCTAssertEqual(empties, (NSUInteger)1, @"only the root may publish an empty displayname, found %lu: %@", (unsigned long)empties, listing);
 
     // Settable, and a stored value wins over the derived one.
-    NSString* setBody = @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\"><D:set><D:prop><D:displayname>Friendly Name</D:displayname></D:prop></D:set></D:propertyupdate>";
-    NSString* patchRequest = [NSString stringWithFormat:@"PROPPATCH /plain.txt HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)setBody.length, setBody];
-    NSString* patched = SendRawRequest(server.port, patchRequest);
+    NSString *setBody = @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\"><D:set><D:prop><D:displayname>Friendly Name</D:displayname></D:prop></D:set></D:propertyupdate>";
+    NSString *patchRequest = [NSString stringWithFormat:@"PROPPATCH /plain.txt HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)setBody.length, setBody];
+    NSString *patched = SendRawRequest(server.port, patchRequest);
     XCTAssertTrue([patched hasPrefix:@"HTTP/1.1 207"], @"%@", [patched substringToIndex:MIN((NSUInteger)40, patched.length)]);
     XCTAssertFalse([patched containsString:@"403 Forbidden"], @"§15.2 makes displayname settable: %@", patched);
 
-    NSString* afterSet = SendRawRequest(server.port, @"PROPFIND /plain.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
+    NSString *afterSet = SendRawRequest(server.port, @"PROPFIND /plain.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
     XCTAssertTrue([afterSet containsString:@"<D:displayname>Friendly Name</D:displayname>"], @"a stored displayname must be published: %@", afterSet);
 
     // Exactly one element — the stored value must not ALSO come out of the dead-property loop.
@@ -1639,15 +1642,15 @@
     XCTAssertEqual(occurrences, (NSUInteger)1, @"displayname was emitted %lu times: %@", (unsigned long)occurrences, afterSet);
 
     // Removing the stored value falls back to the derived name.
-    NSString* removeBody = @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\"><D:remove><D:prop><D:displayname/></D:prop></D:remove></D:propertyupdate>";
-    NSString* removeRequest = [NSString stringWithFormat:@"PROPPATCH /plain.txt HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)removeBody.length, removeBody];
+    NSString *removeBody = @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\"><D:remove><D:prop><D:displayname/></D:prop></D:remove></D:propertyupdate>";
+    NSString *removeRequest = [NSString stringWithFormat:@"PROPPATCH /plain.txt HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)removeBody.length, removeBody];
     XCTAssertTrue([SendRawRequest(server.port, removeRequest) hasPrefix:@"HTTP/1.1 207"]);
-    NSString* afterRemove = SendRawRequest(server.port, @"PROPFIND /plain.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
+    NSString *afterRemove = SendRawRequest(server.port, @"PROPFIND /plain.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
     XCTAssertTrue([afterRemove containsString:@"<D:displayname>plain.txt</D:displayname>"], @"removing the stored name must fall back to the derived one: %@", afterRemove);
 
     // The other live properties stay protected — this change is about displayname alone.
-    NSString* etagBody = @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\"><D:set><D:prop><D:getetag>x</D:getetag></D:prop></D:set></D:propertyupdate>";
-    NSString* etagRequest = [NSString stringWithFormat:@"PROPPATCH /plain.txt HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)etagBody.length, etagBody];
+    NSString *etagBody = @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\"><D:set><D:prop><D:getetag>x</D:getetag></D:prop></D:set></D:propertyupdate>";
+    NSString *etagRequest = [NSString stringWithFormat:@"PROPPATCH /plain.txt HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)etagBody.length, etagBody];
     XCTAssertTrue([SendRawRequest(server.port, etagRequest) containsString:@"403 Forbidden"], @"getetag must stay protected");
 
     [server stop];
@@ -1664,20 +1667,20 @@
 // the write is refused whole: PROPPATCH is atomic per §9.2, so a request that would cross the cap
 // stores nothing at all rather than filling to the brim.
 - (void)testDAVProppatchBoundsCumulativeDeadPropertyStorage {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
-    NSString* path = [dir stringByAppendingPathComponent:@"f.txt"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    NSString *path = [dir stringByAppendingPathComponent:@"f.txt"];
     XCTAssertTrue([@"data" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* (^proppatch)(NSString*) = ^(NSString* body) {
+    NSString * (^proppatch)(NSString *) = ^(NSString *body) {
         return SendRawRequest(server.port, [NSString stringWithFormat:@"PROPPATCH /f.txt HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)body.length, body]);
     };
-    NSString* (^store)(NSString*, NSUInteger) = ^(NSString* name, NSUInteger valueLength) {
-        NSString* value = [@"" stringByPaddingToLength:valueLength withString:@"x" startingAtIndex:0];
+    NSString * (^store)(NSString *, NSUInteger) = ^(NSString *name, NSUInteger valueLength) {
+        NSString *value = [@"" stringByPaddingToLength:valueLength withString:@"x" startingAtIndex:0];
         return proppatch([NSString stringWithFormat:@"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:X=\"urn:example\"><D:set><D:prop><X:%@>%@</X:%@></D:prop></D:set></D:propertyupdate>", name, value, name]);
     };
 
@@ -1686,7 +1689,7 @@
 
     // Fill past the cap. Each request stays well under the per-request body limit, so only a
     // CUMULATIVE bound can stop this; without one every one of these succeeds.
-    NSString* lastReply = nil;
+    NSString *lastReply = nil;
     BOOL refused = NO;
     NSUInteger stored = 0;
 
@@ -1703,9 +1706,9 @@
     XCTAssertTrue([lastReply hasPrefix:@"HTTP/1.1 207"], @"the refusal is still a multistatus: %@", [lastReply substringToIndex:MIN((NSUInteger)40, lastReply.length)]);
 
     // Atomic: the request that crossed the cap stored nothing, while everything before it survives.
-    NSString* readback = SendRawRequest(server.port, @"PROPFIND /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
+    NSString *readback = SendRawRequest(server.port, @"PROPFIND /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
     // Hoisted: a comma inside brackets splits the macro's arguments (the project's recurring trap).
-    NSString* refusedName = [NSString stringWithFormat:@"bulk%lu", (unsigned long)stored];
+    NSString *refusedName = [NSString stringWithFormat:@"bulk%lu", (unsigned long)stored];
     XCTAssertFalse([readback containsString:refusedName], @"the refused property was stored anyway: %@", readback);
     XCTAssertTrue([readback containsString:@"small"], @"a property stored before the cap was lost: %@", readback);
 
@@ -1715,7 +1718,7 @@
     XCTAssertLessThanOrEqual(attributeSize, (ssize_t)(64 * 1024), @"stored dead properties exceeded the cap: %zd bytes", attributeSize);
 
     // Removal still works at the cap — the store must not become unshrinkable once full.
-    NSString* removal = proppatch(@"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:X=\"urn:example\"><D:remove><D:prop><X:bulk0/></D:prop></D:remove></D:propertyupdate>");
+    NSString *removal = proppatch(@"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:X=\"urn:example\"><D:remove><D:prop><X:bulk0/></D:prop></D:remove></D:propertyupdate>");
     XCTAssertTrue([removal containsString:@"200 OK"], @"a removal must still apply when storage is full: %@", removal);
 
     [server stop];
@@ -1731,32 +1734,34 @@
 // a multi-hundred-MB build to the link's own length. Depth:0 of the alias URI was always correct
 // (the follow-resolver hands that path in already resolved); this pins Depth:1 to the same answer.
 - (void)testDAVDepthOnePublishesTargetMetadataForASymlinkAlias {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
-    NSString* target = [dir stringByAppendingPathComponent:@"build.bin"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    NSString *target = [dir stringByAppendingPathComponent:@"build.bin"];
     XCTAssertTrue([[NSMutableData dataWithLength:1024] writeToFile:target atomically:YES]);
     // An mtime safely outside its timestamp bucket, so the seal cannot be the reason a date is absent.
-    XCTAssertTrue([fm setAttributes:@{NSFileModificationDate : [NSDate dateWithTimeIntervalSinceNow:-3600]} ofItemAtPath:target error:NULL]);
+    XCTAssertTrue([fm setAttributes:@{NSFileModificationDate: [NSDate dateWithTimeIntervalSinceNow:-3600]} ofItemAtPath:target error:NULL]);
     XCTAssertTrue([fm createSymbolicLinkAtPath:[dir stringByAppendingPathComponent:@"alias.bin"] withDestinationPath:@"build.bin" error:NULL]);
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* listing = SendRawRequest(server.port, @"PROPFIND / HTTP/1.1\r\nHost: localhost\r\nDepth: 1\r\nContent-Length: 0\r\n\r\n");
+    NSString *listing = SendRawRequest(server.port, @"PROPFIND / HTTP/1.1\r\nHost: localhost\r\nDepth: 1\r\nContent-Length: 0\r\n\r\n");
     [server stop];
     [fm removeItemAtPath:dir error:NULL];
 
     NSRange aliasHref = [listing rangeOfString:@"<D:href>/alias.bin</D:href>"];
     XCTAssertTrue(aliasHref.location != NSNotFound, @"the alias vanished from the listing: %@", listing);
-    NSString* tail = [listing substringFromIndex:NSMaxRange(aliasHref)];
+    NSString *tail = [listing substringFromIndex:NSMaxRange(aliasHref)];
     NSRange entryEnd = [tail rangeOfString:@"</D:response>"];
     XCTAssertTrue(entryEnd.location != NSNotFound);
-    NSString* entry = [tail substringToIndex:entryEnd.location];
+    NSString *entry = [tail substringToIndex:entryEnd.location];
     XCTAssertTrue([entry containsString:@"<D:getcontentlength>1024</D:getcontentlength>"],
-                  @"the alias's getcontentlength must be the 1,024 bytes a GET serves, not the link inode's: %@", entry);
+                  @"the alias's getcontentlength must be the 1,024 bytes a GET serves, not the link inode's: %@",
+                  entry);
     XCTAssertTrue([entry containsString:@"<D:getlastmodified>"],
-                  @"the alias entry published no date validator at all: %@", entry);
+                  @"the alias entry published no date validator at all: %@",
+                  entry);
 }
 
 // RFC 9110 §13.2.2 orders the precondition steps but does not make step 3 conditional on steps 1
@@ -1769,33 +1774,32 @@
 // client checks its own assumptions. Answering 2xx tells it a condition it stated was met when it
 // was not, which is the same lost-update shape the If-Unmodified-Since gap was fixed for.
 - (void)testDAVWriteEvaluatesIfNoneMatchEvenWhenIfMatchIsPresent {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
-    NSString* path = [dir stringByAppendingPathComponent:@"a.txt"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    NSString *path = [dir stringByAppendingPathComponent:@"a.txt"];
     XCTAssertTrue([@"ORIGINAL" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* head = SendRawRequest(server.port, @"HEAD /a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *head = SendRawRequest(server.port, @"HEAD /a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
     NSRange tagLabel = [head rangeOfString:@"Etag: " options:NSCaseInsensitiveSearch];
     XCTAssertTrue(tagLabel.location != NSNotFound, @"the file must publish a validator to condition on: %@", head);
-    NSString* afterLabel = [head substringFromIndex:NSMaxRange(tagLabel)];
-    NSString* etag = [afterLabel substringToIndex:[afterLabel rangeOfString:@"\r\n"].location];
+    NSString *afterLabel = [head substringFromIndex:NSMaxRange(tagLabel)];
+    NSString *etag = [afterLabel substringToIndex:[afterLabel rangeOfString:@"\r\n"].location];
 
     // If-Match holds (that IS the current tag), so step 1 passes; If-None-Match: * matches the
     // existing resource, so step 3 must fail the request with 412 and touch nothing.
-    NSString* request = [NSString stringWithFormat:@"PUT /a.txt HTTP/1.1\r\nHost: localhost\r\nIf-Match: %@\r\nIf-None-Match: *\r\nContent-Length: 9\r\n\r\nREPLACED!", etag];
-    NSString* reply = SendRawRequest(server.port, request);
+    NSString *request = [NSString stringWithFormat:@"PUT /a.txt HTTP/1.1\r\nHost: localhost\r\nIf-Match: %@\r\nIf-None-Match: *\r\nContent-Length: 9\r\n\r\nREPLACED!", etag];
+    NSString *reply = SendRawRequest(server.port, request);
 
     XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 412"], @"a matching If-None-Match must fail the write even behind a satisfied If-Match: %@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
-    XCTAssertEqualObjects([NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:NULL], @"ORIGINAL",
-                          @"the refused write must not have replaced the file");
+    XCTAssertEqualObjects([NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:NULL], @"ORIGINAL", @"the refused write must not have replaced the file");
 
     // The half a naive fix breaks: If-Match alone, with no If-None-Match, must still succeed.
-    NSString* plain = [NSString stringWithFormat:@"PUT /a.txt HTTP/1.1\r\nHost: localhost\r\nIf-Match: %@\r\nContent-Length: 8\r\n\r\nACCEPTED", etag];
-    NSString* plainReply = SendRawRequest(server.port, plain);
+    NSString *plain = [NSString stringWithFormat:@"PUT /a.txt HTTP/1.1\r\nHost: localhost\r\nIf-Match: %@\r\nContent-Length: 8\r\n\r\nACCEPTED", etag];
+    NSString *plainReply = SendRawRequest(server.port, plain);
     XCTAssertTrue([plainReply hasPrefix:@"HTTP/1.1 2"], @"a satisfied If-Match with no other condition must still write: %@", [plainReply substringToIndex:MIN((NSUInteger)40, plainReply.length)]);
     XCTAssertEqualObjects([NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:NULL], @"ACCEPTED");
 
@@ -1817,31 +1821,31 @@
 // A prefixed name with no declaration is not well-formed XML in the first place — only RECOVER let
 // it through — so the request is refused rather than half-honoured.
 - (void)testDAVRefusesAPropertyNameWithAnUndeclaredNamespacePrefix {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
     XCTAssertTrue([@"data" writeToFile:[dir stringByAppendingPathComponent:@"f.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* (^send)(NSString*, NSString*) = ^(NSString* method, NSString* body) {
+    NSString * (^send)(NSString *, NSString *) = ^(NSString *method, NSString *body) {
         return SendRawRequest(server.port, [NSString stringWithFormat:@"%@ /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@", method, (unsigned long)body.length, body]);
     };
     // Every namespace prefix an element uses must be declared somewhere in the same document.
     // NSXMLParser is NOT the oracle here: it accepts an undeclared prefix even with
     // shouldProcessNamespaces set, so it stays green against the very defect this pins (measured).
-    BOOL (^bodyParses)(NSString*) = ^(NSString* reply) {
+    BOOL (^bodyParses)(NSString *) = ^(NSString *reply) {
         NSRange const split = [reply rangeOfString:@"\r\n\r\n"];
         if (split.location == NSNotFound) {
             return NO;
         }
-        NSString* const body = [reply substringFromIndex:NSMaxRange(split)];
-        NSRegularExpression* const uses = [NSRegularExpression regularExpressionWithPattern:@"</?([A-Za-z_][A-Za-z0-9_.-]*):" options:0 error:NULL];
+        NSString *const body = [reply substringFromIndex:NSMaxRange(split)];
+        NSRegularExpression *const uses = [NSRegularExpression regularExpressionWithPattern:@"</?([A-Za-z_][A-Za-z0-9_.-]*):" options:0 error:NULL];
 
-        for (NSTextCheckingResult* match in [uses matchesInString:body options:0 range:NSMakeRange(0, body.length)]) {
-            NSString* const prefix = [body substringWithRange:[match rangeAtIndex:1]];
-            NSString* const declaration = [NSString stringWithFormat:@"xmlns:%@=", prefix];
+        for (NSTextCheckingResult *match in [uses matchesInString:body options:0 range:NSMakeRange(0, body.length)]) {
+            NSString *const prefix = [body substringWithRange:[match rangeAtIndex:1]];
+            NSString *const declaration = [NSString stringWithFormat:@"xmlns:%@=", prefix];
 
             if (![body containsString:declaration]) {
                 return NO;  // An element names a prefix the document never declares: not XML.
@@ -1852,33 +1856,33 @@
     };
 
     // Storing one must be refused outright, not stored and reported as applied.
-    NSString* stored = send(@"PROPPATCH", @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\"><D:set><D:prop><Z:note>v</Z:note></D:prop></D:set></D:propertyupdate>");
+    NSString *stored = send(@"PROPPATCH", @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\"><D:set><D:prop><Z:note>v</Z:note></D:prop></D:set></D:propertyupdate>");
     XCTAssertTrue([stored hasPrefix:@"HTTP/1.1 400"], @"a property name with an undeclared prefix must be refused: %@", [stored substringToIndex:MIN((NSUInteger)40, stored.length)]);
 
     // Nothing was stored, so an ordinary listing stays parseable — the property that matters most,
     // because this is the one that used to spread to the parent directory.
-    NSString* readback = SendRawRequest(server.port, @"PROPFIND /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
+    NSString *readback = SendRawRequest(server.port, @"PROPFIND /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
     XCTAssertTrue(bodyParses(readback), @"allprop PROPFIND is not well-formed XML after the refusal: %@", readback);
     XCTAssertFalse([readback containsString:@"Z:note"], @"the refused property was stored anyway: %@", readback);
 
-    NSString* listing = SendRawRequest(server.port, @"PROPFIND / HTTP/1.1\r\nHost: localhost\r\nDepth: 1\r\nContent-Length: 0\r\n\r\n");
+    NSString *listing = SendRawRequest(server.port, @"PROPFIND / HTTP/1.1\r\nHost: localhost\r\nDepth: 1\r\nContent-Length: 0\r\n\r\n");
     XCTAssertTrue(bodyParses(listing), @"the parent listing is not well-formed XML: %@", listing);
 
     // Asking for one in a PROPFIND is the same malformed name in the same position.
-    NSString* asked = send(@"PROPFIND", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:prop><Q:thing/></D:prop></D:propfind>");
+    NSString *asked = send(@"PROPFIND", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:prop><Q:thing/></D:prop></D:propfind>");
     XCTAssertTrue([asked hasPrefix:@"HTTP/1.1 400"], @"asking for an undeclared-prefix property must be refused: %@", [asked substringToIndex:MIN((NSUInteger)40, asked.length)]);
 
     // What must keep working: a properly DECLARED foreign namespace, which is the ordinary case.
-    NSString* declared = send(@"PROPPATCH", @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:Z=\"urn:example\"><D:set><D:prop><Z:note>v</Z:note></D:prop></D:set></D:propertyupdate>");
+    NSString *declared = send(@"PROPPATCH", @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:Z=\"urn:example\"><D:set><D:prop><Z:note>v</Z:note></D:prop></D:set></D:propertyupdate>");
     XCTAssertTrue([declared containsString:@"200 OK"], @"a declared foreign namespace must still store: %@", declared);
     XCTAssertTrue(bodyParses(declared), @"the PROPPATCH response is not well-formed XML: %@", declared);
 
-    NSString* declaredBack = SendRawRequest(server.port, @"PROPFIND /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
+    NSString *declaredBack = SendRawRequest(server.port, @"PROPFIND /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
     XCTAssertTrue(bodyParses(declaredBack), @"the readback of a declared property is not well-formed: %@", declaredBack);
     XCTAssertTrue([declaredBack containsString:@"urn:example"], @"the stored property lost its namespace: %@", declaredBack);
 
     // A property in NO namespace at all carries no prefix and stays representable.
-    NSString* bare = send(@"PROPPATCH", @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\"><D:set><D:prop><plain>v</plain></D:prop></D:set></D:propertyupdate>");
+    NSString *bare = send(@"PROPPATCH", @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\"><D:set><D:prop><plain>v</plain></D:prop></D:set></D:propertyupdate>");
     XCTAssertTrue([bare containsString:@"200 OK"], @"a no-namespace property must still store: %@", bare);
     XCTAssertTrue(bodyParses(bare), @"the no-namespace response is not well-formed XML: %@", bare);
 
@@ -1900,75 +1904,75 @@
 // containing an ampersand was stored mangled and echoed back as "urn:a&amp;#38;b" — well-formed,
 // but not the namespace the client asked for, so the property it stored can never be named again.
 - (void)testDAVRefusesAPropertyNamespaceThatCannotBeWrittenBack {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
-    NSString* path = [dir stringByAppendingPathComponent:@"f.txt"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    NSString *path = [dir stringByAppendingPathComponent:@"f.txt"];
     XCTAssertTrue([@"data" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* (^send)(NSString*, NSString*, NSString*) = ^(NSString* method, NSString* target, NSString* body) {
+    NSString * (^send)(NSString *, NSString *, NSString *) = ^(NSString *method, NSString *target, NSString *body) {
         return SendRawRequest(server.port, [NSString stringWithFormat:@"%@ %@ HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@", method, target, (unsigned long)body.length, body]);
     };
     // An element NAME cannot be escaped into legality, so the previous test's prefix-declaration
     // rule cannot see this defect: parse the body properly. Proven sensitive by running every
     // assertion here against the unfixed source first.
-    BOOL (^bodyIsXML)(NSString*) = ^(NSString* reply) {
+    BOOL (^bodyIsXML)(NSString *) = ^(NSString *reply) {
         NSRange const split = [reply rangeOfString:@"\r\n\r\n"];
         if (split.location == NSNotFound) {
             return NO;
         }
-        NSData* const body = [[reply substringFromIndex:NSMaxRange(split)] dataUsingEncoding:NSUTF8StringEncoding];
-        NSXMLParser* const parser = [[NSXMLParser alloc] initWithData:body];
+        NSData *const body = [[reply substringFromIndex:NSMaxRange(split)] dataUsingEncoding:NSUTF8StringEncoding];
+        NSXMLParser *const parser = [[NSXMLParser alloc] initWithData:body];
         parser.shouldProcessNamespaces = YES;
         return [parser parse];
     };
 
     // Storing one must be refused, not stored and reported as applied.
-    NSString* const poison = @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:Z=\"urn:a}b\"><D:set><D:prop><Z:note>v</Z:note></D:prop></D:set></D:propertyupdate>";
-    NSString* stored = send(@"PROPPATCH", @"/f.txt", poison);
+    NSString *const poison = @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:Z=\"urn:a}b\"><D:set><D:prop><Z:note>v</Z:note></D:prop></D:set></D:propertyupdate>";
+    NSString *stored = send(@"PROPPATCH", @"/f.txt", poison);
     XCTAssertTrue([stored hasPrefix:@"HTTP/1.1 400"], @"a namespace URI containing \"}\" must be refused: %@", [stored substringToIndex:MIN((NSUInteger)40, stored.length)]);
 
-    NSString* readback = SendRawRequest(server.port, @"PROPFIND /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
+    NSString *readback = SendRawRequest(server.port, @"PROPFIND /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
     XCTAssertTrue(bodyIsXML(readback), @"allprop PROPFIND is not well-formed XML after the refusal: %@", readback);
 
-    NSString* listing = SendRawRequest(server.port, @"PROPFIND / HTTP/1.1\r\nHost: localhost\r\nDepth: 1\r\nContent-Length: 0\r\n\r\n");
+    NSString *listing = SendRawRequest(server.port, @"PROPFIND / HTTP/1.1\r\nHost: localhost\r\nDepth: 1\r\nContent-Length: 0\r\n\r\n");
     XCTAssertTrue(bodyIsXML(listing), @"the parent listing is not well-formed XML: %@", listing);
 
     // Both parsers must judge it alike, or the one that does not becomes the way in.
-    NSString* asked = send(@"PROPFIND", @"/f.txt", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\" xmlns:Z=\"urn:a}b\"><D:prop><Z:note/></D:prop></D:propfind>");
+    NSString *asked = send(@"PROPFIND", @"/f.txt", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\" xmlns:Z=\"urn:a}b\"><D:prop><Z:note/></D:prop></D:propfind>");
     XCTAssertTrue([asked hasPrefix:@"HTTP/1.1 400"], @"asking for a property in such a namespace must be refused: %@", [asked substringToIndex:MIN((NSUInteger)40, asked.length)]);
 
     // A store poisoned by an OLDER build must heal rather than stay unreadable: the key is skipped
     // when writing the response, so one property is lost instead of the whole listing.
-    NSDictionary* const legacy = @{@"{urn:a}b}note" : @"v", @"{urn:ok}fine" : @"w"};
-    NSData* const plist = [NSPropertyListSerialization dataWithPropertyList:legacy format:NSPropertyListBinaryFormat_v1_0 options:0 error:NULL];
+    NSDictionary *const legacy = @{@"{urn:a}b}note": @"v", @"{urn:ok}fine": @"w"};
+    NSData *const plist = [NSPropertyListSerialization dataWithPropertyList:legacy format:NSPropertyListBinaryFormat_v1_0 options:0 error:NULL];
     XCTAssertEqual(setxattr([path fileSystemRepresentation], "com.webserverkit.dav.deadproperties", plist.bytes, plist.length, 0, 0), 0);
 
-    NSString* healed = SendRawRequest(server.port, @"PROPFIND /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
+    NSString *healed = SendRawRequest(server.port, @"PROPFIND /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
     XCTAssertTrue(bodyIsXML(healed), @"a store poisoned by an older build must not make the response unparseable: %@", healed);
     XCTAssertTrue([healed containsString:@"urn:ok"], @"the readable properties beside it must still be published: %@", healed);
 
-    NSString* healedListing = SendRawRequest(server.port, @"PROPFIND / HTTP/1.1\r\nHost: localhost\r\nDepth: 1\r\nContent-Length: 0\r\n\r\n");
+    NSString *healedListing = SendRawRequest(server.port, @"PROPFIND / HTTP/1.1\r\nHost: localhost\r\nDepth: 1\r\nContent-Length: 0\r\n\r\n");
     XCTAssertTrue(bodyIsXML(healedListing), @"the parent listing must survive a legacy poisoned entry: %@", healedListing);
     XCTAssertEqual(removexattr([path fileSystemRepresentation], "com.webserverkit.dav.deadproperties", 0), 0);
 
     // A namespace carrying an ampersand is ordinary and legal; it must come back as it went in.
-    NSString* amp = send(@"PROPPATCH", @"/f.txt", @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:Z=\"urn:a&amp;b\"><D:set><D:prop><Z:note>v</Z:note></D:prop></D:set></D:propertyupdate>");
+    NSString *amp = send(@"PROPPATCH", @"/f.txt", @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:Z=\"urn:a&amp;b\"><D:set><D:prop><Z:note>v</Z:note></D:prop></D:set></D:propertyupdate>");
     XCTAssertTrue([amp containsString:@"200 OK"], @"a namespace containing \"&\" must still store: %@", amp);
 
-    NSString* ampBack = SendRawRequest(server.port, @"PROPFIND /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
+    NSString *ampBack = SendRawRequest(server.port, @"PROPFIND /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
     XCTAssertTrue(bodyIsXML(ampBack), @"the readback is not well-formed XML: %@", ampBack);
     XCTAssertTrue([ampBack containsString:@"xmlns:W=\"urn:a&amp;b\""], @"the namespace did not round-trip: %@", ampBack);
     XCTAssertFalse([ampBack containsString:@"&amp;#38;"], @"libxml2's escaped ampersand was published verbatim: %@", ampBack);
 
     // What must keep working: an ordinary declared namespace, and a "{" that needs no escaping.
-    NSString* brace = send(@"PROPPATCH", @"/f.txt", @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:Z=\"urn:a{b\"><D:set><D:prop><Z:kept>v</Z:kept></D:prop></D:set></D:propertyupdate>");
+    NSString *brace = send(@"PROPPATCH", @"/f.txt", @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:Z=\"urn:a{b\"><D:set><D:prop><Z:kept>v</Z:kept></D:prop></D:set></D:propertyupdate>");
     XCTAssertTrue([brace containsString:@"200 OK"], @"only \"}\" breaks the key encoding; \"{\" must still store: %@", brace);
 
-    NSString* braceBack = SendRawRequest(server.port, @"PROPFIND /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
+    NSString *braceBack = SendRawRequest(server.port, @"PROPFIND /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
     XCTAssertTrue(bodyIsXML(braceBack), @"the readback is not well-formed XML: %@", braceBack);
     XCTAssertTrue([braceBack containsString:@"urn:a{b"], @"the \"{\" namespace lost its URI: %@", braceBack);
 
@@ -1983,30 +1987,191 @@
 // download surfaces did not. The plain GET matters most: that is the response a client sees BEFORE
 // it has any reason to send a Range.
 - (void)testDAVGetAdvertisesByteRangeSupport {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
     XCTAssertTrue([@"0123456789" writeToFile:[dir stringByAppendingPathComponent:@"f.bin"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* plain = SendRawRequest(server.port, @"GET /f.bin HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *plain = SendRawRequest(server.port, @"GET /f.bin HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertTrue([plain hasPrefix:@"HTTP/1.1 200"], @"%@", [plain substringToIndex:MIN((NSUInteger)40, plain.length)]);
     XCTAssertTrue([plain rangeOfString:@"Accept-Ranges: bytes" options:NSCaseInsensitiveSearch].location != NSNotFound,
-                  @"a plain DAV GET must advertise range support — that is when a client decides whether resume is possible: %@", plain);
+                  @"a plain DAV GET must advertise range support — that is when a client decides whether resume is possible: %@",
+                  plain);
 
     // The ranged and unsatisfiable answers advertise too, matching the base-path handler.
-    NSString* ranged = SendRawRequest(server.port, @"GET /f.bin HTTP/1.1\r\nHost: localhost\r\nRange: bytes=2-5\r\n\r\n");
+    NSString *ranged = SendRawRequest(server.port, @"GET /f.bin HTTP/1.1\r\nHost: localhost\r\nRange: bytes=2-5\r\n\r\n");
     XCTAssertTrue([ranged hasPrefix:@"HTTP/1.1 206"], @"%@", [ranged substringToIndex:MIN((NSUInteger)40, ranged.length)]);
     XCTAssertTrue([ranged rangeOfString:@"Accept-Ranges: bytes" options:NSCaseInsensitiveSearch].location != NSNotFound, @"the 206 must advertise too: %@", ranged);
 
-    NSString* unsatisfiable = SendRawRequest(server.port, @"GET /f.bin HTTP/1.1\r\nHost: localhost\r\nRange: bytes=999-\r\n\r\n");
+    NSString *unsatisfiable = SendRawRequest(server.port, @"GET /f.bin HTTP/1.1\r\nHost: localhost\r\nRange: bytes=999-\r\n\r\n");
     XCTAssertTrue([unsatisfiable hasPrefix:@"HTTP/1.1 416"], @"%@", [unsatisfiable substringToIndex:MIN((NSUInteger)40, unsatisfiable.length)]);
     XCTAssertTrue([unsatisfiable rangeOfString:@"Accept-Ranges: bytes" options:NSCaseInsensitiveSearch].location != NSNotFound, @"the 416 must advertise too: %@", unsatisfiable);
 
     // Ranges still WORK — the point is the advertisement, not a behaviour change.
     XCTAssertTrue([ranged hasSuffix:@"2345"], @"the ranged body must still be the requested bytes: %@", ranged);
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// A DELETE of a collection must be one observable event: either the collection is gone and the
+// client is told 204, or nothing was touched and the client is told why. -removeItemAtPath: cannot
+// promise that — it deletes as it WALKS, so a member another client creates after
+// WSKFirstUnremovableItemAtPath has vetted the tree, and before the walk reaches its directory,
+// makes rmdir(2) answer ENOTEMPTY and abandons the walk keeping everything already destroyed.
+//
+// Measured on the wire before the fix: a PUT into an 800-member collection ~45 ms into its DELETE
+// left 161 members and answered 500, with Foundation reporting ENOTEMPTY as "you don't have
+// permission to access it" (NSFileWriteNoPermissionError 513) — a diagnostic that sends the
+// operator to audit file modes. Both servers share the walk, so both shared the window.
+//
+// The removability walk is a snapshot, and a snapshot cannot close a window against a concurrent
+// writer; renaming the tree aside first can, because afterwards no path the server serves leads
+// into it. Recurring shapes 6 and 7, inside the guard built to prevent exactly this.
+- (void)testDAVDeleteOfACollectionIsAtomicAgainstAConcurrentWriter {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    NSString *collection = [dir stringByAppendingPathComponent:@"big"];
+    NSString *subdirectory = [collection stringByAppendingPathComponent:@"sub"];
+    XCTAssertTrue([fm createDirectoryAtPath:subdirectory withIntermediateDirectories:YES attributes:nil error:NULL]);
+
+    NSUInteger const kMembers = 400;
+    for (NSUInteger i = 0; i < kMembers; i++) {
+        NSString *name = [NSString stringWithFormat:@"m%03lu.txt", (unsigned long)i];
+        XCTAssertTrue([@"member" writeToFile:[collection stringByAppendingPathComponent:name] atomically:NO encoding:NSUTF8StringEncoding error:NULL]);
+        XCTAssertTrue([@"member" writeToFile:[subdirectory stringByAppendingPathComponent:name] atomically:NO encoding:NSUTF8StringEncoding error:NULL]);
+    }
+
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    // A second client writing into the collection for as long as the DELETE runs. Writing straight
+    // to the filesystem rather than through the server keeps the test about the removal, not about
+    // which of two requests wins; the window it opens is the same one a racing PUT opens.
+    __block BOOL finished = NO;
+    NSLock *const lock = [[NSLock alloc] init];
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        for (NSUInteger i = 0;; i++) {
+            [lock lock];
+            BOOL const done = finished;
+            [lock unlock];
+            if (done) {
+                break;
+            }
+            NSString *name = [NSString stringWithFormat:@"late%04lu.txt", (unsigned long)i];
+            [@"late" writeToFile:[subdirectory stringByAppendingPathComponent:name] atomically:NO encoding:NSUTF8StringEncoding error:NULL];
+        }
+    });
+
+    NSString *reply = SendRawRequest(server.port, @"DELETE /big HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
+    [lock lock];
+    finished = YES;
+    [lock unlock];
+
+    NSString *const status = [reply substringToIndex:MIN((NSUInteger)40, reply.length)];
+    XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 204"], @"a raced DELETE must still succeed, not report a server fault: %@", status);
+    XCTAssertFalse([fm fileExistsAtPath:collection], @"the collection survived a 2xx DELETE");
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// The same window, the same walk, the other server — and the uploader's _fileOperationLock cannot
+// help, because the racing writer is the WebDAV server on the same folder: the two-server-one-
+// folder composition this library recommends. Swept together because a class closed at only some
+// of its sites is this project's most-repeated defect shape.
+- (void)testUploaderDeleteOfADirectoryIsAtomicAgainstAConcurrentWriter {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    NSString *collection = [dir stringByAppendingPathComponent:@"big"];
+    NSString *subdirectory = [collection stringByAppendingPathComponent:@"sub"];
+    XCTAssertTrue([fm createDirectoryAtPath:subdirectory withIntermediateDirectories:YES attributes:nil error:NULL]);
+
+    for (NSUInteger i = 0; i < 400; i++) {
+        NSString *name = [NSString stringWithFormat:@"m%03lu.txt", (unsigned long)i];
+        [@"member" writeToFile:[collection stringByAppendingPathComponent:name] atomically:NO encoding:NSUTF8StringEncoding error:NULL];
+        [@"member" writeToFile:[subdirectory stringByAppendingPathComponent:name] atomically:NO encoding:NSUTF8StringEncoding error:NULL];
+    }
+
+    WSKWebUploader *server = [[WSKWebUploader alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    __block BOOL finished = NO;
+    NSLock *const lock = [[NSLock alloc] init];
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        for (NSUInteger i = 0;; i++) {
+            [lock lock];
+            BOOL const done = finished;
+            [lock unlock];
+            if (done) {
+                break;
+            }
+            NSString *name = [NSString stringWithFormat:@"late%04lu.txt", (unsigned long)i];
+            [@"late" writeToFile:[subdirectory stringByAppendingPathComponent:name] atomically:NO encoding:NSUTF8StringEncoding error:NULL];
+        }
+    });
+
+    NSString *const body = @"path=%2Fbig";
+    NSString *request = [NSString stringWithFormat:@"POST /delete HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)body.length, body];
+    NSString *reply = SendRawRequest(server.port, request);
+    [lock lock];
+    finished = YES;
+    [lock unlock];
+
+    NSString *const status = [reply substringToIndex:MIN((NSUInteger)40, reply.length)];
+    XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 200"], @"a raced delete must still succeed, not report a server fault: %@", status);
+    XCTAssertFalse([fm fileExistsAtPath:collection], @"the directory survived a successful delete");
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// Losing a race is not a server fault. Two clients deleting the same resource, or a DELETE whose
+// target another client removed first, answered 500 — which tells the client to retry something
+// that can never succeed, and blames the server for a race it did not cause. 404 is the honest
+// answer, and is what a DELETE of a resource that is simply absent already gets.
+- (void)testDAVDeleteOfAVanishedResourceIsNotAServerFault {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    // Deleting the same file from many connections at once: exactly one may claim to have removed
+    // it, and none may answer 5xx.
+    NSUInteger fiveHundreds = 0;
+    for (NSUInteger round = 0; round < 12; round++) {
+        NSString *path = [dir stringByAppendingPathComponent:@"raced.txt"];
+        XCTAssertTrue([@"data" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+        NSMutableArray<NSString *> *replies = [NSMutableArray array];
+        NSLock *const lock = [[NSLock alloc] init];
+        dispatch_group_t group = dispatch_group_create();
+        for (NSUInteger i = 0; i < 4; i++) {
+            dispatch_group_async(group, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                NSString *reply = SendRawRequest(server.port, @"DELETE /raced.txt HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
+                NSString *const recorded = (reply != nil) ? reply : @"";
+                [lock lock];
+                [replies addObject:recorded];
+                [lock unlock];
+            });
+        }
+        dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
+
+        for (NSString *reply in replies) {
+            if ([reply hasPrefix:@"HTTP/1.1 5"]) {
+                fiveHundreds++;
+            }
+        }
+        XCTAssertFalse([fm fileExistsAtPath:path], @"the file survived four concurrent DELETEs");
+    }
+
+    XCTAssertEqual(fiveHundreds, (NSUInteger)0, @"a DELETE that lost a race answered 5xx instead of 404");
 
     [server stop];
     [fm removeItemAtPath:dir error:NULL];
