@@ -4,6 +4,5 @@
 // project and the podspec already expect it.
 module WebServerKitUploader {
     header "../WSKWebUploader.h"
-    header "../WSKWebUploaderSSEChannel.h"
     export *
 }

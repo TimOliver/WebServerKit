@@ -33,7 +33,7 @@ NS_ASSUME_NONNULL_BEGIN
  *  The WSKBodyReaderCompletionBlock is passed by WSKWebServer to the
  *  WSKBodyReader object when reading data from it asynchronously.
  */
-typedef void (^WSKBodyReaderCompletionBlock)(NSData *_Nullable data, NSError *_Nullable error);
+typedef void (^WSKBodyReaderCompletionBlock)(NSData *_Nullable data, NSError *_Nullable error) NS_SWIFT_SENDABLE;
 
 /**
  *  This protocol is used by the WSKConnection to communicate with

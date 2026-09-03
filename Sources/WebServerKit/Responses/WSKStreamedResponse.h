@@ -38,7 +38,7 @@ NS_ASSUME_NONNULL_BEGIN
  *  The block must return either a chunk of data, an empty NSData when done, or
  *  nil on error and set the "error" argument which is guaranteed to be non-NULL.
  */
-typedef NSData *_Nullable (^WSKStreamBlock)(NSError **error);
+typedef NSData *_Nullable (^WSKStreamBlock)(NSError **error) NS_SWIFT_SENDABLE;
 
 /**
  *  The WSKAsyncStreamBlock works like the WSKStreamBlock
@@ -50,7 +50,7 @@ typedef NSData *_Nullable (^WSKStreamBlock)(NSError **error);
  *
  *  The block cannot call "completionBlock" more than once per invocation.
  */
-typedef void (^WSKAsyncStreamBlock)(WSKBodyReaderCompletionBlock completionBlock);
+typedef void (^WSKAsyncStreamBlock)(WSKBodyReaderCompletionBlock completionBlock) NS_SWIFT_SENDABLE;
 
 /**
  *  The WSKStreamedResponse subclass of WSKResponse streams

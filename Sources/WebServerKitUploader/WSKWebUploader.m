@@ -34,11 +34,20 @@
 #import <UIKit/UIKit.h>
 #endif
 #ifdef SWIFT_PACKAGE
-// SwiftPM emits this accessor for any target that declares resources, naming it after the
-// SwiftPM *target* — WebServerKitUploader — which is deliberately not the class prefix, so it
-// does not follow a rename of the classes. Declared here rather than importing its generated header, which SwiftPM puts in
-// DerivedSources without placing that directory on this target's own include path.
+// Both package generators emit an accessor for a target that declares resources, but they
+// name it differently: command-line SwiftPM after the target alone
+// (WebServerKitUploader_SWIFTPM_MODULE_BUNDLE), Xcode after the package AND the target
+// (WebServerKit_WebServerKitUploader_SWIFTPM_MODULE_BUNDLE). Hard-coding the first meant an
+// app that added the package in Xcode could not link this target at all. Each generator also
+// writes a header defining SWIFTPM_MODULE_BUNDLE as a call to its own accessor; Xcode puts it
+// on the include path, so prefer that, and fall back to the command-line spelling when it is
+// not there. Neither name follows the class prefix, so neither follows a rename of the classes.
+#if __has_include("resource_bundle_accessor.h")
+#import "resource_bundle_accessor.h"
+#else
 FOUNDATION_EXPORT NSBundle *WebServerKitUploader_SWIFTPM_MODULE_BUNDLE(void);
+#define SWIFTPM_MODULE_BUNDLE WebServerKitUploader_SWIFTPM_MODULE_BUNDLE()
+#endif
 #endif
 
 #import "WSKDataRequest.h"
@@ -151,7 +160,7 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
         // thing that finds them there. Every other distribution (the framework, CocoaPods)
         // keeps the bundle alongside the class.
 #ifdef SWIFT_PACKAGE
-        NSBundle *const ownerBundle = WebServerKitUploader_SWIFTPM_MODULE_BUNDLE();
+        NSBundle *const ownerBundle = SWIFTPM_MODULE_BUNDLE;
 #else
         NSBundle *const ownerBundle = [NSBundle bundleForClass:[WSKWebUploader class]];
 #endif

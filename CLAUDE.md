@@ -660,6 +660,36 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
 - Nullability tells the truth, source-breaking for Swift deliberately (`WSKFileResponse`'s
   three properties, `allowedFileExtensions`, the uploader's five strings, match-block
   addresses) — nil is meaningful in every case.
+- **Every public block typedef is `NS_SWIFT_SENDABLE` (2026-09-03, 23rd pass).** Swift 6
+  language mode treats a block formed in a main-actor context — top-level code, any view
+  controller — as main-actor-isolated unless its type is Sendable, and inserts an executor check
+  that traps (`_dispatch_assert_queue_fail`) when a connection queue calls it: every Swift 6 host
+  app crashed on its first request to a handler it registered. Swift 5 mode and `{ @Sendable … }`
+  closures never saw it. The blocks run on connection queues by design; the attribute states that
+  contract. `WSKRequest`/`WSKResponse` themselves are NOT marked Sendable — a nested closure that
+  captures the request still warns, honestly.
+- **The SwiftPM resource-bundle accessor is named differently by the two generators** (same
+  pass): command-line SwiftPM emits `WebServerKitUploader_SWIFTPM_MODULE_BUNDLE`, Xcode emits
+  `WebServerKit_WebServerKitUploader_SWIFTPM_MODULE_BUNDLE`, and the code hard-coded the first,
+  so an app that added the package in Xcode could not link the uploader at all — while `swift
+  build`, the record's "external consumer building clean", never links a library target and
+  stayed green. `WSKWebUploader.m` now imports the generated `resource_bundle_accessor.h` when
+  the generator puts it on the include path (Xcode does; the old comment claiming SwiftPM never
+  does was half right — it is absent under `swift build`, hence the fallback declaration) and
+  uses its `SWIFTPM_MODULE_BUNDLE` macro. **The gate for both is `Scripts/SwiftConsumer`**: a
+  Swift-6-mode executable package depending on the repo by path, which `Run-Tests.sh` runs under
+  SwiftPM's generator and builds under Xcode's. It registers a sync and an async handler from
+  top-level code and drives a request through each, plus the page and a CSS asset from the
+  resource bundle. Red on the unfixed tree in both flavours (SIGTRAP; undefined symbol). The
+  library's own manifest stays at swift-tools-version 5.9; only that check needs Swift 6.
+- CocoaPods published every `Internal/*.h` as PUBLIC, `WSKPrivate.h` included: the podspec's
+  `private_header_files` still named `Core/WSKPrivate.h` after the 2026-08-18 move and matched
+  nothing (`pod lib lint` said so, as a warning). Now `Internal/*.h` and both uploader SSE headers
+  are private, and the SPM modulemap no longer exports `WSKWebUploaderSSEChannel`. The version
+  strings agree at last: pbxproj `BUNDLE_VERSION_STRING` 3.5.4 → 4.0.0 to match the podspec, and
+  the README's SwiftPM line pointed at tag 3.5.5, a pre-rename tree with no manifest. **The 4.0.0
+  tag itself does not exist yet** — the podspec's `:tag` and the README's `from:` both need it
+  cut on the restructured tree before either install path works.
 - `+responseWithFile:` returns nil for empty/NUL paths (`-fileSystemRepresentation` RAISES —
   guard every new call site); `+responseWithJSONObject:` asks `+isValidJSONObject:` FIRST
   (`dataWithJSONObject:` raises, so a nil-guard after the call is dead code).
