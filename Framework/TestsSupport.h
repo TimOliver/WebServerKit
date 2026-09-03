@@ -33,6 +33,7 @@ extern NSUInteger OpenFileDescriptorCount(void);
 extern NSString* MakeTempDirectory(void);
 extern NSData* NestedMultipartMixedBody(NSString* top, NSUInteger levels);
 extern NSString* QuotedParam(NSString* header, NSString* name);
+extern NSTimeInterval ProcessCPUSeconds(void);
 
 extern NSString* gAbortRequestPeer;
 extern BOOL gAbortRequestSawVirtualHEAD;

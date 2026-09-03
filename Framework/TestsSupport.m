@@ -511,3 +511,16 @@ NSString* QuotedParam(NSString* header, NSString* name) {
     }
     return [header substringWithRange:NSMakeRange(valueStart, end.location - valueStart)];
 }
+
+#import <sys/resource.h>
+
+// User plus system CPU time this process has consumed so far. Assertions that bound an
+// algorithm's cost read this rather than the wall clock: a loaded machine slows every test's
+// wall time, but it cannot inflate the CPU a quadratic loop burns.
+NSTimeInterval ProcessCPUSeconds(void) {
+    struct rusage usage;
+    if (getrusage(RUSAGE_SELF, &usage) != 0) {
+        return 0;
+    }
+    return (NSTimeInterval)usage.ru_utime.tv_sec + (NSTimeInterval)usage.ru_utime.tv_usec / 1e6 + (NSTimeInterval)usage.ru_stime.tv_sec + (NSTimeInterval)usage.ru_stime.tv_usec / 1e6;
+}

@@ -350,6 +350,26 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
 - Multipart: one shared budget (`WSKMIMEStreamBudget`) across nested parsers; part-header
   blocks capped; 1024 parts max; `[super init]` and the `_tmpFile = -1` sentinel are set
   before any failure return (a nil-returning init once closed fd 0 in dealloc).
+- **Both body parsers are linear in their input (2026-09-03, 23rd pass) — and were not before.**
+  The chunked decoder dropped each consumed chunk from the FRONT of its buffer and searched from
+  offset 0, so one read holding N tiny chunks cost O(N²): 400k one-byte chunks (2.4 MB of wire)
+  burned 4.6 s of CPU, 2M (10 MB) 85 s, from any LAN peer, and a DAV PUT streams to disk so no
+  size cap bounded it. Now a cursor skips consumed chunks and the buffer is compacted once per
+  read. The multipart parser rescanned its whole working buffer on every append, and its 8 KB
+  part-header cap was judged only AFTER the terminating blank line, so an unterminated header
+  block grew to the 16 MB working buffer: 128 KB of header in 1-byte segments cost 8.5 s. Now
+  every search resumes from the last position that could still begin the token it wants
+  (`_scanOffset`), the header cap is judged on the bytes buffered, and a preamble is discarded as
+  it streams (RFC 2046 §5.1.1). Third, the working-buffer cap was applied to the size of ONE
+  `appendBytes:` call before its file content could drain, so a single loopback or
+  same-host-proxy read above 16 MB — which the kernel does hand over — answered 413 on a 1 GB
+  upload; the append now feeds 256 KB slices and parses after each. Pinned by five tests that
+  bound CPU time (load-proof, unlike wall time) and check the bytes arrive whole, all red on the
+  unfixed source (2.1 s / 9,000 header bytes accepted / 2.5 s / refused at 1 MB / 413). The
+  stalled fake-boundary behaviour is UNCHANGED by design (its pinning test still passes): a
+  token not followed by a delimiter still wedges until the cap, but at O(1) per append. What the
+  fuzzing pass could not see: libFuzzer measures crashes and hangs, not a terminating-but-
+  quadratic cost.
 - Digest auth works over full bytes (never `-UTF8String`+`strlen`); header-parameter
   extraction requires a token boundary (`nonce=` matches inside `cnonce=` otherwise);
   `filename*` uses an escaper that covers `;`.
