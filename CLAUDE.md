@@ -520,6 +520,26 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   one and not the other just moves the way in. `_DeadPropertyElement` also returns nil for a key
   it cannot represent and every call site skips it, so a share poisoned by an OLDER build heals
   on upgrade (verified by staging with the old binary and serving with the new).
+- **A property NAMESPACE containing `}` is refused 400 by both parsers too (2026-09-03), and the
+  `&` libxml2 escapes inside one is undone.** The same defect one field over, and it survived the
+  entry above because that fix validated only the LOCAL NAME. The key is `{href}localname`, read
+  back by splitting at the FIRST `}`, so `xmlns:Z="urn:a}b"` stored `{urn:a}b}note` and emitted
+  `<W:b}note xmlns:W="urn:a"/>` — whose prefix IS declared, so that entry's own oracle passed it,
+  but `b}note` is not an XML name, and a NAME cannot be escaped into legality the way a value can.
+  Measured at tip: one PROPPATCH made the file's allprop AND its parent's Depth:1 listing
+  unparseable, persistently (xattr). `_PropertyLocalNameIsRepresentable` now rejects `}` beside `:`,
+  which is what HEALS a store poisoned by an older build — the key is skipped, so one property is
+  lost instead of the whole listing. `{` needs no guard: the split looks for `}` only. Recurring
+  shapes 2 and 13.
+  Separately, and only visible by testing the ROUND TRIP rather than the response: **libxml2 writes
+  every `&` in `node->ns->href` as `&#38;`, and does that to nothing else** — measured across `&`,
+  `<`, `>`, `"`, `'`, tab and newline, every one of which arrives decoded. So `urn:a&b` was stored
+  and published as `urn:a&#38;b`: well-formed, but not the namespace the client named, so the
+  property it had just set could never be named again. `_PropertyNamespaceHref` undoes it in ONE
+  home both parsers share. The inverse is exact — libxml2 escapes every `&`, so every `&#38;` came
+  from one — hence a URI whose literal text is `&#38;` still round-trips. A property stored by an
+  OLDER build under the mangled key keeps its mangled namespace: deliberately not healed, since
+  decoding on READ would corrupt the literal `&#38;` that is now storable.
 - A `Destination` naming another server answers 502; compared by host NAME only — scheme and
   port deliberately ignored (TLS terminates upstream, ports may translate). A value starting
   `//` is a network-path reference and CARRIES an authority; `///path` parses with an EMPTY
