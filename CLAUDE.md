@@ -193,6 +193,31 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   when no allow-list is set, so nothing that must run by default may live inside it. The
   removability walk `WSKFirstUnremovableItemAtPath` is UNCONDITIONAL and asks before anything
   is touched (`removeItemAtPath:` deletes as it walks and keeps what it already destroyed).
+- **Destroying anything goes through `WSKRemoveItemAtPath`, which renames a collection aside
+  BEFORE removing it (2026-09-03).** The removability walk above vets a SNAPSHOT, and a snapshot
+  cannot close a window against a second client: a member created after the walk, into a directory
+  `removeItemAtPath:` has already emptied, makes `rmdir` answer ENOTEMPTY, and the removal abandons
+  the tree keeping everything it already destroyed — the exact outcome the walk exists to prevent.
+  Measured on the wire at tip: a PUT ~45 ms into the DELETE of an 800-member collection left 161
+  members and answered **500**, with Foundation reporting that ENOTEMPTY as
+  `NSFileWriteNoPermissionError` ("you don't have permission to access it"), a diagnostic that
+  sends an operator to audit file modes. Both servers shared the walk, so both shared the window,
+  and the uploader's `_fileOperationLock` cannot help because the racing writer is typically the
+  DAV server on the SAME folder — the two-server composition this record recommends. Recurring
+  shapes 6 and 7, inside the guard built to prevent exactly this.
+  A `rename(2)` into a hidden sibling makes the resource leave the namespace in one syscall; after
+  it no path the server serves leads into the tree, so the removal that follows cannot be raced.
+  Keep calling the vetting walk FIRST — it is what refuses a tree this server must not destroy at
+  all, before anything moves. Three sites share it: DAV DELETE, DAV COPY/MOVE overwrite, uploader
+  `/delete`. The one thing it trades: if the removal fails AFTER the rename, the client is told the
+  truth (the resource is gone) and a dot-named remainder is logged rather than left silently — that
+  needs a failure no client can now cause.
+- **Losing a race is not a server fault.** A DELETE whose target another client removed first
+  answered 500 — 19 of 48 concurrent DELETEs in the pinning test — which blames the server and
+  invites a retry that can never succeed. `WSKStatusCodeForRemovalErrno` maps ENOENT/ENOTDIR to
+  404, EACCES/EPERM/EROFS to 403, ENOTEMPTY/EEXIST/EBUSY to 409, everything else to 500. Kept
+  SEPARATE from `WSKServerErrorStatusCodeForError`, which is a server-error mapper by contract —
+  widening that one into a client/server mapper is still its own decision (the ENAMETOOLONG item).
 - **`_RealPath` is the most security-critical function in the library; any edit needs its own
   measured pass.** It walks up past missing components so deep not-yet-existing paths resolve
   (404 vs 403 correctness), bounded by `PATH_MAX` — that bound is a load-bearing DoS guard (a
@@ -832,9 +857,21 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
     undeletable through that spelling, and 500 blames the server for something no retry fixes.
     Finder is unaffected (it deletes via the PROPFIND href, which is the on-disk NFD spelling);
     a client that builds the NFC name itself is not, and NFC is what most web clients normalize
-    to. Fix shape: remove via `unlink(2)`/`rmdir(2)` on the already-resolved path — which is what
-    the removability walk already reasons about — and stop mapping the failure to 500. **OWNER
-    RULING 2026-09-02: not worth fixing.** It needs three things at once — an exFAT share (APFS
+    to. **THE PROPOSED FIX IS REFUTED (2026-09-03).** This entry used to say "remove via
+    `unlink(2)`/`rmdir(2)` on the already-resolved path", on the strength of the original probe's
+    claim that `lstat(2)` AND `unlink(2)` both resolve the name. `unlink(2)` does NOT. Measured on
+    a fresh exFAT image under macOS 26.4's FSKit driver, in pure C, one isolated directory per
+    trial, creating by RAW BYTES and looking up by the bytes `readdir(3)` hands back: an ASCII name
+    and a CJK name (no decomposition) are removed by BOTH `unlink(2)` and `removeItemAtPath:`; a
+    name containing a decomposable character is removed by NEITHER, while `lstat(2)` on the same
+    bytes succeeds every time. APFS is clean on all six. So the two primitives fail identically and
+    no choice at this layer can fix it — it is an OS defect, not one of ours. The tree now calls
+    `unlink(2)` anyway (see `WSKRemoveItemAtPath`), which changes only the reported status: the
+    errno is ENOENT, so such a DELETE now answers 404 rather than 500. Both are wrong about a file
+    that demonstrably exists — a GET of it answers 200 — but 404 is what the OS said and stops
+    blaming the server. A DIRECTORY containing such a member now answers 204 with the tree renamed
+    aside and a logged, dot-named remainder that the driver will not let anything delete. **OWNER
+    RULING 2026-09-02, and now better founded: not worth fixing.** It needs three things at once — an exFAT share (APFS
     and HFS+ are both fine), a name with decomposable non-ASCII characters, and a client that
     builds the NFC spelling itself rather than using the one the server listed. Neither deployment
     shape can reach it: Shape A vends from APFS, and Shape B is iOS, which has been APFS-only

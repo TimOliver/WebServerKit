@@ -601,7 +601,16 @@ static NSString *_StagingPathForPath(NSString *path) {
         return NO;
     }
 
-    if (![[NSFileManager defaultManager] removeItemAtPath:path error:error]) {
+    // The overwrite destroys the destination, so it inherits the partial-removal problem the
+    // DELETE path has — and a failed COPY/MOVE that had already gutted the destination is the
+    // worse half of it. Same atomic primitive.
+    int failure = 0;
+
+    if (!WSKRemoveItemAtPath(path, &failure)) {
+        if (error) {
+            *error = WSKMakePosixError(failure);
+        }
+
         return NO;
     }
 
@@ -1021,10 +1030,20 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not permitted", relativePath];
     }
 
-    NSError *error = nil;
+    // Atomic from the client's point of view, and answering with an errno so a lost race reads as
+    // one: the removability walk above vets a SNAPSHOT, which cannot close a window against a
+    // second client writing into the tree. See WSKRemoveItemAtPath.
+    int failure = 0;
 
-    if (![[NSFileManager defaultManager] removeItemAtPath:absolutePath error:&error]) {
-        return [WSKErrorResponse responseWithServerError:kWSKHTTPStatusCode_InternalServerError underlyingError:error message:@"Failed deleting \"%@\"", relativePath];
+    if (!WSKRemoveItemAtPath(absolutePath, &failure)) {
+        NSInteger const status = WSKStatusCodeForRemovalErrno(failure);
+        NSError *const error = WSKMakePosixError(failure);
+
+        if (status < 500) {
+            return [WSKErrorResponse responseWithClientError:(WSKClientErrorHTTPStatusCode)status message:@"Failed deleting \"%@\": %s", relativePath, strerror(failure)];
+        }
+
+        return [WSKErrorResponse responseWithServerError:(WSKServerErrorHTTPStatusCode)status underlyingError:error message:@"Failed deleting \"%@\"", relativePath];
     }
 
     if ([self.delegate respondsToSelector:@selector(davServer:didDeleteItemAtPath:)]) {
