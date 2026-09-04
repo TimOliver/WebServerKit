@@ -396,7 +396,12 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   stalled fake-boundary behaviour is UNCHANGED by design (its pinning test still passes): a
   token not followed by a delimiter still wedges until the cap, but at O(1) per append. What the
   fuzzing pass could not see: libFuzzer measures crashes and hangs, not a terminating-but-
-  quadratic cost.
+  quadratic cost. **Caveat (2026-09-04): the cursor advances only when a chunk COMPLETES, so a
+  chunk-size line that never ends — `5;` plus megabytes of extension, dribbled a byte per read —
+  still rescans the whole prefix for CRLF on every read: ~6 ms of CPU per dribbled byte at an 8 MB
+  prefix, one connection ≈ one core; bounded by the 16 MB framing cap, self-healing, identical on
+  the pre-fix build. Fix: remember the position already scanned when no CRLF is found, as the
+  multipart `_scanOffset` does. Listed under "Still open at tip".**
 - Digest auth works over full bytes (never `-UTF8String`+`strlen`); header-parameter
   extraction requires a token boundary (`nonce=` matches inside `cnonce=` otherwise);
   `filename*` uses an escaper that covers `;`.
@@ -524,7 +529,8 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
 - Budget exhaustion = 500, settled. A failed body read (disconnect, bad framing, cap) aborts
   the request — never process a partial body as complete. Bodies streamed to disk are
   deliberately unlimited.
-- Idle timeout: hard header-phase deadline; body phase uses a byte-RATE floor; response phase
+- Idle timeout: hard header-phase deadline; body phase uses a byte-RATE floor (effectively ~34 B/s,
+  not the nominal 32, because the timer's `interval / 10` leeway shortens a tick window); response phase
   is any-byte-is-progress (SSE-safe); handler time never counts.
 - **Dead-property storage: 64 KB per RESOURCE** (`kDAVMaxDeadPropertyStorageLength`, 2026-09-02),
   judged on the serialized plist after the merge. `kDAVMaxRequestBodyLength` bounds one request;
@@ -1004,7 +1010,12 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
   Headers and framing) and the Xcode-generator link failure, the Swift 6 trap, the pod's public
   Internal headers and the version strings (`fix/packaging`, under API shape). One correction the
   P1 work forced: the Digest finding claimed its fix "also closes the recorded no-nc/cnonce replay
-  item" — it does NOT, and the invariant entry says why. What remains, in the suggested order:
+  item" — it does NOT, and the invariant entry says why. **Re-verified 2026-09-04 against 49084f0** (four agents re-ran every original probe on a
+  host built from tip; the orchestrator reproduced the P1 verdicts): all four merged fixes HOLD with
+  no over-refusal (24 namespace spellings, 45 Digest cases, both SwiftPM generators with each oracle
+  proven sensitive on the pre-fix tree), every unfixed item below is STILL PRESENT and unchanged in
+  mechanism, every regression sweep held, and the pass surfaced the NEW items marked ★ plus the
+  calibrations in the last sub-bullet. What remains, in the suggested order:
   - *WebDAV.* ~~(P1) A property namespace URI containing `}` poisons the dead-property store.~~
     ~~(P1) The qop-less RFC 2069 Digest challenge is refused outright by every neon client.~~ Both
     fixed 2026-09-03; see the invariants. Note for anyone re-reading the originals in git history:
@@ -1012,6 +1023,17 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
     attributed to it (it is libxml2's own escaping of `&` inside `ns->href`, not anything this
     code does), and the Digest fix needed one thing the finding did not mention — `qop`/`nc`
     arrive UNQUOTED, so the shared header-parameter reader hands back `auth,` and `00000001,`.
+    ★ **(P2) A namespace URI containing WHITESPACE is still stored and published** —
+    `_PropertyNamespaceIsRepresentable` (`WSKWebDAVServer.m:428`) tests only `}`. `xmlns:Z="urn:with
+    space"` → 207 and the key `{urn:with space}note` lands in the xattr; allprop and the parent's
+    Depth:1 then carry `xmlns:W="urn:with space"`, which xmllint flags (`is not a valid URI`) and
+    **NSXMLDocument refuses outright** (`initWithData:` fails on the whole document); NSXMLParser,
+    WebDAVFS, neon and rclone tolerate it, Python expat in namespace mode does not. Same for tab,
+    newline, leading/trailing space and U+00A0. F3's persistence-and-contagion shape with a narrower
+    blast radius: a Cocoa client parsing 207s with NSXMLDocument cannot list the folder while the
+    property exists. Nameable and removable through the protocol, unlike the `}` case. Fix: refuse
+    whitespace in the same one home (or run libxml2's `xmlParseURI` on the href); the writer needs
+    no change and an old store with such a key stays nameable.
     (P2) Concurrent PROPPATCHes on one resource lose updates while both answer 200: an
     unlocked read-modify-write of the xattr plist (`:1799` read … `:1883` write; 106/200 and
     53/150 rounds lost a write). Fix: serialize PROPPATCH per server or per resolved path. (P2)
@@ -1039,6 +1061,11 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
     target" ruling).
   - *Connection.* **(P1 for Shape A) The slow-reader cut** — quantified in the corrected line
     under "Uploader and lifecycle" above, fix direction there; fixing it also un-flakes CI.
+    ★ **(P2) An UNTERMINATED chunk-size line is rescanned in full on every read** — see the
+    caveat on the "Both body parsers are linear" invariant under Headers and framing: `5;` plus
+    megabytes of extension, dribbled a byte per read, costs ~6 ms of CPU per byte at an 8 MB prefix
+    (0.2 ms for an ordinary body), so one slow connection is one core; four were 3.8 cores. Bounded
+    by the 16 MB framing cap, self-healing, pre-existing (identical on the pre-fix build).
     (P2, owner ruling requested) An async handler that KEEPS its completion block and never
     calls it holds its slot until process exit even after the client disconnects: no read is
     posted during a handler (`WSKConnection.m:843-877`), so a peer FIN/RST is never observed,
@@ -1134,6 +1161,29 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
     target is 14.6 against 12.0 everywhere else; LICENSE years disagree with the headers; CI
     runs macos-15/Xcode 16.4 with `actions/checkout@v4` deprecation warnings and no caching; the
     4.0.0 tag the podspec and README now both name does not exist yet.
+  - *Found by the 2026-09-04 re-verification, not in the original report.* ★ (P3) Swift can call
+    the OPTIONAL `-asyncReadDataWithCompletion:` on any `WSKResponse` subclass unconditionally —
+    `WSKBodyReader` marks it `@optional` (`WSKResponse.h:74-83`) and the library's own callers guard
+    with `respondsToSelector:` (`WSKResponse.m:72,82,384`), but Swift imports the requirement onto
+    the conforming class without an optional chain, so `response.asyncReadData { … }` on a
+    `WSKDataResponse` raises `NSInvalidArgumentException: unrecognized selector` (exit 134). A host
+    writing its own body-reader chain (an encoder, a progress wrapper) meets it; the Sendable
+    attribute on that very block is what now invites the call. Fix: a base implementation on
+    `WSKResponse` that calls `-readData:` and invokes the block (the encoder's fallback already does
+    this), or document `responds(to:)`. (nit) A multipart EPILOGUE larger than 16 MB after the closing
+    boundary accumulates in the End state and answers 413 rather than 200; no residue, unreachable in
+    practice. (nit) `Scripts/SwiftConsumer` leaves its temp directory behind on a RED run only
+    (`defer` does not run past `exit(1)`). **Calibrations, each measured:** the body-drip floor is
+    ~34 B/s, not "exactly 32" — `kMinReceiveBytesPerSecond` (32) × the tick, minus the idle timer's
+    `interval / 10` leeway (`WSKConnection.m:1451`), so a deadline-scheduled 33 B/s sender was cut
+    and 34 survived; a test pinned to 32 will flake by exactly this. A gzip request bomb answers
+    **503**, not the 413 the security report recorded — the decompressed-length check is a strict
+    `>` at 64 MB, so the buffer tries one more growth step and the process-wide reservation fails
+    first (`ServerAtCapacity`); refused either way, reserved returns to 0. The F7 `-idle 5` survival
+    boundary moved from "52 KB/s survives" to "52 KB/s cut" under load 300 — the threshold is a
+    race, so verify any fix by MECHANISM (progress counted at bytes the socket accepted), never by
+    a rate table. Scaling re-taken on a quiet machine (load 4.5): 3,983 / 14,997 / 11,346 req/s at
+    1.0 / 6.7 / 7.1 cores for c = 1 / 8 / 32 — the same shape as the pass.
 
 ## Lessons (the ones that cost real time)
 
@@ -1334,6 +1384,19 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
   litmus, a reverse proxy in front for the slow-reader cut, E-core participation, exFAT/HFS+/
   network volumes, 10,000-deep MKCOL, and the four recorded `-stop` TSan false positives (not
   re-observed).
+- **Re-verification of the 23rd pass, 2026-09-04 (four agents, every original probe re-run against
+  49084f0).** Verdicts and the three new siblings are in the "From the 23rd pass" block. Lessons
+  it added: (1) **the built-in logger prints ONLY when stderr is a TTY or a logger block is set**
+  (`WSKWebServer.m:79-94`) — a "no log line" claim made with stderr redirected to a file is vacuous;
+  drive the host under `script -q -F` or a pty, and say so in the finding. (2) A `pkill -f` on the
+  shared binary path from one agent again reached another agent's hosts (twice in two days); kill
+  by PID or by port range, never by binary path. (3) On a machine at load 250–350 (a parallel
+  fleet), wall-clock and req/s figures are meaningless while CPU-time deltas (`getrusage`,
+  `/__wskstats`) stay usable — every timing verdict in the re-check rests on the latter, and the
+  scaling curve was re-taken alone. (4) A fix's own neighbourhood is where its siblings hide: the
+  cursor rewrite closed the chunk-count quadratic and left the never-completing chunk-size line
+  untouched, and the `}` refusal left whitespace in — both found only by asking "what else has
+  this shape" against the FIXED code.
 
 ## Recurring defect shapes (check all new code against these)
 
