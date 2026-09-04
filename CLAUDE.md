@@ -581,8 +581,21 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   Measured at tip: one PROPPATCH made the file's allprop AND its parent's Depth:1 listing
   unparseable, persistently (xattr). `_PropertyLocalNameIsRepresentable` now rejects `}` beside `:`,
   which is what HEALS a store poisoned by an older build — the key is skipped, so one property is
-  lost instead of the whole listing. `{` needs no guard: the split looks for `}` only. Recurring
-  shapes 2 and 13.
+  lost instead of the whole listing. Recurring shapes 2 and 13.
+  **That check was itself too narrow, and its `{` needs-no-guard claim was wrong (2026-09-04).**
+  Asking only about `}` protected the KEY encoding and nothing else, so a namespace URI containing a
+  space was still stored and published — the sibling the re-verification found. The client that
+  cares is a Cocoa one: **NSXMLDocument refuses the WHOLE 207** when a namespace name is not a URI
+  reference, so the resource's allprop AND its parent's Depth:1 listing are unreadable to it while
+  the property exists. Measured over 19 spellings on a live server: space, tab, newline, NBSP, `>`,
+  `%`, `^`, `` ` ``, `{`, `|`, `\` and any non-ASCII character each break it; NSXMLParser, WebDAVFS,
+  neon and rclone tolerate every one, which is why only the `}` spelling — the one that ALSO breaks
+  the key — was caught the first time. The rule is therefore not "no whitespace" (that covers six of
+  the twelve breaking spellings) but "is it a URI", asked of libxml2 itself via `xmlParseURI` —
+  the same implementation the client-side check comes from. Measured against NSXMLDocument on all
+  19: they agree on 17, and the two where `xmlParseURI` is stricter (`<` and a bare quote) are
+  excluded from a URI by RFC 3986 anyway. The explicit `}` test stays in FRONT of it, because that
+  one protects the key encoding and would still be needed if libxml2 ever loosened.
   Separately, and only visible by testing the ROUND TRIP rather than the response: **libxml2 writes
   every `&` in `node->ns->href` as `&#38;`, and does that to nothing else** — measured across `&`,
   `<`, `>`, `"`, `'`, tab and newline, every one of which arrives decoded. So `urn:a&b` was stored

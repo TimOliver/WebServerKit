@@ -1968,13 +1968,12 @@
     XCTAssertTrue([ampBack containsString:@"xmlns:W=\"urn:a&amp;b\""], @"the namespace did not round-trip: %@", ampBack);
     XCTAssertFalse([ampBack containsString:@"&amp;#38;"], @"libxml2's escaped ampersand was published verbatim: %@", ampBack);
 
-    // What must keep working: an ordinary declared namespace, and a "{" that needs no escaping.
+    // "{" was accepted when this test was written, on the reasoning that only "}" breaks the KEY
+    // encoding. That reasoning was right and the conclusion wrong: RFC 3986 excludes "{" from a URI
+    // and NSXMLDocument refuses the whole 207 because of it, so it is refused now too — see
+    // testDAVRefusesAPropertyNamespaceThatIsNotAValidURI.
     NSString *brace = send(@"PROPPATCH", @"/f.txt", @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:Z=\"urn:a{b\"><D:set><D:prop><Z:kept>v</Z:kept></D:prop></D:set></D:propertyupdate>");
-    XCTAssertTrue([brace containsString:@"200 OK"], @"only \"}\" breaks the key encoding; \"{\" must still store: %@", brace);
-
-    NSString *braceBack = SendRawRequest(server.port, @"PROPFIND /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
-    XCTAssertTrue(bodyIsXML(braceBack), @"the readback is not well-formed XML: %@", braceBack);
-    XCTAssertTrue([braceBack containsString:@"urn:a{b"], @"the \"{\" namespace lost its URI: %@", braceBack);
+    XCTAssertTrue([brace hasPrefix:@"HTTP/1.1 400"], @"a namespace excluded from a URI must be refused: %@", [brace substringToIndex:MIN((NSUInteger)40, brace.length)]);
 
     [server stop];
     [fm removeItemAtPath:dir error:NULL];
@@ -2172,6 +2171,76 @@
     }
 
     XCTAssertEqual(fiveHundreds, (NSUInteger)0, @"a DELETE that lost a race answered 5xx instead of 404");
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// The sibling of the "}" refusal above, and the same lesson as the one before it: that fix asked
+// only whether the LOCAL NAME could be written back, this one asks it of the NAMESPACE, and the
+// first version of THIS check asked only about "}" — so a namespace URI containing a space was
+// still stored and published.
+//
+// The blast radius is a real client, not a purist's reading. Measured over 19 spellings against a
+// live server: NSXMLDocument — what a Cocoa client parses a 207 with — REFUSES the entire document
+// for a namespace containing a space, tab, newline, NBSP, ">", "%", "^", "`", "{", "|", "\" or any
+// non-ASCII character, so one such property makes the resource's allprop AND its parent's Depth:1
+// listing unreadable to that client while it exists. NSXMLParser, WebDAVFS, neon and rclone all
+// tolerate it, which is why nothing noticed.
+//
+// The rule is not "no whitespace" — that was the shape the finding was first written in, and it
+// covers six of the twelve breaking spellings. A namespace name is required to be a URI reference,
+// so the honest question is whether it IS one, and libxml2's own xmlParseURI answers exactly that.
+// Measured against the Cocoa oracle on all 19: they agree on 17, and the two where xmlParseURI is
+// stricter ("<" and a bare quote) are characters RFC 3986 excludes anyway.
+- (void)testDAVRefusesAPropertyNamespaceThatIsNotAValidURI {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    XCTAssertTrue([@"data" writeToFile:[dir stringByAppendingPathComponent:@"f.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString * (^propPatch)(NSString *) = ^(NSString *namespaceHref) {
+        NSString *const body = [NSString stringWithFormat:@"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:Z=\"%@\"><D:set><D:prop><Z:note>v</Z:note></D:prop></D:set></D:propertyupdate>", namespaceHref];
+        return SendRawRequest(server.port, [NSString stringWithFormat:@"PROPPATCH /f.txt HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)body.length, body]);
+    };
+    // The oracle a Cocoa client actually uses. NSXMLParser is NOT usable here: it tolerates every
+    // one of these, which is how the class stayed open through the previous fix.
+    BOOL (^bodyParsesAsCocoaXML)(NSString *) = ^(NSString *reply) {
+        NSRange const split = [reply rangeOfString:@"\r\n\r\n"];
+        if (split.location == NSNotFound) {
+            return NO;
+        }
+        NSData *const body = [[reply substringFromIndex:NSMaxRange(split)] dataUsingEncoding:NSUTF8StringEncoding];
+        return (BOOL)([[NSXMLDocument alloc] initWithData:body options:0 error:NULL] != nil);
+    };
+
+    NSArray<NSString *> *const refused = @[@"urn:a b", @"urn:a\tb", @"urn:a\nb", @" urn:a", @"urn:a ", @"urn:a b", @"urn:a>b", @"urn:a%b", @"urn:a^b", @"urn:a`b", @"urn:a{b", @"urn:a|b", @"urn:a\\b", @"urn:café"];
+    for (NSString *href in refused) {
+        NSString *reply = propPatch(href);
+        NSString *const status = [reply substringToIndex:MIN((NSUInteger)40, reply.length)];
+        XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 400"], @"namespace \"%@\" is not a URI and must be refused: %@", href, status);
+    }
+
+    // Nothing was stored, so both listings stay readable to the client that would have choked.
+    NSString *readback = SendRawRequest(server.port, @"PROPFIND /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
+    XCTAssertTrue(bodyParsesAsCocoaXML(readback), @"NSXMLDocument cannot parse the resource's allprop: %@", readback);
+
+    NSString *listing = SendRawRequest(server.port, @"PROPFIND / HTTP/1.1\r\nHost: localhost\r\nDepth: 1\r\nContent-Length: 0\r\n\r\n");
+    XCTAssertTrue(bodyParsesAsCocoaXML(listing), @"NSXMLDocument cannot parse the parent listing: %@", listing);
+
+    // What must keep working — the ordinary shapes, including the two the previous fix pinned.
+    NSArray<NSString *> *const accepted = @[@"urn:example", @"urn:a&amp;b", @"http://x/?a=1&amp;b=2", @"http://example.com/ns/", @"urn:a'b"];
+    for (NSString *href in accepted) {
+        NSString *reply = propPatch(href);
+        XCTAssertTrue([reply containsString:@"200 OK"], @"namespace \"%@\" is a valid URI and must still store: %@", href, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+    }
+
+    NSString *acceptedBack = SendRawRequest(server.port, @"PROPFIND /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
+    XCTAssertTrue(bodyParsesAsCocoaXML(acceptedBack), @"the stored valid namespaces broke the readback: %@", acceptedBack);
+    XCTAssertTrue([acceptedBack containsString:@"urn:a&amp;b"], @"the ampersand round trip regressed: %@", acceptedBack);
 
     [server stop];
     [fm removeItemAtPath:dir error:NULL];

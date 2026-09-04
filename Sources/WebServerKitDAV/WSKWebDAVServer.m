@@ -35,6 +35,7 @@
 #import "WSKWebDAVServer.h"
 
 #import <libxml/parser.h>
+#import <libxml/uri.h>
 #import <sys/xattr.h>
 
 #import "WSKDataRequest.h"
@@ -420,13 +421,44 @@ static BOOL _PropertyLocalNameIsRepresentable(NSString *localName) {
            ([localName rangeOfString:@"}" options:NSLiteralSearch].location == NSNotFound);
 }
 
-// The same question about the other half of the key. "{href}localname" is read back by splitting at
-// the FIRST "}", so a URI containing one splits in the wrong place — xmlns:Z="urn:a}b" stores
-// {urn:a}b}note and emits <W:b}note xmlns:W="urn:a"/>, whose prefix IS declared and whose name is
-// still not XML. "{" needs no guard: the split looks for "}" only, so a URI containing one is
-// keyed and read back correctly.
+// The same question about the other half of the key, asked twice because the first answer was too
+// narrow.
+//
+// The KEY reason: "{href}localname" is read back by splitting at the FIRST "}", so a URI containing
+// one splits in the wrong place — xmlns:Z="urn:a}b" stores {urn:a}b}note and emits
+// <W:b}note xmlns:W="urn:a"/>, whose prefix IS declared and whose name is still not XML.
+//
+// The CLIENT reason, which the "}" check alone missed: a namespace name is required to be a URI
+// reference, and a Cocoa client parses a 207 with NSXMLDocument, which refuses the WHOLE document
+// when one is not. Measured over 19 spellings against a live server: a space, tab, newline, NBSP,
+// ">", "%", "^", "`", "{", "|", "\" or any non-ASCII character each make NSXMLDocument reject the
+// resource's allprop AND its parent's Depth:1 listing, for as long as the property exists.
+// NSXMLParser, WebDAVFS, neon and rclone tolerate every one of them, which is why only the "}"
+// spelling — the one that also breaks the key — was caught the first time.
+//
+// So ask libxml2 the question directly rather than enumerating characters: xmlParseURI is the same
+// implementation the client-side check comes from. Measured against NSXMLDocument on all 19
+// spellings they agree on 17, and the two where xmlParseURI is stricter ("<" and a bare quote) are
+// excluded from a URI by RFC 3986 anyway. The explicit "}" test stays in front of it: that one
+// protects the key encoding, which would still be broken if libxml2 ever loosened.
 static BOOL _PropertyNamespaceIsRepresentable(NSString *namespaceHref) {
-    return [namespaceHref rangeOfString:@"}" options:NSLiteralSearch].location == NSNotFound;
+    if ([namespaceHref rangeOfString:@"}" options:NSLiteralSearch].location != NSNotFound) {
+        return NO;
+    }
+
+    if (namespaceHref.length == 0) {
+        return YES;  // A property in no namespace at all; keyed by its bare local name.
+    }
+
+    xmlURIPtr const uri = xmlParseURI([namespaceHref UTF8String]);
+
+    if (uri == NULL) {
+        return NO;
+    }
+
+    xmlFreeURI(uri);
+
+    return YES;
 }
 
 // The namespace URI of a property element, with libxml2's own escaping undone — ONE home, because
