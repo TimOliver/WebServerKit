@@ -396,12 +396,22 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   stalled fake-boundary behaviour is UNCHANGED by design (its pinning test still passes): a
   token not followed by a delimiter still wedges until the cap, but at O(1) per append. What the
   fuzzing pass could not see: libFuzzer measures crashes and hangs, not a terminating-but-
-  quadratic cost. **Caveat (2026-09-04): the cursor advances only when a chunk COMPLETES, so a
-  chunk-size line that never ends — `5;` plus megabytes of extension, dribbled a byte per read —
-  still rescans the whole prefix for CRLF on every read: ~6 ms of CPU per dribbled byte at an 8 MB
-  prefix, one connection ≈ one core; bounded by the 16 MB framing cap, self-healing, identical on
-  the pre-fix build. Fix: remember the position already scanned when no CRLF is found, as the
-  multipart `_scanOffset` does. Listed under "Still open at tip".**
+  quadratic cost.
+  **Both of that cursor's own siblings are now closed too (2026-09-04), and it had two.** It
+  advanced only when a chunk COMPLETED, so (a) a chunk-size line that never ends — `5;` plus
+  megabytes of extension, dribbled a byte per read — rescanned the whole prefix for CRLF every
+  time, and (b) once the last-chunk marker was seen, the terminating CRLFCRLF was searched from
+  that marker on every read, so a trailer that never ends did the same. `_chunkScanOffset` and
+  `_chunkTrailerScanOffset` persist across reads and resume at the last byte that could still begin
+  their token. Measured on the wire at an 8 MB prefix: size line **2.80 ms of CPU per read → 0.067
+  ms**, trailer **1.37 ms → 0.067 ms**; at 64 KB the size line cost 0.35 ms, so the cost grew with
+  the prefix, which is the quadratic signature. A few hundred dribbled bytes a second owned a core.
+  Bounded by the 16 MB framing cap and self-healing, and pre-existing — the pre-cursor build
+  behaves identically. Each is pinned by a CPU-bounded test proven red against its OWN hunk with
+  the other fix in place. **Getting the probe right was the whole difficulty:** the kernel
+  coalesces dribbled bytes into one read unless the writes are paced AND `TCP_NODELAY` is set, and
+  without both the cost reads as LINEAR and the defect looks absent — the first measurement said
+  exactly that.
 - Digest auth works over full bytes (never `-UTF8String`+`strlen`); header-parameter
   extraction requires a token boundary (`nonce=` matches inside `cnonce=` otherwise);
   `filename*` uses an escaper that covers `;`.

@@ -24,13 +24,13 @@
 // "Executed N tests" count rather than a named failing test, so read the count, not the
 // failure number.
 - (void)testAbortiveClientResetsDoNotKillTheProcess {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
                           requestClass:[WSKRequest class]
-                          processBlock:^WSKResponse*(WSKRequest* request) {
+                          processBlock:^WSKResponse *(WSKRequest *request) {
                               return [WSKDataResponse responseWithText:@"alive"];
                           }];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     // Two shapes, because the option can fail either with a request already sent or with
@@ -42,7 +42,7 @@
                 continue;
             }
             if (round == 0) {
-                const char* request = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+                const char *request = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
                 send(fd, request, strlen(request), 0);
             }
             struct linger abortive = {1, 0};  // RST rather than FIN on close
@@ -52,20 +52,20 @@
     }
 
     // Reaching here at all is most of the assertion; this proves the listener also still works.
-    NSString* reply = SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *reply = SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertTrue([reply containsString:@"alive"], @"server stopped serving after abortive resets: %@", reply);
 
     [server stop];
 }
 
 - (void)testConnectionIdleTimeoutClosesSilentConnection {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
                           requestClass:[WSKRequest class]
-                          processBlock:^WSKResponse*(WSKRequest* request) {
+                          processBlock:^WSKResponse *(WSKRequest *request) {
                               return [WSKDataResponse responseWithText:@"hello"];
                           }];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES, WSKOption_ConnectionIdleTimeout : @0.5};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES, WSKOption_ConnectionIdleTimeout: @0.5};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     int fd = ConnectToLocalhostPort(server.port);
@@ -83,25 +83,25 @@
 // I/O. A handler that takes longer than the timeout to produce a response (no
 // pending reads or writes during that window) must not have its connection cut.
 - (void)testConnectionIdleTimeoutSparesSlowHandler {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
                           requestClass:[WSKRequest class]
-                     asyncProcessBlock:^(WSKRequest* request, WSKCompletionBlock completionBlock) {
+                     asyncProcessBlock:^(WSKRequest *request, WSKCompletionBlock completionBlock) {
                          dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * (double)NSEC_PER_SEC)), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
                              completionBlock([WSKDataResponse responseWithText:@"slow-response-body"]);
                          });
                      }];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES, WSKOption_ConnectionIdleTimeout : @0.5};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES, WSKOption_ConnectionIdleTimeout: @0.5};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     int fd = ConnectToLocalhostPort(server.port);
     XCTAssertGreaterThan(fd, 0);
-    const char* request = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    const char *request = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
     XCTAssertEqual(send(fd, request, strlen(request), 0), (ssize_t)strlen(request));
 
     BOOL sawEOF = NO;
-    NSData* data = ReadToEOF(fd, &sawEOF);
-    NSString* reply = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    NSData *data = ReadToEOF(fd, &sawEOF);
+    NSString *reply = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
     XCTAssertTrue([reply containsString:@"200"], @"expected a 200 response, got: %@", reply);
     XCTAssertTrue([reply containsString:@"slow-response-body"], @"slow handler's response was cut off: %@", reply);
     close(fd);
@@ -118,31 +118,31 @@
 // Demonstrated against the Host allow-list — a Host placed after an LF-LF vanished
 // entirely, taking the request down the "no Host" branch. Framing must be unambiguous.
 - (void)testMalformedHeaderFramingIsRefused {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
                           requestClass:[WSKRequest class]
-                          processBlock:^WSKResponse*(WSKRequest* request) {
+                          processBlock:^WSKResponse *(WSKRequest *request) {
                               return [WSKDataResponse responseWithText:@"ok"];
                           }];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     // Sanity: a well-formed request still works.
     XCTAssertTrue([SendRawRequest(server.port, @"GET /a HTTP/1.1\r\nHost: localhost\r\n\r\n") containsString:@"200"]);
 
-    NSDictionary* cases = @{
-        @"bare LF-LF hiding later headers" : @"GET /a HTTP/1.1\r\nX-Pad: p\n\nHost: evil.example\r\n\r\n",
-        @"space before the colon" : @"GET /a HTTP/1.1\r\nHost: localhost\r\nContent-Length : 5\r\n\r\n",
-        @"obs-fold continuation line" : @"GET /a HTTP/1.1\r\nHost: localhost\r\nContent-Length:\r\n 5\r\n\r\n",
-        @"header line with no colon" : @"GET /a HTTP/1.1\r\nHost: localhost\r\nBogusLine\r\n\r\n",
-        @"non-token character in the field name" : @"GET /a HTTP/1.1\r\nHost: localhost\r\nX Bad: 1\r\n\r\n",
-        @"junk after the HTTP version" : @"GET /a HTTP/1.1 junk\r\nHost: localhost\r\n\r\n",
-        @"space inside the request target" : @"GET /a b HTTP/1.1\r\nHost: localhost\r\n\r\n",
-        @"doubled spaces in the request line" : @"GET  /a  HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    NSDictionary *cases = @{
+        @"bare LF-LF hiding later headers": @"GET /a HTTP/1.1\r\nX-Pad: p\n\nHost: evil.example\r\n\r\n",
+        @"space before the colon": @"GET /a HTTP/1.1\r\nHost: localhost\r\nContent-Length : 5\r\n\r\n",
+        @"obs-fold continuation line": @"GET /a HTTP/1.1\r\nHost: localhost\r\nContent-Length:\r\n 5\r\n\r\n",
+        @"header line with no colon": @"GET /a HTTP/1.1\r\nHost: localhost\r\nBogusLine\r\n\r\n",
+        @"non-token character in the field name": @"GET /a HTTP/1.1\r\nHost: localhost\r\nX Bad: 1\r\n\r\n",
+        @"junk after the HTTP version": @"GET /a HTTP/1.1 junk\r\nHost: localhost\r\n\r\n",
+        @"space inside the request target": @"GET /a b HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        @"doubled spaces in the request line": @"GET  /a  HTTP/1.1\r\nHost: localhost\r\n\r\n",
     };
 
-    [cases enumerateKeysAndObjectsUsingBlock:^(NSString* name, NSString* raw, BOOL* stop) {
-        NSString* reply = SendRawRequest(server.port, raw);
+    [cases enumerateKeysAndObjectsUsingBlock:^(NSString *name, NSString *raw, BOOL *stop) {
+        NSString *reply = SendRawRequest(server.port, raw);
         XCTAssertNotNil(reply, @"%@: no reply", name);
         XCTAssertTrue([reply containsString:@"400"], @"%@: expected 400, got: %@", name, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
     }];
@@ -153,17 +153,17 @@
 // An oversized header block is the client's error, not the server's: answering 500 told
 // the client we had failed and invited a retry of something that can never succeed.
 - (void)testOversizedHeaderBlockIsRefusedWith431 {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
                           requestClass:[WSKRequest class]
-                          processBlock:^WSKResponse*(WSKRequest* request) {
+                          processBlock:^WSKResponse *(WSKRequest *request) {
                               return [WSKDataResponse responseWithText:@"ok"];
                           }];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* huge = [@"" stringByPaddingToLength:(1024 * 1024) withString:@"A" startingAtIndex:0];
-    NSString* reply = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /a HTTP/1.1\r\nHost: localhost\r\nX-Big: %@\r\n\r\n", huge]);
+    NSString *huge = [@"" stringByPaddingToLength:(1024 * 1024) withString:@"A" startingAtIndex:0];
+    NSString *reply = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /a HTTP/1.1\r\nHost: localhost\r\nX-Big: %@\r\n\r\n", huge]);
     XCTAssertNotNil(reply);
     XCTAssertTrue([reply containsString:@"431"], @"expected 431 for an oversized header block, got: %@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
 
@@ -180,24 +180,24 @@
 // up front the reply arrives immediately, whereas the old ordering sits waiting for
 // bytes that never come until the idle timeout fires.
 - (void)testHeaderOnlyRefusalsHappenBeforeTheBodyIsRead {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{
-        WSKOption_Port : @0,
-        WSKOption_BindToLocalhost : @YES,
-        WSKOption_AuthenticationMethod : WSKAuthenticationMethod_Basic,
-        WSKOption_AuthenticationAccounts : @{@"user" : @"pass"}
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{
+        WSKOption_Port: @0,
+        WSKOption_BindToLocalhost: @YES,
+        WSKOption_AuthenticationMethod: WSKAuthenticationMethod_Basic,
+        WSKOption_AuthenticationAccounts: @{@"user": @"pass"}
     };
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     // (a) No credentials.
-    NSString* unauthenticated = SendRawRequest(server.port, @"PUT /big.bin HTTP/1.1\r\nHost: localhost\r\nContent-Length: 104857600\r\n\r\n");
+    NSString *unauthenticated = SendRawRequest(server.port, @"PUT /big.bin HTTP/1.1\r\nHost: localhost\r\nContent-Length: 104857600\r\n\r\n");
     XCTAssertTrue([unauthenticated containsString:@"401"], @"expected 401 before the body, got: %@", unauthenticated);
 
     // (b) Valid credentials but a Host the allow-list does not cover. "dXNlcjpwYXNz" is
     // base64 of "user:pass", so this fails only on the Host check.
-    NSString* badHost = SendRawRequest(server.port, @"PUT /big.bin HTTP/1.1\r\nHost: evil.example\r\nAuthorization: Basic dXNlcjpwYXNz\r\nContent-Length: 104857600\r\n\r\n");
+    NSString *badHost = SendRawRequest(server.port, @"PUT /big.bin HTTP/1.1\r\nHost: evil.example\r\nAuthorization: Basic dXNlcjpwYXNz\r\nContent-Length: 104857600\r\n\r\n");
     XCTAssertTrue([badHost containsString:@"421"], @"expected 421 before the body, got: %@", badHost);
 
     XCTAssertEqual([fm contentsOfDirectoryAtPath:dir error:NULL].count, (NSUInteger)0, @"nothing should have been stored");
@@ -211,13 +211,13 @@
 // The per-chunk cap only applies after a size line is parsed; the framing scan itself
 // was previously unbounded.
 - (void)testChunkedTransferRejectsUnterminatedSizeLine {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addDefaultHandlerForMethod:@"POST"
                           requestClass:[WSKDataRequest class]
-                          processBlock:^WSKResponse*(WSKRequest* request) {
+                          processBlock:^WSKResponse *(WSKRequest *request) {
                               return [WSKDataResponse responseWithText:@"ok"];
                           }];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES, WSKOption_ConnectionIdleTimeout : @5.0};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES, WSKOption_ConnectionIdleTimeout: @5.0};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     // Shrink the bound so the property is proven with a few hundred kilobytes rather than
@@ -231,7 +231,7 @@
 
     int fd = ConnectToLocalhostPort(server.port);
     XCTAssertGreaterThan(fd, 0);
-    const char* head = "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\n\r\n";
+    const char *head = "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\n\r\n";
     XCTAssertEqual(send(fd, head, strlen(head), 0), (ssize_t)strlen(head));
 
     // Stream 'a' bytes (all valid hex, no CRLF) so the chunk-size line can never complete,
@@ -252,7 +252,7 @@
     });
 
     BOOL sawEOF = NO;
-    NSString* reply = [[NSString alloc] initWithData:ReadToEOF(fd, &sawEOF) encoding:NSUTF8StringEncoding];
+    NSString *reply = [[NSString alloc] initWithData:ReadToEOF(fd, &sawEOF) encoding:NSUTF8StringEncoding];
     // Tightened from "500 or 400": the framing bound is a size limit, so 413 is what it owes, and
     // that is now what it sends. The loose form was written when every body failure was 500.
     XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 413"], @"server did not reject unbounded chunk framing with 413 (reply: %@)", reply);
@@ -267,12 +267,12 @@
 // bounded it. The bound is on CPU time, which a loaded machine cannot inflate; the data check
 // proves the decoder still hands every byte over intact.
 - (void)testChunkedBodyOfManyTinyChunksDecodesInLinearTime {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addDefaultHandlerForMethod:@"POST"
                           requestClass:[WSKDataRequest class]
-                          processBlock:^WSKResponse*(WSKRequest* request) {
-                              NSData* body = [(WSKDataRequest*)request data];
-                              const unsigned char* bytes = body.bytes;
+                          processBlock:^WSKResponse *(WSKRequest *request) {
+                              NSData *body = [(WSKDataRequest *)request data];
+                              const unsigned char *bytes = body.bytes;
                               NSUInteger intact = 0;
                               for (NSUInteger i = 0; i < body.length; i++) {
                                   if (bytes[i] == 'A') {
@@ -281,11 +281,11 @@
                               }
                               return [WSKDataResponse responseWithText:[NSString stringWithFormat:@"%lu/%lu", (unsigned long)intact, (unsigned long)body.length]];
                           }];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES, WSKOption_ConnectionIdleTimeout : @30.0};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES, WSKOption_ConnectionIdleTimeout: @30.0};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     const NSUInteger kChunks = 300000;  // ~1.8 MB on the wire: seconds of CPU when quadratic, milliseconds when linear
-    NSMutableData* body = [NSMutableData dataWithCapacity:(kChunks * 6 + 8)];
+    NSMutableData *body = [NSMutableData dataWithCapacity:(kChunks * 6 + 8)];
     for (NSUInteger i = 0; i < kChunks; i++) {
         [body appendBytes:"1\r\nA\r\n" length:6];
     }
@@ -293,14 +293,14 @@
 
     int fd = ConnectToLocalhostPort(server.port);
     XCTAssertGreaterThan(fd, 0);
-    const char* head = "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\n\r\n";
+    const char *head = "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\n\r\n";
     XCTAssertEqual(send(fd, head, strlen(head), 0), (ssize_t)strlen(head));
 
     NSTimeInterval cpuBefore = ProcessCPUSeconds();
     // The socket buffers cannot hold the whole body, so the send has to interleave with the
     // server's reads; do it off the main thread and read the reply from here once it lands.
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        const char* bytes = body.bytes;
+        const char *bytes = body.bytes;
         NSUInteger sent = 0;
         while (sent < body.length) {
             ssize_t n = send(fd, bytes + sent, body.length - sent, 0);
@@ -312,15 +312,131 @@
     });
 
     BOOL sawEOF = NO;
-    NSString* reply = [[NSString alloc] initWithData:ReadToEOF(fd, &sawEOF) encoding:NSUTF8StringEncoding];
+    NSString *reply = [[NSString alloc] initWithData:ReadToEOF(fd, &sawEOF) encoding:NSUTF8StringEncoding];
     NSTimeInterval cpuSpent = ProcessCPUSeconds() - cpuBefore;
     close(fd);
     [server stop];
 
     XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 200"], @"the body was not accepted (reply: %@)", reply);
-    NSString* expected = [NSString stringWithFormat:@"%lu/%lu", (unsigned long)kChunks, (unsigned long)kChunks];
+    NSString *expected = [NSString stringWithFormat:@"%lu/%lu", (unsigned long)kChunks, (unsigned long)kChunks];
     XCTAssertTrue([reply hasSuffix:expected], @"the decoded body was not %@ intact bytes (reply: %@)", expected, reply);
     XCTAssertLessThan(cpuSpent, 1.0, @"decoding %lu one-byte chunks cost %.2f s of CPU: the decoder is not linear in chunk count", (unsigned long)kChunks, cpuSpent);
+}
+
+// The sibling the cursor fix left behind. That fix advances its cursor only when a chunk
+// COMPLETES, so a chunk-size line that never ends — "5;" followed by megabytes of extension —
+// leaves the cursor at zero and every arriving byte rescans the whole prefix for CRLF. Measured
+// against a live server: 0.35 ms of CPU per read at a 64 KB prefix, rising to 2.80 ms at 8 MB, so
+// a client dribbling a few hundred bytes a second occupies a core. Bounded by the framing cap and
+// self-healing, but the cost is paid before the cap is reached, and it is pre-existing — the
+// pre-fix build behaves identically.
+//
+// Only bytes that could still BEGIN the token need re-examining, which for a two-byte CRLF is the
+// final byte alone — the same rule the multipart parser's _scanOffset follows.
+- (void)testChunkedSizeLineThatNeverEndsIsNotRescannedFromTheFront {
+    WSKWebServer *server = [[WSKWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"POST"
+                          requestClass:[WSKDataRequest class]
+                          processBlock:^WSKResponse *(WSKRequest *request) {
+                              return [WSKDataResponse responseWithText:@"ok"];
+                          }];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES, WSKOption_ConnectionIdleTimeout: @60.0};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    int fd = ConnectToLocalhostPort(server.port);
+    XCTAssertGreaterThan(fd, 0);
+    int one = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));  // Each dribbled byte must be its own read
+
+    const char *head = "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\n\r\n";
+    XCTAssertEqual(send(fd, head, strlen(head), 0), (ssize_t)strlen(head));
+
+    // A chunk-size line with a megabytes-long extension and no terminating CRLF, sent in one go so
+    // building the prefix is not what is being timed.
+    NSUInteger const kPrefix = 8 * 1024 * 1024;
+    NSMutableData *prefix = [NSMutableData dataWithLength:kPrefix];
+    memset(prefix.mutableBytes, 'x', prefix.length);
+    XCTAssertEqual(send(fd, "5;", 2, 0), (ssize_t)2);
+    const char *prefixBytes = prefix.bytes;
+    NSUInteger written = 0;
+    while (written < prefix.length) {
+        ssize_t n = send(fd, prefixBytes + written, prefix.length - written, 0);
+        if (n <= 0) {
+            break;
+        }
+        written += (NSUInteger)n;
+    }
+    XCTAssertEqual(written, kPrefix, @"the prefix did not reach the server");
+    usleep(700000);  // Let the server buffer it before the clock starts
+
+    NSUInteger const kDribbles = 300;
+    NSTimeInterval cpuBefore = ProcessCPUSeconds();
+    for (NSUInteger i = 0; i < kDribbles; i++) {
+        if (send(fd, "x", 1, 0) != 1) {
+            break;
+        }
+        usleep(2000);  // Pacing, so the kernel cannot coalesce these into one read
+    }
+    NSTimeInterval cpuSpent = ProcessCPUSeconds() - cpuBefore;
+    close(fd);
+    [server stop];
+
+    XCTAssertLessThan(cpuSpent, 0.30, @"%lu bytes dribbled into an unterminated chunk-size line behind an %lu MB prefix cost %.2f s of CPU: the prefix is being rescanned per read", (unsigned long)kDribbles, (unsigned long)(kPrefix / (1024 * 1024)), cpuSpent);
+}
+
+// The same shape one branch over, and the reason this fix was not finished when the size-line
+// cursor went green: once the last-chunk marker has been seen, the search for the terminating
+// CRLFCRLF started at that marker on every read, so a trailer that never ends was rescanned in
+// full each time — 1.37 ms of CPU per read at an 8 MB trailer, against 0.07 for the size line the
+// cursor had just fixed. A fix's own neighbourhood is where its siblings hide.
+- (void)testChunkedTrailerThatNeverEndsIsNotRescannedFromTheFront {
+    WSKWebServer *server = [[WSKWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"POST"
+                          requestClass:[WSKDataRequest class]
+                          processBlock:^WSKResponse *(WSKRequest *request) {
+                              return [WSKDataResponse responseWithText:@"ok"];
+                          }];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES, WSKOption_ConnectionIdleTimeout: @60.0};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    int fd = ConnectToLocalhostPort(server.port);
+    XCTAssertGreaterThan(fd, 0);
+    int one = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+
+    const char *head = "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\n\r\n";
+    XCTAssertEqual(send(fd, head, strlen(head), 0), (ssize_t)strlen(head));
+
+    // The last-chunk marker, then a trailer that never reaches its blank line.
+    NSUInteger const kPrefix = 8 * 1024 * 1024;
+    NSMutableData *prefix = [NSMutableData dataWithLength:kPrefix];
+    memset(prefix.mutableBytes, 'x', prefix.length);
+    XCTAssertEqual(send(fd, "0\r\n", 3, 0), (ssize_t)3);
+    const char *prefixBytes = prefix.bytes;
+    NSUInteger written = 0;
+    while (written < prefix.length) {
+        ssize_t n = send(fd, prefixBytes + written, prefix.length - written, 0);
+        if (n <= 0) {
+            break;
+        }
+        written += (NSUInteger)n;
+    }
+    XCTAssertEqual(written, kPrefix, @"the trailer did not reach the server");
+    usleep(700000);
+
+    NSUInteger const kDribbles = 300;
+    NSTimeInterval cpuBefore = ProcessCPUSeconds();
+    for (NSUInteger i = 0; i < kDribbles; i++) {
+        if (send(fd, "x", 1, 0) != 1) {
+            break;
+        }
+        usleep(2000);
+    }
+    NSTimeInterval cpuSpent = ProcessCPUSeconds() - cpuBefore;
+    close(fd);
+    [server stop];
+
+    XCTAssertLessThan(cpuSpent, 0.30, @"%lu bytes dribbled into an unterminated trailer behind an %lu MB prefix cost %.2f s of CPU: the trailer is being rescanned per read", (unsigned long)kDribbles, (unsigned long)(kPrefix / (1024 * 1024)), cpuSpent);
 }
 
 // A slowloris that dribbles one byte per tick keeps "bytes moving", so the
@@ -329,13 +445,13 @@
 // slot forever. Dribbling faster than one tick guarantees the zero-progress check is
 // not what closes it, so a close proves the header deadline works.
 - (void)testConnectionClosesSlowlorisHeaderDribble {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
                           requestClass:[WSKRequest class]
-                          processBlock:^WSKResponse*(WSKRequest* request) {
+                          processBlock:^WSKResponse *(WSKRequest *request) {
                               return [WSKDataResponse responseWithText:@"hello"];
                           }];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES, WSKOption_ConnectionIdleTimeout : @0.5};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES, WSKOption_ConnectionIdleTimeout: @0.5};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     int fd = ConnectToLocalhostPort(server.port);
@@ -350,7 +466,7 @@
     struct timeval readTimeout = {30, 0};
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &readTimeout, sizeof(readTimeout));
 
-    const char* partial = "GET / HTTP/1.1\r\nHost: localhost\r\n";  // deliberately never completes the header block
+    const char *partial = "GET / HTTP/1.1\r\nHost: localhost\r\n";  // deliberately never completes the header block
     XCTAssertEqual(send(fd, partial, strlen(partial), 0), (ssize_t)strlen(partial));
 
     // Dribble one header byte every 0.25 s (< the 0.5 s tick) on a background queue so
@@ -400,14 +516,14 @@
 // curl strips '#' from the target and passes it through in Destination untouched. With only the
 // request-target guard, a COPY still destroyed a collection through Destination.
 - (void)testFragmentInRequestTargetIsRefusedRatherThanTruncated {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* collection = [dir stringByAppendingPathComponent:@"Builds"];
+    NSString *collection = [dir stringByAppendingPathComponent:@"Builds"];
     void (^rebuild)(void) = ^{
         [fm removeItemAtPath:collection error:NULL];
         XCTAssertTrue([fm createDirectoryAtPath:collection withIntermediateDirectories:YES attributes:nil error:NULL]);
@@ -417,25 +533,25 @@
 
     // A fragment in the request-target must be refused, not silently dropped.
     rebuild();
-    NSString* deleted = SendRawRequest(server.port, @"DELETE /Builds/#nonexistent HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *deleted = SendRawRequest(server.port, @"DELETE /Builds/#nonexistent HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertTrue([deleted hasPrefix:@"HTTP/1.1 400"], @"a '#' in the request-target should be refused: %@", [deleted substringToIndex:MIN((NSUInteger)40, deleted.length)]);
     XCTAssertTrue([fm fileExistsAtPath:collection], @"the request destroyed a collection the client never named");
 
     rebuild();
-    NSString* put = SendRawRequest(server.port, @"PUT /src.txt#new.ipa HTTP/1.1\r\nHost: localhost\r\nContent-Length: 9\r\n\r\nCLOBBERED");
+    NSString *put = SendRawRequest(server.port, @"PUT /src.txt#new.ipa HTTP/1.1\r\nHost: localhost\r\nContent-Length: 9\r\n\r\nCLOBBERED");
     XCTAssertTrue([put hasPrefix:@"HTTP/1.1 400"], @"a '#' in a PUT target should be refused: %@", [put substringToIndex:MIN((NSUInteger)40, put.length)]);
     XCTAssertEqualObjects([NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:@"src.txt"] encoding:NSUTF8StringEncoding error:NULL], @"SRC", @"the PUT overwrote a different file than the one named");
 
     // The same defect through the Destination header, which no HTTP stack sanitizes.
     rebuild();
-    NSString* copied = SendRawRequest(server.port, @"COPY /src.txt HTTP/1.1\r\nHost: localhost\r\nDestination: http://localhost/Builds#nonexistent.txt\r\nOverwrite: T\r\n\r\n");
+    NSString *copied = SendRawRequest(server.port, @"COPY /src.txt HTTP/1.1\r\nHost: localhost\r\nDestination: http://localhost/Builds#nonexistent.txt\r\nOverwrite: T\r\n\r\n");
     XCTAssertTrue([copied hasPrefix:@"HTTP/1.1 400"], @"a '#' in Destination should be refused: %@", [copied substringToIndex:MIN((NSUInteger)40, copied.length)]);
     XCTAssertTrue([fm fileExistsAtPath:[collection stringByAppendingPathComponent:@"a.txt"]], @"the COPY replaced a collection named only by a discarded fragment");
 
     // What must keep working: %23 is how a '#'-bearing filename is legitimately addressed, and a
     // naive fix breaks exactly this.
     rebuild();
-    NSString* encoded = SendRawRequest(server.port, @"PUT /MyApp%2342.ipa HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nBUILD");
+    NSString *encoded = SendRawRequest(server.port, @"PUT /MyApp%2342.ipa HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nBUILD");
     XCTAssertTrue([encoded hasPrefix:@"HTTP/1.1 201"], @"%%23 must still address a '#'-bearing name: %@", [encoded substringToIndex:MIN((NSUInteger)40, encoded.length)]);
     XCTAssertTrue([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"MyApp#42.ipa"]], @"the percent-encoded name did not land on disk");
     XCTAssertTrue([SendRawRequest(server.port, @"GET /MyApp%2342.ipa HTTP/1.1\r\nHost: localhost\r\n\r\n") containsString:@"BUILD"], @"a '#'-bearing file could not be read back");
@@ -456,26 +572,26 @@
 // is an opaque match block. So 405 is deliberately not attempted, and this test pins the two
 // answers that are honest rather than a third that would be guessed.
 - (void)testUnmatchedRequestDistinguishesUnknownTargetFromUnimplementedMethod {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addHandlerForMethod:@"GET"
                            path:@"/ok"
                    requestClass:[WSKRequest class]
-                   processBlock:^WSKResponse*(WSKRequest* request) {
+                   processBlock:^WSKResponse *(WSKRequest *request) {
                        return [WSKDataResponse responseWithText:@"ok"];
                    }];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     // GET is implemented, so an unknown target is 404 — not "this server does not do GET".
-    NSString* unknownTarget = SendRawRequest(server.port, @"GET /nope HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *unknownTarget = SendRawRequest(server.port, @"GET /nope HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertTrue([unknownTarget hasPrefix:@"HTTP/1.1 404"], @"an unknown target under an implemented method is 404: %@", [unknownTarget substringToIndex:MIN((NSUInteger)40, unknownTarget.length)]);
 
     // A method NO handler claims is genuinely not implemented, and 501 still says so.
-    NSString* unknownMethod = SendRawRequest(server.port, @"PROPFIND /ok HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
+    NSString *unknownMethod = SendRawRequest(server.port, @"PROPFIND /ok HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
     XCTAssertTrue([unknownMethod hasPrefix:@"HTTP/1.1 501"], @"a method no handler claims is still 501: %@", [unknownMethod substringToIndex:MIN((NSUInteger)40, unknownMethod.length)]);
 
     // A HEAD is rewritten to GET before matching, so it inherits GET's implemented-ness.
-    NSString* head = SendRawRequest(server.port, @"HEAD /nope HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *head = SendRawRequest(server.port, @"HEAD /nope HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertTrue([head hasPrefix:@"HTTP/1.1 404"], @"a mapped HEAD follows GET: %@", [head substringToIndex:MIN((NSUInteger)40, head.length)]);
 
     // And the handler that does exist is untouched.
@@ -495,22 +611,22 @@
 // parsing carefully. This test pins both halves: that eligible requests really do share one
 // connection, and that every ineligible shape still closes.
 - (void)testConnectionKeepAliveCarriesBodylessRequestsAndClosesOnEverythingElse {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
     XCTAssertTrue([@"ALPHA" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
     XCTAssertTrue([@"BETA" writeToFile:[dir stringByAppendingPathComponent:@"b.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addGETHandlerForBasePath:@"/f/" directoryPath:dir indexFilename:nil cacheAge:0 allowRangeRequests:YES];
     // Hoisted: a dictionary literal's commas split XCTAssertTrue's macro arguments. Fourth time
     // this project has hit that.
-    NSDictionary* keepAliveOptions = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES, WSKOption_ConnectionKeepAliveTimeout : @5.0};
+    NSDictionary *keepAliveOptions = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES, WSKOption_ConnectionKeepAliveTimeout: @5.0};
     XCTAssertTrue([server startWithOptions:keepAliveOptions error:NULL]);
 
-    NSString* const getA = @"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n";
-    NSString* const getB = @"GET /f/b.txt HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    NSString *const getA = @"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    NSString *const getB = @"GET /f/b.txt HTTP/1.1\r\nHost: localhost\r\n\r\n";
 
-    NSArray<NSString*>* replies = SendRawRequestsOnOneConnection(server.port, @[ getA, getB, getA ]);
+    NSArray<NSString *> *replies = SendRawRequestsOnOneConnection(server.port, @[getA, getB, getA]);
     XCTAssertEqual(replies.count, (NSUInteger)3, @"three bodyless GETs must all be answered on one connection");
 
     if (replies.count == 3) {
@@ -527,7 +643,7 @@
 
     // A HEAD followed by a GET: _virtualHEAD is per-request state, and inheriting it would suppress
     // the following GET's body entirely.
-    NSArray<NSString*>* mixed = SendRawRequestsOnOneConnection(server.port, @[ @"HEAD /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n", getB ]);
+    NSArray<NSString *> *mixed = SendRawRequestsOnOneConnection(server.port, @[@"HEAD /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n", getB]);
     XCTAssertEqual(mixed.count, (NSUInteger)2, @"a HEAD may be followed by a GET on the same connection");
 
     if (mixed.count == 2) {
@@ -537,31 +653,31 @@
 
     // A request that was REFUSED ends the connection: a refusal can happen before the body is read,
     // so bytes may be left in flight that would otherwise be parsed as the next request line.
-    NSArray<NSString*>* refused = SendRawRequestsOnOneConnection(server.port, @[ @"GET /f/nope.txt HTTP/1.1\r\nHost: localhost\r\n\r\n", getA ]);
+    NSArray<NSString *> *refused = SendRawRequestsOnOneConnection(server.port, @[@"GET /f/nope.txt HTTP/1.1\r\nHost: localhost\r\n\r\n", getA]);
     XCTAssertTrue(refused.count >= 1, @"the refusal itself is answered");
     XCTAssertTrue([refused.firstObject hasPrefix:@"HTTP/1.1 404"], @"…as a 404: %@", refused.firstObject);
     XCTAssertTrue([refused.firstObject rangeOfString:@"keep-alive" options:NSCaseInsensitiveSearch].location == NSNotFound, @"a refusal must not offer to keep the connection: %@", refused.firstObject);
 
     // A request WITH a body is answered and the connection closes, whatever the body is. This is
     // the restriction the whole design rests on.
-    NSArray<NSString*>* withBody = SendRawRequestsOnOneConnection(server.port, @[ @"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n", getB ]);
+    NSArray<NSString *> *withBody = SendRawRequestsOnOneConnection(server.port, @[@"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n", getB]);
     XCTAssertTrue(withBody.count >= 1, @"the request carrying framing is still answered");
     XCTAssertTrue([withBody.firstObject rangeOfString:@"keep-alive" options:NSCaseInsensitiveSearch].location == NSNotFound, @"a request declaring Content-Length must not be reused: %@", withBody.firstObject);
 
     // "Transfer-Encoding: identity" sets no content type, so -[WSKRequest hasBody] answers NO for
     // it — keying reuse on that instead of on the raw header names would have made exactly the
     // shape a TE.CL desync is built from eligible. It must not be.
-    NSArray<NSString*>* identity = SendRawRequestsOnOneConnection(server.port, @[ @"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: identity\r\n\r\n", getB ]);
+    NSArray<NSString *> *identity = SendRawRequestsOnOneConnection(server.port, @[@"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: identity\r\n\r\n", getB]);
     XCTAssertTrue(identity.count >= 1);
     XCTAssertTrue([identity.firstObject rangeOfString:@"keep-alive" options:NSCaseInsensitiveSearch].location == NSNotFound, @"a Transfer-Encoding of any kind must not be reused: %@", identity.firstObject);
 
     // A client that asks to close is obeyed.
-    NSArray<NSString*>* asked = SendRawRequestsOnOneConnection(server.port, @[ @"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", getB ]);
+    NSArray<NSString *> *asked = SendRawRequestsOnOneConnection(server.port, @[@"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", getB]);
     XCTAssertTrue(asked.count >= 1);
     XCTAssertTrue([asked.firstObject rangeOfString:@"keep-alive" options:NSCaseInsensitiveSearch].location == NSNotFound, @"Connection: close must be honoured: %@", asked.firstObject);
 
     // HTTP/1.0 has no persistent connections by default and may be framed by connection close.
-    NSArray<NSString*>* old = SendRawRequestsOnOneConnection(server.port, @[ @"GET /f/a.txt HTTP/1.0\r\nHost: localhost\r\n\r\n", getB ]);
+    NSArray<NSString *> *old = SendRawRequestsOnOneConnection(server.port, @[@"GET /f/a.txt HTTP/1.0\r\nHost: localhost\r\n\r\n", getB]);
     XCTAssertTrue(old.count >= 1);
     XCTAssertTrue([old.firstObject rangeOfString:@"keep-alive" options:NSCaseInsensitiveSearch].location == NSNotFound, @"an HTTP/1.0 client must not be given a persistent connection: %@", old.firstObject);
 
@@ -576,29 +692,30 @@
 // exactly the workload keep-alive is for: files are served no-cache by default, so a browser
 // revisiting a page of thumbnails revalidates each one and pays a fresh connection for every 304.
 - (void)testConnectionKeepAliveSurvivesASelfDelimiting304 {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
     XCTAssertTrue([@"ALPHA" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
     XCTAssertTrue([@"BETA" writeToFile:[dir stringByAppendingPathComponent:@"b.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addGETHandlerForBasePath:@"/f/" directoryPath:dir indexFilename:nil cacheAge:0 allowRangeRequests:YES];
-    NSDictionary* keepAliveOptions = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES, WSKOption_ConnectionKeepAliveTimeout : @5.0};
+    NSDictionary *keepAliveOptions = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES, WSKOption_ConnectionKeepAliveTimeout: @5.0};
     XCTAssertTrue([server startWithOptions:keepAliveOptions error:NULL]);
 
-    NSString* unconditional = SendRawRequest(server.port, @"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *unconditional = SendRawRequest(server.port, @"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
     NSRange tagLabel = [unconditional rangeOfString:@"Etag: " options:NSCaseInsensitiveSearch];
     XCTAssertTrue(tagLabel.location != NSNotFound, @"the 200 must carry the validator the 304 is asked for: %@", unconditional);
-    NSString* afterLabel = [unconditional substringFromIndex:NSMaxRange(tagLabel)];
-    NSString* etag = [afterLabel substringToIndex:[afterLabel rangeOfString:@"\r\n"].location];
+    NSString *afterLabel = [unconditional substringFromIndex:NSMaxRange(tagLabel)];
+    NSString *etag = [afterLabel substringToIndex:[afterLabel rangeOfString:@"\r\n"].location];
 
-    NSString* conditional = [NSString stringWithFormat:@"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: %@\r\n\r\n", etag];
-    NSArray<NSString*>* replies = SendRawRequestsOnOneConnection(server.port, @[ conditional, @"GET /f/b.txt HTTP/1.1\r\nHost: localhost\r\n\r\n" ]);
+    NSString *conditional = [NSString stringWithFormat:@"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: %@\r\n\r\n", etag];
+    NSArray<NSString *> *replies = SendRawRequestsOnOneConnection(server.port, @[conditional, @"GET /f/b.txt HTTP/1.1\r\nHost: localhost\r\n\r\n"]);
 
     XCTAssertTrue(replies.count >= 1, @"the conditional request is answered at all");
     XCTAssertTrue([replies.firstObject hasPrefix:@"HTTP/1.1 304"], @"the validator must produce a 304: %@", replies.firstObject);
     XCTAssertTrue([replies.firstObject rangeOfString:@"Connection: keep-alive" options:NSCaseInsensitiveSearch].location != NSNotFound,
-                  @"a 304 is self-delimiting, so it must not close a negotiated keep-alive connection: %@", replies.firstObject);
+                  @"a 304 is self-delimiting, so it must not close a negotiated keep-alive connection: %@",
+                  replies.firstObject);
     XCTAssertEqual(replies.count, (NSUInteger)2, @"the request after the 304 must still be served on the same connection");
 
     if (replies.count == 2) {
@@ -616,42 +733,41 @@
 // Last-Modified go out), but the writer was gated to 2xx, so the copied value could never be
 // emitted — dead code standing where the header should be.
 - (void)testNotModifiedCarriesTheCacheControlOfTheResponseItReplaces {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
     XCTAssertTrue([@"CACHED" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     // cacheAge 0 is the shipped default and yields "no-cache"; the max-age case is asserted below
     // through a second handler so both spellings are pinned.
     [server addGETHandlerForBasePath:@"/f/" directoryPath:dir indexFilename:nil cacheAge:0 allowRangeRequests:YES];
     [server addGETHandlerForBasePath:@"/aged/" directoryPath:dir indexFilename:nil cacheAge:3600 allowRangeRequests:YES];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* (^cacheControlOf)(NSString*) = ^(NSString* reply) {
+    NSString * (^cacheControlOf)(NSString *) = ^(NSString *reply) {
         NSRange label = [reply rangeOfString:@"Cache-Control: " options:NSCaseInsensitiveSearch];
         if (label.location == NSNotFound) {
-            return (NSString*)nil;
+            return (NSString *)nil;
         }
-        NSString* rest = [reply substringFromIndex:NSMaxRange(label)];
+        NSString *rest = [reply substringFromIndex:NSMaxRange(label)];
         return [rest substringToIndex:[rest rangeOfString:@"\r\n"].location];
     };
-    NSString* (^etagOf)(NSString*) = ^(NSString* reply) {
+    NSString * (^etagOf)(NSString *) = ^(NSString *reply) {
         NSRange label = [reply rangeOfString:@"Etag: " options:NSCaseInsensitiveSearch];
-        NSString* rest = [reply substringFromIndex:NSMaxRange(label)];
+        NSString *rest = [reply substringFromIndex:NSMaxRange(label)];
         return [rest substringToIndex:[rest rangeOfString:@"\r\n"].location];
     };
 
-    for (NSString* base in @[ @"/f/", @"/aged/" ]) {
-        NSString* full = SendRawRequest(server.port, [NSString stringWithFormat:@"GET %@a.txt HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", base]);
+    for (NSString *base in @[@"/f/", @"/aged/"]) {
+        NSString *full = SendRawRequest(server.port, [NSString stringWithFormat:@"GET %@a.txt HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", base]);
         XCTAssertTrue([full hasPrefix:@"HTTP/1.1 200"], @"%@", [full substringToIndex:MIN((NSUInteger)40, full.length)]);
-        NSString* expected = cacheControlOf(full);
+        NSString *expected = cacheControlOf(full);
         XCTAssertNotNil(expected, @"the 200 must state a Cache-Control to compare against: %@", full);
 
-        NSString* revalidated = SendRawRequest(server.port, [NSString stringWithFormat:@"GET %@a.txt HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: %@\r\nConnection: close\r\n\r\n", base, etagOf(full)]);
+        NSString *revalidated = SendRawRequest(server.port, [NSString stringWithFormat:@"GET %@a.txt HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: %@\r\nConnection: close\r\n\r\n", base, etagOf(full)]);
         XCTAssertTrue([revalidated hasPrefix:@"HTTP/1.1 304"], @"%@", [revalidated substringToIndex:MIN((NSUInteger)40, revalidated.length)]);
-        XCTAssertEqualObjects(cacheControlOf(revalidated), expected,
-                              @"the 304 must carry the same Cache-Control the 200 did (%@ base): %@", base, revalidated);
+        XCTAssertEqualObjects(cacheControlOf(revalidated), expected, @"the 304 must carry the same Cache-Control the 200 did (%@ base): %@", base, revalidated);
     }
 
     [server stop];
@@ -663,20 +779,20 @@
 // security-critical file in the library, and "the default did not change" is the property that
 // makes landing it safe.
 - (void)testConnectionKeepAliveIsOffByDefault {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
     XCTAssertTrue([@"ALPHA" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addGETHandlerForBasePath:@"/f/" directoryPath:dir indexFilename:nil cacheAge:0 allowRangeRequests:YES];
-    NSDictionary* defaultOptions = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *defaultOptions = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:defaultOptions error:NULL]);
 
-    NSString* single = SendRawRequest(server.port, @"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *single = SendRawRequest(server.port, @"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertTrue([single containsString:@"ALPHA"], @"the response is unchanged: %@", single);
     XCTAssertTrue([single rangeOfString:@"Connection: Close" options:NSCaseInsensitiveSearch].location != NSNotFound, @"the default is still one request per connection: %@", single);
 
-    NSArray<NSString*>* replies = SendRawRequestsOnOneConnection(server.port, @[ @"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n", @"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n" ]);
+    NSArray<NSString *> *replies = SendRawRequestsOnOneConnection(server.port, @[@"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n", @"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n"]);
     XCTAssertEqual(replies.count, (NSUInteger)1, @"a second request on the same connection must go unanswered by default");
 
     [server stop];
@@ -693,19 +809,19 @@
 // 30-second default. What it pins is that the connection IS closed while idle, and that the
 // slowloris deadline for a request in progress was not weakened to achieve it.
 - (void)testConnectionKeepAliveReclaimsAnIdleConnection {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
     XCTAssertTrue([@"ALPHA" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addGETHandlerForBasePath:@"/f/" directoryPath:dir indexFilename:nil cacheAge:0 allowRangeRequests:YES];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES, WSKOption_ConnectionKeepAliveTimeout : @1.0, WSKOption_ConnectionIdleTimeout : @1.0};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES, WSKOption_ConnectionKeepAliveTimeout: @1.0, WSKOption_ConnectionIdleTimeout: @1.0};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     int fd = ConnectToLocalhostPort(server.port);
     XCTAssertTrue(fd >= 0);
 
-    const char* request = "GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    const char *request = "GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n";
     XCTAssertTrue(send(fd, request, strlen(request), 0) > 0);
 
     // Drain the reply, then go quiet and let the reaper find it.
@@ -716,8 +832,8 @@
     // returns only what has arrived, so stopping there leaves the body in the socket and the
     // "did the server close?" read below picks THAT up instead of EOF.
     char buffer[8192];
-    NSMutableData* reply = [NSMutableData data];
-    NSData* const terminator = [@"\r\n\r\n" dataUsingEncoding:NSUTF8StringEncoding];
+    NSMutableData *reply = [NSMutableData data];
+    NSData *const terminator = [@"\r\n\r\n" dataUsingEncoding:NSUTF8StringEncoding];
     NSRange headerEnd = NSMakeRange(NSNotFound, 0);
     NSInteger expected = 0;
 
@@ -725,7 +841,7 @@
         headerEnd = [reply rangeOfData:terminator options:0 range:NSMakeRange(0, reply.length)];
 
         if (headerEnd.location != NSNotFound) {
-            NSString* head = [[NSString alloc] initWithData:[reply subdataWithRange:NSMakeRange(0, NSMaxRange(headerEnd))] encoding:NSUTF8StringEncoding];
+            NSString *head = [[NSString alloc] initWithData:[reply subdataWithRange:NSMakeRange(0, NSMaxRange(headerEnd))] encoding:NSUTF8StringEncoding];
             NSRange lengthRange = [head rangeOfString:@"Content-Length: " options:NSCaseInsensitiveSearch];
             expected = (lengthRange.location == NSNotFound) ? 0 : [[head substringFromIndex:NSMaxRange(lengthRange)] integerValue];
 
@@ -748,7 +864,7 @@
 
     // Now read again without sending anything. A reclaimed connection gives EOF; one that is never
     // reclaimed sits here until the receive timeout above, which is what the assertion catches.
-    NSDate* const started = [NSDate date];
+    NSDate *const started = [NSDate date];
     ssize_t const after = recv(fd, buffer, sizeof(buffer), 0);
     NSTimeInterval const waited = -[started timeIntervalSinceNow];
     close(fd);
@@ -769,11 +885,11 @@
 // Without the branch, an idle reused connection is cut after two idle ticks no matter what
 // WSKOption_ConnectionKeepAliveTimeout says, and the option's documented meaning would be a lie.
 - (void)testConnectionKeepAliveHoldsForTheConfiguredTimeNotTheSlowlorisDeadline {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
     XCTAssertTrue([@"ALPHA" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addGETHandlerForBasePath:@"/f/" directoryPath:dir indexFilename:nil cacheAge:0 allowRangeRequests:YES];
     // Idle ticks of 2s, so the header-phase deadline (kMaxHeaderPhaseTicks = 2 ticks) would cut an
     // idle connection at ~4s; a keep-alive of 12s must override that, and the 5s pause below sits
@@ -782,7 +898,7 @@
     // Deliberately NOT 1s ticks, which is what this used first: that leaves the header phase only
     // 2s to receive and match a request, and a loaded machine trips it — measured flaking 2 runs in
     // 6 under the full suite. The margin, not the property, was the problem.
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES, WSKOption_ConnectionKeepAliveTimeout : @12.0, WSKOption_ConnectionIdleTimeout : @2.0};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES, WSKOption_ConnectionKeepAliveTimeout: @12.0, WSKOption_ConnectionIdleTimeout: @2.0};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     int fd = ConnectToLocalhostPort(server.port);
@@ -790,22 +906,22 @@
     struct timeval tv = {5, 0};
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-    NSString* (^exchange)(void) = ^NSString* {
-        const char* request = "GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    NSString * (^exchange)(void) = ^NSString * {
+        const char *request = "GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n";
 
         if (send(fd, request, strlen(request), 0) <= 0) {
             return nil;
         }
 
-        NSMutableData* reply = [NSMutableData data];
-        NSData* const terminator = [@"\r\n\r\n" dataUsingEncoding:NSUTF8StringEncoding];
+        NSMutableData *reply = [NSMutableData data];
+        NSData *const terminator = [@"\r\n\r\n" dataUsingEncoding:NSUTF8StringEncoding];
         char buffer[8192];
 
         while (true) {
             NSRange headerEnd = [reply rangeOfData:terminator options:0 range:NSMakeRange(0, reply.length)];
 
             if (headerEnd.location != NSNotFound) {
-                NSString* head = [[NSString alloc] initWithData:[reply subdataWithRange:NSMakeRange(0, NSMaxRange(headerEnd))] encoding:NSUTF8StringEncoding];
+                NSString *head = [[NSString alloc] initWithData:[reply subdataWithRange:NSMakeRange(0, NSMaxRange(headerEnd))] encoding:NSUTF8StringEncoding];
                 NSRange lengthRange = [head rangeOfString:@"Content-Length: " options:NSCaseInsensitiveSearch];
                 NSInteger expected = (lengthRange.location == NSNotFound) ? 0 : [[head substringFromIndex:NSMaxRange(lengthRange)] integerValue];
 
@@ -831,7 +947,7 @@
     // Go quiet for longer than the header-phase deadline would tolerate, then use the connection.
     [NSThread sleepForTimeInterval:5.0];
 
-    NSString* second = exchange();
+    NSString *second = exchange();
     XCTAssertTrue([second containsString:@"ALPHA"], @"the connection must survive an idle period shorter than the configured keep-alive: %@", second);
 
     close(fd);
@@ -845,26 +961,26 @@
 // complete block instead of issuing a read for bytes the client has no reason to send, which would
 // hang until the idle timeout. That hazard is the reason this is a refactor and not a one-line loop.
 - (void)testConnectionKeepAliveAnswersPipelinedRequestsInOrder {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
     XCTAssertTrue([@"ALPHA" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
     XCTAssertTrue([@"BETA" writeToFile:[dir stringByAppendingPathComponent:@"b.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addGETHandlerForBasePath:@"/f/" directoryPath:dir indexFilename:nil cacheAge:0 allowRangeRequests:YES];
     // Hoisted: a dictionary literal's commas split XCTAssertTrue's macro arguments. Fourth time
     // this project has hit that.
-    NSDictionary* keepAliveOptions = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES, WSKOption_ConnectionKeepAliveTimeout : @5.0};
+    NSDictionary *keepAliveOptions = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES, WSKOption_ConnectionKeepAliveTimeout: @5.0};
     XCTAssertTrue([server startWithOptions:keepAliveOptions error:NULL]);
 
     // Both requests in a single write, so the second lands in the first's read.
-    NSArray<NSString*>* replies = SendRawRequestsOnOneConnection(server.port, @[ @"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\nGET /f/b.txt HTTP/1.1\r\nHost: localhost\r\n\r\n" ]);
+    NSArray<NSString *> *replies = SendRawRequestsOnOneConnection(server.port, @[@"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\nGET /f/b.txt HTTP/1.1\r\nHost: localhost\r\n\r\n"]);
     XCTAssertTrue(replies.count >= 1, @"the first pipelined request is answered");
     XCTAssertTrue([replies.firstObject containsString:@"ALPHA"], @"…and in order: %@", replies.firstObject);
 
     // Then drain the second reply, which must have been produced from the carried-over bytes
     // without waiting for anything further from the client.
-    NSArray<NSString*>* both = SendRawRequestsOnOneConnection(server.port, @[ @"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\nGET /f/b.txt HTTP/1.1\r\nHost: localhost\r\n\r\n", @"" ]);
+    NSArray<NSString *> *both = SendRawRequestsOnOneConnection(server.port, @[@"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\nGET /f/b.txt HTTP/1.1\r\nHost: localhost\r\n\r\n", @""]);
     XCTAssertEqual(both.count, (NSUInteger)2, @"a pipelined pair must produce two replies");
 
     if (both.count == 2) {
@@ -887,27 +1003,27 @@
 // deployment this library is aimed at pulls multi-hundred-megabyte builds, so a body that stops
 // early and claims not to have is an IPA that installs and crashes.
 - (void)testPipelinedRequestIsNotReclaimedWhileItsResponseIsStillStreaming {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
     NSUInteger const bigLength = 8 * 1024 * 1024;
     XCTAssertTrue([@"ALPHA" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
     XCTAssertTrue([[NSMutableData dataWithLength:bigLength] writeToFile:[dir stringByAppendingPathComponent:@"big.bin"] atomically:YES]);
 
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addGETHandlerForBasePath:@"/f/" directoryPath:dir indexFilename:nil cacheAge:0 allowRangeRequests:YES];
     // A short keep-alive and a matching tick, so the reaper's deadline lands about one second in —
     // comfortably inside the paced transfer below, which takes roughly 2.5 s.
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES, WSKOption_ConnectionKeepAliveTimeout : @0.5, WSKOption_ConnectionIdleTimeout : @0.5};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES, WSKOption_ConnectionKeepAliveTimeout: @0.5, WSKOption_ConnectionIdleTimeout: @0.5};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* const first = @"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n";
-    NSString* const second = @"GET /f/big.bin HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    NSString *const first = @"GET /f/a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    NSString *const second = @"GET /f/big.bin HTTP/1.1\r\nHost: localhost\r\n\r\n";
 
     // PIPELINED: both requests in one write, so the second is served entirely from carried-over
     // bytes and the connection performs no read at all while answering it.
     int fd = ConnectToLocalhostPort(server.port);
     XCTAssertTrue(fd >= 0);
-    NSString* const both = [first stringByAppendingString:second];
+    NSString *const both = [first stringByAppendingString:second];
     XCTAssertEqual(send(fd, both.UTF8String, strlen(both.UTF8String), 0), (ssize_t)strlen(both.UTF8String));
     NSUInteger const pipelinedBytes = DrainToEOFAtPace(fd, 32 * 1024, 10000);
     close(fd);
@@ -942,34 +1058,34 @@
 // for reuse, so the connection closes after it and the remainder is dropped exactly as before.
 // Nothing here widens what may be framed on a reused connection.
 - (void)testRequestWithBytesTrailingItsBodyIsServedRatherThanRefused {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addHandlerForMethod:@"POST"
                            path:@"/echo"
                    requestClass:[WSKDataRequest class]
-                   processBlock:^WSKResponse*(WSKRequest* request) {
-                       return [WSKDataResponse responseWithData:[(WSKDataRequest*)request data] contentType:@"text/plain"];
+                   processBlock:^WSKResponse *(WSKRequest *request) {
+                       return [WSKDataResponse responseWithData:[(WSKDataRequest *)request data] contentType:@"text/plain"];
                    }];
     [server addHandlerForMethod:@"GET"
                            path:@"/ok"
                    requestClass:[WSKRequest class]
-                   processBlock:^WSKResponse*(WSKRequest* request) {
+                   processBlock:^WSKResponse *(WSKRequest *request) {
                        return [WSKDataResponse responseWithText:@"OK"];
                    }];
 
     // DEFAULT configuration — no keep-alive. This is not a reuse defect: the check predates
     // connection reuse entirely, and a single write is all it takes to reach it.
-    NSDictionary* defaultOptions = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};  // Hoisted: the commas would split the macro's arguments
+    NSDictionary *defaultOptions = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};  // Hoisted: the commas would split the macro's arguments
     XCTAssertTrue([server startWithOptions:defaultOptions error:NULL]);
-    NSString* const trailing = @"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\nBODYGET /ok HTTP/1.1\r\nHost: localhost\r\n\r\n";
-    NSString* reply = SendRawRequest(server.port, trailing);
+    NSString *const trailing = @"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\nBODYGET /ok HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    NSString *reply = SendRawRequest(server.port, trailing);
     XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 200"], @"a request whose body is followed by more bytes in the same read must still be served: %@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
     XCTAssertTrue([reply containsString:@"BODY"], @"the body must be exactly Content-Length bytes, with the trailing bytes excluded: %@", reply);
     [server stop];
 
     // And with reuse enabled, where a pipelining client produces the same shape deliberately.
-    NSDictionary* keepAliveOptions = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES, WSKOption_ConnectionKeepAliveTimeout : @5.0};
+    NSDictionary *keepAliveOptions = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES, WSKOption_ConnectionKeepAliveTimeout: @5.0};
     XCTAssertTrue([server startWithOptions:keepAliveOptions error:NULL]);
-    NSArray<NSString*>* replies = SendRawRequestsOnOneConnection(server.port, @[ [@"GET /ok HTTP/1.1\r\nHost: localhost\r\n\r\n" stringByAppendingString:trailing], @"" ]);
+    NSArray<NSString *> *replies = SendRawRequestsOnOneConnection(server.port, @[[@"GET /ok HTTP/1.1\r\nHost: localhost\r\n\r\n" stringByAppendingString:trailing], @""]);
     XCTAssertTrue(replies.count >= 1);
     XCTAssertTrue([replies.firstObject hasPrefix:@"HTTP/1.1 200"], @"first: %@", replies.firstObject);
     XCTAssertFalse([replies.firstObject containsString:@"400"], @"a pipelined body-bearing request must not be refused: %@", replies.firstObject);
@@ -988,17 +1104,17 @@
 - (void)testReusedConnectionOpensAndClosesOnceAndInventsNoResponseAtTheEnd {
     gConnectionEvents = [NSMutableArray array];
 
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addHandlerForMethod:@"GET"
                            path:@"/ok"
                    requestClass:[WSKRequest class]
-                   processBlock:^WSKResponse*(WSKRequest* request) {
+                   processBlock:^WSKResponse *(WSKRequest *request) {
                        return [WSKDataResponse responseWithText:@"OK"];
                    }];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES, WSKOption_ConnectionKeepAliveTimeout : @5.0, WSKOption_ConnectionClass : [LifecycleProbeConnection class]};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES, WSKOption_ConnectionKeepAliveTimeout: @5.0, WSKOption_ConnectionClass: [LifecycleProbeConnection class]};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSArray<NSString*>* replies = SendRawRequestsOnOneConnection(server.port, @[ @"GET /ok HTTP/1.1\r\nHost: localhost\r\n\r\nGET /ok HTTP/1.1\r\nHost: localhost\r\n\r\n", @"" ]);
+    NSArray<NSString *> *replies = SendRawRequestsOnOneConnection(server.port, @[@"GET /ok HTTP/1.1\r\nHost: localhost\r\n\r\nGET /ok HTTP/1.1\r\nHost: localhost\r\n\r\n", @""]);
     XCTAssertEqual(replies.count, (NSUInteger)2, @"both requests must be answered before the pairing is judged");
 
     [server stop];
@@ -1013,7 +1129,7 @@
     // This cannot mask the defect it is guarding: the unfixed code calls -close once per REQUEST,
     // so `closes` reaches 2 before -stop is even called and the poll returns immediately with the
     // wrong value still in hand.
-    NSDate* const deadline = [NSDate dateWithTimeIntervalSinceNow:10.0];
+    NSDate *const deadline = [NSDate dateWithTimeIntervalSinceNow:10.0];
 
     while ([deadline timeIntervalSinceNow] > 0) {
         @synchronized(gConnectionEvents) {
@@ -1025,7 +1141,7 @@
         [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
     }
 
-    NSArray<NSString*>* events = nil;
+    NSArray<NSString *> *events = nil;
 
     @synchronized(gConnectionEvents) {
         events = [gConnectionEvents copy];
@@ -1034,7 +1150,7 @@
     XCTAssertTrue([events containsObject:@"close"], @"the connection never closed within 10 s: %@", events);
     NSUInteger opens = 0, closes = 0, aborts = 0;
 
-    for (NSString* event in events) {
+    for (NSString *event in events) {
         if ([event isEqualToString:@"open"]) {
             opens += 1;
         } else if ([event isEqualToString:@"close"]) {
@@ -1055,19 +1171,19 @@
     gAbortRequestPeer = nil;
     gAbortRequestSawVirtualHEAD = NO;
 
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addHandlerForMethod:@"GET"
                            path:@"/ok"
                    requestClass:[WSKRequest class]
-                   processBlock:^WSKResponse*(WSKRequest* request) {
+                   processBlock:^WSKResponse *(WSKRequest *request) {
                        return [WSKDataResponse responseWithText:@"ok"];
                    }];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES, WSKOption_ConnectionClass : [AbortProbeConnection class]};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES, WSKOption_ConnectionClass: [AbortProbeConnection class]};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     // HEAD, so the method has been rewritten to GET before matching; no handler claims
     // "/nope", so this takes the 501 branch that builds its own request.
-    NSString* reply = SendRawRequest(server.port, @"HEAD /nope HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *reply = SendRawRequest(server.port, @"HEAD /nope HTTP/1.1\r\nHost: localhost\r\n\r\n");
     // 404 rather than the 501 this once asserted: a GET handler is registered above, and the HEAD
     // was rewritten to GET before matching, so the METHOD is implemented and only the target is
     // missing. The branch under test — the one that builds its own request — is the same either
@@ -1084,21 +1200,21 @@
 // A request target whose percent-escapes are invalid or not valid UTF-8 cannot be
 // decoded. That is the client's error: it must be answered 400 and must never abort.
 - (void)testMalformedPercentEncodedPathIsRejectedNotFatal {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
                           requestClass:[WSKRequest class]
-                          processBlock:^WSKResponse*(WSKRequest* request) {
+                          processBlock:^WSKResponse *(WSKRequest *request) {
                               return [WSKDataResponse responseWithText:@"hello"];
                           }];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* reply = SendRawRequest(server.port, @"GET /%FF HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *reply = SendRawRequest(server.port, @"GET /%FF HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertNotNil(reply);
     XCTAssertTrue([reply containsString:@"400"], @"expected 400 for an undecodable request target, got: %@", reply);
 
     // The server must still be serving afterwards.
-    NSString* second = SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *second = SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertTrue([second containsString:@"200"], @"server stopped serving after a malformed target: %@", second);
     [server stop];
 }
@@ -1106,16 +1222,16 @@
 // A Content-Length together with a chunked Transfer-Encoding is a framing conflict the
 // client controls: reject it with 400 rather than asserting.
 - (void)testConflictingFramingHeadersAreRejectedNotFatal {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addDefaultHandlerForMethod:@"POST"
                           requestClass:[WSKDataRequest class]
-                          processBlock:^WSKResponse*(WSKRequest* request) {
+                          processBlock:^WSKResponse *(WSKRequest *request) {
                               return [WSKDataResponse responseWithText:@"ok"];
                           }];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* reply = SendRawRequest(server.port, @"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/plain\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n");
+    NSString *reply = SendRawRequest(server.port, @"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/plain\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n");
     XCTAssertNotNil(reply);
     XCTAssertTrue([reply containsString:@"400"], @"expected 400 for conflicting framing headers, got: %@", reply);
     [server stop];
@@ -1124,9 +1240,9 @@
 // A Content-Length must be exactly a run of digits. -integerValue used to accept "5abc"
 // as 5 and silently clamp an over-large value to NSIntegerMax.
 - (void)testContentLengthIsParsedStrictly {
-    NSURL* url = [NSURL URLWithString:@"http://localhost/"];
-    NSDictionary* (^headers)(NSString*) = ^(NSString* length) {
-        return @{@"Content-Type" : @"text/plain", @"Content-Length" : length};
+    NSURL *url = [NSURL URLWithString:@"http://localhost/"];
+    NSDictionary * (^headers)(NSString *) = ^(NSString *length) {
+        return @{@"Content-Type": @"text/plain", @"Content-Length": length};
     };
 
     XCTAssertNil([[WSKRequest alloc] initWithMethod:@"POST" url:url headers:headers(@"5abc") path:@"/" query:@{}]);
@@ -1134,7 +1250,7 @@
     XCTAssertNil([[WSKRequest alloc] initWithMethod:@"POST" url:url headers:headers(@"") path:@"/" query:@{}]);
     XCTAssertNil([[WSKRequest alloc] initWithMethod:@"POST" url:url headers:headers(@"99999999999999999999999") path:@"/" query:@{}]);
 
-    WSKRequest* valid = [[WSKRequest alloc] initWithMethod:@"POST" url:url headers:headers(@"5") path:@"/" query:@{}];
+    WSKRequest *valid = [[WSKRequest alloc] initWithMethod:@"POST" url:url headers:headers(@"5") path:@"/" query:@{}];
     XCTAssertNotNil(valid);
     XCTAssertEqual(valid.contentLength, (NSUInteger)5);
 }
@@ -1144,13 +1260,13 @@
 // for as long as it likes. While a request body is still arriving the server must demand
 // real throughput, not merely non-zero throughput.
 - (void)testConnectionIdleTimeoutClosesDribblingBodyClient {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addDefaultHandlerForMethod:@"POST"
                           requestClass:[WSKDataRequest class]
-                          processBlock:^WSKResponse*(WSKRequest* request) {
+                          processBlock:^WSKResponse *(WSKRequest *request) {
                               return [WSKDataResponse responseWithText:@"ok"];
                           }];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES, WSKOption_ConnectionIdleTimeout : @0.5};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES, WSKOption_ConnectionIdleTimeout: @0.5};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     int fd = ConnectToLocalhostPort(server.port);
@@ -1158,7 +1274,7 @@
     int on = 1;
     setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));  // Report a closed peer as an error, not a signal
 
-    const char* request = "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/plain\r\nContent-Length: 1000000\r\n\r\n";
+    const char *request = "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/plain\r\nContent-Length: 1000000\r\n\r\n";
     XCTAssertEqual(send(fd, request, strlen(request), 0), (ssize_t)strlen(request));
 
     // One byte every 0.2s: faster than the 0.5s tick, so every tick observes progress.
@@ -1186,19 +1302,19 @@
 // with no reset, so a single reservation that never releases permanently disables every
 // in-memory endpoint until the process is relaunched.
 - (void)testSustainedServingDoesNotAccumulateResources {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* root = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *root = MakeTempDirectory();
     // Big enough to be streamed from disk in several chunks rather than served in one go.
     XCTAssertTrue([[NSMutableData dataWithLength:(4 * 1024 * 1024)] writeToFile:[root stringByAppendingPathComponent:@"build.bin"] atomically:YES]);
 
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addGETHandlerForBasePath:@"/" directoryPath:root indexFilename:nil cacheAge:0 allowRangeRequests:YES];
     [server addDefaultHandlerForMethod:@"POST"
                           requestClass:[WSKDataRequest class]
-                          processBlock:^WSKResponse*(WSKRequest* request) {
+                          processBlock:^WSKResponse *(WSKRequest *request) {
                               return [WSKDataResponse responseWithText:@"ok"];
                           }];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     // Warm up first: the first requests populate caches and date formatters, so a baseline
@@ -1210,17 +1326,17 @@
     NSUInteger const baselineFDs = OpenFileDescriptorCount();
     XCTAssertEqual(WSKReservedMemoryLength(), (NSUInteger)0, @"budget should be idle at the baseline");
 
-    NSString* const body = [@"" stringByPaddingToLength:4096 withString:@"x" startingAtIndex:0];
-    NSString* const post = [NSString stringWithFormat:@"POST /submit HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/plain\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)body.length, body];
+    NSString *const body = [@"" stringByPaddingToLength:4096 withString:@"x" startingAtIndex:0];
+    NSString *const post = [NSString stringWithFormat:@"POST /submit HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/plain\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)body.length, body];
 
     for (int i = 0; i < 150; i++) {
         @autoreleasepool {
             // A ranged read, the shape an interrupted download resumes with.
-            NSString* ranged = SendRawRequest(server.port, @"GET /build.bin HTTP/1.1\r\nHost: localhost\r\nRange: bytes=1048576-1049599\r\n\r\n");
+            NSString *ranged = SendRawRequest(server.port, @"GET /build.bin HTTP/1.1\r\nHost: localhost\r\nRange: bytes=1048576-1049599\r\n\r\n");
             XCTAssertTrue([ranged containsString:@"206"], @"iteration %i: %@", i, [ranged substringToIndex:MIN((NSUInteger)40, ranged.length)]);
 
             // An in-memory body, which is what takes a reservation from the shared budget.
-            NSString* posted = SendRawRequest(server.port, post);
+            NSString *posted = SendRawRequest(server.port, post);
             XCTAssertTrue([posted containsString:@"200"], @"iteration %i: %@", i, [posted substringToIndex:MIN((NSUInteger)40, posted.length)]);
 
             // A refusal, so the failure paths are exercised too rather than only the happy ones.
@@ -1246,26 +1362,26 @@
 // Identity framing is safe here because every response carries "Connection: Close" and the
 // connection serves one request, so end-of-body by close is well defined.
 - (void)testStreamedResponseIsNotChunkedForHTTP10Clients {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
                           requestClass:[WSKRequest class]
-                          processBlock:^WSKResponse*(WSKRequest* request) {
+                          processBlock:^WSKResponse *(WSKRequest *request) {
                               __block int remaining = 3;
                               return [WSKStreamedResponse responseWithContentType:@"text/plain"
-                                                                               asyncStreamBlock:^(WSKBodyReaderCompletionBlock completionBlock) {
-                                                                                   completionBlock(remaining-- > 0 ? SSEData(@"PIECE|") : [NSData data], nil);
-                                                                               }];
+                                                                 asyncStreamBlock:^(WSKBodyReaderCompletionBlock completionBlock) {
+                                                                     completionBlock(remaining-- > 0 ? SSEData(@"PIECE|") : [NSData data], nil);
+                                                                 }];
                           }];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* reply10 = SendRawRequest(server.port, @"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n");
+    NSString *reply10 = SendRawRequest(server.port, @"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n");
     XCTAssertNotNil(reply10);
     XCTAssertFalse([reply10 containsString:@"Transfer-Encoding"], @"an HTTP/1.0 client must not be sent chunked framing: %@", reply10);
     XCTAssertTrue([reply10 hasSuffix:@"PIECE|PIECE|PIECE|"], @"the body must be the raw bytes with no chunk headers: %@", reply10);
 
     // An HTTP/1.1 client must still get chunked framing, since there is no Content-Length.
-    NSString* reply11 = SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *reply11 = SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertTrue([reply11 containsString:@"Transfer-Encoding: chunked"], @"HTTP/1.1 must still be chunked: %@", reply11);
     XCTAssertTrue([reply11 containsString:@"\r\n0\r\n\r\n"], @"chunked body must be terminated: %@", reply11);
 
@@ -1277,13 +1393,13 @@
 // discarded the body unread, and WebDAV PUT (which unlinks the destination first) destroyed
 // the target file. Anything that cannot be framed or decoded must be refused instead.
 - (void)testTransferEncodingIsParsedNotStringCompared {
-    NSURL* url = [NSURL URLWithString:@"http://localhost/"];
-    WSKRequest* (^make)(NSString*) = ^(NSString* transferEncoding) {
+    NSURL *url = [NSURL URLWithString:@"http://localhost/"];
+    WSKRequest * (^make)(NSString *) = ^(NSString *transferEncoding) {
         return [[WSKRequest alloc] initWithMethod:@"PUT"
-                                                      url:url
-                                                  headers:@{@"Content-Type" : @"text/plain", @"Transfer-Encoding" : transferEncoding}
-                                                     path:@"/"
-                                                    query:@{}];
+                                              url:url
+                                          headers:@{@"Content-Type": @"text/plain", @"Transfer-Encoding": transferEncoding}
+                                             path:@"/"
+                                            query:@{}];
     };
 
     // Chunked, in every spelling that means chunked.
@@ -1299,7 +1415,7 @@
     XCTAssertNil(make(@""));
 
     // "identity" means no chunked framing; length framing still applies.
-    WSKRequest* identity = make(@"identity");
+    WSKRequest *identity = make(@"identity");
     XCTAssertNotNil(identity);
     XCTAssertFalse(identity.usesChunkedTransferEncoding);
 }
@@ -1309,7 +1425,7 @@
 // NULL sockaddr to WSKStringFromSockAddr, which dereferences addr->sa_len before it can
 // fail, i.e. SEGV rather than a nil. Inspecting the request is the match block's job.
 - (void)testRequestAddressAccessorsAreSafeBeforeTheServerPopulatesThem {
-    WSKRequest* request = [[WSKRequest alloc] initWithMethod:@"GET"
+    WSKRequest *request = [[WSKRequest alloc] initWithMethod:@"GET"
                                                          url:LiteralURL(@"http://localhost/x")
                                                      headers:@{}
                                                         path:@"/x"
@@ -1323,20 +1439,20 @@
 // 421 is the Host allow-list refusal — the DNS-rebinding defence — and it went out labelled
 // "Bad Request", which is a different claim about why the request was refused.
 - (void)testStatusLinesCarryTheirOwnReasonPhrase {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addGETHandlerForBasePath:@"/" directoryPath:dir indexFilename:nil cacheAge:0 allowRangeRequests:YES];
 
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES, WSKOption_AllowedHostNames : @[@"allowed.example"]};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES, WSKOption_AllowedHostNames: @[@"allowed.example"]};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* misdirected = SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: evil.example\r\n\r\n");
+    NSString *misdirected = SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: evil.example\r\n\r\n");
     XCTAssertTrue([misdirected hasPrefix:@"HTTP/1.1 421 Misdirected Request"], @"421 must name itself: %@", [misdirected substringToIndex:MIN((NSUInteger)40, misdirected.length)]);
 
     // A code CoreFoundation already gets right must be untouched — the recorded-trace corpus
     // compares response bytes, so a phrase changing there would be a corpus break.
-    NSString* notFound = SendRawRequest(server.port, @"GET /nope.txt HTTP/1.1\r\nHost: allowed.example\r\n\r\n");
+    NSString *notFound = SendRawRequest(server.port, @"GET /nope.txt HTTP/1.1\r\nHost: allowed.example\r\n\r\n");
     XCTAssertTrue([notFound hasPrefix:@"HTTP/1.1 404 Not Found"], @"404's phrase must be unchanged: %@", [notFound substringToIndex:MIN((NSUInteger)40, notFound.length)]);
 
     [server stop];
@@ -1350,31 +1466,31 @@
 // request.headers). obs-text (0x80–0xFF) is legal field content and HTAB is legal whitespace,
 // so both must keep being served: this is a control-byte refusal, not an ASCII allow-list.
 - (void)testControlBytesInHeaderValuesAreRefused {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
                           requestClass:[WSKRequest class]
-                          processBlock:^WSKResponse*(WSKRequest* request) {
+                          processBlock:^WSKResponse *(WSKRequest *request) {
                               return [WSKDataResponse responseWithText:@"ok"];
                           }];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSData* (^requestWithValueByte)(unsigned char) = ^(unsigned char byte) {
-        NSMutableData* raw = [[@"GET /a HTTP/1.1\r\nHost: localhost\r\nX-A: a" dataUsingEncoding:NSASCIIStringEncoding] mutableCopy];
+    NSData * (^requestWithValueByte)(unsigned char) = ^(unsigned char byte) {
+        NSMutableData *raw = [[@"GET /a HTTP/1.1\r\nHost: localhost\r\nX-A: a" dataUsingEncoding:NSASCIIStringEncoding] mutableCopy];
         [raw appendBytes:&byte length:1];
         [raw appendData:UTF8Data(@"b\r\n\r\n")];
-        return (NSData*)raw;
+        return (NSData *)raw;
     };
 
     const unsigned char refused[] = {0x00, 0x01, 0x1F, 0x7F};
     for (size_t i = 0; i < sizeof(refused); i++) {
-        NSString* reply = SendRawDataRequest(server.port, requestWithValueByte(refused[i]));
+        NSString *reply = SendRawDataRequest(server.port, requestWithValueByte(refused[i]));
         XCTAssertTrue([reply containsString:@"400"], @"byte 0x%02X in a field value must be refused, got: %@", refused[i], [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
     }
 
     const unsigned char served[] = {0x09, 0xE9};  // HTAB, and an obs-text byte
     for (size_t i = 0; i < sizeof(served); i++) {
-        NSString* reply = SendRawDataRequest(server.port, requestWithValueByte(served[i]));
+        NSString *reply = SendRawDataRequest(server.port, requestWithValueByte(served[i]));
         XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 200"], @"byte 0x%02X is legal field content and must be served, got: %@", served[i], [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
     }
 
@@ -1387,27 +1503,27 @@
 // refused. Both previously collapsed into 400, which tells the client its message was malformed
 // when it was not. Grammar violations (a version that is not HTTP/DIGIT.DIGIT) must stay 400.
 - (void)testUnsupportedHTTPVersionAnswers505AndAHigherMinorIsServedAs11 {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
                           requestClass:[WSKRequest class]
-                          processBlock:^WSKResponse*(WSKRequest* request) {
+                          processBlock:^WSKResponse *(WSKRequest *request) {
                               return [WSKDataResponse responseWithText:@"ok"];
                           }];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSArray<NSString*>* unsupported = @[@"HTTP/2.0", @"HTTP/3.0", @"HTTP/0.9"];
-    for (NSString* version in unsupported) {
-        NSString* reply = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /a %@\r\nHost: localhost\r\n\r\n", version]);
+    NSArray<NSString *> *unsupported = @[@"HTTP/2.0", @"HTTP/3.0", @"HTTP/0.9"];
+    for (NSString *version in unsupported) {
+        NSString *reply = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /a %@\r\nHost: localhost\r\n\r\n", version]);
         XCTAssertTrue([reply containsString:@"505"], @"%@ must answer 505, got: %@", version, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
     }
 
-    NSString* higherMinor = SendRawRequest(server.port, @"GET /a HTTP/1.2\r\nHost: localhost\r\n\r\n");
+    NSString *higherMinor = SendRawRequest(server.port, @"GET /a HTTP/1.2\r\nHost: localhost\r\n\r\n");
     XCTAssertTrue([higherMinor hasPrefix:@"HTTP/1.1 200"], @"HTTP/1.2 must be processed as HTTP/1.1, got: %@", [higherMinor substringToIndex:MIN((NSUInteger)40, higherMinor.length)]);
 
-    NSArray<NSString*>* malformed = @[@"http/1.1", @"HTTP/1.x", @"HTTP/11.1"];
-    for (NSString* version in malformed) {
-        NSString* reply = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /a %@\r\nHost: localhost\r\n\r\n", version]);
+    NSArray<NSString *> *malformed = @[@"http/1.1", @"HTTP/1.x", @"HTTP/11.1"];
+    for (NSString *version in malformed) {
+        NSString *reply = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /a %@\r\nHost: localhost\r\n\r\n", version]);
         XCTAssertTrue([reply containsString:@"400"], @"%@ is a grammar violation and must stay 400, got: %@", version, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
     }
 
@@ -1418,16 +1534,16 @@
 // request-line. The validator treated a leading CRLF as an empty block terminating at the
 // request line's expense and refused the whole message.
 - (void)testALeadingEmptyLineBeforeTheRequestLineIsIgnored {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
                           requestClass:[WSKRequest class]
-                          processBlock:^WSKResponse*(WSKRequest* request) {
+                          processBlock:^WSKResponse *(WSKRequest *request) {
                               return [WSKDataResponse responseWithText:@"ok"];
                           }];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* reply = SendRawRequest(server.port, @"\r\nGET /a HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *reply = SendRawRequest(server.port, @"\r\nGET /a HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 200"], @"a single leading CRLF must be ignored, got: %@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
 
     [server stop];
@@ -1439,29 +1555,29 @@
 // another origin, which a malformed message does not deserve. A well-formed name that is simply
 // not on the allow-list must KEEP answering 421: that split is the point of this test.
 - (void)testMultipleOrSyntacticallyInvalidHostHeadersAnswer400 {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
                           requestClass:[WSKRequest class]
-                          processBlock:^WSKResponse*(WSKRequest* request) {
+                          processBlock:^WSKResponse *(WSKRequest *request) {
                               return [WSKDataResponse responseWithText:@"ok"];
                           }];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSDictionary* badCases = @{
-        @"two identical Host lines" : @"GET /a HTTP/1.1\r\nHost: localhost\r\nHost: localhost\r\n\r\n",
-        @"two differing Host lines" : @"GET /a HTTP/1.1\r\nHost: localhost\r\nHost: evil.example\r\n\r\n",
-        @"space inside the Host value" : @"GET /a HTTP/1.1\r\nHost: bad host value\r\n\r\n",
+    NSDictionary *badCases = @{
+        @"two identical Host lines": @"GET /a HTTP/1.1\r\nHost: localhost\r\nHost: localhost\r\n\r\n",
+        @"two differing Host lines": @"GET /a HTTP/1.1\r\nHost: localhost\r\nHost: evil.example\r\n\r\n",
+        @"space inside the Host value": @"GET /a HTTP/1.1\r\nHost: bad host value\r\n\r\n",
     };
-    [badCases enumerateKeysAndObjectsUsingBlock:^(NSString* name, NSString* raw, BOOL* stop) {
-        NSString* reply = SendRawRequest(server.port, raw);
+    [badCases enumerateKeysAndObjectsUsingBlock:^(NSString *name, NSString *raw, BOOL *stop) {
+        NSString *reply = SendRawRequest(server.port, raw);
         XCTAssertTrue([reply containsString:@"400"], @"%@: expected 400, got: %@", name, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
     }];
 
-    NSString* sane = SendRawRequest(server.port, @"GET /a HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *sane = SendRawRequest(server.port, @"GET /a HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertTrue([sane hasPrefix:@"HTTP/1.1 200"], @"a single valid Host must still be served: %@", [sane substringToIndex:MIN((NSUInteger)40, sane.length)]);
 
-    NSString* misdirected = SendRawRequest(server.port, @"GET /a HTTP/1.1\r\nHost: other.example\r\n\r\n");
+    NSString *misdirected = SendRawRequest(server.port, @"GET /a HTTP/1.1\r\nHost: other.example\r\n\r\n");
     XCTAssertTrue([misdirected containsString:@"421"], @"a well-formed but unrecognized name must stay 421, got: %@", [misdirected substringToIndex:MIN((NSUInteger)40, misdirected.length)]);
 
     [server stop];
@@ -1473,22 +1589,22 @@
 // (absolute-form is only sent to proxies), so the rebinding defence never depended on it — but
 // the two positive assertions here pin the required direction both ways.
 - (void)testAbsoluteFormTargetAuthorityOverridesTheHostHeader {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
                           requestClass:[WSKRequest class]
-                          processBlock:^WSKResponse*(WSKRequest* request) {
+                          processBlock:^WSKResponse *(WSKRequest *request) {
                               return [WSKDataResponse responseWithText:@"ok"];
                           }];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* foreignAuthority = SendRawRequest(server.port, @"GET http://evil.example/a HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *foreignAuthority = SendRawRequest(server.port, @"GET http://evil.example/a HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertTrue([foreignAuthority containsString:@"421"], @"the absolute-form authority must be validated, not the Host header: %@", [foreignAuthority substringToIndex:MIN((NSUInteger)40, foreignAuthority.length)]);
 
-    NSString* localAuthority = SendRawRequest(server.port, @"GET http://localhost/a HTTP/1.1\r\nHost: evil.example\r\n\r\n");
+    NSString *localAuthority = SendRawRequest(server.port, @"GET http://localhost/a HTTP/1.1\r\nHost: evil.example\r\n\r\n");
     XCTAssertTrue([localAuthority hasPrefix:@"HTTP/1.1 200"], @"with absolute-form the Host header must be ignored entirely: %@", [localAuthority substringToIndex:MIN((NSUInteger)40, localAuthority.length)]);
 
-    NSString* originForm = SendRawRequest(server.port, @"GET /a HTTP/1.1\r\nHost: evil.example\r\n\r\n");
+    NSString *originForm = SendRawRequest(server.port, @"GET /a HTTP/1.1\r\nHost: evil.example\r\n\r\n");
     XCTAssertTrue([originForm containsString:@"421"], @"origin-form must keep validating the Host header: %@", [originForm substringToIndex:MIN((NSUInteger)40, originForm.length)]);
 
     [server stop];
@@ -1499,21 +1615,21 @@
 // if no line terminator has arrived inside the whole block budget, it is the request line
 // itself that is oversized. An oversized block whose request line is ordinary must stay 431.
 - (void)testARequestTargetLongerThanTheHeaderCapAnswers414 {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
                           requestClass:[WSKRequest class]
-                          processBlock:^WSKResponse*(WSKRequest* request) {
+                          processBlock:^WSKResponse *(WSKRequest *request) {
                               return [WSKDataResponse responseWithText:@"ok"];
                           }];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* hugeTarget = [@"/" stringByPaddingToLength:(80 * 1024) withString:@"a" startingAtIndex:0];
-    NSString* reply = SendRawRequest(server.port, [NSString stringWithFormat:@"GET %@ HTTP/1.1\r\nHost: localhost\r\n\r\n", hugeTarget]);
+    NSString *hugeTarget = [@"/" stringByPaddingToLength:(80 * 1024) withString:@"a" startingAtIndex:0];
+    NSString *reply = SendRawRequest(server.port, [NSString stringWithFormat:@"GET %@ HTTP/1.1\r\nHost: localhost\r\n\r\n", hugeTarget]);
     XCTAssertTrue([reply containsString:@"414"], @"an oversized request-target owes 414, got: %@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
 
-    NSString* hugeHeader = [@"" stringByPaddingToLength:(80 * 1024) withString:@"A" startingAtIndex:0];
-    NSString* blockReply = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /a HTTP/1.1\r\nHost: localhost\r\nX-Big: %@\r\n\r\n", hugeHeader]);
+    NSString *hugeHeader = [@"" stringByPaddingToLength:(80 * 1024) withString:@"A" startingAtIndex:0];
+    NSString *blockReply = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /a HTTP/1.1\r\nHost: localhost\r\nX-Big: %@\r\n\r\n", hugeHeader]);
     XCTAssertTrue([blockReply containsString:@"431"], @"an oversized block with an ordinary request line must stay 431, got: %@", [blockReply substringToIndex:MIN((NSUInteger)40, blockReply.length)]);
 
     [server stop];
@@ -1525,30 +1641,30 @@
 // implement ("chunked, chunked", or Content-Length alongside chunked) is the client's framing
 // error and must stay 400.
 - (void)testATransferCodingTheServerDoesNotImplementAnswers501 {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
                           requestClass:[WSKRequest class]
-                          processBlock:^WSKResponse*(WSKRequest* request) {
+                          processBlock:^WSKResponse *(WSKRequest *request) {
                               return [WSKDataResponse responseWithText:@"ok"];
                           }];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSDictionary* notImplemented = @{
-        @"gzip ahead of chunked" : @"GET /a HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: gzip, chunked\r\n\r\n",
-        @"gzip alone" : @"GET /a HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: gzip\r\n\r\n",
+    NSDictionary *notImplemented = @{
+        @"gzip ahead of chunked": @"GET /a HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: gzip, chunked\r\n\r\n",
+        @"gzip alone": @"GET /a HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: gzip\r\n\r\n",
     };
-    [notImplemented enumerateKeysAndObjectsUsingBlock:^(NSString* name, NSString* raw, BOOL* stop) {
-        NSString* reply = SendRawRequest(server.port, raw);
+    [notImplemented enumerateKeysAndObjectsUsingBlock:^(NSString *name, NSString *raw, BOOL *stop) {
+        NSString *reply = SendRawRequest(server.port, raw);
         XCTAssertTrue([reply containsString:@"501"], @"%@: an unimplemented coding owes 501, got: %@", name, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
     }];
 
-    NSDictionary* stillMalformed = @{
-        @"chunked applied twice" : @"GET /a HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked, chunked\r\n\r\n",
-        @"Content-Length alongside chunked" : @"GET /a HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n",
+    NSDictionary *stillMalformed = @{
+        @"chunked applied twice": @"GET /a HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked, chunked\r\n\r\n",
+        @"Content-Length alongside chunked": @"GET /a HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n",
     };
-    [stillMalformed enumerateKeysAndObjectsUsingBlock:^(NSString* name, NSString* raw, BOOL* stop) {
-        NSString* reply = SendRawRequest(server.port, raw);
+    [stillMalformed enumerateKeysAndObjectsUsingBlock:^(NSString *name, NSString *raw, BOOL *stop) {
+        NSString *reply = SendRawRequest(server.port, raw);
         XCTAssertTrue([reply containsString:@"400"], @"%@: a framing error must stay 400, got: %@", name, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
     }];
 
@@ -1560,7 +1676,7 @@
 // client's buffer. This predicate is the cheap guard that decides whether a connection needs to
 // linger at all, so the ordinary case (nothing unread) keeps closing exactly as it always has.
 - (void)testUnreadInboundDataIsDetected {
-    int fds[2] = { -1, -1 };
+    int fds[2] = {-1, -1};
     XCTAssertEqual(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
 
     XCTAssertFalse(WSKSocketHasUnreadInboundData(fds[0]), @"an idle socket has nothing unread");
@@ -1595,14 +1711,14 @@
 // Measured on unfixed source: 391 bytes complete on one run, 167 bytes truncated mid-headers on the
 // next. Because it is a race, this runs K trials and requires ALL of them to be clean.
 - (void)testRefusalSurvivesWhileClientIsStillSending {
-    NSString* directory = MakeTempDirectory();
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:directory];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSString *directory = MakeTempDirectory();
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:directory];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     NSUInteger const trials = 20;
     NSUInteger clean = 0;
-    NSMutableArray<NSString*>* failures = [NSMutableArray array];
+    NSMutableArray<NSString *> *failures = [NSMutableArray array];
 
     for (NSUInteger trial = 0; trial < trials; trial++) {
         int fd = ConnectToLocalhostPort(server.port);
@@ -1612,8 +1728,8 @@
         // so the server answers immediately while the body is still arriving. WebDAV is used
         // because it HANDLES PUT — on a server with no PUT handler this is a bodiless 501 abort
         // instead, which has no error page to lose and would make this test prove nothing.
-        NSString* header = @"PUT /x.bin HTTP/1.1\r\nHost: localhost\r\nContent-Range: bytes 0-2/10\r\nContent-Length: 67108864\r\n\r\n";
-        const char* headerBytes = [header UTF8String];
+        NSString *header = @"PUT /x.bin HTTP/1.1\r\nHost: localhost\r\nContent-Range: bytes 0-2/10\r\nContent-Length: 67108864\r\n\r\n";
+        const char *headerBytes = [header UTF8String];
         XCTAssertEqual(send(fd, headerBytes, strlen(headerBytes), 0), (ssize_t)strlen(headerBytes));
 
         // Keep pushing body from another thread so the receive queue stays non-empty while the
@@ -1623,7 +1739,7 @@
         setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, sizeof(noSignal));
         dispatch_semaphore_t pumpDone = dispatch_semaphore_create(0);
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-            char* chunk = malloc(65536);
+            char *chunk = malloc(65536);
             memset(chunk, 'Z', 65536);
             for (int i = 0; i < 1024; i++) {
                 if (send(fd, chunk, 65536, 0) < 0) {
@@ -1635,11 +1751,11 @@
         });
 
         BOOL sawEOF = NO;
-        NSData* reply = ReadToEOF(fd, &sawEOF);
+        NSData *reply = ReadToEOF(fd, &sawEOF);
         dispatch_semaphore_wait(pumpDone, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
         close(fd);
 
-        NSString* text = [[NSString alloc] initWithData:reply encoding:NSUTF8StringEncoding];
+        NSString *text = [[NSString alloc] initWithData:reply encoding:NSUTF8StringEncoding];
         NSRange const separator = (text != nil) ? [text rangeOfString:@"\r\n\r\n"] : NSMakeRange(NSNotFound, 0);
         BOOL const rightStatus = (text != nil) && [text hasPrefix:@"HTTP/1.1 400"];
 
@@ -1654,13 +1770,14 @@
             clean += 1;
         } else if (failures.count < 3) {
             [failures addObject:[NSString stringWithFormat:@"trial %lu: %lu bytes, body=%lu, sawEOF=%@",
-                                 (unsigned long)trial, (unsigned long)reply.length,
-                                 (unsigned long)bodyLength, sawEOF ? @"YES" : @"NO"]];
+                                                           (unsigned long)trial,
+                                                           (unsigned long)reply.length,
+                                                           (unsigned long)bodyLength,
+                                                           sawEOF ? @"YES" : @"NO"]];
         }
     }
 
-    XCTAssertEqual(clean, trials, @"a refusal must reach the client intact every time: %@",
-                   [failures componentsJoinedByString:@"; "]);
+    XCTAssertEqual(clean, trials, @"a refusal must reach the client intact every time: %@", [failures componentsJoinedByString:@"; "]);
 
     [server stop];
     [[NSFileManager defaultManager] removeItemAtPath:directory error:NULL];
@@ -1686,26 +1803,26 @@
 // engages here — 18 of 20 trials log "Lingering before close" and hit the discard cap — so the call
 // site is live and exercised; there is simply nothing left to lose by the time it runs.
 - (void)testBodilessAbortIsDeliveredCompleteWhileClientIsStillSending {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
                           requestClass:[WSKRequest class]
-                          processBlock:^WSKResponse*(WSKRequest* request) {
+                          processBlock:^WSKResponse *(WSKRequest *request) {
                               return [WSKDataResponse responseWithText:@"alive"];
                           }];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     NSUInteger const trials = 20;
     NSUInteger clean = 0;
-    NSMutableArray<NSString*>* failures = [NSMutableArray array];
+    NSMutableArray<NSString *> *failures = [NSMutableArray array];
 
     for (NSUInteger trial = 0; trial < trials; trial++) {
         int fd = ConnectToLocalhostPort(server.port);
         XCTAssertGreaterThan(fd, 0);
 
         // No PUT handler is registered, so this is refused 501 before any body is spooled.
-        NSString* header = @"PUT /x.bin HTTP/1.1\r\nHost: localhost\r\nContent-Length: 67108864\r\n\r\n";
-        const char* headerBytes = [header UTF8String];
+        NSString *header = @"PUT /x.bin HTTP/1.1\r\nHost: localhost\r\nContent-Length: 67108864\r\n\r\n";
+        const char *headerBytes = [header UTF8String];
         XCTAssertEqual(send(fd, headerBytes, strlen(headerBytes), 0), (ssize_t)strlen(headerBytes));
 
         // Keep the receive queue non-empty while the server answers and closes.
@@ -1713,7 +1830,7 @@
         setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, sizeof(noSignal));
         dispatch_semaphore_t pumpDone = dispatch_semaphore_create(0);
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-            char* chunk = malloc(65536);
+            char *chunk = malloc(65536);
             memset(chunk, 'Z', 65536);
             for (int i = 0; i < 1024; i++) {
                 if (send(fd, chunk, 65536, 0) < 0) {
@@ -1725,11 +1842,11 @@
         });
 
         BOOL sawEOF = NO;
-        NSData* reply = ReadToEOF(fd, &sawEOF);
+        NSData *reply = ReadToEOF(fd, &sawEOF);
         dispatch_semaphore_wait(pumpDone, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
         close(fd);
 
-        NSString* text = [[NSString alloc] initWithData:reply encoding:NSUTF8StringEncoding];
+        NSString *text = [[NSString alloc] initWithData:reply encoding:NSUTF8StringEncoding];
         BOOL const rightStatus = (text != nil) && [text hasPrefix:@"HTTP/1.1 501"];
         BOOL const terminated = (text != nil) && ([text rangeOfString:@"\r\n\r\n"].location != NSNotFound);
 
@@ -1737,13 +1854,14 @@
             clean += 1;
         } else if (failures.count < 3) {
             [failures addObject:[NSString stringWithFormat:@"trial %lu: %lu bytes, status=%@, terminated=%@",
-                                 (unsigned long)trial, (unsigned long)reply.length,
-                                 rightStatus ? @"YES" : @"NO", terminated ? @"YES" : @"NO"]];
+                                                           (unsigned long)trial,
+                                                           (unsigned long)reply.length,
+                                                           rightStatus ? @"YES" : @"NO",
+                                                           terminated ? @"YES" : @"NO"]];
         }
     }
 
-    XCTAssertEqual(clean, trials, @"a bodiless abort must reach the client complete every time: %@",
-                   [failures componentsJoinedByString:@"; "]);
+    XCTAssertEqual(clean, trials, @"a bodiless abort must reach the client complete every time: %@", [failures componentsJoinedByString:@"; "]);
 
     [server stop];
 }
@@ -1793,9 +1911,9 @@
 //    apart, before trusting the count as a baseline -- so a still-churning count simply keeps
 //    resetting the streak instead of being accepted.
 - (void)testLingeringCloseReleasesItsSlotWhenTheClientGoesQuiet {
-    NSString* directory = MakeTempDirectory();
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:directory];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSString *directory = MakeTempDirectory();
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:directory];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     XCTAssertNotNil(SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"));
@@ -1819,8 +1937,8 @@
     // Declare a huge body, send a little of it, then go silent WITHOUT closing. The refusal is
     // written immediately, the receive queue is non-empty, so the connection lingers — and then
     // nothing more ever arrives.
-    NSString* header = @"PUT /x.bin HTTP/1.1\r\nHost: localhost\r\nContent-Range: bytes 0-2/10\r\nContent-Length: 67108864\r\n\r\n";
-    const char* headerBytes = [header UTF8String];
+    NSString *header = @"PUT /x.bin HTTP/1.1\r\nHost: localhost\r\nContent-Range: bytes 0-2/10\r\nContent-Length: 67108864\r\n\r\n";
+    const char *headerBytes = [header UTF8String];
     XCTAssertEqual(send(fd, headerBytes, strlen(headerBytes), 0), (ssize_t)strlen(headerBytes));
 
     int const noSignal = 1;
