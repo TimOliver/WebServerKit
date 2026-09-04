@@ -1046,17 +1046,14 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
     attributed to it (it is libxml2's own escaping of `&` inside `ns->href`, not anything this
     code does), and the Digest fix needed one thing the finding did not mention — `qop`/`nc`
     arrive UNQUOTED, so the shared header-parameter reader hands back `auth,` and `00000001,`.
-    ★ **(P2) A namespace URI containing WHITESPACE is still stored and published** —
-    `_PropertyNamespaceIsRepresentable` (`WSKWebDAVServer.m:428`) tests only `}`. `xmlns:Z="urn:with
-    space"` → 207 and the key `{urn:with space}note` lands in the xattr; allprop and the parent's
-    Depth:1 then carry `xmlns:W="urn:with space"`, which xmllint flags (`is not a valid URI`) and
-    **NSXMLDocument refuses outright** (`initWithData:` fails on the whole document); NSXMLParser,
-    WebDAVFS, neon and rclone tolerate it, Python expat in namespace mode does not. Same for tab,
-    newline, leading/trailing space and U+00A0. F3's persistence-and-contagion shape with a narrower
-    blast radius: a Cocoa client parsing 207s with NSXMLDocument cannot list the folder while the
-    property exists. Nameable and removable through the protocol, unlike the `}` case. Fix: refuse
-    whitespace in the same one home (or run libxml2's `xmlParseURI` on the href); the writer needs
-    no change and an old store with such a key stays nameable.
+    ~~★ (P2) A namespace URI containing WHITESPACE is still stored and published.~~ Fixed
+    2026-09-04, and the finding was NARROWER than the defect: whitespace is six of the twelve
+    spellings NSXMLDocument refuses. Measured over 19 spellings on a live server, it also refuses
+    `>`, `%`, `^`, `` ` ``, `{`, `|`, `\` and any non-ASCII character — so the rule is "is it a
+    URI", asked of `xmlParseURI`, not a character list. See the invariant under WebDAV. The
+    finding's other half was right and useful: NSXMLParser tolerates every one of them, which is
+    exactly why the class stayed open through the `}` fix. (One correction to the original: Python
+    expat in namespace mode PARSES these, measured — only NSXMLDocument refuses.)
     (P2) Concurrent PROPPATCHes on one resource lose updates while both answer 200: an
     unlocked read-modify-write of the xattr plist (`:1799` read … `:1883` write; 106/200 and
     53/150 rounds lost a write). Fix: serialize PROPPATCH per server or per resolved path. (P2)
@@ -1084,11 +1081,11 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
     target" ruling).
   - *Connection.* **(P1 for Shape A) The slow-reader cut** — quantified in the corrected line
     under "Uploader and lifecycle" above, fix direction there; fixing it also un-flakes CI.
-    ★ **(P2) An UNTERMINATED chunk-size line is rescanned in full on every read** — see the
-    caveat on the "Both body parsers are linear" invariant under Headers and framing: `5;` plus
-    megabytes of extension, dribbled a byte per read, costs ~6 ms of CPU per byte at an 8 MB prefix
-    (0.2 ms for an ordinary body), so one slow connection is one core; four were 3.8 cores. Bounded
-    by the 16 MB framing cap, self-healing, pre-existing (identical on the pre-fix build).
+    ~~★ (P2) An UNTERMINATED chunk-size line is rescanned in full on every read.~~ Fixed
+    2026-09-04, together with a sibling the finding did not name: the trailer's CRLFCRLF search had
+    the identical shape one branch over (1.37 ms of CPU per read at an 8 MB trailer). Re-measured
+    at 2.80 ms per read for the size line, not the ~6 ms first recorded — that figure came from a
+    machine at load 250-350. See the invariant under Headers and framing.
     (P2, owner ruling requested) An async handler that KEEPS its completion block and never
     calls it holds its slot until process exit even after the client disconnects: no read is
     posted during a handler (`WSKConnection.m:843-877`), so a peer FIN/RST is never observed,
@@ -1191,9 +1188,12 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
     the conforming class without an optional chain, so `response.asyncReadData { … }` on a
     `WSKDataResponse` raises `NSInvalidArgumentException: unrecognized selector` (exit 134). A host
     writing its own body-reader chain (an encoder, a progress wrapper) meets it; the Sendable
-    attribute on that very block is what now invites the call. Fix: a base implementation on
-    `WSKResponse` that calls `-readData:` and invokes the block (the encoder's fallback already does
-    this), or document `responds(to:)`. (nit) A multipart EPILOGUE larger than 16 MB after the closing
+    attribute on that very block is what now invites the call. Fix: **NOT the base implementation on
+    `WSKResponse` this first suggested** — the three guards read `[_reader respondsToSelector:]`
+    (`WSKResponse.m:72,82,384`), so adding one makes `hasAsyncReader` true for EVERY response and
+    flips the connection layer onto the async path for all of them, with a synchronous callback per
+    chunk; that is the stack-recursion shape the multipart parser already carries a lesson about.
+    Document `responds(to:)`, or give the async path a signal that is not "does it respond". (nit) A multipart EPILOGUE larger than 16 MB after the closing
     boundary accumulates in the End state and answers 413 rather than 200; no residue, unreachable in
     practice. (nit) `Scripts/SwiftConsumer` leaves its temp directory behind on a RED run only
     (`defer` does not run past `exit(1)`). **Calibrations, each measured:** the body-drip floor is
