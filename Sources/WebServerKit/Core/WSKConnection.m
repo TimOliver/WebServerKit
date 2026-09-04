@@ -32,7 +32,6 @@
 #import <arpa/inet.h>
 #import <netdb.h>
 #import <netinet/in.h>
-#import <netinet/tcp.h>
 #import <sys/socket.h>
 #import <TargetConditionals.h>
 #import <zlib.h>  // Z_DATA_ERROR / Z_NEED_DICT, to tell the client's bad stream from our allocation failure
@@ -129,20 +128,19 @@ NS_ASSUME_NONNULL_END
 
     BOOL _opened;
 
-    dispatch_source_t _idleTimer;           // Nil when idle timeouts are disabled
-    NSUInteger _pendingIOCount;             // Accessed on _connectionQueue only
-    NSUInteger _chunkScanOffset;            // Where the next chunk-size-line CRLF search may begin; _connectionQueue only
-    NSUInteger _chunkTrailerScanOffset;     // The same, for the trailer's CRLFCRLF search
-    NSUInteger _idleCheckedBytes;           // Accessed on _connectionQueue only
-    uint64_t _idleCheckedTransmittedBytes;  // Bytes the TCP layer had sent at the last check; _connectionQueue only
-    BOOL _idleCheckWasBusy;                 // Accessed on _connectionQueue only
-    NSUInteger _headerPhaseTicks;           // Idle ticks elapsed before a request was matched; on _connectionQueue only
-    BOOL _requestReceived;                  // Set once the body is fully read and the handler runs; on _connectionQueue only
-    BOOL _clientIsHTTP10;                   // The client spoke HTTP/1.0 (or older): no chunked framing, no interim 1xx
-    BOOL _earlyChecksRun;                   // Host allow-list and preflight are decided once, as early as the headers allow
-    NSInteger _headerFailureStatus;         // Why the header block was rejected; 500 only if nothing more specific applies
-    NSInteger _bodyFailureStatus;           // Why the body was rejected; same idiom, because the body readers report only a BOOL
-    NSTimeInterval _idleTimeout;            // Seconds between idle-timer ticks; 0 when idle timeouts are disabled
+    dispatch_source_t _idleTimer;        // Nil when idle timeouts are disabled
+    NSUInteger _pendingIOCount;          // Accessed on _connectionQueue only
+    NSUInteger _chunkScanOffset;         // Where the next chunk-size-line CRLF search may begin; _connectionQueue only
+    NSUInteger _chunkTrailerScanOffset;  // The same, for the trailer's CRLFCRLF search
+    NSUInteger _idleCheckedBytes;        // Accessed on _connectionQueue only
+    BOOL _idleCheckWasBusy;              // Accessed on _connectionQueue only
+    NSUInteger _headerPhaseTicks;        // Idle ticks elapsed before a request was matched; on _connectionQueue only
+    BOOL _requestReceived;               // Set once the body is fully read and the handler runs; on _connectionQueue only
+    BOOL _clientIsHTTP10;                // The client spoke HTTP/1.0 (or older): no chunked framing, no interim 1xx
+    BOOL _earlyChecksRun;                // Host allow-list and preflight are decided once, as early as the headers allow
+    NSInteger _headerFailureStatus;      // Why the header block was rejected; 500 only if nothing more specific applies
+    NSInteger _bodyFailureStatus;        // Why the body was rejected; same idiom, because the body readers report only a BOOL
+    NSTimeInterval _idleTimeout;         // Seconds between idle-timer ticks; 0 when idle timeouts are disabled
 
     // Connection reuse. Deliberately restricted to requests carrying NO body, which is what keeps
     // request smuggling structurally impossible rather than a matter of parsing carefully: a
@@ -1098,34 +1096,8 @@ static BOOL _StatusDelimitsItself(NSInteger statusCode) {
 // started just before a tick. Time spent waiting on a request handler to produce a
 // response (no pending socket I/O) never counts, so slow handlers are unaffected. How
 // much counts as "enough" depends on the phase — see the two guards below.
-// Bytes this connection has actually put on the wire, from the TCP layer itself.
-//
-// The response-phase rule is "any byte is progress", but the MEASURE could not see one:
-// -didWriteBytes: runs only when a whole dispatch_write COMPLETES, so a 256 KB chunk to a reader
-// slower than roughly bufferSize/timeout spans two idle ticks having registered nothing, and the
-// starvation check closed a connection whose peer was reading the whole time. Measured at the
-// default 30 s idle: 8 of 8 trials cut, a 20 KB/s client reset after 121 s with 2.27 MB of a 20 MB
-// file. The rule was right; only the instrument was wrong.
-//
-// SO_NWRITE cannot be the instrument, which is worth recording because it is the obvious choice:
-// it reports SEND-BUFFER OCCUPANCY, and the buffer is refilled exactly as fast as it drains, so it
-// reads identically for a peer at 5 KB/s and one that has stopped reading altogether (measured:
-// 491052 across every tick for the first, 646700 for the second). tcpi_txbytes is monotonic and
-// moves only when the peer actually takes bytes, which is the question being asked.
-static uint64_t _SocketTransmittedByteCount(int socket) {
-    struct tcp_connection_info info;
-    socklen_t length = sizeof(info);
-
-    if (getsockopt(socket, IPPROTO_TCP, TCP_CONNECTION_INFO, &info, &length) != 0) {
-        return 0;  // Not a TCP socket, or already torn down: fall back to the completion-counted rule
-    }
-
-    return info.tcpi_txbytes;
-}
-
 - (void)_checkIdleTimeout {
     NSUInteger const transferredBytes = _totalBytesRead + _totalBytesWritten;
-    uint64_t const transmittedBytes = _SocketTransmittedByteCount(_socket);
     BOOL const waitingOnSocket = (_pendingIOCount > 0);
 
     // A reused connection with no request in flight is idle BY DESIGN — that is what it is for —
@@ -1153,7 +1125,6 @@ static uint64_t _SocketTransmittedByteCount(int socket) {
 
             _idleCheckWasBusy = waitingOnSocket;
             _idleCheckedBytes = transferredBytes;
-            _idleCheckedTransmittedBytes = transmittedBytes;
             return;
         }
     }
@@ -1190,12 +1161,7 @@ static uint64_t _SocketTransmittedByteCount(int socket) {
         minimumProgress = MAX(minimumProgress, (NSUInteger)1);
     }
 
-    // A write still draining to the peer is progress even though its completion has not run. This
-    // only ever RELAXES the rule for a connection that is genuinely moving bytes: during the body
-    // phase nothing is being sent, so the rate floor above is untouched, and a peer that has
-    // stopped reading stops advancing this counter and is still reclaimed.
-    BOOL const outboundProgressed = (transmittedBytes > _idleCheckedTransmittedBytes);
-    BOOL const starved = ((transferredBytes - _idleCheckedBytes) < minimumProgress) && !outboundProgressed;
+    BOOL const starved = ((transferredBytes - _idleCheckedBytes) < minimumProgress);
 
     if (waitingOnSocket && _idleCheckWasBusy && starved) {
         WSK_LOG_WARNING(@"Closing connection on socket %i: too few bytes transferred while waiting on socket I/O across the idle timeout", _socket);
@@ -1209,7 +1175,6 @@ static uint64_t _SocketTransmittedByteCount(int socket) {
 
     _idleCheckWasBusy = waitingOnSocket;
     _idleCheckedBytes = transferredBytes;
-    _idleCheckedTransmittedBytes = transmittedBytes;
 }
 
 - (void)_readRequestHeaders {
