@@ -283,13 +283,13 @@ static inline BOOL _HeaderTokenIs(NSString *value, NSString *token) {
 }
 
 - (BOOL)_checkFileExtension:(NSString *)fileName {
-    return WSKNamePassesExtensionAllowList(fileName, _allowedFileExtensions);
+    return WSKNamePassesExtensionAllowList(fileName, self.allowedFileExtensions);
 }
 
 // Both names an entry presents must satisfy the allow-list; see WSKEntryPassesExtensionAllowList.
 // `resolvedName` is nil for anything that is not a link, which reduces to the single-name rule.
 - (BOOL)_checkFileExtensionForName:(NSString *)namedName resolvedName:(nullable NSString *)resolvedName {
-    return WSKEntryPassesExtensionAllowList(namedName, resolvedName, _allowedFileExtensions);
+    return WSKEntryPassesExtensionAllowList(namedName, resolvedName, self.allowedFileExtensions);
 }
 
 // A destructive verb must refuse whatever a direct request would refuse; see
@@ -298,7 +298,7 @@ static inline BOOL _HeaderTokenIs(NSString *value, NSString *token) {
 // whole subtree, and MOVE/COPY destroy exactly as much through Overwrite (a collection
 // *destination* named "Backup.txt" satisfies the file-source form).
 - (nullable NSString *)_firstUnvettableItemAtPath:(NSString *)absolutePath isDirectory:(BOOL)isDirectory {
-    return WSKFirstUnvettableItemAtPath(absolutePath, isDirectory, _allowedFileExtensions);
+    return WSKFirstUnvettableItemAtPath(absolutePath, isDirectory, self.allowedFileExtensions);
 }
 
 // Yields the entry the client NAMED rather than what it points at; see

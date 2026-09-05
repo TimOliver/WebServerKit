@@ -97,7 +97,7 @@ NS_ASSUME_NONNULL_BEGIN
  *
  *  The default value is nil i.e. all file extensions are allowed.
  */
-@property (nonatomic, copy, nullable) NSArray<NSString *> *allowedFileExtensions;
+@property (atomic, copy, nullable) NSArray<NSString *> *allowedFileExtensions;
 
 /**
  *  Sets if files and directories whose name start with a period are allowed to
@@ -141,7 +141,7 @@ NS_ASSUME_NONNULL_BEGIN
  *  @warning Any reserved HTML characters in the string value for this property
  *  must have been replaced by character entities e.g. "&" becomes "&amp;".
  */
-@property (nonatomic, copy, nullable) NSString *title;
+@property (atomic, copy, nullable) NSString *title;
 
 /**
  *  Sets the header for the uploader web interface.
@@ -151,7 +151,7 @@ NS_ASSUME_NONNULL_BEGIN
  *  @warning Any reserved HTML characters in the string value for this property
  *  must have been replaced by character entities e.g. "&" becomes "&amp;".
  */
-@property (nonatomic, copy, nullable) NSString *header;
+@property (atomic, copy, nullable) NSString *header;
 
 /**
  *  Sets the prologue for the uploader web interface.
@@ -161,7 +161,7 @@ NS_ASSUME_NONNULL_BEGIN
  *  @warning The string value for this property must be raw HTML
  *  e.g. "<p>Some text</p>"
  */
-@property (nonatomic, copy, nullable) NSString *prologue;
+@property (atomic, copy, nullable) NSString *prologue;
 
 /**
  *  Sets the epilogue for the uploader web interface.
@@ -171,7 +171,7 @@ NS_ASSUME_NONNULL_BEGIN
  *  @warning The string value for this property must be raw HTML
  *  e.g. "<p>Some text</p>"
  */
-@property (nonatomic, copy, nullable) NSString *epilogue;
+@property (atomic, copy, nullable) NSString *epilogue;
 
 /**
  *  Sets the footer for the uploader web interface.
@@ -181,7 +181,7 @@ NS_ASSUME_NONNULL_BEGIN
  *  @warning Any reserved HTML characters in the string value for this property
  *  must have been replaced by character entities e.g. "&" becomes "&amp;".
  */
-@property (nonatomic, copy, nullable) NSString *footer;
+@property (atomic, copy, nullable) NSString *footer;
 
 /**
  *  This method is the designated initializer for the class.

@@ -1160,8 +1160,28 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
     served; base-path text/html and text/plain carry no charset; chunked trailers are not
     validated; the header goes out as `Etag`; `Range: bytes=0-18446744073709551615` is ignored
     (the sentinel).
-  - *Host-app safety, docs, hygiene.* **(P1) Changing a host-settable property while the server
-    runs is a use-after-free**: `allowedFileExtensions`, `allowHiddenItems`, `title`/`header`/
+  - *Host-app safety, docs, hygiene.* ~~**(P1) Changing a host-settable property while the server
+    runs is a use-after-free.**~~ **Fixed 2026-09-05** — the six object-typed ones
+    (`allowedFileExtensions` on both servers, and the uploader's `title`/`header`/`prologue`/
+    `epilogue`/`footer`) are now `atomic`, and the internal reads go through the getter instead of
+    the ivar, which is the half that matters: an atomic property whose own implementation reads
+    `_ivar` directly is protected for nobody. The scalars (`allowHiddenItems`,
+    `serverSentEventsEnabled`, `fileCacheControlMaxAge`) are left `nonatomic` deliberately — an
+    aligned word load cannot tear and there is nothing to free, so the worst case is reading the
+    previous value, which a host flipping a switch mid-request can get anyway. What this does NOT
+    buy is CONSISTENCY: one listing can still see the old allow-list for one entry and the new one
+    for the next. That is acceptable; a torn read of a freed pointer was not.
+    **How it was verified, because the crash would not reproduce:** roughly a million allow-list
+    walks against forty thousand frees, 16 clients, Release, under `MallocScribble` and then under
+    guard malloc (which unmaps freed pages) — no fault, because a freed pointer that is merely read
+    usually reads fine. The proof is in the shipped Release disassembly instead: the read was a bare
+    `movq (%rdi,%rdx), %rdx` tail-calling `_WSKEntryPassesExtensionAllowList` with no retain, and a
+    minimal ARC repro confirms clang emits no `objc_retain` for an ivar passed to a function at
+    `-Os`. After the change the same method makes 5 `objc_getProperty`/`objc_retain` calls where it
+    made 0. **Verify any future change to these by disassembly, not by waiting for a crash.** The
+    concurrency test that ships alongside passes against the UNFIXED build too and says so in its
+    own comment; it is kept only because nothing else exercises concurrent mutation.
+    The original finding, for the record: `allowedFileExtensions`, `allowHiddenItems`, `title`/`header`/
     `prologue`/`epilogue`/`footer`, `fileCacheControlMaxAge`, `serverSentEventsEnabled` are
     plain nonatomic ivars read on connection threads (`WSKWebUploader.m:880-1633`,
     `WSKWebDAVServer.m:285-2107`) and the headers state no set-before-start rule. Release, a

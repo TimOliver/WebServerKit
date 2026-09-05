@@ -886,13 +886,13 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
 @implementation WSKWebUploader (Methods)
 
 - (BOOL)_checkFileExtension:(NSString *)fileName {
-    return WSKNamePassesExtensionAllowList(fileName, _allowedFileExtensions);
+    return WSKNamePassesExtensionAllowList(fileName, self.allowedFileExtensions);
 }
 
 // Both names an entry presents must satisfy the allow-list; see WSKEntryPassesExtensionAllowList.
 // `resolvedName` is nil for anything that is not a link, which reduces to the single-name rule.
 - (BOOL)_checkFileExtensionForName:(NSString *)namedName resolvedName:(nullable NSString *)resolvedName {
-    return WSKEntryPassesExtensionAllowList(namedName, resolvedName, _allowedFileExtensions);
+    return WSKEntryPassesExtensionAllowList(namedName, resolvedName, self.allowedFileExtensions);
 }
 
 // Yields the entry the client NAMED rather than what it points at; see
@@ -1501,7 +1501,7 @@ static NSString *_OriginAuthority(NSString *value) {
     // Nothing is destroyed here (/move has no overwrite path — it routes through
     // -_uniquePathForPath:), but relocating a file the client may not touch is still acting on it.
     if (isDirectory) {
-        NSString *const unvettable = WSKFirstUnvettableItemAtPath(oldAbsolutePath, YES, _allowedFileExtensions);
+        NSString *const unvettable = WSKFirstUnvettableItemAtPath(oldAbsolutePath, YES, self.allowedFileExtensions);
 
         if (unvettable) {
             return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Moving \"%@\" is not allowed: it contains \"%@\"", oldRelativePath, unvettable];
@@ -1639,7 +1639,7 @@ static NSString *_OriginAuthority(NSString *value) {
         // of the same rule, comments and all, and "a rule closed in one server and not the other"
         // is the class that has recurred FOUR times in this project — including through this exact
         // walk, where the -skipDescendants handling was wrong in both copies simultaneously.
-        NSString *const unvettable = WSKFirstUnvettableItemAtPath(absolutePath, isDirectory, _allowedFileExtensions);
+        NSString *const unvettable = WSKFirstUnvettableItemAtPath(absolutePath, isDirectory, self.allowedFileExtensions);
 
         if (unvettable) {
             return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not allowed: it contains \"%@\"", relativePath, unvettable];
