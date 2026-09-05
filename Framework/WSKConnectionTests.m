@@ -439,6 +439,72 @@
     XCTAssertLessThan(cpuSpent, 0.30, @"%lu bytes dribbled into an unterminated trailer behind an %lu MB prefix cost %.2f s of CPU: the trailer is being rescanned per read", (unsigned long)kDribbles, (unsigned long)(kPrefix / (1024 * 1024)), cpuSpent);
 }
 
+// A response with no body and a status that does not settle its own length still has to state one,
+// or a keep-alive client cannot tell where it ends. It did not, so every DAV OPTIONS, MKCOL,
+// COPY/MOVE 201 and collection GET closed its connection — measured, one of two pipelined OPTIONS
+// served — which is constant traffic from Finder. The sibling of the 304 fix, one status class over.
+- (void)testBodilessResponseStatesItsLengthAndKeepsTheConnection {
+    WSKWebServer *server = [[WSKWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[WSKRequest class]
+                          processBlock:^WSKResponse *(WSKRequest *request) {
+                              return [WSKResponse responseWithStatusCode:kWSKHTTPStatusCode_OK];  // 200, no body
+                          }];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES, WSKOption_ConnectionKeepAliveTimeout: @15.0};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    int fd = ConnectToLocalhostPort(server.port);
+    XCTAssertGreaterThan(fd, 0);
+    const char *two = "GET /a HTTP/1.1\r\nHost: localhost\r\n\r\nGET /b HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    XCTAssertEqual(send(fd, two, strlen(two), 0), (ssize_t)strlen(two));
+    BOOL sawEOF = NO;
+    NSString *reply = [[NSString alloc] initWithData:ReadToEOF(fd, &sawEOF) encoding:NSUTF8StringEncoding];
+    close(fd);
+    [server stop];
+
+    XCTAssertTrue([reply containsString:@"Content-Length: 0"], @"a bodiless 200 must state its length: %@", reply);
+    NSUInteger served = 0;
+    NSRange search = NSMakeRange(0, reply.length);
+    while (search.length > 0) {
+        NSRange const found = [reply rangeOfString:@"HTTP/1.1 200" options:NSLiteralSearch range:search];
+        if (found.location == NSNotFound) {
+            break;
+        }
+        served += 1;
+        search = NSMakeRange(NSMaxRange(found), reply.length - NSMaxRange(found));
+    }
+    XCTAssertEqual(served, (NSUInteger)2, @"the connection closed after one bodiless response: %@", reply);
+}
+
+// The half that makes the rule above conditional on -hasBody rather than on "we are not chunking".
+// A response of UNKNOWN length still has a body, and for an HTTP/1.0 client it is not chunked —
+// 1.0 has no chunked encoding — so it is framed by the close. Saying "Content-Length: 0" over that
+// would announce an empty body and then send one, which truncates rather than frames.
+- (void)testStreamedResponseToAnHTTP10ClientIsNotDeclaredEmpty {
+    WSKWebServer *server = [[WSKWebServer alloc] init];
+    __block NSUInteger chunks = 0;
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[WSKRequest class]
+                          processBlock:^WSKResponse *(WSKRequest *request) {
+                              return [WSKStreamedResponse responseWithContentType:@"text/plain"
+                                                                      streamBlock:^NSData *(NSError **error) {
+                                                                          chunks += 1;
+                                                                          if (chunks > 3) {
+                                                                              return [NSData data];
+                                                                          }
+                                                                          return [@"PAYLOAD-" dataUsingEncoding:NSUTF8StringEncoding];
+                                                                      }];
+                          }];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString *reply = SendRawRequest(server.port, @"GET /s HTTP/1.0\r\nHost: localhost\r\n\r\n");
+    [server stop];
+
+    XCTAssertFalse([reply containsString:@"Content-Length: 0"], @"a streamed body was announced as empty: %@", reply);
+    XCTAssertTrue([reply containsString:@"PAYLOAD-PAYLOAD-PAYLOAD-"], @"the streamed body did not arrive whole: %@", reply);
+}
+
 // Progress in the response phase is counted in -didWriteBytes:, which runs only when a whole
 // dispatch_write COMPLETES. A 256 KB chunk to a reader slower than roughly bufferSize/timeout
 // therefore spans two idle ticks having registered ZERO progress, and the starvation rule closes a

@@ -568,8 +568,15 @@
     NSString *link = [dir stringByAppendingPathComponent:@"latest"];
     XCTAssertTrue([fm createSymbolicLinkAtPath:link withDestinationPath:@"builds/current" error:NULL], @"could not create the dangling link");
 
-    NSString *reply = SendRawRequest(server.port, @"COPY /src.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /latest\r\n\r\n");
-    XCTAssertFalse([reply hasPrefix:@"HTTP/1.1 2"], @"a COPY onto an occupied name should refuse: %@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+    // Overwrite: F, so the refusal is one the RFC asks for rather than an accident. This assertion
+    // used to be written without the header, on the reasoning that a COPY onto an occupied name
+    // refuses — but it only refused because -fileExistsAtPath: mis-read the dangling link as
+    // ABSENT, so the Overwrite check never ran and -copyItemAtPath: failed with EEXIST. With the
+    // destination seen correctly the default (T, per §10.6) replaces it, which is right; see
+    // testDAVMoveAndCopyTreatADanglingAliasAsTheEntryItIs. What this test is really for is the
+    // assertion below, and that is unchanged.
+    NSString *reply = SendRawRequest(server.port, @"COPY /src.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /latest\r\nOverwrite: F\r\n\r\n");
+    XCTAssertFalse([reply hasPrefix:@"HTTP/1.1 2"], @"a COPY refused by Overwrite: F must not report success: %@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
 
     // The assertion that matters: the refusal left the tree exactly as it was. -fileExistsAtPath:
     // follows the link and would report NO for a link that is still there, so ask lstat.
@@ -2244,6 +2251,112 @@
 
     [server stop];
     [fm removeItemAtPath:dir error:NULL];
+}
+
+// DELETE was taught that a dangling alias exists; MOVE and COPY were not, so the same name stayed
+// wedged for every other verb. Both existence tests in performCOPY:isMove: used -fileExistsAtPath:,
+// which follows the final link, so a link whose target is gone read as absent: MOVE and COPY of it
+// answered 404, and MOVE ONTO it answered 403 (renamex_np EEXIST) with Overwrite: T and 403 rather
+// than 412 without. A dangling alias is the ordinary end state of publish-by-symlink — replace the
+// build and the alias outlives it — and it is invisible in listings, so a client cannot tell why.
+- (void)testDAVMoveAndCopyTreatADanglingAliasAsTheEntryItIs {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    NSString * (^dangling)(NSString *) = ^(NSString *name) {
+        NSString *target = [dir stringByAppendingPathComponent:@"gone.bin"];
+        [@"build" writeToFile:target atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        NSString *link = [dir stringByAppendingPathComponent:name];
+        [fm removeItemAtPath:link error:NULL];
+        XCTAssertTrue([fm createSymbolicLinkAtPath:link withDestinationPath:@"gone.bin" error:NULL]);
+        [fm removeItemAtPath:target error:NULL];
+        return link;
+    };
+
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString * (^send)(NSString *, NSString *, NSString *, NSString *) = ^(NSString *method, NSString *target, NSString *destination, NSString *extra) {
+        NSString *request = [NSString stringWithFormat:@"%@ %@ HTTP/1.1\r\nHost: localhost\r\nDestination: http://localhost/%@\r\n%@Content-Length: 0\r\n\r\n", method, target, destination, extra];
+        return SendRawRequest(server.port, request);
+    };
+
+    // Moving the alias somewhere else: it exists, so this is a rename of the link itself.
+    NSString *link = dangling(@"latest");
+    NSString *moved = send(@"MOVE", @"/latest", @"moved", @"Overwrite: T\r\n");
+    XCTAssertTrue([moved hasPrefix:@"HTTP/1.1 2"], @"moving a dangling alias must succeed: %@", [moved substringToIndex:MIN((NSUInteger)40, moved.length)]);
+    XCTAssertFalse([fm fileExistsAtPath:link], @"the alias was left behind");
+    NSString *movedLink = [dir stringByAppendingPathComponent:@"moved"];
+    XCTAssertNotNil([fm destinationOfSymbolicLinkAtPath:movedLink error:NULL], @"the destination must be the link, not its target");
+    [fm removeItemAtPath:movedLink error:NULL];
+
+    // Copying it likewise yields a link, never the vanished target's bytes.
+    link = dangling(@"latest");
+    NSString *copied = send(@"COPY", @"/latest", @"copy", @"Overwrite: T\r\n");
+    XCTAssertTrue([copied hasPrefix:@"HTTP/1.1 2"], @"copying a dangling alias must succeed: %@", [copied substringToIndex:MIN((NSUInteger)40, copied.length)]);
+    XCTAssertNotNil([fm destinationOfSymbolicLinkAtPath:[dir stringByAppendingPathComponent:@"copy"] error:NULL], @"COPY produced something other than a link");
+    [fm removeItemAtPath:[dir stringByAppendingPathComponent:@"copy"] error:NULL];
+
+    // Publishing over it: the whole point of the pattern. Without Overwrite the destination
+    // EXISTS, so 412 is owed — not the 403 that renamex_np's EEXIST used to produce.
+    link = dangling(@"latest");
+    [@"new build" writeToFile:[dir stringByAppendingPathComponent:@"new.bin"] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+    NSString *refused = send(@"MOVE", @"/new.bin", @"latest", @"");
+    XCTAssertTrue([refused hasPrefix:@"HTTP/1.1 412"], @"MOVE onto an existing dangling alias without Overwrite must be 412: %@", [refused substringToIndex:MIN((NSUInteger)40, refused.length)]);
+
+    NSString *replaced = send(@"MOVE", @"/new.bin", @"latest", @"Overwrite: T\r\n");
+    XCTAssertTrue([replaced hasPrefix:@"HTTP/1.1 2"], @"MOVE onto a dangling alias with Overwrite: T must replace it: %@", [replaced substringToIndex:MIN((NSUInteger)40, replaced.length)]);
+    XCTAssertEqualObjects([NSString stringWithContentsOfFile:link encoding:NSUTF8StringEncoding error:NULL], @"new build", @"the alias was not replaced by the new build");
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// PROPPATCH is a read-modify-write of one xattr plist: read at the top, merged, written at the
+// bottom. Nothing serialised it, so two clients patching the same resource both answered 200 and
+// one write vanished — 198 of 200 lost when measured against a live server, which is what a Finder
+// and a phone touching the same folder look like. The lock is per server; PROPPATCH is rare and a
+// per-path table would be more machinery than the problem is worth.
+- (void)testDAVConcurrentPropPatchesDoNotLoseUpdates {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    XCTAssertTrue([@"data" writeToFile:[dir stringByAppendingPathComponent:@"f.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSUInteger const kPatches = 60;
+    __block NSUInteger accepted = 0;
+    NSLock *const lock = [[NSLock alloc] init];
+    dispatch_apply(kPatches, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^(size_t i) {
+        @autoreleasepool {
+            NSString *body = [NSString stringWithFormat:@"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:Z=\"urn:t\"><D:set><D:prop><Z:p%zu>v</Z:p%zu></D:prop></D:set></D:propertyupdate>", i, i];
+            NSString *request = [NSString stringWithFormat:@"PROPPATCH /f.txt HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)body.length, body];
+            NSString *reply = SendRawRequest(server.port, request);
+            if ([reply hasPrefix:@"HTTP/1.1 207"]) {
+                [lock lock];
+                accepted += 1;
+                [lock unlock];
+            }
+        }
+    });
+
+    // Every property the server said it stored must be readable back.
+    NSString *readback = SendRawRequest(server.port, @"PROPFIND /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
+    NSUInteger stored = 0;
+    for (NSUInteger i = 0; i < kPatches; i++) {
+        NSString *name = [NSString stringWithFormat:@":p%lu>", (unsigned long)i];
+        if ([readback containsString:name]) {
+            stored += 1;
+        }
+    }
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+
+    XCTAssertEqual(accepted, kPatches, @"only %lu of %lu PROPPATCHes were accepted", (unsigned long)accepted, (unsigned long)kPatches);
+    XCTAssertEqual(stored, accepted, @"the server reported %lu stored properties but only %lu survived: concurrent patches are losing writes", (unsigned long)accepted, (unsigned long)stored);
 }
 
 @end

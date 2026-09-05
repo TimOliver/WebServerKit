@@ -572,6 +572,12 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
     return YES;
 }
 
+// 2xx, the range where a bodiless response is a SUCCESSFUL one the client will want to follow with
+// another request. Refusals are framed by the close on purpose; see the Content-Length branch.
+static BOOL _StatusIsSuccessful(NSInteger statusCode) {
+    return (statusCode >= 200) && (statusCode < 300);
+}
+
 // RFC 9112 §6.3 rule 1: a 1xx, 204 or 304 response ends at the first empty line after its header
 // fields, "regardless of the header fields present in the message". Its length is settled by the
 // STATUS, so it delimits itself with no Content-Length and cannot desynchronize a reused
@@ -616,13 +622,18 @@ static BOOL _StatusDelimitsItself(NSInteger statusCode) {
     // waiting for the close that reuse is avoiding. A chunked response frames itself; a 304 or 204
     // is framed by its status; anything else needs Content-Length.
     //
+    // The -hasBody clause mirrors the serializer: a response with no body now states
+    // "Content-Length: 0", so it frames itself and may be followed by another request. Without it
+    // every DAV OPTIONS, MKCOL, COPY/MOVE 201 and collection GET closed its connection.
+    //
     // The status clause is not a refinement — without it the substituted 304 (minted bare, so it
     // states no length) closed every connection it went out on, which is precisely the
     // revalidation traffic reuse exists to serve: files are no-cache by default, so a browser
     // re-viewing a page of images conditionally re-requests each one and paid a new connection for
     // every 304 it got back.
     if (![self _shouldChunkResponse] && (_response.contentLength == NSUIntegerMax) &&
-        !_StatusDelimitsItself(_response.statusCode)) {
+        !_StatusDelimitsItself(_response.statusCode) &&
+        ([_response hasBody] || !_StatusIsSuccessful(_response.statusCode))) {
         return NO;
     }
 
@@ -945,6 +956,25 @@ static BOOL _StatusDelimitsItself(NSInteger statusCode) {
 
         if (_response.contentLength != NSUIntegerMax) {
             CFHTTPMessageSetHeaderFieldValue(_responseMessage, CFSTR("Content-Length"), (__bridge CFStringRef)[NSString stringWithFormat:@"%lu", (unsigned long)_response.contentLength]);
+        } else if (![_response hasBody] && _StatusIsSuccessful(_response.statusCode) && !_StatusDelimitsItself(_response.statusCode)) {
+            // A response that will send no body and whose STATUS does not settle its length has to
+            // say so, or the client cannot tell where it ends without waiting for the close. That
+            // made every DAV OPTIONS, MKCOL, COPY/MOVE 201 and collection GET close its connection
+            // on a keep-alive server — the sibling of the 304 case one status class over, and the
+            // same traffic Finder generates constantly. 1xx/204/304 are excluded because RFC 9112
+            // §6.3 rule 1 frames them by status "regardless of the header fields present".
+            //
+            // -hasBody, NOT "we are not chunking": a response of UNKNOWN length still has a body,
+            // and for an HTTP/1.0 client -_shouldChunkResponse is NO because 1.0 has no chunked
+            // encoding — such a response is framed by the close. The first version of this used
+            // that condition and announced "Content-Length: 0" over a streamed body it then sent,
+            // which is a desync, not a framing fix. The test below pins it.
+            //
+            // 2xx only, which is narrower than "not 1xx/204/304": a REFUSAL closes the connection by
+            // construction here, and that is deliberate — every abort and every path that does not
+            // reach this point inherits the "Close" default. Letting a bodiless 404 state its length
+            // made it keep-alive-eligible and broke that, so the refusal paths are left alone.
+            CFHTTPMessageSetHeaderFieldValue(_responseMessage, CFSTR("Content-Length"), CFSTR("0"));
         }
 
         if ([self _shouldChunkResponse]) {
