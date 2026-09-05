@@ -598,4 +598,92 @@ static BOOL WSKInjectingMove(id self, SEL _cmd, NSString *src, NSString *dst, NS
     [fm removeItemAtPath:dir error:NULL];
 }
 
+// The host-settable object properties are read on connection threads while the server runs. They
+// were plain nonatomic ivars read directly, so a host app flipping one — a Shape B settings screen
+// is the realistic shape — could free an array out from under a listing walking it.
+//
+// **This test does NOT prove the fix**, and is kept only because nothing else exercises concurrent
+// mutation at all: it passes against the unfixed build too. The race would not manifest here —
+// roughly a million allow-list walks against forty thousand frees, under MallocScribble and then
+// under guard malloc, never faulted, because a freed pointer that is merely read usually reads
+// fine. What DOES prove it is the shipped Release disassembly: the read was
+//     movq  (%rdi,%rdx), %rdx      ; bare ivar load
+//     jmp   _WSKEntryPassesExtensionAllowList
+// with no retain anywhere, tail-calling into a walk over an array another thread can free. After
+// the change the same method calls objc_getProperty/objc_retain (0 → 5 such calls). Verify any
+// future change the same way, not by waiting for a crash that may never come.
+- (void)testHostSettablePropertiesSurviveMutationWhileServing {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    for (NSUInteger i = 0; i < 120; i++) {
+        NSString *name = [NSString stringWithFormat:@"f%03lu.txt", (unsigned long)i];
+        [@"x" writeToFile:[dir stringByAppendingPathComponent:name] atomically:NO encoding:NSUTF8StringEncoding error:NULL];
+        NSString *other = [NSString stringWithFormat:@"g%03lu.bin", (unsigned long)i];
+        [@"y" writeToFile:[dir stringByAppendingPathComponent:other] atomically:NO encoding:NSUTF8StringEncoding error:NULL];
+    }
+
+    WSKWebUploader *server = [[WSKWebUploader alloc] initWithUploadDirectory:dir];
+    server.allowedFileExtensions = @[@"txt"];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    __block BOOL finished = NO;
+    NSLock *const lock = [[NSLock alloc] init];
+    BOOL (^done)(void) = ^{
+        [lock lock];
+        BOOL const value = finished;
+        [lock unlock];
+        return value;
+    };
+
+    // The host app, changing its mind as fast as it can.
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        for (NSUInteger i = 0; !done(); i++) {
+            @autoreleasepool {
+                // Large lists, so the walk a reader is inside lasts long enough for the swap to land
+                // in the middle of it. With three-element arrays the window is a few microseconds
+                // and thousands of listings never caught it.
+                NSMutableArray *list = [NSMutableArray arrayWithCapacity:4000];
+                [list addObject:@"txt"];
+                for (NSUInteger k = 0; k < 4000; k++) {
+                    [list addObject:[NSString stringWithFormat:@"e%lu-%lu", (unsigned long)i, (unsigned long)k]];
+                }
+                server.allowedFileExtensions = list;
+                server.allowHiddenItems = ((i % 3) == 0);
+                server.title = [NSString stringWithFormat:@"share-%lu", (unsigned long)i];
+                server.footer = [NSString stringWithFormat:@"footer-%lu", (unsigned long)i];
+            }
+        }
+    });
+
+    // Eight clients listing the share, which is what walks the allow-list.
+    dispatch_group_t const group = dispatch_group_create();
+    __block NSUInteger listings = 0;
+    for (NSUInteger i = 0; i < 8; i++) {
+        dispatch_group_async(group, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            while (!done()) {
+                @autoreleasepool {
+                    NSString *reply = SendRawRequest(server.port, @"GET /list?path=%2F HTTP/1.1\r\nHost: localhost\r\n\r\n");
+                    if (reply.length > 0) {
+                        [lock lock];
+                        listings += 1;
+                        [lock unlock];
+                    }
+                }
+            }
+        });
+    }
+
+    [NSThread sleepForTimeInterval:3.0];
+    [lock lock];
+    finished = YES;
+    [lock unlock];
+    dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20 * NSEC_PER_SEC)));
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+
+    XCTAssertGreaterThan(listings, (NSUInteger)100, @"only %lu listings completed, so the race was barely exercised", (unsigned long)listings);
+}
+
 @end
