@@ -141,7 +141,7 @@
     NSString *request = [NSString stringWithFormat:@"PROPFIND / HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Type: text/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)body.length, body];
     NSString *reply = SendRawRequest(server.port, request);
     XCTAssertNotNil(reply);
-    XCTAssertTrue([reply containsString:@"413"], @"an oversized DAV body must be refused with 413, got: %@", [reply substringToIndex:MIN((NSUInteger)80, reply.length)]);
+    XCTAssertTrue(ReplyHasStatus(reply, 413), @"an oversized DAV body must be refused with 413, got: %@", [reply substringToIndex:MIN((NSUInteger)80, reply.length)]);
 
     [server stop];
     [fm removeItemAtPath:dir error:NULL];
@@ -166,7 +166,7 @@
 
     NSString *reply = SendRawRequest(server.port, @"COPY /d HTTP/1.1\r\nHost: localhost\r\nDestination: /d/sub\r\nOverwrite: T\r\n\r\n");
     XCTAssertNotNil(reply);
-    XCTAssertTrue([reply containsString:@"403"], @"copying into its own subtree must be refused: %@", reply);
+    XCTAssertTrue(ReplyHasStatus(reply, 403), @"copying into its own subtree must be refused: %@", reply);
 
     // It must be refused as a precondition, before any filesystem work. Previously the
     // only thing that stopped it was copyItemAtPath: nesting directories until a path
@@ -195,13 +195,13 @@
     // Destination present, Host absent (HTTP/1.0 so CFHTTPMessage accepts no Host).
     NSString *reply = SendRawRequest(server.port, @"MOVE /a.txt HTTP/1.0\r\nDestination: http://localhost/b.txt\r\nOverwrite: T\r\n\r\n");
     XCTAssertNotNil(reply);
-    XCTAssertTrue([reply containsString:@"400"], @"missing Host must yield 400, got: %@", reply);
+    XCTAssertTrue(ReplyHasStatus(reply, 400), @"missing Host must yield 400, got: %@", reply);
     XCTAssertTrue([fm fileExistsAtPath:path], @"file must be untouched; reply: %@", reply);
 
     // The process must still be alive: a fresh, well-formed request must get a reply.
     NSString *reply2 = SendRawRequest(server.port, @"OPTIONS / HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertNotNil(reply2, @"server appears to have crashed after the malformed request");
-    XCTAssertTrue([reply2 containsString:@"200"], @"server did not respond normally after the malformed request: %@", reply2);
+    XCTAssertTrue(ReplyHasStatus(reply2, 200), @"server did not respond normally after the malformed request: %@", reply2);
 
     [server stop];
     [fm removeItemAtPath:dir error:NULL];
@@ -883,7 +883,7 @@
     XCTAssertTrue([@"secret" writeToFile:[guarded stringByAppendingPathComponent:@"id_rsa"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
     NSString *refused = deleteFolder(@"Guarded");
-    XCTAssertTrue([refused containsString:@"403"], @"expected 403 for a folder containing a disallowed file, got: %@", refused);
+    XCTAssertTrue(ReplyHasStatus(refused, 403), @"expected 403 for a folder containing a disallowed file, got: %@", refused);
     XCTAssertTrue([fm fileExistsAtPath:[guarded stringByAppendingPathComponent:@"id_rsa"]], @"recursive delete destroyed a file a direct delete would refuse");
 
     // A folder whose only extra entry is filesystem noise must still be deletable.
@@ -920,12 +920,12 @@
     NSString *request = [NSString stringWithFormat:@"LOCK / HTTP/1.0\r\nUser-Agent: WebDAVFS/3.0.0\r\nDepth: 0\r\nContent-Type: text/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)body.length, body];
     NSString *reply = SendRawRequest(server.port, request);
     XCTAssertNotNil(reply, @"server appears to have crashed handling LOCK with no Host header");
-    XCTAssertTrue([reply containsString:@"400"], @"missing Host must yield 400, got: %@", reply);
+    XCTAssertTrue(ReplyHasStatus(reply, 400), @"missing Host must yield 400, got: %@", reply);
 
     // The process must still be alive: a fresh, well-formed request must get a reply.
     NSString *reply2 = SendRawRequest(server.port, @"OPTIONS / HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertNotNil(reply2, @"server appears to have crashed after the malformed request");
-    XCTAssertTrue([reply2 containsString:@"200"], @"server did not respond normally after the malformed request: %@", reply2);
+    XCTAssertTrue(ReplyHasStatus(reply2, 200), @"server did not respond normally after the malformed request: %@", reply2);
 
     [server stop];
     [fm removeItemAtPath:dir error:NULL];
@@ -946,7 +946,7 @@
     NSString *request = [NSString stringWithFormat:@"LOCK /a.txt HTTP/1.1\r\nHost: localhost\r\nUser-Agent: WebDAVFS/3.0.0\r\nDepth: 0\r\nContent-Type: text/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)body.length, body];
     NSString *reply = SendRawRequest(server.port, request);
     XCTAssertNotNil(reply);
-    XCTAssertTrue([reply containsString:@"200"], @"a well-formed LOCK should succeed, got: %@", reply);
+    XCTAssertTrue(ReplyHasStatus(reply, 200), @"a well-formed LOCK should succeed, got: %@", reply);
     XCTAssertTrue([reply containsString:@"<D:lockroot><D:href>http://localhost//a.txt</D:href></D:lockroot>"], @"lockroot not built from the Host header: %@", reply);
 
     [server stop];
@@ -969,7 +969,7 @@
     NSString *reply = SendRawRequest(server.port, @"GET /Escape/secret.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertNotNil(reply);
     XCTAssertFalse([reply containsString:@"TOP-SECRET-PAYLOAD"], @"a file outside the share was served through a symlink: %@", reply);
-    XCTAssertTrue([reply containsString:@"403"], @"expected the traversal to be refused, got: %@", reply);
+    XCTAssertTrue(ReplyHasStatus(reply, 403), @"expected the traversal to be refused, got: %@", reply);
 
     [server stop];
     [fm removeItemAtPath:outside error:NULL];
@@ -997,7 +997,7 @@
     NSString *request = [NSString stringWithFormat:@"LOCK /a%%01b.txt HTTP/1.1\r\nHost: localhost\r\nUser-Agent: WebDAVFS/3.0.0\r\nDepth: 0\r\nContent-Type: text/xml\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)lockBody.length, lockBody];
     NSString *reply = SendRawRequest(server.port, request);
     XCTAssertNotNil(reply);
-    XCTAssertTrue([reply containsString:@"200"], @"%@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+    XCTAssertTrue(ReplyHasStatus(reply, 200), @"%@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
 
     NSRange body = [reply rangeOfString:@"\r\n\r\n"];
     XCTAssertNotEqual(body.location, (NSUInteger)NSNotFound);
@@ -1702,7 +1702,9 @@
 
     for (NSUInteger i = 0; (i < 40) && !refused; i++) {
         lastReply = store([NSString stringWithFormat:@"bulk%lu", (unsigned long)i], 8 * 1024);
-        refused = [lastReply containsString:@"507"];
+        // The 507 is reported INSIDE the 207 multistatus, not as the response status, so this stays a
+        // body check — with the reason phrase, which an entity tag cannot match.
+        refused = [lastReply containsString:@"507 Insufficient Storage"];
 
         if (!refused) {
             stored += 1;
@@ -2070,6 +2072,10 @@
             }
             NSString *name = [NSString stringWithFormat:@"late%04lu.txt", (unsigned long)i];
             [@"late" writeToFile:[subdirectory stringByAppendingPathComponent:name] atomically:NO encoding:NSUTF8StringEncoding error:NULL];
+            usleep(200);  // Paced: an unpaced writer starves the server on a loaded machine and the
+                          // request never completes, which failed this test twice in CI-like
+                          // conditions while passing 3/3 quiet. The race is unchanged — a member
+                          // still lands inside the walk — it just no longer monopolises a core.
         }
     });
 
@@ -2119,6 +2125,10 @@
             }
             NSString *name = [NSString stringWithFormat:@"late%04lu.txt", (unsigned long)i];
             [@"late" writeToFile:[subdirectory stringByAppendingPathComponent:name] atomically:NO encoding:NSUTF8StringEncoding error:NULL];
+            usleep(200);  // Paced: an unpaced writer starves the server on a loaded machine and the
+                          // request never completes, which failed this test twice in CI-like
+                          // conditions while passing 3/3 quiet. The race is unchanged — a member
+                          // still lands inside the walk — it just no longer monopolises a core.
         }
     });
 

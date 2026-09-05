@@ -269,7 +269,7 @@
     XCTAssertTrue([uploader startWithOptions:options error:NULL]);
     NSString *body = @"path=%2Fself";
     NSString *reply = SendRawRequest(uploader.port, [NSString stringWithFormat:@"POST /delete HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)body.length, body]);
-    XCTAssertTrue([reply containsString:@"200"], @"the uploader should remove the alias: %@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+    XCTAssertTrue(ReplyHasStatus(reply, 200), @"the uploader should remove the alias: %@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
 
     for (NSUInteger i = 0; i < 4; i++) {
         NSString *build = [upRoot stringByAppendingPathComponent:[NSString stringWithFormat:@"build%lu.txt", (unsigned long)i]];
@@ -515,7 +515,7 @@
     NSString *host = [NSString stringWithFormat:@"localhost:%lu", (unsigned long)uploader.port];
     NSString *body = @"path=/Vault";
     NSString *uploaderReply = SendRawRequest(uploader.port, [NSString stringWithFormat:@"POST /delete HTTP/1.1\r\nHost: %@\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %lu\r\n\r\n%@", host, (unsigned long)body.length, body]);
-    XCTAssertTrue([uploaderReply containsString:@"403"], @"uploader /delete should refuse it too: %@", uploaderReply);
+    XCTAssertTrue(ReplyHasStatus(uploaderReply, 403), @"uploader /delete should refuse it too: %@", uploaderReply);
     XCTAssertTrue([fm fileExistsAtPath:victim], @"the uploader's recursive delete destroyed it");
 
     // The overwrite form: a collection destination whose name passes the allow-list.
@@ -594,7 +594,7 @@
     NSString *uploaderHost = [NSString stringWithFormat:@"localhost:%lu", (unsigned long)uploader.port];
     NSString *body = @"path=/Folder";
     NSString *uploaderReply = SendRawRequest(uploader.port, [NSString stringWithFormat:@"POST /delete HTTP/1.1\r\nHost: %@\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %lu\r\n\r\n%@", uploaderHost, (unsigned long)body.length, body]);
-    XCTAssertTrue([uploaderReply containsString:@"403"], @"uploader /delete of a partly-removable tree should refuse: %@", uploaderReply);
+    XCTAssertTrue(ReplyHasStatus(uploaderReply, 403), @"uploader /delete of a partly-removable tree should refuse: %@", uploaderReply);
     XCTAssertEqual(countFiles(), before, @"uploader /delete destroyed part of a tree it could not fully remove");
 
     rebuild();
@@ -819,16 +819,16 @@
     NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    XCTAssertTrue([SendRawRequest(server.port, @"GET /build.ipa HTTP/1.1\r\nHost: localhost\r\n\r\n") containsString:@"200"], @"ordinary files must still be served");
+    XCTAssertTrue(ReplyHasStatus(SendRawRequest(server.port, @"GET /build.ipa HTTP/1.1\r\nHost: localhost\r\n\r\n"), 200), @"ordinary files must still be served");
 
     // A dotfile at the root, and a file *inside* a dot-directory — the latter is where the
     // interesting secrets live, so the check has to walk every component, not just the leaf.
     NSString *env = SendRawRequest(server.port, @"GET /.env HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    XCTAssertTrue([env containsString:@"404"], @"a dotfile must not be served: %@", [env substringToIndex:MIN((NSUInteger)40, env.length)]);
+    XCTAssertTrue(ReplyHasStatus(env, 404), @"a dotfile must not be served: %@", [env substringToIndex:MIN((NSUInteger)40, env.length)]);
     XCTAssertFalse([env containsString:@"SECRET"], @"the dotfile's contents leaked");
 
     NSString *git = SendRawRequest(server.port, @"GET /.git/config HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    XCTAssertTrue([git containsString:@"404"], @"a file inside a dot-directory must not be served: %@", [git substringToIndex:MIN((NSUInteger)40, git.length)]);
+    XCTAssertTrue(ReplyHasStatus(git, 404), @"a file inside a dot-directory must not be served: %@", [git substringToIndex:MIN((NSUInteger)40, git.length)]);
     XCTAssertFalse([git containsString:@"TOKEN"], @"the credential leaked");
 
     [server stop];
@@ -1013,7 +1013,7 @@
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     NSString *response = SendRawRequest(server.port, @"GET /files/x.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    XCTAssertTrue([response containsString:@"200"], @"a base path without a trailing slash must still serve: %@", [response substringToIndex:MIN((NSUInteger)40, response.length)]);
+    XCTAssertTrue(ReplyHasStatus(response, 200), @"a base path without a trailing slash must still serve: %@", [response substringToIndex:MIN((NSUInteger)40, response.length)]);
     XCTAssertTrue([response containsString:@"served"], @"the body must be the file's contents");
 
     [server stop];
