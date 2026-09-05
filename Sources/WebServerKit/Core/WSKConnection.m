@@ -47,6 +47,7 @@
 #define kHeadersMaxLength (64 * 1024)  // Upper bound on total request header bytes, to cap memory for a client that never sends the terminating blank line.
 #define kMaxHeaderPhaseTicks 2         // Idle-timer ticks a connection may spend receiving its request line + headers before being closed (defeats a slowloris dribbling bytes just under the zero-progress check).
 #define kMinReceiveBytesPerSecond 32   // Throughput a connection must sustain while its request body is still arriving; see -_checkIdleTimeout.
+#define kMaxResponseStallTicks 10      // Idle-timer ticks a RESPONSE may go without the peer taking a byte; see -_checkIdleTimeout.
 #define kMaxRequestsPerConnection 100  // Requests one reused connection may carry before it must be re-established; bounds how long a single client can hold one of the kWSKMaxConnections slots.
 
 // Lingering close. close(2) with unread inbound data makes the kernel send RST instead of FIN, and
@@ -135,6 +136,7 @@ NS_ASSUME_NONNULL_END
     NSUInteger _chunkTrailerScanOffset;     // The same, for the trailer's CRLFCRLF search
     NSUInteger _idleCheckedBytes;           // Accessed on _connectionQueue only
     uint64_t _idleCheckedTransmittedBytes;  // Bytes the TCP layer had sent at the last check; _connectionQueue only
+    NSUInteger _responseStallTicks;         // Consecutive checks in the response phase with nothing transmitted; _connectionQueue only
     BOOL _idleCheckWasBusy;                 // Accessed on _connectionQueue only
     NSUInteger _headerPhaseTicks;           // Idle ticks elapsed before a request was matched; on _connectionQueue only
     BOOL _requestReceived;                  // Set once the body is fully read and the handler runs; on _connectionQueue only
@@ -654,6 +656,7 @@ static BOOL _StatusDelimitsItself(NSInteger statusCode) {
     _statusCode = 0;
     _virtualHEAD = NO;
     _requestReceived = NO;
+    _responseStallTicks = 0;
     _earlyChecksRun = NO;
     _requestIsBodyless = NO;
     _willKeepAlive = NO;
@@ -1197,7 +1200,27 @@ static uint64_t _SocketTransmittedByteCount(int socket) {
     BOOL const outboundProgressed = (transmittedBytes > _idleCheckedTransmittedBytes);
     BOOL const starved = ((transferredBytes - _idleCheckedBytes) < minimumProgress) && !outboundProgressed;
 
+    // The response phase gets a LONGER allowance than the two consecutive ticks the other phases
+    // use, because a peer can legitimately take nothing for a while: once its receive buffer is
+    // full the server cannot send, so tcpi_txbytes freezes for (that buffer / the read rate) —
+    // measured at tens of seconds for a phone-shaped reader, which is exactly the client Shape A
+    // exists to serve, and cutting it truncates a multi-hundred-MB build. The counter resets on
+    // any transmitted byte, so this costs a DEAD peer at most kMaxResponseStallTicks ticks of its
+    // slot (five minutes at the 30 s default) rather than one.
+    //
+    // Deliberately NOT extended to the header or body phases: those are where a dribbling client
+    // is an actual attack, and their rules are unchanged. This library is for local networks only
+    // (owner ruling, 2026-09-05) — on an internet-facing deployment this allowance is one of the
+    // first things to revisit.
+    BOOL const respondingPhase = (_request != nil) && _requestReceived;
+
     if (waitingOnSocket && _idleCheckWasBusy && starved) {
+        _responseStallTicks += 1;
+    } else {
+        _responseStallTicks = 0;
+    }
+
+    if (waitingOnSocket && _idleCheckWasBusy && starved && (!respondingPhase || (_responseStallTicks >= kMaxResponseStallTicks))) {
         WSK_LOG_WARNING(@"Closing connection on socket %i: too few bytes transferred while waiting on socket I/O across the idle timeout", _socket);
         dispatch_source_cancel(_idleTimer);
         // Shut down (rather than close) so the pending read completes with EOF or

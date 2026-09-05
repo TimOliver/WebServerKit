@@ -14,28 +14,29 @@
 #import "WSKPrivate.h"
 #import "WSKWebUploaderSSEChannel.h"
 
-extern NSData* SSEData(NSString* string);
-extern NSData* UTF8Data(NSString* string);
-extern NSURL* LiteralURL(NSString* string);
+extern NSData *SSEData(NSString *string);
+extern NSData *UTF8Data(NSString *string);
+extern NSURL *LiteralURL(NSString *string);
 extern int ConnectToLocalhostPort(NSUInteger port);
-extern NSData* ReadToEOF(int fd, BOOL* sawEOF);
+extern NSData *ReadToEOF(int fd, BOOL *sawEOF);
 extern NSUInteger DrainToEOFAtPace(int fd, NSUInteger chunkSize, useconds_t pauseMicroseconds);
-extern NSData* GZipDecompress(NSData* input);
-extern NSData* DrainResponseBody(WSKResponse* response);
-extern NSData* GZipCompress(NSData* input);
-extern __kindof WSKRequest* OpenBodyRequest(Class requestClass, NSDictionary* extraHeaders);
-extern NSString* SendRawRequest(NSUInteger port, NSString* request);
-extern NSArray<NSString*>* SendRawRequestsOnOneConnection(NSUInteger port, NSArray<NSString*>* requests);
-extern NSString* SendRawDataRequestSplit(NSUInteger port, NSData* request, NSUInteger splitAt);
-extern NSString* SendRawDataRequest(NSUInteger port, NSData* request);
-extern NSString* SendRawRequestUntilMarker(NSUInteger port, NSString* request, NSString* marker, NSTimeInterval seconds);
+extern NSData *GZipDecompress(NSData *input);
+extern NSData *DrainResponseBody(WSKResponse *response);
+extern NSData *GZipCompress(NSData *input);
+extern __kindof WSKRequest *OpenBodyRequest(Class requestClass, NSDictionary *extraHeaders);
+extern NSString *SendRawRequest(NSUInteger port, NSString *request);
+extern NSArray<NSString *> *SendRawRequestsOnOneConnection(NSUInteger port, NSArray<NSString *> *requests);
+extern NSString *SendRawDataRequestSplit(NSUInteger port, NSData *request, NSUInteger splitAt);
+extern NSString *SendRawDataRequest(NSUInteger port, NSData *request);
+extern NSString *SendRawRequestUntilMarker(NSUInteger port, NSString *request, NSString *marker, NSTimeInterval seconds);
 extern NSUInteger OpenFileDescriptorCount(void);
-extern NSString* MakeTempDirectory(void);
-extern NSData* NestedMultipartMixedBody(NSString* top, NSUInteger levels);
-extern NSString* QuotedParam(NSString* header, NSString* name);
+extern NSString *MakeTempDirectory(void);
+extern NSData *NestedMultipartMixedBody(NSString *top, NSUInteger levels);
+extern NSString *QuotedParam(NSString *header, NSString *name);
 extern NSTimeInterval ProcessCPUSeconds(void);
+extern BOOL ReplyHasStatus(NSString *reply, NSInteger status);
 
-extern NSString* gAbortRequestPeer;
+extern NSString *gAbortRequestPeer;
 extern BOOL gAbortRequestSawVirtualHEAD;
 
 @interface AbortProbeConnection : WSKConnection
@@ -47,7 +48,7 @@ extern BOOL gAbortRequestSawVirtualHEAD;
 // following the header. Connection reuse has to leave that pairing intact, and it must not
 // manufacture a response when a persistent connection simply ends — the events are recorded in
 // order so a test can assert on the whole sequence rather than a count.
-extern NSMutableArray<NSString*>* gConnectionEvents;
+extern NSMutableArray<NSString *> *gConnectionEvents;
 
 @interface LifecycleProbeConnection : WSKConnection
 @end

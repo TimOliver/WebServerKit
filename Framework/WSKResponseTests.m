@@ -27,7 +27,7 @@
     NSString *const disposition = [response valueForAdditionalHeader:@"Content-Disposition"];
     XCTAssertNotNil(disposition);
     XCTAssertEqual([disposition rangeOfString:crString].location, (NSUInteger)NSNotFound);  // no raw CR
-    XCTAssertFalse([disposition containsString:@"\n"]);  // no raw LF
+    XCTAssertFalse([disposition containsString:@"\n"]);                                     // no raw LF
     XCTAssertTrue([disposition hasPrefix:@"attachment;"]);
     XCTAssertEqualObjects([response valueForAdditionalHeader:@"X-Content-Type-Options"], @"nosniff");
 
@@ -42,15 +42,15 @@
 // into the message, and the HTML escaper expands `"` sixfold, so an unbounded message
 // turned one 16 MB request into a ~96 MB response and ~540 MB of transient memory.
 - (void)testErrorResponseClampsReflectedMessage {
-    NSString* const payload = [@"" stringByPaddingToLength:(4 * 1024 * 1024) withString:@"\"" startingAtIndex:0];
-    WSKErrorResponse* response = [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"%@", payload];
+    NSString *const payload = [@"" stringByPaddingToLength:(4 * 1024 * 1024) withString:@"\"" startingAtIndex:0];
+    WSKErrorResponse *response = [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"%@", payload];
     XCTAssertNotNil(response);
 
     [response prepareForReading];
-    NSError* error = nil;
+    NSError *error = nil;
     XCTAssertTrue([response performOpen:&error]);
-    __block NSData* body = nil;
-    [response performReadDataWithCompletion:^(NSData* data, NSError* readError) {
+    __block NSData *body = nil;
+    [response performReadDataWithCompletion:^(NSData *data, NSError *readError) {
         body = data;
     }];
     [response performClose];
@@ -60,20 +60,20 @@
 }
 
 - (void)testErrorResponseEscapesReflectedMarkup {
-    NSString* const payload = @"<script>alert(1)</script> a&b \"q\" 'z'";
-    WSKErrorResponse* response = [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", payload];
+    NSString *const payload = @"<script>alert(1)</script> a&b \"q\" 'z'";
+    WSKErrorResponse *response = [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", payload];
     XCTAssertNotNil(response);
 
     [response prepareForReading];
-    NSError* error = nil;
+    NSError *error = nil;
     XCTAssertTrue([response performOpen:&error]);
-    __block NSData* body = nil;
-    [response performReadDataWithCompletion:^(NSData* data, NSError* readError) {
+    __block NSData *body = nil;
+    [response performReadDataWithCompletion:^(NSData *data, NSError *readError) {
         body = data;
     }];
     [response performClose];
 
-    NSString* const html = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
+    NSString *const html = [[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding];
     XCTAssertNotNil(html);
     // The payload's angle brackets must be escaped: no raw <script> tag (the template's
     // own tags are fine; <script> only comes from the reflected message).
@@ -95,14 +95,14 @@
 // The byte at offset i is (i & 0x7f) | (rep ? 0x80 : 0), so the low seven bits pin the absolute
 // offset and the top bit names which representation each byte came from.
 - (void)testFileResponseRefusesToSpliceAFileRewrittenInPlace {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
-    NSString* path = [dir stringByAppendingPathComponent:@"build.bin"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    NSString *path = [dir stringByAppendingPathComponent:@"build.bin"];
     const NSUInteger kSize = 48 * 1024 * 1024;  // Must exceed the socket buffer, or the whole body is sent before the client can stall
 
-    NSMutableData* (^representation)(BOOL) = ^(BOOL second) {
-        NSMutableData* d = [NSMutableData dataWithLength:kSize];
-        uint8_t* b = d.mutableBytes;
+    NSMutableData * (^representation)(BOOL) = ^(BOOL second) {
+        NSMutableData *d = [NSMutableData dataWithLength:kSize];
+        uint8_t *b = d.mutableBytes;
         for (NSUInteger i = 0; i < kSize; i++) {
             b[i] = (uint8_t)((i & 0x7f) | (second ? 0x80 : 0x00));
         }
@@ -111,19 +111,19 @@
 
     XCTAssertTrue([representation(NO) writeToFile:path atomically:YES]);
 
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addGETHandlerForBasePath:@"/f/" directoryPath:dir indexFilename:nil cacheAge:0 allowRangeRequests:YES];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     int socket = ConnectToLocalhostPort(server.port);
     XCTAssertGreaterThan(socket, 0);
-    NSString* request = @"GET /f/build.bin HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    NSString *request = @"GET /f/build.bin HTTP/1.1\r\nHost: localhost\r\n\r\n";
     XCTAssertGreaterThan(write(socket, request.UTF8String, strlen(request.UTF8String)), 0);
 
     // Drain a little, then stall — an ordinary slow client — and rewrite the file IN PLACE,
     // keeping the inode, exactly as cp(1) does.
-    NSMutableData* received = [NSMutableData data];
+    NSMutableData *received = [NSMutableData data];
     uint8_t buffer[64 * 1024];
     while (received.length < 128 * 1024) {
         ssize_t n = read(socket, buffer, sizeof(buffer));
@@ -138,7 +138,7 @@
 
     int rewrite = open(path.fileSystemRepresentation, O_WRONLY | O_TRUNC);
     XCTAssertGreaterThanOrEqual(rewrite, 0, @"could not reopen the file for an in-place rewrite");
-    NSData* second = representation(YES);
+    NSData *second = representation(YES);
     XCTAssertEqual(write(rewrite, second.bytes, second.length), (ssize_t)second.length);
     close(rewrite);
 
@@ -149,11 +149,11 @@
     close(socket);
 
     // Find the body and check every byte came from ONE representation.
-    NSData* marker = [@"\r\n\r\n" dataUsingEncoding:NSASCIIStringEncoding];
+    NSData *marker = [@"\r\n\r\n" dataUsingEncoding:NSASCIIStringEncoding];
     NSRange headerEnd = [received rangeOfData:marker options:0 range:NSMakeRange(0, received.length)];
     XCTAssertNotEqual(headerEnd.location, (NSUInteger)NSNotFound, @"no header terminator in the reply");
 
-    const uint8_t* body = (const uint8_t*)received.bytes + NSMaxRange(headerEnd);
+    const uint8_t *body = (const uint8_t *)received.bytes + NSMaxRange(headerEnd);
     NSUInteger bodyLength = received.length - NSMaxRange(headerEnd);
     NSUInteger spliced = 0;
     for (NSUInteger i = 0; i < bodyLength; i++) {
@@ -184,14 +184,14 @@
 - (void)testJSONResponseRefusesAnInvalidObjectInsteadOfRaising {
     // The shapes a host app actually hits: dates and URLs out of a model object, a NAN from a
     // division, a non-string key, and raw bytes.
-    NSArray* invalid = @[
-        @{@"created" : [NSDate date]},
-        @{@"url" : LiteralURL(@"http://example.com")},
-        @{@"n" : @(NAN)},
-        @{@"n" : @(INFINITY)},
-        @{@42 : @"v"},
-        @{@"data" : [NSData data]},
-        @{@"nested" : @{@"when" : [NSDate date]}},
+    NSArray *invalid = @[
+        @{@"created": [NSDate date]},
+        @{@"url": LiteralURL(@"http://example.com")},
+        @{@"n": @(NAN)},
+        @{@"n": @(INFINITY)},
+        @{@42: @"v"},
+        @{@"data": [NSData data]},
+        @{@"nested": @{@"when": [NSDate date]}},
     ];
 
     for (id object in invalid) {
@@ -199,11 +199,11 @@
     }
 
     // What must keep working, or the assertions above are satisfied by a method that always fails.
-    WSKDataResponse* valid = [WSKDataResponse responseWithJSONObject:@{@"a" : @1, @"b" : @[ @"x" ]}];
+    WSKDataResponse *valid = [WSKDataResponse responseWithJSONObject:@{@"a": @1, @"b": @[@"x"]}];
     XCTAssertNotNil(valid, @"a valid JSON object stopped working");
     XCTAssertEqualObjects(valid.contentType, @"application/json");
 
-    WSKDataResponse* custom = [WSKDataResponse responseWithJSONObject:@[ @1, @2 ] contentType:@"application/vnd.x+json"];
+    WSKDataResponse *custom = [WSKDataResponse responseWithJSONObject:@[@1, @2] contentType:@"application/vnd.x+json"];
     XCTAssertNotNil(custom, @"a valid top-level array stopped working");
     XCTAssertEqualObjects(custom.contentType, @"application/vnd.x+json");
 }
@@ -214,27 +214,27 @@
 // Constructing the response must now fail outright for a symlink, whether it points
 // outside the served directory or at a perfectly ordinary file inside it.
 - (void)testFileResponseRejectsSymlink {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
-    NSString* realPath = [dir stringByAppendingPathComponent:@"real.txt"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    NSString *realPath = [dir stringByAppendingPathComponent:@"real.txt"];
     XCTAssertTrue([@"payload" writeToFile:realPath atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
     // A regular file is still served, with the body length taken from the file itself.
-    WSKFileResponse* ok = [WSKFileResponse responseWithFile:realPath];
+    WSKFileResponse *ok = [WSKFileResponse responseWithFile:realPath];
     XCTAssertNotNil(ok, @"a regular file must still be servable");
     XCTAssertEqual(ok.contentLength, (NSUInteger)7);
 
     // A symlink to a file inside the directory must be refused.
-    NSString* insideLink = [dir stringByAppendingPathComponent:@"inside.txt"];
+    NSString *insideLink = [dir stringByAppendingPathComponent:@"inside.txt"];
     XCTAssertTrue([fm createSymbolicLinkAtPath:insideLink withDestinationPath:realPath error:NULL]);
     XCTAssertNil([WSKFileResponse responseWithFile:insideLink], @"a symlink must not be accepted as a regular file");
 
     // A symlink escaping the directory must be refused too. Previously this built a
     // response whose Content-Length came from the link rather than its target, and was
     // only stopped later by O_NOFOLLOW failing with ELOOP.
-    NSString* outsidePath = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSProcessInfo processInfo] globallyUniqueString]];
+    NSString *outsidePath = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSProcessInfo processInfo] globallyUniqueString]];
     XCTAssertTrue([@"secret" writeToFile:outsidePath atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
-    NSString* escapingLink = [dir stringByAppendingPathComponent:@"escape.txt"];
+    NSString *escapingLink = [dir stringByAppendingPathComponent:@"escape.txt"];
     XCTAssertTrue([fm createSymbolicLinkAtPath:escapingLink withDestinationPath:outsidePath error:NULL]);
     XCTAssertNil([WSKFileResponse responseWithFile:escapingLink], @"a symlink out of the served directory must not be accepted");
 
@@ -250,19 +250,19 @@
 // browser as a filename of "evil.command", bypassing whatever extension allow-list let the
 // name through on the way in.
 - (void)testAttachmentFilenameEscapesParameterDelimiters {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* root = MakeTempDirectory();
-    NSString* name = @"evil.command;ok.txt";
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *root = MakeTempDirectory();
+    NSString *name = @"evil.command;ok.txt";
     XCTAssertTrue([@"data" writeToFile:[root stringByAppendingPathComponent:name] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    WSKFileResponse* response = [WSKFileResponse responseWithFile:[root stringByAppendingPathComponent:name] isAttachment:YES];
+    WSKFileResponse *response = [WSKFileResponse responseWithFile:[root stringByAppendingPathComponent:name] isAttachment:YES];
     XCTAssertNotNil(response);
-    NSString* disposition = [response valueForAdditionalHeader:@"Content-Disposition"];
+    NSString *disposition = [response valueForAdditionalHeader:@"Content-Disposition"];
     XCTAssertNotNil(disposition);
 
     NSRange extRange = [disposition rangeOfString:@"filename*=UTF-8''"];
     XCTAssertNotEqual(extRange.location, (NSUInteger)NSNotFound, @"%@", disposition);
-    NSString* extValue = [disposition substringFromIndex:(extRange.location + extRange.length)];
+    NSString *extValue = [disposition substringFromIndex:(extRange.location + extRange.length)];
     XCTAssertFalse([extValue containsString:@";"], @"';' must be percent-encoded in filename*: %@", disposition);
     XCTAssertTrue([extValue containsString:@"%3B"], @"expected a percent-encoded ';': %@", disposition);
 
@@ -274,17 +274,17 @@
 // character references inside attribute values, so "javascript&colon;alert(1)" became a live
 // javascript: URL in the server's own origin.
 - (void)testDirectoryListingEscapesHrefEntities {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* root = MakeTempDirectory();
-    NSString* hostile = @"javascript&colon;alert(1)";
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *root = MakeTempDirectory();
+    NSString *hostile = @"javascript&colon;alert(1)";
     XCTAssertTrue([@"x" writeToFile:[root stringByAppendingPathComponent:hostile] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addGETHandlerForBasePath:@"/" directoryPath:root indexFilename:nil cacheAge:0 allowRangeRequests:NO];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* listing = SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *listing = SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertNotNil(listing);
     XCTAssertTrue([listing containsString:@"&amp;colon;"], @"href entity not escaped: %@", listing);
     XCTAssertFalse([listing containsString:@"\"javascript&colon;"], @"a raw entity survived into the href attribute: %@", listing);
@@ -296,9 +296,9 @@
 // Range halves get the same strict parsing Content-Length received: -integerValue read
 // "0x10" as 0 and " 5"/"+5"/"5abc" as 5.
 - (void)testByteRangeIsParsedStrictly {
-    NSURL* url = [NSURL URLWithString:@"http://localhost/"];
-    NSRange (^rangeFor)(NSString*) = ^(NSString* value) {
-        return [[[WSKRequest alloc] initWithMethod:@"GET" url:url headers:@{@"Range" : value} path:@"/" query:@{}] byteRange];
+    NSURL *url = [NSURL URLWithString:@"http://localhost/"];
+    NSRange (^rangeFor)(NSString *) = ^(NSString *value) {
+        return [[[WSKRequest alloc] initWithMethod:@"GET" url:url headers:@{@"Range": value} path:@"/" query:@{}] byteRange];
     };
 
     NSRange valid = rangeFor(@"bytes=500-999");
@@ -314,7 +314,7 @@
     XCTAssertEqual(suffix.length, (NSUInteger)500);
 
     // Malformed values must be ignored (the sentinel), not silently coerced to a number.
-    for (NSString* bad in @[ @"bytes=0x10-20", @"bytes=+5-20", @"bytes=5abc-20", @"bytes= 5-20", @"bytes=abc-def" ]) {
+    for (NSString *bad in @[@"bytes=0x10-20", @"bytes=+5-20", @"bytes=5abc-20", @"bytes= 5-20", @"bytes=abc-def"]) {
         NSRange r = rangeFor(bad);
         XCTAssertFalse(WSKIsValidByteRange(r), @"expected \"%@\" to be rejected, got {%lu,%lu}", bad, (unsigned long)r.location, (unsigned long)r.length);
     }
@@ -322,13 +322,13 @@
 
 // A gzip-encoded response body must decompress back to exactly what the handler produced.
 - (void)testGZipEncodedDataResponseRoundTrips {
-    NSString* text = @"the quick brown fox jumps over the lazy dog";
-    WSKDataResponse* response = [WSKDataResponse responseWithText:text];
+    NSString *text = @"the quick brown fox jumps over the lazy dog";
+    WSKDataResponse *response = [WSKDataResponse responseWithText:text];
     response.gzipContentEncodingEnabled = YES;
 
-    NSData* encoded = DrainResponseBody(response);
+    NSData *encoded = DrainResponseBody(response);
     XCTAssertNotNil(encoded);
-    NSData* decoded = GZipDecompress(encoded);
+    NSData *decoded = GZipDecompress(encoded);
     XCTAssertNotNil(decoded, @"response body was not a valid gzip stream");
     XCTAssertEqualObjects([[NSString alloc] initWithData:decoded encoding:NSUTF8StringEncoding], text);
 }
@@ -337,20 +337,20 @@
 // that implements just the async reader — every WSKStreamedResponse — silently
 // encoded an empty body and never ran its stream block at all.
 - (void)testGZipEncodedStreamedResponseRoundTrips {
-    NSArray<NSString*>* chunks = @[ @"first-", @"second-", @"third" ];
+    NSArray<NSString *> *chunks = @[@"first-", @"second-", @"third"];
     __block NSUInteger index = 0;
-    WSKStreamedResponse* response =
+    WSKStreamedResponse *response =
         [WSKStreamedResponse responseWithContentType:@"text/plain"
-                                             asyncStreamBlock:^(WSKBodyReaderCompletionBlock completionBlock) {
-                                                 NSData* data = (index < chunks.count) ? SSEData(chunks[index]) : [NSData data];
-                                                 index += 1;
-                                                 completionBlock(data, nil);
-                                             }];
+                                    asyncStreamBlock:^(WSKBodyReaderCompletionBlock completionBlock) {
+                                        NSData *data = (index < chunks.count) ? SSEData(chunks[index]) : [NSData data];
+                                        index += 1;
+                                        completionBlock(data, nil);
+                                    }];
     response.gzipContentEncodingEnabled = YES;
 
-    NSData* encoded = DrainResponseBody(response);
+    NSData *encoded = DrainResponseBody(response);
     XCTAssertNotNil(encoded, @"streamed gzip response never completed");
-    NSData* decoded = GZipDecompress(encoded);
+    NSData *decoded = GZipDecompress(encoded);
     XCTAssertNotNil(decoded, @"response body was not a valid gzip stream");
     XCTAssertEqualObjects([[NSString alloc] initWithData:decoded encoding:NSUTF8StringEncoding], [chunks componentsJoinedByString:@""]);
 }
@@ -362,28 +362,28 @@
 // size — while identity file responses hid it completely, because Content-Length had already
 // framed the body. This is the identity-hidden half, so it needs its own pin.
 - (void)testGZipEncodedFileResponseRoundTrips {
-    NSString* dir = MakeTempDirectory();
+    NSString *dir = MakeTempDirectory();
 
     // One file smaller than the 32 KiB read buffer, one spanning several reads with an
     // unaligned tail, so both the single-chunk and multi-chunk paths reach the sentinel.
-    for (NSNumber* sizeNumber in @[ @117, @100000 ]) {
+    for (NSNumber *sizeNumber in @[@117, @100000]) {
         NSUInteger size = sizeNumber.unsignedIntegerValue;
-        NSMutableData* original = [NSMutableData dataWithLength:size];
-        uint8_t* bytes = original.mutableBytes;
+        NSMutableData *original = [NSMutableData dataWithLength:size];
+        uint8_t *bytes = original.mutableBytes;
         for (NSUInteger i = 0; i < size; i++) {
             bytes[i] = (uint8_t)(i * 31 + 7);
         }
 
-        NSString* path = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"f%lu.bin", (unsigned long)size]];
+        NSString *path = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"f%lu.bin", (unsigned long)size]];
         XCTAssertTrue([original writeToFile:path atomically:YES]);
 
-        WSKFileResponse* response = [WSKFileResponse responseWithFile:path];
+        WSKFileResponse *response = [WSKFileResponse responseWithFile:path];
         XCTAssertNotNil(response);
         response.gzipContentEncodingEnabled = YES;
 
-        NSData* encoded = DrainResponseBody(response);
+        NSData *encoded = DrainResponseBody(response);
         XCTAssertNotNil(encoded, @"gzip file response never completed at %lu bytes", (unsigned long)size);
-        NSData* decoded = GZipDecompress(encoded);
+        NSData *decoded = GZipDecompress(encoded);
         XCTAssertNotNil(decoded, @"file response body was not a valid gzip stream at %lu bytes", (unsigned long)size);
         XCTAssertEqualObjects(decoded, original, @"gzip round-trip corrupted the body at %lu bytes", (unsigned long)size);
     }
@@ -396,8 +396,8 @@
 // visibly — never as the zero-length success sentinel, which would tell the client a short
 // body is complete.
 - (void)testFileTruncatedWhileServedIsReportedAsAnErrorNotACleanEnd {
-    NSString* dir = MakeTempDirectory();
-    NSString* path = [dir stringByAppendingPathComponent:@"shrinking.bin"];
+    NSString *dir = MakeTempDirectory();
+    NSString *path = [dir stringByAppendingPathComponent:@"shrinking.bin"];
     // Comfortably larger than the read buffer, whatever its size: the first chunk must leave
     // bytes owed or the truncation lands after a complete transfer and proves nothing. The
     // first-chunk assertion below guards that, so a future buffer bump fails loudly here
@@ -405,18 +405,18 @@
     const NSUInteger kSize = 4 * 1024 * 1024;
     XCTAssertTrue([[NSMutableData dataWithLength:kSize] writeToFile:path atomically:YES]);
 
-    WSKFileResponse* response = [WSKFileResponse responseWithFile:path];
+    WSKFileResponse *response = [WSKFileResponse responseWithFile:path];
     XCTAssertNotNil(response);
     XCTAssertEqual(response.contentLength, kSize);
 
     [response prepareForReading];
     XCTAssertTrue([response performOpen:NULL]);
 
-    NSData* (^readChunk)(NSError**) = ^NSData*(NSError** outError) {
-        __block NSData* chunk = nil;
-        __block NSError* chunkError = nil;
+    NSData * (^readChunk)(NSError **) = ^NSData *(NSError **outError) {
+        __block NSData *chunk = nil;
+        __block NSError *chunkError = nil;
         dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-        [response performReadDataWithCompletion:^(NSData* data, NSError* readError) {
+        [response performReadDataWithCompletion:^(NSData *data, NSError *readError) {
             chunk = data;
             chunkError = readError;
             dispatch_semaphore_signal(semaphore);
@@ -429,8 +429,8 @@
     };
 
     // First chunk arrives normally.
-    NSError* error = nil;
-    NSData* first = readChunk(&error);
+    NSError *error = nil;
+    NSData *first = readChunk(&error);
     XCTAssertGreaterThan(first.length, (NSUInteger)0);
     XCTAssertLessThan(first.length, kSize, @"fixture must outsize the read buffer or the truncation cannot land mid-transfer");
     XCTAssertNil(error);
@@ -438,7 +438,7 @@
     // Truncate below the offset already consumed: the next read(2) hits EOF with bytes owed.
     XCTAssertEqual(truncate(path.fileSystemRepresentation, (off_t)(first.length / 2)), 0);
 
-    NSData* next = readChunk(&error);
+    NSData *next = readChunk(&error);
     XCTAssertNil(next, @"a truncated-under-us file must not deliver data or the success sentinel");
     XCTAssertNotNil(error, @"premature EOF with bytes owed must be reported as an error");
 
@@ -449,15 +449,15 @@
 // The same streamed response without gzip must be unaffected.
 - (void)testStreamedResponseWithoutGZipRoundTrips {
     __block NSUInteger index = 0;
-    WSKStreamedResponse* response =
+    WSKStreamedResponse *response =
         [WSKStreamedResponse responseWithContentType:@"text/plain"
-                                             asyncStreamBlock:^(WSKBodyReaderCompletionBlock completionBlock) {
-                                                 NSData* data = (index < 3) ? SSEData(@"chunk") : [NSData data];
-                                                 index += 1;
-                                                 completionBlock(data, nil);
-                                             }];
+                                    asyncStreamBlock:^(WSKBodyReaderCompletionBlock completionBlock) {
+                                        NSData *data = (index < 3) ? SSEData(@"chunk") : [NSData data];
+                                        index += 1;
+                                        completionBlock(data, nil);
+                                    }];
 
-    NSData* body = DrainResponseBody(response);
+    NSData *body = DrainResponseBody(response);
     XCTAssertEqualObjects([[NSString alloc] initWithData:body encoding:NSUTF8StringEncoding], @"chunkchunkchunk");
 }
 
@@ -471,13 +471,13 @@
     XCTAssertNil([WSKFileResponse responseWithFile:@""]);
 
     unichar const nulBearing[] = {'/', 't', 'm', 'p', '/', 0, 'x'};
-    NSString* nulPath = [NSString stringWithCharacters:nulBearing length:(sizeof(nulBearing) / sizeof(nulBearing[0]))];
+    NSString *nulPath = [NSString stringWithCharacters:nulBearing length:(sizeof(nulBearing) / sizeof(nulBearing[0]))];
     XCTAssertNoThrow([WSKFileResponse responseWithFile:nulPath]);
     XCTAssertNil([WSKFileResponse responseWithFile:nulPath]);
 
     // The ordinary path must still work, or this could pass by refusing everything.
-    NSString* dir = MakeTempDirectory();
-    NSString* file = [dir stringByAppendingPathComponent:@"ok.txt"];
+    NSString *dir = MakeTempDirectory();
+    NSString *file = [dir stringByAppendingPathComponent:@"ok.txt"];
     [@"hello" writeToFile:file atomically:YES encoding:NSUTF8StringEncoding error:NULL];
     XCTAssertNotNil([WSKFileResponse responseWithFile:file]);
     [[NSFileManager defaultManager] removeItemAtPath:dir error:NULL];
@@ -486,7 +486,7 @@
 // An empty field name serializes as ": value", which is not a field-line at all. The request
 // parser already refuses one; this is the response side, which did not.
 - (void)testResponseRefusesAnEmptyAdditionalHeaderName {
-    WSKResponse* response = [WSKResponse responseWithStatusCode:kWSKHTTPStatusCode_OK];
+    WSKResponse *response = [WSKResponse responseWithStatusCode:kWSKHTTPStatusCode_OK];
     [response setValue:@"x" forAdditionalHeader:@""];
     XCTAssertNil([response valueForAdditionalHeader:@""], @"an empty header name must be refused, not stored");
 
@@ -500,15 +500,15 @@
 // appended to the PRECEDING header's value — measured against the real Date header. Closing one
 // spelling of a rule while quoting the whole rule is this codebase's most repeated shape.
 - (void)testResponseRefusesAHeaderNameThatIsNotAToken {
-    WSKResponse* response = [WSKResponse responseWithStatusCode:kWSKHTTPStatusCode_OK];
+    WSKResponse *response = [WSKResponse responseWithStatusCode:kWSKHTTPStatusCode_OK];
 
-    for (NSString* illegal in @[ @"", @" X-Folded", @"X-A B", @"X-Tab\tName", @"X-Üni", @"X-Trailing " ]) {
+    for (NSString *illegal in @[@"", @" X-Folded", @"X-A B", @"X-Tab\tName", @"X-Üni", @"X-Trailing "]) {
         [response setValue:@"INJECTED" forAdditionalHeader:illegal];
         XCTAssertNil([response valueForAdditionalHeader:illegal], @"a non-token header name must be refused: \"%@\"", illegal);
     }
 
     // Every character the token rule allows must still work.
-    for (NSString* legal in @[ @"Accept-Ranges", @"X-Custom_Header", @"X-A.B", @"X-1234", @"!#$%&'*+-.^_`|~" ]) {
+    for (NSString *legal in @[@"Accept-Ranges", @"X-Custom_Header", @"X-A.B", @"X-1234", @"!#$%&'*+-.^_`|~"]) {
         [response setValue:@"ok" forAdditionalHeader:legal];
         XCTAssertEqualObjects([response valueForAdditionalHeader:legal], @"ok", @"a legal token name must be accepted: \"%@\"", legal);
     }

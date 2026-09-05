@@ -36,19 +36,19 @@
 // while this thread is blocked and the block lands on a LATER main-queue turn. No concurrency is
 // needed to hit the window: straight-line code suffices.
 - (void)testDelegateSwappedBetweenCheckAndCallbackDoesNotRaise {
-    WSKFullDelegate* full = [[WSKFullDelegate alloc] init];
-    WSKPartialDelegate* partial = [[WSKPartialDelegate alloc] init];
+    WSKFullDelegate *full = [[WSKFullDelegate alloc] init];
+    WSKPartialDelegate *partial = [[WSKPartialDelegate alloc] init];
 
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addHandlerForMethod:@"GET"
                            path:@"/ok"
                    requestClass:[WSKRequest class]
-                   processBlock:^WSKResponse*(WSKRequest* request) {
+                   processBlock:^WSKResponse *(WSKRequest *request) {
                        return [WSKDataResponse responseWithText:@"ok"];
                    }];
     server.delegate = full;
 
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     // The check has run against `full` and the block is queued; swap before it lands.
@@ -70,12 +70,12 @@
         [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
     }
 
-    WSKFullDelegate* stable = [[WSKFullDelegate alloc] init];
-    WSKWebServer* second = [[WSKWebServer alloc] init];
+    WSKFullDelegate *stable = [[WSKFullDelegate alloc] init];
+    WSKWebServer *second = [[WSKWebServer alloc] init];
     [second addHandlerForMethod:@"GET"
                            path:@"/ok"
                    requestClass:[WSKRequest class]
-                   processBlock:^WSKResponse*(WSKRequest* request) {
+                   processBlock:^WSKResponse *(WSKRequest *request) {
                        return [WSKDataResponse responseWithText:@"ok"];
                    }];
     second.delegate = stable;
@@ -97,16 +97,16 @@
 - (void)testNATPortMappingStartStopCyclesDoNotDeadlock {
     for (int i = 0; i < 5; i++) {
         @autoreleasepool {
-            WSKWebServer* server = [[WSKWebServer alloc] init];
+            WSKWebServer *server = [[WSKWebServer alloc] init];
             [server addDefaultHandlerForMethod:@"GET"
                                   requestClass:[WSKRequest class]
-                                  processBlock:^WSKResponse*(WSKRequest* request) {
+                                  processBlock:^WSKResponse *(WSKRequest *request) {
                                       return [WSKDataResponse responseWithText:@"ok"];
                                   }];
-            NSDictionary* options = @{
-                WSKOption_Port : @0,
-                WSKOption_BindToLocalhost : @YES,
-                WSKOption_RequestNATPortMapping : @YES
+            NSDictionary *options = @{
+                WSKOption_Port: @0,
+                WSKOption_BindToLocalhost: @YES,
+                WSKOption_RequestNATPortMapping: @YES
             };
             XCTAssertTrue([server startWithOptions:options error:NULL], @"cycle %i failed to start", i);
 
@@ -125,13 +125,15 @@
 // error path would naturally do aborted a Debug build. Stopping something that never
 // started must be a no-op.
 - (void)testStopAfterAFailedStartIsANoOp {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
-    [server addDefaultHandlerForMethod:@"GET" requestClass:[WSKRequest class] processBlock:^WSKResponse*(WSKRequest* request) {
-        return [WSKDataResponse responseWithText:@"hi"];
-    }];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[WSKRequest class]
+                          processBlock:^WSKResponse *(WSKRequest *request) {
+                              return [WSKDataResponse responseWithText:@"hi"];
+                          }];
 
     // Port 1 is privileged, so bind(2) fails for an unprivileged test process.
-    NSDictionary* privileged = @{WSKOption_Port : @1, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *privileged = @{WSKOption_Port: @1, WSKOption_BindToLocalhost: @YES};
     XCTAssertFalse([server startWithOptions:privileged error:NULL]);
     XCTAssertFalse(server.isRunning);
     XCTAssertNoThrow([server stop]);
@@ -141,15 +143,15 @@
 // -startWithOptions:error: returns NO for an already-running server but left *error nil, so a
 // host app doing the documented thing had nothing to report. It also aborted a Debug build.
 - (void)testStartingAnAlreadyStartedServerReportsAnError {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addGETHandlerForBasePath:@"/" directoryPath:dir indexFilename:nil cacheAge:0 allowRangeRequests:YES];
 
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSError* error = nil;
+    NSError *error = nil;
     BOOL started = NO;
     XCTAssertNoThrow(started = [server startWithOptions:options error:&error]);
     XCTAssertFalse(started, @"starting twice must fail");
@@ -168,11 +170,11 @@
 // Like the other host-app process-kills, the unfixed signal is a DEAD RUNNER reporting
 // "Executed 0 tests, with 0 failures", not a red assertion.
 - (void)testHandlerRegistrationNormalizesAMissingLeadingSlashInsteadOfAborting {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addHandlerForMethod:@"GET"
                            path:@"noslash"
                    requestClass:[WSKRequest class]
-                   processBlock:^WSKResponse*(WSKRequest* request) {
+                   processBlock:^WSKResponse *(WSKRequest *request) {
                        return [WSKDataResponse responseWithText:@"REACHED"];
                    }];
     // An unusable path must be refused loudly rather than aborting -- and must not register a
@@ -180,7 +182,7 @@
     [server addHandlerForMethod:@"GET"
                            path:@""
                    requestClass:[WSKRequest class]
-                   processBlock:^WSKResponse*(WSKRequest* request) {
+                   processBlock:^WSKResponse *(WSKRequest *request) {
                        return [WSKDataResponse responseWithText:@"EMPTY"];
                    }];
     // A regex that cannot compile is the same shape: an unusable string argument, not a
@@ -188,18 +190,18 @@
     [server addHandlerForMethod:@"GET"
                       pathRegex:@"[unterminated"
                    requestClass:[WSKRequest class]
-                   processBlock:^WSKResponse*(WSKRequest* request) {
+                   processBlock:^WSKResponse *(WSKRequest *request) {
                        return [WSKDataResponse responseWithText:@"REGEX"];
                    }];
 
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};  // Hoisted: commas split the macro
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};  // Hoisted: commas split the macro
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* reply = SendRawRequest(server.port, @"GET /noslash HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *reply = SendRawRequest(server.port, @"GET /noslash HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertTrue([reply containsString:@"REACHED"], @"a missing leading slash is a spelling, not an error: %@", reply);
 
     // And the refused registrations really did register nothing, rather than claiming some path.
-    NSString* other = SendRawRequest(server.port, @"GET /anything-else HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *other = SendRawRequest(server.port, @"GET /anything-else HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertTrue([other hasPrefix:@"HTTP/1.1 404"], @"a refused registration must not shadow other paths: %@", other);
 
     [server stop];
@@ -241,9 +243,9 @@
 // floor: -2 for the listening sockets -stop always closes, +1 for this test's own fd, which stays
 // open until the assertion is done.
 - (void)testStopAbandonsLingeringConnections {
-    NSString* directory = MakeTempDirectory();
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:directory];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSString *directory = MakeTempDirectory();
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:directory];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     // Warm up and settle exactly as -testLingeringCloseReleasesItsSlotWhenTheClientGoesQuiet does
@@ -266,8 +268,8 @@
 
     int fd = ConnectToLocalhostPort(server.port);
     XCTAssertGreaterThan(fd, 0);
-    NSString* header = @"PUT /x.bin HTTP/1.1\r\nHost: localhost\r\nContent-Range: bytes 0-2/10\r\nContent-Length: 67108864\r\n\r\n";
-    const char* headerBytes = [header UTF8String];
+    NSString *header = @"PUT /x.bin HTTP/1.1\r\nHost: localhost\r\nContent-Range: bytes 0-2/10\r\nContent-Length: 67108864\r\n\r\n";
+    const char *headerBytes = [header UTF8String];
     XCTAssertEqual(send(fd, headerBytes, strlen(headerBytes), 0), (ssize_t)strlen(headerBytes));
 
     int const noSignal = 1;
@@ -340,13 +342,13 @@
 // Reads one reply: the header block plus whatever length it declares. A receive timeout bounds it,
 // because a kept-alive connection sends nothing more until the next request and reading to EOF
 // would wait out the whole keep-alive timeout.
-static NSString* ReadOneReply(int fd) {
+static NSString *ReadOneReply(int fd) {
     struct timeval tv = {3, 0};
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    NSMutableData* buffered = [NSMutableData data];
+    NSMutableData *buffered = [NSMutableData data];
 
     while (1) {
-        NSString* const soFar = [[NSString alloc] initWithData:buffered encoding:NSUTF8StringEncoding];
+        NSString *const soFar = [[NSString alloc] initWithData:buffered encoding:NSUTF8StringEncoding];
         NSRange const headerEnd = soFar ? [soFar rangeOfString:@"\r\n\r\n"] : NSMakeRange(NSNotFound, 0);
 
         if (headerEnd.location != NSNotFound) {
@@ -368,7 +370,7 @@ static NSString* ReadOneReply(int fd) {
         [buffered appendBytes:chunk length:(NSUInteger)got];
     }
 
-    NSString* const reply = [[NSString alloc] initWithData:buffered encoding:NSUTF8StringEncoding];
+    NSString *const reply = [[NSString alloc] initWithData:buffered encoding:NSUTF8StringEncoding];
     return reply ? reply : @"";
 }
 
@@ -382,25 +384,25 @@ static NSString* ReadOneReply(int fd) {
 // same live read is also a data race, and reproduced as a SIGSEGV under concurrent mutation; a
 // crash cannot be asserted on, so this pins the observable that shares its cause.
 - (void)testConnectionServesTheHandlersItWasAcceptedUnder {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addHandlerForMethod:@"GET"
                            path:@"/which"
                    requestClass:[WSKRequest class]
-                   processBlock:^WSKResponse*(WSKRequest* request) {
+                   processBlock:^WSKResponse *(WSKRequest *request) {
                        return [WSKDataResponse responseWithText:@"SESSION-ONE"];
                    }];
 
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES, WSKOption_ConnectionKeepAliveTimeout : @10.0};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES, WSKOption_ConnectionKeepAliveTimeout: @10.0};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
     NSUInteger const port = server.port;
 
     int fd = ConnectToLocalhostPort(port);
     XCTAssertGreaterThan(fd, 0);
-    NSString* const request = @"GET /which HTTP/1.1\r\nHost: localhost\r\n\r\n";
-    const char* bytes = [request UTF8String];
+    NSString *const request = @"GET /which HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    const char *bytes = [request UTF8String];
     XCTAssertEqual(send(fd, bytes, strlen(bytes), 0), (ssize_t)strlen(bytes));
 
-    NSString* const firstReply = ReadOneReply(fd);
+    NSString *const firstReply = ReadOneReply(fd);
     XCTAssertTrue([firstReply containsString:@"SESSION-ONE"], @"the connection is serving under the first handler set: %@", firstReply);
     XCTAssertTrue([firstReply rangeOfString:@"keep-alive" options:NSCaseInsensitiveSearch].location != NSNotFound, @"…and was offered for reuse: %@", firstReply);
 
@@ -410,16 +412,17 @@ static NSString* ReadOneReply(int fd) {
     [server addHandlerForMethod:@"GET"
                            path:@"/which"
                    requestClass:[WSKRequest class]
-                   processBlock:^WSKResponse*(WSKRequest* request) {
+                   processBlock:^WSKResponse *(WSKRequest *request) {
                        return [WSKDataResponse responseWithText:@"SESSION-TWO"];
                    }];
 
     XCTAssertEqual(send(fd, bytes, strlen(bytes), 0), (ssize_t)strlen(bytes));
-    NSString* const secondReply = ReadOneReply(fd);
+    NSString *const secondReply = ReadOneReply(fd);
     close(fd);
 
     XCTAssertFalse([secondReply containsString:@"SESSION-TWO"],
-                   @"a connection accepted under one handler set must never be answered by handlers registered after it: %@", secondReply);
+                   @"a connection accepted under one handler set must never be answered by handlers registered after it: %@",
+                   secondReply);
 }
 
 @end
