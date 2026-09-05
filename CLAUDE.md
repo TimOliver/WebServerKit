@@ -542,6 +542,25 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
 - Idle timeout: hard header-phase deadline; body phase uses a byte-RATE floor (effectively ~34 B/s,
   not the nominal 32, because the timer's `interval / 10` leeway shortens a tick window); response phase
   is any-byte-is-progress (SSE-safe); handler time never counts.
+- **Response-phase progress is read from the TCP layer (`tcpi_txbytes`), not from write completions
+  (2026-09-04).** The rule was always "any byte is progress"; the MEASURE could not see one.
+  `-didWriteBytes:` runs only when a whole `dispatch_write` COMPLETES, so a 256 KB chunk to a reader
+  slower than roughly buffer ÷ timeout spanned two ticks having registered nothing and the
+  starvation check closed a connection whose peer was reading throughout: at the default 30 s idle,
+  8 of 8 trials logged the cut and a 20 KB/s client pulling a 20 MB file was reset after 121 s with
+  2,272,633 bytes. A phone on a Tailscale relay is exactly that client.
+  **`SO_NWRITE` cannot be the instrument** — worth recording because it is the obvious choice and it
+  is wrong: it reports send-buffer OCCUPANCY, and the buffer is refilled as fast as it drains, so it
+  reads identically for a 5 KB/s peer (491052 every tick) and one that has stopped reading (646700
+  every tick). `tcpi_txbytes` is monotonic and moves only when the peer takes bytes.
+  **What it does NOT do, measured:** it does not advance smoothly. For a client reading continuously
+  at 20 KB/s it moves in BURSTS of ~35 KB every 4-6 s, driven by TCP window updates, so a tick
+  shorter than the burst interval can still see zero. The fix therefore holds at realistic idle
+  timeouts (30 s default: many bursts per tick) and NOT at very short ones — which is the same
+  race the `-idle 5` band note describes. The pinning test has to sit in the band where a write
+  spans two ticks (256 KB ÷ R > 2 × idle) while a burst falls inside one (35 KB ÷ R < idle): idle
+  5 s at ~15 KB/s, 3/3 green with the fix and 2/2 red without. That band is ~3.6× wide, so treat
+  the test as calibrated rather than robust, and verify any change by the MECHANISM.
 - **Dead-property storage: 64 KB per RESOURCE** (`kDAVMaxDeadPropertyStorageLength`, 2026-09-02),
   judged on the serialized plist after the merge. `kDAVMaxRequestBodyLength` bounds one request;
   nothing bounded what those requests accumulate into, so ordinary legal PROPPATCHes grew the
@@ -951,7 +970,9 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
     -closed (usually RST, never an HTTP status). The Bonjour registration callback reads
     `_resolutionService` on the main thread outside `_stateQueue`. Response-phase progress is
     measured per write-buffer completion, so a reader slower than ~bufferSize/timeout can be cut.
-    **Quantified 2026-09-03, and promoted to a P1 for Shape A:** at the default 30 s idle, readers
+    ~~Promoted to a P1 for Shape A.~~ **Fixed 2026-09-04** — see the invariant under Limits. The
+    quantification below stands as the reproduction recipe:
+    at the default 30 s idle, readers
     at 5–8 KB/s on a 20 MB file are cut at ~120 s after ~0.6–0.95 MB — exactly the socket send
     high-water mark at that instant — while reading continuously; `-idle 5` moves the band to
     20–40 KB/s (it scales as buffer ÷ timeout); race-dependent, so non-monotonic (5 KB/s survived
@@ -1079,8 +1100,9 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
     sessions would litter `._*` AppleDouble files; the allow-list vetting walk reaches THROUGH a
     symlink-to-directory destination on overwrite (a fourth site of the "walk judges the
     target" ruling).
-  - *Connection.* **(P1 for Shape A) The slow-reader cut** — quantified in the corrected line
-    under "Uploader and lifecycle" above, fix direction there; fixing it also un-flakes CI.
+  - *Connection.* ~~**(P1 for Shape A) The slow-reader cut.**~~ Fixed 2026-09-04; the CI flake it
+    was also causing should go with it (`testPipelinedRequestIsNotReclaimedWhileItsResponseIsStillStreaming`
+    failed half its runs on its own control assertion, which was this cut on a slow runner).
     ~~★ (P2) An UNTERMINATED chunk-size line is rescanned in full on every read.~~ Fixed
     2026-09-04, together with a sibling the finding did not name: the trailer's CRLFCRLF search had
     the identical shape one branch over (1.37 ms of CPU per read at an 8 MB trailer). Re-measured
