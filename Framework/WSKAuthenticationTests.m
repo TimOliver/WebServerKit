@@ -14,17 +14,20 @@
 // silently run the server with no authentication at all.
 - (void)testUnknownAuthenticationMethodFailsClosed {
     WSKWebServer *server = [[WSKWebServer alloc] init];
-    [server addDefaultHandlerForMethod:@"GET" requestClass:[WSKRequest class] processBlock:^WSKResponse *(WSKRequest *request) {
-        return [WSKDataResponse responseWithText:@"ok"];
-    }];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[WSKRequest class]
+                          processBlock:^WSKResponse *(WSKRequest *request) {
+                              return [WSKDataResponse responseWithText:@"ok"];
+                          }];
 
     NSError *error = nil;
     BOOL started = [server startWithOptions:@{
-        WSKOption_Port : @(0),
-        WSKOption_BindToLocalhost : @(YES),
-        WSKOption_AuthenticationMethod : @"Digest",  // typo for "DigestAccess"
-        WSKOption_AuthenticationAccounts : @{@"user" : @"password"}
-    } error:&error];
+        WSKOption_Port: @(0),
+        WSKOption_BindToLocalhost: @(YES),
+        WSKOption_AuthenticationMethod: @"Digest",  // typo for "DigestAccess"
+        WSKOption_AuthenticationAccounts: @{@"user": @"password"}
+    }
+                                      error:&error];
     XCTAssertFalse(started);
     XCTAssertNotNil(error);
     if (started) {
@@ -34,11 +37,12 @@
     // The correctly-spelled method still starts.
     NSError *validError = nil;
     BOOL validStarted = [server startWithOptions:@{
-        WSKOption_Port : @(0),
-        WSKOption_BindToLocalhost : @(YES),
-        WSKOption_AuthenticationMethod : WSKAuthenticationMethod_DigestAccess,
-        WSKOption_AuthenticationAccounts : @{@"user" : @"password"}
-    } error:&validError];
+        WSKOption_Port: @(0),
+        WSKOption_BindToLocalhost: @(YES),
+        WSKOption_AuthenticationMethod: WSKAuthenticationMethod_DigestAccess,
+        WSKOption_AuthenticationAccounts: @{@"user": @"password"}
+    }
+                                           error:&validError];
     XCTAssertTrue(validStarted);
     if (validStarted) {
         [server stop];
@@ -46,27 +50,27 @@
 }
 
 - (void)testBasicAuthEnforcedOverConnection {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
                           requestClass:[WSKRequest class]
-                          processBlock:^WSKResponse*(WSKRequest* request) {
+                          processBlock:^WSKResponse *(WSKRequest *request) {
                               return [WSKDataResponse responseWithText:@"secret-body"];
                           }];
-    NSDictionary* options = @{
-        WSKOption_Port : @0,
-        WSKOption_BindToLocalhost : @YES,
-        WSKOption_AuthenticationMethod : WSKAuthenticationMethod_Basic,
-        WSKOption_AuthenticationAccounts : @{@"user" : @"pass"}
+    NSDictionary *options = @{
+        WSKOption_Port: @0,
+        WSKOption_BindToLocalhost: @YES,
+        WSKOption_AuthenticationMethod: WSKAuthenticationMethod_Basic,
+        WSKOption_AuthenticationAccounts: @{@"user": @"pass"}
     };
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     // No credentials: expect 401 with a challenge, and the body must not leak.
     int fd = ConnectToLocalhostPort(server.port);
     XCTAssertGreaterThan(fd, 0);
-    const char* anonRequest = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    const char *anonRequest = "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
     XCTAssertEqual(send(fd, anonRequest, strlen(anonRequest), 0), (ssize_t)strlen(anonRequest));
     BOOL sawEOF = NO;
-    NSString* anonReply = [[NSString alloc] initWithData:ReadToEOF(fd, &sawEOF) encoding:NSUTF8StringEncoding];
+    NSString *anonReply = [[NSString alloc] initWithData:ReadToEOF(fd, &sawEOF) encoding:NSUTF8StringEncoding];
     XCTAssertTrue([anonReply containsString:@"401"], @"expected 401 without credentials, got: %@", anonReply);
     XCTAssertNotEqual([anonReply rangeOfString:@"WWW-Authenticate" options:NSCaseInsensitiveSearch].location, (NSUInteger)NSNotFound, @"expected a challenge, got: %@", anonReply);  // CFNetwork normalizes the header case
     XCTAssertFalse([anonReply containsString:@"secret-body"], @"body leaked without authentication");
@@ -75,12 +79,12 @@
     // Correct credentials: expect 200 with the body.
     int authFd = ConnectToLocalhostPort(server.port);
     XCTAssertGreaterThan(authFd, 0);
-    NSString* credentials = [[@"user:pass" dataUsingEncoding:NSUTF8StringEncoding] base64EncodedStringWithOptions:0];
-    NSString* authRequest = [NSString stringWithFormat:@"GET / HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic %@\r\n\r\n", credentials];
-    const char* authRequestBytes = [authRequest UTF8String];
+    NSString *credentials = [[@"user:pass" dataUsingEncoding:NSUTF8StringEncoding] base64EncodedStringWithOptions:0];
+    NSString *authRequest = [NSString stringWithFormat:@"GET / HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic %@\r\n\r\n", credentials];
+    const char *authRequestBytes = [authRequest UTF8String];
     XCTAssertEqual(send(authFd, authRequestBytes, strlen(authRequestBytes), 0), (ssize_t)strlen(authRequestBytes));
     BOOL authSawEOF = NO;
-    NSString* authReply = [[NSString alloc] initWithData:ReadToEOF(authFd, &authSawEOF) encoding:NSUTF8StringEncoding];
+    NSString *authReply = [[NSString alloc] initWithData:ReadToEOF(authFd, &authSawEOF) encoding:NSUTF8StringEncoding];
     XCTAssertTrue([authReply containsString:@"200"], @"expected 200 with valid credentials, got: %@", authReply);
     XCTAssertTrue([authReply containsString:@"secret-body"], @"expected the body with valid credentials, got: %@", authReply);
     close(authFd);
@@ -93,40 +97,40 @@
 // a different URI (the "uri" directive was previously never checked against the
 // request line, so a captured header authenticated any same-method resource).
 - (void)testDigestAuthRoundTripAndURIBinding {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
                           requestClass:[WSKRequest class]
-                          processBlock:^WSKResponse*(WSKRequest* request) {
+                          processBlock:^WSKResponse *(WSKRequest *request) {
                               return [WSKDataResponse responseWithText:@"secret-body"];
                           }];
-    NSDictionary* options = @{
-        WSKOption_Port : @0,
-        WSKOption_BindToLocalhost : @YES,
-        WSKOption_AuthenticationMethod : WSKAuthenticationMethod_DigestAccess,
-        WSKOption_AuthenticationRealm : @"test",
-        WSKOption_AuthenticationAccounts : @{@"user" : @"pass"}
+    NSDictionary *options = @{
+        WSKOption_Port: @0,
+        WSKOption_BindToLocalhost: @YES,
+        WSKOption_AuthenticationMethod: WSKAuthenticationMethod_DigestAccess,
+        WSKOption_AuthenticationRealm: @"test",
+        WSKOption_AuthenticationAccounts: @{@"user": @"pass"}
     };
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     // Anonymous request -> 401 with a Digest challenge; capture the server-issued nonce.
-    NSString* challenge = SendRawRequest(server.port, @"GET /secret HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *challenge = SendRawRequest(server.port, @"GET /secret HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertTrue([challenge containsString:@"401"], @"expected 401 challenge, got: %@", challenge);
-    NSString* nonce = QuotedParam(challenge, @"nonce");
+    NSString *nonce = QuotedParam(challenge, @"nonce");
     XCTAssertNotNil(nonce, @"no nonce in challenge: %@", challenge);
 
     // Compute a valid Digest response for GET /secret and authenticate.
-    NSString* ha1 = WSKComputeMD5Digest(@"%@:%@:%@", @"user", @"test", @"pass");
-    NSString* ha2Secret = WSKComputeMD5Digest(@"%@:%@", @"GET", @"/secret");
-    NSString* response = WSKComputeMD5Digest(@"%@:%@:%@", ha1, nonce, ha2Secret);
-    NSString* authForSecret = [NSString stringWithFormat:@"Authorization: Digest username=\"user\", realm=\"test\", nonce=\"%@\", uri=\"/secret\", response=\"%@\"", nonce, response];
+    NSString *ha1 = WSKComputeMD5Digest(@"%@:%@:%@", @"user", @"test", @"pass");
+    NSString *ha2Secret = WSKComputeMD5Digest(@"%@:%@", @"GET", @"/secret");
+    NSString *response = WSKComputeMD5Digest(@"%@:%@:%@", ha1, nonce, ha2Secret);
+    NSString *authForSecret = [NSString stringWithFormat:@"Authorization: Digest username=\"user\", realm=\"test\", nonce=\"%@\", uri=\"/secret\", response=\"%@\"", nonce, response];
 
-    NSString* ok = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /secret HTTP/1.1\r\nHost: localhost\r\n%@\r\n\r\n", authForSecret]);
+    NSString *ok = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /secret HTTP/1.1\r\nHost: localhost\r\n%@\r\n\r\n", authForSecret]);
     XCTAssertTrue([ok containsString:@"200"], @"valid digest credentials should authenticate, got: %@", ok);
     XCTAssertTrue([ok containsString:@"secret-body"], @"expected body with valid credentials, got: %@", ok);
 
     // Replay the exact same Authorization header (computed for /secret) against a
     // different resource: must be rejected because the uri no longer matches.
-    NSString* replay = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /other HTTP/1.1\r\nHost: localhost\r\n%@\r\n\r\n", authForSecret]);
+    NSString *replay = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /other HTTP/1.1\r\nHost: localhost\r\n%@\r\n\r\n", authForSecret]);
     XCTAssertTrue([replay containsString:@"401"], @"a header computed for /secret must not authenticate /other, got: %@", replay);
     XCTAssertFalse([replay containsString:@"secret-body"], @"cross-resource replay leaked the body: %@", replay);
 
@@ -143,71 +147,71 @@
 // The legacy form must keep working beside it: a client that ignores the qop we offer is still
 // entitled to the RFC 2069 computation (§3.4.6 selects the form by whether the CLIENT sent qop).
 - (void)testDigestOffersAndVerifiesQualityOfProtection {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
                           requestClass:[WSKRequest class]
-                          processBlock:^WSKResponse*(WSKRequest* request) {
+                          processBlock:^WSKResponse *(WSKRequest *request) {
                               return [WSKDataResponse responseWithText:@"secret-body"];
                           }];
-    NSDictionary* options = @{
-        WSKOption_Port : @0,
-        WSKOption_BindToLocalhost : @YES,
-        WSKOption_AuthenticationMethod : WSKAuthenticationMethod_DigestAccess,
-        WSKOption_AuthenticationRealm : @"test",
-        WSKOption_AuthenticationAccounts : @{@"user" : @"pass"}
+    NSDictionary *options = @{
+        WSKOption_Port: @0,
+        WSKOption_BindToLocalhost: @YES,
+        WSKOption_AuthenticationMethod: WSKAuthenticationMethod_DigestAccess,
+        WSKOption_AuthenticationRealm: @"test",
+        WSKOption_AuthenticationAccounts: @{@"user": @"pass"}
     };
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* challenge = SendRawRequest(server.port, @"GET /secret HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *challenge = SendRawRequest(server.port, @"GET /secret HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertTrue([challenge containsString:@"401"], @"expected a 401 challenge, got: %@", challenge);
     XCTAssertTrue([challenge containsString:@"qop=\"auth\""], @"the challenge must offer qop=\"auth\": %@", challenge);
     XCTAssertTrue([challenge containsString:@"algorithm=MD5"], @"the challenge must name its algorithm: %@", challenge);
 
-    NSString* nonce = QuotedParam(challenge, @"nonce");
+    NSString *nonce = QuotedParam(challenge, @"nonce");
     XCTAssertNotNil(nonce, @"no nonce in challenge: %@", challenge);
 
-    NSString* const ha1 = WSKComputeMD5Digest(@"%@:%@:%@", @"user", @"test", @"pass");
-    NSString* const ha2 = WSKComputeMD5Digest(@"%@:%@", @"GET", @"/secret");
+    NSString *const ha1 = WSKComputeMD5Digest(@"%@:%@:%@", @"user", @"test", @"pass");
+    NSString *const ha2 = WSKComputeMD5Digest(@"%@:%@", @"GET", @"/secret");
     // Exactly the header shape a real client sends: qop and nc UNQUOTED, cnonce quoted, every
     // parameter comma-separated. The unquoted ones are what make this more than a hashing change —
     // an unquoted value does not stop at a comma, so "auth," and "00000001," reach the digest
     // unless the Digest reader cuts them there.
-    NSString* (^authorization)(NSString*, NSString*, NSString*) = ^(NSString* nc, NSString* cnonce, NSString* digest) {
+    NSString * (^authorization)(NSString *, NSString *, NSString *) = ^(NSString *nc, NSString *cnonce, NSString *digest) {
         return [NSString stringWithFormat:@"Authorization: Digest username=\"user\", realm=\"test\", nonce=\"%@\", uri=\"/secret\", qop=auth, nc=%@, cnonce=\"%@\", response=\"%@\"", nonce, nc, cnonce, digest];
     };
-    NSString* (^get)(NSString*) = ^(NSString* header) {
+    NSString * (^get)(NSString *) = ^(NSString *header) {
         return SendRawRequest(server.port, [NSString stringWithFormat:@"GET /secret HTTP/1.1\r\nHost: localhost\r\n%@\r\n\r\n", header]);
     };
 
-    NSString* const qopResponse = WSKComputeMD5Digest(@"%@:%@:%@:%@:%@:%@", ha1, nonce, @"00000001", @"0a4f113b", @"auth", ha2);
-    NSString* ok = get(authorization(@"00000001", @"0a4f113b", qopResponse));
+    NSString *const qopResponse = WSKComputeMD5Digest(@"%@:%@:%@:%@:%@:%@", ha1, nonce, @"00000001", @"0a4f113b", @"auth", ha2);
+    NSString *ok = get(authorization(@"00000001", @"0a4f113b", qopResponse));
     XCTAssertTrue([ok containsString:@"200"], @"an RFC 7616 qop=auth credential must authenticate, got: %@", ok);
     XCTAssertTrue([ok containsString:@"secret-body"], @"expected the body with valid credentials, got: %@", ok);
 
     // The nonce count and client nonce must be part of what is hashed, not decoration: a header
     // whose nc says one thing while the digest was computed over another must not authenticate.
-    NSString* wrongCount = get(authorization(@"00000002", @"0a4f113b", qopResponse));
+    NSString *wrongCount = get(authorization(@"00000002", @"0a4f113b", qopResponse));
     XCTAssertTrue([wrongCount containsString:@"401"], @"the nonce count is not bound into the digest: %@", wrongCount);
 
-    NSString* wrongClientNonce = get(authorization(@"00000001", @"deadbeef", qopResponse));
+    NSString *wrongClientNonce = get(authorization(@"00000001", @"deadbeef", qopResponse));
     XCTAssertTrue([wrongClientNonce containsString:@"401"], @"the client nonce is not bound into the digest: %@", wrongClientNonce);
 
     // The password still has to be right, with qop in play as without it.
-    NSString* const wrongHA1 = WSKComputeMD5Digest(@"%@:%@:%@", @"user", @"test", @"wrong");
-    NSString* const wrongDigest = WSKComputeMD5Digest(@"%@:%@:%@:%@:%@:%@", wrongHA1, nonce, @"00000001", @"0a4f113b", @"auth", ha2);
-    NSString* wrongPassword = get(authorization(@"00000001", @"0a4f113b", wrongDigest));
+    NSString *const wrongHA1 = WSKComputeMD5Digest(@"%@:%@:%@", @"user", @"test", @"wrong");
+    NSString *const wrongDigest = WSKComputeMD5Digest(@"%@:%@:%@:%@:%@:%@", wrongHA1, nonce, @"00000001", @"0a4f113b", @"auth", ha2);
+    NSString *wrongPassword = get(authorization(@"00000001", @"0a4f113b", wrongDigest));
     XCTAssertTrue([wrongPassword containsString:@"401"], @"a wrong password authenticated under qop: %@", wrongPassword);
 
     // A client that sends no qop of its own still gets the RFC 2069 computation it used.
-    NSString* const legacyResponse = WSKComputeMD5Digest(@"%@:%@:%@", ha1, nonce, ha2);
-    NSString* legacyHeader = [NSString stringWithFormat:@"Authorization: Digest username=\"user\", realm=\"test\", nonce=\"%@\", uri=\"/secret\", response=\"%@\"", nonce, legacyResponse];
-    NSString* legacy = get(legacyHeader);
+    NSString *const legacyResponse = WSKComputeMD5Digest(@"%@:%@:%@", ha1, nonce, ha2);
+    NSString *legacyHeader = [NSString stringWithFormat:@"Authorization: Digest username=\"user\", realm=\"test\", nonce=\"%@\", uri=\"/secret\", response=\"%@\"", nonce, legacyResponse];
+    NSString *legacy = get(legacyHeader);
     XCTAssertTrue([legacy containsString:@"200"], @"the RFC 2069 form must keep working beside qop: %@", legacy);
 
     // A qop this server never offered cannot be honoured: auth-int hashes the body, which is not
     // what HA2 above is, so accepting it would be authenticating against the wrong digest.
-    NSString* authIntHeader = [NSString stringWithFormat:@"Authorization: Digest username=\"user\", realm=\"test\", nonce=\"%@\", uri=\"/secret\", qop=auth-int, nc=00000001, cnonce=\"0a4f113b\", response=\"%@\"", nonce, qopResponse];
-    NSString* authInt = get(authIntHeader);
+    NSString *authIntHeader = [NSString stringWithFormat:@"Authorization: Digest username=\"user\", realm=\"test\", nonce=\"%@\", uri=\"/secret\", qop=auth-int, nc=00000001, cnonce=\"0a4f113b\", response=\"%@\"", nonce, qopResponse];
+    NSString *authInt = get(authIntHeader);
     XCTAssertTrue([authInt containsString:@"401"], @"an unoffered qop must not authenticate: %@", authInt);
 
     [server stop];
@@ -223,47 +227,47 @@
 // HA2 must therefore be computed over the method that arrived on the WIRE. -isVirtualHEAD is what
 // the request keeps that distinction in.
 - (void)testDigestAuthenticatesAHEADMappedToGET {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
                           requestClass:[WSKRequest class]
-                          processBlock:^WSKResponse*(WSKRequest* request) {
+                          processBlock:^WSKResponse *(WSKRequest *request) {
                               return [WSKDataResponse responseWithText:@"secret-body"];
                           }];
-    NSDictionary* options = @{
-        WSKOption_Port : @0,
-        WSKOption_BindToLocalhost : @YES,
-        WSKOption_AuthenticationMethod : WSKAuthenticationMethod_DigestAccess,
-        WSKOption_AuthenticationRealm : @"test",
-        WSKOption_AuthenticationAccounts : @{@"user" : @"pass"}
+    NSDictionary *options = @{
+        WSKOption_Port: @0,
+        WSKOption_BindToLocalhost: @YES,
+        WSKOption_AuthenticationMethod: WSKAuthenticationMethod_DigestAccess,
+        WSKOption_AuthenticationRealm: @"test",
+        WSKOption_AuthenticationAccounts: @{@"user": @"pass"}
     };
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* challenge = SendRawRequest(server.port, @"HEAD /secret HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *challenge = SendRawRequest(server.port, @"HEAD /secret HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertTrue([challenge containsString:@"401"], @"an unauthenticated HEAD is challenged: %@", challenge);
-    NSString* nonce = QuotedParam(challenge, @"nonce");
+    NSString *nonce = QuotedParam(challenge, @"nonce");
     XCTAssertNotNil(nonce, @"no nonce in challenge: %@", challenge);
 
     // What every conformant client computes for this request: RFC 7616 §3.4.3 makes A2 the method
     // as sent, so "HEAD:/secret".
-    NSString* ha1 = WSKComputeMD5Digest(@"%@:%@:%@", @"user", @"test", @"pass");
-    NSString* ha2 = WSKComputeMD5Digest(@"%@:%@", @"HEAD", @"/secret");
-    NSString* response = WSKComputeMD5Digest(@"%@:%@:%@", ha1, nonce, ha2);
-    NSString* authorization = [NSString stringWithFormat:@"Authorization: Digest username=\"user\", realm=\"test\", nonce=\"%@\", uri=\"/secret\", response=\"%@\"", nonce, response];
+    NSString *ha1 = WSKComputeMD5Digest(@"%@:%@:%@", @"user", @"test", @"pass");
+    NSString *ha2 = WSKComputeMD5Digest(@"%@:%@", @"HEAD", @"/secret");
+    NSString *response = WSKComputeMD5Digest(@"%@:%@:%@", ha1, nonce, ha2);
+    NSString *authorization = [NSString stringWithFormat:@"Authorization: Digest username=\"user\", realm=\"test\", nonce=\"%@\", uri=\"/secret\", response=\"%@\"", nonce, response];
 
-    NSString* reply = SendRawRequest(server.port, [NSString stringWithFormat:@"HEAD /secret HTTP/1.1\r\nHost: localhost\r\n%@\r\n\r\n", authorization]);
+    NSString *reply = SendRawRequest(server.port, [NSString stringWithFormat:@"HEAD /secret HTTP/1.1\r\nHost: localhost\r\n%@\r\n\r\n", authorization]);
     XCTAssertTrue([reply containsString:@"200"], @"a HEAD digest hashed over HEAD must authenticate: %@", reply);
     XCTAssertFalse([reply containsString:@"secret-body"], @"…and a HEAD still carries no body: %@", reply);
 
     // The mirror: a digest computed over GET must NOT authenticate a HEAD once the wire method is
     // what binds, or the fix would just move the mismatch rather than close it.
-    NSString* ha2AsGet = WSKComputeMD5Digest(@"%@:%@", @"GET", @"/secret");
-    NSString* responseAsGet = WSKComputeMD5Digest(@"%@:%@:%@", ha1, nonce, ha2AsGet);
-    NSString* mismatched = [NSString stringWithFormat:@"Authorization: Digest username=\"user\", realm=\"test\", nonce=\"%@\", uri=\"/secret\", response=\"%@\"", nonce, responseAsGet];
-    NSString* refused = SendRawRequest(server.port, [NSString stringWithFormat:@"HEAD /secret HTTP/1.1\r\nHost: localhost\r\n%@\r\n\r\n", mismatched]);
+    NSString *ha2AsGet = WSKComputeMD5Digest(@"%@:%@", @"GET", @"/secret");
+    NSString *responseAsGet = WSKComputeMD5Digest(@"%@:%@:%@", ha1, nonce, ha2AsGet);
+    NSString *mismatched = [NSString stringWithFormat:@"Authorization: Digest username=\"user\", realm=\"test\", nonce=\"%@\", uri=\"/secret\", response=\"%@\"", nonce, responseAsGet];
+    NSString *refused = SendRawRequest(server.port, [NSString stringWithFormat:@"HEAD /secret HTTP/1.1\r\nHost: localhost\r\n%@\r\n\r\n", mismatched]);
     XCTAssertTrue([refused containsString:@"401"], @"a GET-computed digest must not authenticate a HEAD: %@", refused);
 
     // And the GET path itself is untouched.
-    NSString* getReply = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /secret HTTP/1.1\r\nHost: localhost\r\n%@\r\n\r\n", mismatched]);
+    NSString *getReply = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /secret HTTP/1.1\r\nHost: localhost\r\n%@\r\n\r\n", mismatched]);
     XCTAssertTrue([getReply containsString:@"secret-body"], @"GET with a GET-computed digest must still work: %@", getReply);
 
     [server stop];
@@ -279,50 +283,50 @@
 // This is the same class as the cross-resource replay the test above pins, in the spelling that
 // escaped it.
 - (void)testDigestBindsTheQueryStringNotJustThePath {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
                           requestClass:[WSKRequest class]
-                          processBlock:^WSKResponse*(WSKRequest* request) {
+                          processBlock:^WSKResponse *(WSKRequest *request) {
                               return [WSKDataResponse responseWithText:[NSString stringWithFormat:@"served:%@", request.query[@"file"] ?: @"none"]];
                           }];
-    NSDictionary* options = @{
-        WSKOption_Port : @0,
-        WSKOption_BindToLocalhost : @YES,
-        WSKOption_AuthenticationMethod : WSKAuthenticationMethod_DigestAccess,
-        WSKOption_AuthenticationRealm : @"test",
-        WSKOption_AuthenticationAccounts : @{@"user" : @"pass"}
+    NSDictionary *options = @{
+        WSKOption_Port: @0,
+        WSKOption_BindToLocalhost: @YES,
+        WSKOption_AuthenticationMethod: WSKAuthenticationMethod_DigestAccess,
+        WSKOption_AuthenticationRealm: @"test",
+        WSKOption_AuthenticationAccounts: @{@"user": @"pass"}
     };
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* challenge = SendRawRequest(server.port, @"GET /read?file=mine HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    NSString* nonce = QuotedParam(challenge, @"nonce");
+    NSString *challenge = SendRawRequest(server.port, @"GET /read?file=mine HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *nonce = QuotedParam(challenge, @"nonce");
     XCTAssertNotNil(nonce, @"no nonce in challenge: %@", challenge);
 
     // A credential computed for the whole target, exactly as a conformant client computes it.
-    NSString* ha1 = WSKComputeMD5Digest(@"%@:%@:%@", @"user", @"test", @"pass");
-    NSString* ha2 = WSKComputeMD5Digest(@"%@:%@", @"GET", @"/read?file=mine");
-    NSString* response = WSKComputeMD5Digest(@"%@:%@:%@", ha1, nonce, ha2);
-    NSString* authorization = [NSString stringWithFormat:@"Authorization: Digest username=\"user\", realm=\"test\", nonce=\"%@\", uri=\"/read?file=mine\", response=\"%@\"", nonce, response];
+    NSString *ha1 = WSKComputeMD5Digest(@"%@:%@:%@", @"user", @"test", @"pass");
+    NSString *ha2 = WSKComputeMD5Digest(@"%@:%@", @"GET", @"/read?file=mine");
+    NSString *response = WSKComputeMD5Digest(@"%@:%@:%@", ha1, nonce, ha2);
+    NSString *authorization = [NSString stringWithFormat:@"Authorization: Digest username=\"user\", realm=\"test\", nonce=\"%@\", uri=\"/read?file=mine\", response=\"%@\"", nonce, response];
 
     // It must authenticate the request it was computed for — the half a binding fix can break.
-    NSString* ok = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /read?file=mine HTTP/1.1\r\nHost: localhost\r\n%@\r\n\r\n", authorization]);
+    NSString *ok = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /read?file=mine HTTP/1.1\r\nHost: localhost\r\n%@\r\n\r\n", authorization]);
     XCTAssertTrue([ok containsString:@"200"], @"a digest covering the full target must authenticate it: %@", ok);
     XCTAssertTrue([ok containsString:@"served:mine"], @"…and reach the handler with its own arguments: %@", ok);
 
     // Replayed verbatim with a substituted argument: same path, same method, different resource.
-    NSString* substituted = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /read?file=yours HTTP/1.1\r\nHost: localhost\r\n%@\r\n\r\n", authorization]);
+    NSString *substituted = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /read?file=yours HTTP/1.1\r\nHost: localhost\r\n%@\r\n\r\n", authorization]);
     XCTAssertTrue([substituted containsString:@"401"], @"a digest computed for one query must not authenticate another: %@", substituted);
     XCTAssertFalse([substituted containsString:@"served:yours"], @"the substituted argument reached the handler: %@", substituted);
 
     // A query stripped entirely is also a different resource.
-    NSString* stripped = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /read HTTP/1.1\r\nHost: localhost\r\n%@\r\n\r\n", authorization]);
+    NSString *stripped = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /read HTTP/1.1\r\nHost: localhost\r\n%@\r\n\r\n", authorization]);
     XCTAssertTrue([stripped containsString:@"401"], @"dropping the query must not authenticate either: %@", stripped);
 
     // And a target with no query at all still works, computed over just the path.
-    NSString* plainHa2 = WSKComputeMD5Digest(@"%@:%@", @"GET", @"/read");
-    NSString* plainResponse = WSKComputeMD5Digest(@"%@:%@:%@", ha1, nonce, plainHa2);
-    NSString* plainAuthorization = [NSString stringWithFormat:@"Authorization: Digest username=\"user\", realm=\"test\", nonce=\"%@\", uri=\"/read\", response=\"%@\"", nonce, plainResponse];
-    NSString* plain = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /read HTTP/1.1\r\nHost: localhost\r\n%@\r\n\r\n", plainAuthorization]);
+    NSString *plainHa2 = WSKComputeMD5Digest(@"%@:%@", @"GET", @"/read");
+    NSString *plainResponse = WSKComputeMD5Digest(@"%@:%@:%@", ha1, nonce, plainHa2);
+    NSString *plainAuthorization = [NSString stringWithFormat:@"Authorization: Digest username=\"user\", realm=\"test\", nonce=\"%@\", uri=\"/read\", response=\"%@\"", nonce, plainResponse];
+    NSString *plain = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /read HTTP/1.1\r\nHost: localhost\r\n%@\r\n\r\n", plainAuthorization]);
     XCTAssertTrue([plain containsString:@"200"], @"a query-less target must still authenticate: %@", plain);
 
     [server stop];
@@ -356,9 +360,8 @@
 // meant the per-process secret never reached the digest and its tag became forgeable.
 - (void)testMD5DigestHashesPastEmbeddedNUL {
     unichar nul = 0;
-    NSString* withNUL = [NSString stringWithFormat:@"abc%@def", [NSString stringWithCharacters:&nul length:1]];
-    XCTAssertNotEqualObjects(WSKComputeMD5Digest(@"%@", withNUL), WSKComputeMD5Digest(@"%@", @"abc"),
-                             @"input must not be truncated at the first NUL");
+    NSString *withNUL = [NSString stringWithFormat:@"abc%@def", [NSString stringWithCharacters:&nul length:1]];
+    XCTAssertNotEqualObjects(WSKComputeMD5Digest(@"%@", withNUL), WSKComputeMD5Digest(@"%@", @"abc"), @"input must not be truncated at the first NUL");
 }
 
 // A page on evil.example that repoints its DNS at this server is, to the browser, genuinely
@@ -366,27 +369,27 @@
 // still differs is the name the browser puts in Host, which is why this check exists and why
 // nothing else substitutes for it.
 - (void)testHostValidationRefusesRebindingButAllowsRealNames {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
                           requestClass:[WSKRequest class]
-                          processBlock:^WSKResponse*(WSKRequest* request) {
+                          processBlock:^WSKResponse *(WSKRequest *request) {
                               return [WSKDataResponse responseWithText:@"served"];
                           }];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* (^get)(NSString*) = ^(NSString* host) {
+    NSString * (^get)(NSString *) = ^(NSString *host) {
         return SendRawRequest(server.port, [NSString stringWithFormat:@"GET / HTTP/1.1\r\nHost: %@\r\n\r\n", host]);
     };
 
     // Names and literals this server genuinely answers to.
-    for (NSString* host in @[ @"localhost", @"LOCALHOST", @"127.0.0.1", @"192.168.1.42", @"[::1]" ]) {
+    for (NSString *host in @[@"localhost", @"LOCALHOST", @"127.0.0.1", @"192.168.1.42", @"[::1]"]) {
         XCTAssertTrue([get(host) containsString:@"served"], @"legitimate host \"%@\" was refused", host);
     }
     XCTAssertTrue([get([NSString stringWithFormat:@"localhost:%lu", (unsigned long)server.port]) containsString:@"served"], @"matching port was refused");
 
     // The rebinding case, and near-misses around it.
-    for (NSString* host in @[ @"evil.example", @"localhost.evil.com", @"attacker.localhost.evil.com" ]) {
+    for (NSString *host in @[@"evil.example", @"localhost.evil.com", @"attacker.localhost.evil.com"]) {
         XCTAssertTrue([get(host) containsString:@"421"], @"host \"%@\" should have been refused", host);
     }
     // A mismatched port is deliberately NOT refused any more, and this assertion was inverted on
@@ -397,7 +400,7 @@
     // server's port — a differing one comes from a forwarder, or from a non-browser client that
     // could state any Host it liked and for which rebinding (which needs a browser) does not apply.
     // The name is what carries the defence, and the assertions above still prove it does.
-    XCTAssertFalse([get([NSString stringWithFormat:@"localhost:%lu", (unsigned long)server.port + 1]) containsString:@"421"], @"a differing port on an accepted name should no longer be refused");
+    XCTAssertFalse(ReplyHasStatus(get([NSString stringWithFormat:@"localhost:%lu", (unsigned long)server.port + 1]), 421), @"a differing port on an accepted name should no longer be refused");
 
     // No Host at all is allowed: HTTP/1.0 and native clients omit it, and rebinding needs a
     // browser, which never does.
@@ -409,19 +412,19 @@
 // The check lives in the connection layer precisely so WebDAV inherits it — WebDAV has no
 // origin check of its own, so an uploader-only fix would leave the more capable API exposed.
 - (void)testHostValidationCoversWebDAV {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
     XCTAssertTrue([@"secret" writeToFile:[dir stringByAppendingPathComponent:@"a.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* rebound = SendRawRequest(server.port, @"GET /a.txt HTTP/1.1\r\nHost: evil.example\r\n\r\n");
+    NSString *rebound = SendRawRequest(server.port, @"GET /a.txt HTTP/1.1\r\nHost: evil.example\r\n\r\n");
     XCTAssertTrue([rebound containsString:@"421"], @"WebDAV did not inherit host validation: %@", rebound);
     XCTAssertFalse([rebound containsString:@"secret"], @"WebDAV served file contents to a rebound host");
 
-    NSString* legitimate = SendRawRequest(server.port, @"GET /a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *legitimate = SendRawRequest(server.port, @"GET /a.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertTrue([legitimate containsString:@"secret"], @"host validation broke a legitimate WebDAV read: %@", legitimate);
 
     [server stop];
@@ -440,28 +443,28 @@
 // and an attacker controls the port he targets either way. An entry that DOES pin a port is still
 // honoured verbatim, which this pins in both directions.
 - (void)testHostValidationMatchesAnyPortUnlessAnEntryPinsOne {
-    NSString* dir = MakeTempDirectory();
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    NSString *dir = MakeTempDirectory();
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addGETHandlerForBasePath:@"/" directoryPath:dir indexFilename:nil cacheAge:0 allowRangeRequests:NO];
-    NSDictionary* options = @{
-        WSKOption_Port : @0,
-        WSKOption_BindToLocalhost : @YES,
-        WSKOption_AllowedHostNames : @[ @"files.example", @"pinned.example:9999" ]
+    NSDictionary *options = @{
+        WSKOption_Port: @0,
+        WSKOption_BindToLocalhost: @YES,
+        WSKOption_AllowedHostNames: @[@"files.example", @"pinned.example:9999"]
     };
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* (^get)(NSString*) = ^(NSString* host) {
+    NSString * (^get)(NSString *) = ^(NSString *host) {
         return SendRawRequest(server.port, [NSString stringWithFormat:@"GET / HTTP/1.1\r\nHost: %@\r\n\r\n", host]);
     };
 
     // An entry with no port matches whatever port the client states, including none.
-    for (NSString* host in @[ @"files.example", @"files.example:80", @"files.example:443", @"files.example:8080" ]) {
+    for (NSString *host in @[@"files.example", @"files.example:80", @"files.example:443", @"files.example:8080"]) {
         XCTAssertFalse([get(host) hasPrefix:@"HTTP/1.1 421"], @"an unpinned entry should match any port, but \"%@\" was refused", host);
     }
 
     // The same for the names accepted without configuration — a forwarded localhost or IP literal
     // arrives carrying the port the client dialled, not the one being listened on.
-    for (NSString* host in @[ @"localhost", @"localhost:8080", @"127.0.0.1:8080", @"[::1]:8080" ]) {
+    for (NSString *host in @[@"localhost", @"localhost:8080", @"127.0.0.1:8080", @"[::1]:8080"]) {
         XCTAssertFalse([get(host) hasPrefix:@"HTTP/1.1 421"], @"\"%@\" should be accepted whatever port it states", host);
     }
 
@@ -481,20 +484,20 @@
 }
 
 - (void)testHostValidationHonoursConfiguredNames {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addDefaultHandlerForMethod:@"GET"
                           requestClass:[WSKRequest class]
-                          processBlock:^WSKResponse*(WSKRequest* request) {
+                          processBlock:^WSKResponse *(WSKRequest *request) {
                               return [WSKDataResponse responseWithText:@"served"];
                           }];
-    NSDictionary* options = @{
-        WSKOption_Port : @0,
-        WSKOption_BindToLocalhost : @YES,
-        WSKOption_AllowedHostNames : @[ @"files.example", @"pinned.example:8080" ]
+    NSDictionary *options = @{
+        WSKOption_Port: @0,
+        WSKOption_BindToLocalhost: @YES,
+        WSKOption_AllowedHostNames: @[@"files.example", @"pinned.example:8080"]
     };
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* (^get)(NSString*) = ^(NSString* host) {
+    NSString * (^get)(NSString *) = ^(NSString *host) {
         return SendRawRequest(server.port, [NSString stringWithFormat:@"GET / HTTP/1.1\r\nHost: %@\r\n\r\n", host]);
     };
 
@@ -523,23 +526,23 @@
 // So an entry written as a fully-qualified name matched NOTHING — not even its own spelling — and
 // every request answered 421. That is the one option a Tailscale deployment is required to set.
 - (void)testAllowedHostNameEntryIsHonouredWithOrWithoutItsRootLabel {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
     [@"served" writeToFile:[dir stringByAppendingPathComponent:@"x.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL];
 
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addGETHandlerForBasePath:@"/" directoryPath:dir indexFilename:nil cacheAge:0 allowRangeRequests:YES];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES, WSKOption_AllowedHostNames : @[ @"puck.tailnet.ts.net." ]};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES, WSKOption_AllowedHostNames: @[@"puck.tailnet.ts.net."]};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* dotted = SendRawRequest(server.port, @"GET /x.txt HTTP/1.1\r\nHost: puck.tailnet.ts.net.\r\n\r\n");
+    NSString *dotted = SendRawRequest(server.port, @"GET /x.txt HTTP/1.1\r\nHost: puck.tailnet.ts.net.\r\n\r\n");
     XCTAssertTrue([dotted containsString:@" 200"], @"the entry's own spelling must be admitted: %@", [dotted substringToIndex:MIN((NSUInteger)40, dotted.length)]);
 
-    NSString* plain = SendRawRequest(server.port, @"GET /x.txt HTTP/1.1\r\nHost: puck.tailnet.ts.net\r\n\r\n");
+    NSString *plain = SendRawRequest(server.port, @"GET /x.txt HTTP/1.1\r\nHost: puck.tailnet.ts.net\r\n\r\n");
     XCTAssertTrue([plain containsString:@" 200"], @"the spelling browsers send must be admitted: %@", [plain substringToIndex:MIN((NSUInteger)40, plain.length)]);
 
     // A name that is genuinely not on the list must still be refused, or this passes by admitting all.
-    NSString* other = SendRawRequest(server.port, @"GET /x.txt HTTP/1.1\r\nHost: evil.example\r\n\r\n");
+    NSString *other = SendRawRequest(server.port, @"GET /x.txt HTTP/1.1\r\nHost: evil.example\r\n\r\n");
     XCTAssertTrue([other containsString:@" 421"], @"an unlisted name must still be refused: %@", [other substringToIndex:MIN((NSUInteger)40, other.length)]);
 
     [server stop];

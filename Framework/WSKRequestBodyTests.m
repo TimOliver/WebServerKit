@@ -14,11 +14,11 @@
 // request) must be rejected once it exceeds the in-memory cap, rather than
 // growing unbounded and exhausting memory on the device.
 - (void)testDataRequestRejectsBodyExceedingInMemoryCap {
-    WSKDataRequest* request = OpenBodyRequest([WSKDataRequest class], @{});
+    WSKDataRequest *request = OpenBodyRequest([WSKDataRequest class], @{});
     XCTAssertTrue([request hasBody]);
 
-    NSData* chunk = [NSMutableData dataWithLength:(1024 * 1024)];  // 1 MB
-    NSError* error = nil;
+    NSData *chunk = [NSMutableData dataWithLength:(1024 * 1024)];  // 1 MB
+    NSError *error = nil;
     BOOL rejected = NO;
 
     for (int i = 0; i < 256; i++) {  // up to 256 MB if never rejected
@@ -35,18 +35,18 @@
 // boundary token not followed by CRLF: it can never advance, so the buffer
 // would grow without bound. It must reject once the buffer exceeds the cap.
 - (void)testMultiPartParserRejectsUnboundedBufferingFromFakeBoundary {
-    WSKMultiPartFormRequest* request = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
+    WSKMultiPartFormRequest *request = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
     XCTAssertTrue([request hasBody]);
 
     // A file part header, then content that begins with the boundary token "--X"
     // followed by 'y' (not CRLF) — the parser stalls on this forever.
-    NSMutableData* head = [NSMutableData data];
+    NSMutableData *head = [NSMutableData data];
     [head appendData:SSEData(@"--X\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.bin\"\r\n\r\n")];
     [head appendData:SSEData(@"--Xy")];
-    NSError* error = nil;
+    NSError *error = nil;
     XCTAssertTrue([request performWriteData:head error:&error]);
 
-    NSData* filler = [NSMutableData dataWithLength:(1024 * 1024)];  // zeros: no boundary token
+    NSData *filler = [NSMutableData dataWithLength:(1024 * 1024)];  // zeros: no boundary token
     BOOL rejected = NO;
 
     for (int i = 0; i < 256; i++) {
@@ -62,12 +62,12 @@
 // A gzip-encoded body must not be allowed to inflate without bound: a small
 // highly-compressible payload that decompresses past the cap must be rejected.
 - (void)testGZipDecoderRejectsDecompressionBomb {
-    NSData* bomb = GZipCompress([NSMutableData dataWithLength:(80 * 1024 * 1024)]);  // inflates to 80 MB
+    NSData *bomb = GZipCompress([NSMutableData dataWithLength:(80 * 1024 * 1024)]);  // inflates to 80 MB
     XCTAssertNotNil(bomb);
     XCTAssertLessThan(bomb.length, (NSUInteger)(1024 * 1024));  // sanity: compressed form is tiny
 
-    WSKDataRequest* request = OpenBodyRequest([WSKDataRequest class], @{@"Content-Encoding": @"gzip"});
-    NSError* error = nil;
+    WSKDataRequest *request = OpenBodyRequest([WSKDataRequest class], @{@"Content-Encoding": @"gzip"});
+    NSError *error = nil;
 
     XCTAssertFalse([request performWriteData:bomb error:&error], @"gzip decoder should reject a decompression bomb");
 }
@@ -77,11 +77,11 @@
 // decoder only asserted this (a no-op in Release), so the handler ran on a partial
 // body — and on WebDAV PUT that replaced the target file with the fragment.
 - (void)testGZipDecoderRejectsTruncatedBody {
-    NSData* full = GZipCompress([NSMutableData dataWithLength:(64 * 1024)]);
+    NSData *full = GZipCompress([NSMutableData dataWithLength:(64 * 1024)]);
     XCTAssertGreaterThan(full.length, (NSUInteger)20);
 
-    WSKDataRequest* request = OpenBodyRequest([WSKDataRequest class], @{@"Content-Encoding": @"gzip"});
-    NSError* error = nil;
+    WSKDataRequest *request = OpenBodyRequest([WSKDataRequest class], @{@"Content-Encoding": @"gzip"});
+    NSError *error = nil;
 
     // The first 20 bytes are a well-formed prefix, so the write itself succeeds.
     XCTAssertTrue([request performWriteData:[full subdataWithRange:NSMakeRange(0, 20)] error:&error]);
@@ -92,9 +92,9 @@
 // either way the body is not one we can reproduce, so it must be refused rather
 // than silently dropped (it was a WSK_DCHECK, i.e. an abort in Debug builds).
 - (void)testGZipDecoderRejectsTrailingDataAfterStreamEnd {
-    NSData* full = GZipCompress([NSMutableData dataWithLength:1024]);
-    WSKDataRequest* request = OpenBodyRequest([WSKDataRequest class], @{@"Content-Encoding": @"gzip"});
-    NSError* error = nil;
+    NSData *full = GZipCompress([NSMutableData dataWithLength:1024]);
+    WSKDataRequest *request = OpenBodyRequest([WSKDataRequest class], @{@"Content-Encoding": @"gzip"});
+    NSError *error = nil;
 
     XCTAssertTrue([request performWriteData:full error:&error]);
     XCTAssertFalse([request performWriteData:SSEData(@"trailing") error:&error], @"trailing data after the gzip stream must be refused");
@@ -114,18 +114,21 @@
 
         // Inflates to 8 MB — four times the whole budget — but never more than a
         // fraction of it at once, because the compressed input is fed in slices.
-        NSData* compressed = GZipCompress([NSMutableData dataWithLength:(8 * 1024 * 1024)]);
+        NSData *compressed = GZipCompress([NSMutableData dataWithLength:(8 * 1024 * 1024)]);
         XCTAssertNotNil(compressed);
 
         @autoreleasepool {
-            WSKFileRequest* request = OpenBodyRequest([WSKFileRequest class], @{@"Content-Encoding": @"gzip"});
-            NSError* error = nil;
+            WSKFileRequest *request = OpenBodyRequest([WSKFileRequest class], @{@"Content-Encoding": @"gzip"});
+            NSError *error = nil;
 
             for (NSUInteger offset = 0; offset < compressed.length; offset += 256) {
                 NSRange slice = NSMakeRange(offset, MIN((NSUInteger)256, compressed.length - offset));
                 XCTAssertTrue([request performWriteData:[compressed subdataWithRange:slice] error:&error],
                               @"inflating %lu MB through a %lu MB budget must succeed when only live buffers are charged (failed at offset %lu: %@)",
-                              (unsigned long)8, (unsigned long)(kTotal / (1024 * 1024)), (unsigned long)offset, error);
+                              (unsigned long)8,
+                              (unsigned long)(kTotal / (1024 * 1024)),
+                              (unsigned long)offset,
+                              error);
                 XCTAssertLessThanOrEqual(WSKReservedMemoryLength(), kTotal, @"reserved memory exceeded the ceiling");
             }
 
@@ -143,13 +146,13 @@
 // accepted; nesting beyond it is rejected (before it can recurse deeply and crash).
 - (void)testMultiPartRejectsDeeplyNestedMixed {
     // Within the cap: parses successfully.
-    WSKMultiPartFormRequest* shallow = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=top"});
-    NSError* error = nil;
+    WSKMultiPartFormRequest *shallow = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=top"});
+    NSError *error = nil;
     XCTAssertTrue([shallow performWriteData:NestedMultipartMixedBody(@"top", 2) error:&error], @"shallow nesting should parse: %@", error);
     XCTAssertTrue([shallow performClose:&error], @"shallow nesting should finish cleanly: %@", error);
 
     // Beyond the cap: rejected rather than recursing to the crash depth.
-    WSKMultiPartFormRequest* deep = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=top"});
+    WSKMultiPartFormRequest *deep = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=top"});
     XCTAssertFalse([deep performWriteData:NestedMultipartMixedBody(@"top", 20) error:&error], @"deeply nested multipart/mixed must be rejected");
 }
 
@@ -159,28 +162,28 @@
 // boundary the same bytes answered 500. The client chose which. The fifth pass fixed the
 // later-read half and this file recorded the case as closed; the same-read half was still open.
 - (void)testGZipTrailingDataIsRefusedRegardlessOfHowItIsSplit {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
-    __block NSString* received = nil;
+    WSKWebServer *server = [[WSKWebServer alloc] init];
+    __block NSString *received = nil;
     [server addHandlerForMethod:@"POST"
                            path:@"/data"
                    requestClass:[WSKDataRequest class]
-                   processBlock:^WSKResponse*(WSKDataRequest* request) {
+                   processBlock:^WSKResponse *(WSKDataRequest *request) {
                        received = [[NSString alloc] initWithData:request.data encoding:NSUTF8StringEncoding];
                        return [WSKDataResponse responseWithText:@"ok"];
                    }];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSData* first = GZipCompress([@"AAAAAAAAAAAAAAAA" dataUsingEncoding:NSUTF8StringEncoding]);
-    NSData* second = GZipCompress([@"BBBBBBBBBBBBBBBB" dataUsingEncoding:NSUTF8StringEncoding]);
-    NSMutableData* twoMembers = [first mutableCopy];
+    NSData *first = GZipCompress([@"AAAAAAAAAAAAAAAA" dataUsingEncoding:NSUTF8StringEncoding]);
+    NSData *second = GZipCompress([@"BBBBBBBBBBBBBBBB" dataUsingEncoding:NSUTF8StringEncoding]);
+    NSMutableData *twoMembers = [first mutableCopy];
     [twoMembers appendData:second];
 
-    NSData* (^request)(NSData*) = ^(NSData* body) {
-        NSString* head = [NSString stringWithFormat:@"POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Encoding: gzip\r\nContent-Type: text/plain\r\nContent-Length: %lu\r\n\r\n", (unsigned long)body.length];
-        NSMutableData* full = [[head dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+    NSData * (^request)(NSData *) = ^(NSData *body) {
+        NSString *head = [NSString stringWithFormat:@"POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Encoding: gzip\r\nContent-Type: text/plain\r\nContent-Length: %lu\r\n\r\n", (unsigned long)body.length];
+        NSMutableData *full = [[head dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
         [full appendData:body];
-        return (NSData*)full;
+        return (NSData *)full;
     };
 
     // A single well-formed member is the control: it must still be accepted and delivered whole.
@@ -190,11 +193,11 @@
 
     // Two members in one write: previously 200 with the second silently dropped.
     received = nil;
-    NSString* whole = SendRawDataRequest(server.port, request(twoMembers));
+    NSString *whole = SendRawDataRequest(server.port, request(twoMembers));
     XCTAssertFalse([whole hasPrefix:@"HTTP/1.1 200"], @"a concatenated second member was accepted and silently dropped: handler got %@", received);
 
     // And with trailing bytes that are not a member at all.
-    NSMutableData* withGarbage = [first mutableCopy];
+    NSMutableData *withGarbage = [first mutableCopy];
     [withGarbage appendBytes:"GARBAGE!" length:8];
     received = nil;
     XCTAssertFalse([SendRawDataRequest(server.port, request(withGarbage)) hasPrefix:@"HTTP/1.1 200"], @"trailing garbage after a gzip member was accepted");
@@ -211,19 +214,19 @@
 // NOTE: against the unfixed source this closes the test process's own stdin. Read the executed
 // count, not the failure count.
 - (void)testMalformedMultipartBoundaryDoesNotCloseDescriptorZero {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
 
-    WSKWebUploader* server = [[WSKWebUploader alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebUploader *server = [[WSKWebUploader alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     XCTAssertTrue(fcntl(0, F_GETFD) != -1, @"descriptor 0 should be open before the request");
 
-    NSString* body = @"--x\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\nv\r\n--x--\r\n";
-    for (NSString* contentType in @[ @"multipart/form-data",
-                                     @"multipart/form-data; boundary=",
-                                     @"multipart/form-data; boundary=\u00e9\u00e9\u00e9" ]) {
+    NSString *body = @"--x\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\nv\r\n--x--\r\n";
+    for (NSString *contentType in @[@"multipart/form-data",
+                                    @"multipart/form-data; boundary=",
+                                    @"multipart/form-data; boundary=\u00e9\u00e9\u00e9"]) {
         SendRawRequest(server.port, [NSString stringWithFormat:@"POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Type: %@\r\nContent-Length: %lu\r\n\r\n%@", contentType, (unsigned long)body.length, body]);
         XCTAssertTrue(fcntl(0, F_GETFD) != -1, @"\"%@\" closed descriptor 0", contentType);
     }
@@ -239,27 +242,27 @@
 // sizes. The ninth pass's own commit claimed the gzip verdict no longer depends on segmentation;
 // for valid bodies at these sizes it still did.
 - (void)testValidGZipBodyIsAcceptedWhateverItsInflatedSize {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     __block NSUInteger receivedLength = 0;
     [server addHandlerForMethod:@"POST"
                            path:@"/data"
                    requestClass:[WSKDataRequest class]
-                   processBlock:^WSKResponse*(WSKDataRequest* request) {
+                   processBlock:^WSKResponse *(WSKDataRequest *request) {
                        receivedLength = request.data.length;
                        return [WSKDataResponse responseWithText:@"ok"];
                    }];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     // Either side of the initial buffer size, and two doublings past it.
-    for (NSNumber* size in @[ @261120, @262144, @263168, @524288, @1048576 ]) {
+    for (NSNumber *size in @[@261120, @262144, @263168, @524288, @1048576]) {
         NSUInteger const length = size.unsignedIntegerValue;
-        NSMutableData* payload = [NSMutableData dataWithLength:length];
+        NSMutableData *payload = [NSMutableData dataWithLength:length];
         memset(payload.mutableBytes, 'Z', length);
-        NSData* body = GZipCompress(payload);
+        NSData *body = GZipCompress(payload);
 
-        NSString* head = [NSString stringWithFormat:@"POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Encoding: gzip\r\nContent-Type: application/octet-stream\r\nContent-Length: %lu\r\n\r\n", (unsigned long)body.length];
-        NSMutableData* whole = [[head dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+        NSString *head = [NSString stringWithFormat:@"POST /data HTTP/1.1\r\nHost: localhost\r\nContent-Encoding: gzip\r\nContent-Type: application/octet-stream\r\nContent-Length: %lu\r\n\r\n", (unsigned long)body.length];
+        NSMutableData *whole = [[head dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
         [whole appendData:body];
 
         receivedLength = 0;
@@ -269,7 +272,7 @@
         // The same bytes with the trailer in a later read must give the same answer — that
         // invariance is the whole point, and it has to hold for VALID bodies too.
         receivedLength = 0;
-        NSString* split = SendRawDataRequestSplit(server.port, whole, whole.length - 4);
+        NSString *split = SendRawDataRequestSplit(server.port, whole, whole.length - 4);
         XCTAssertTrue([split hasPrefix:@"HTTP/1.1 200"], @"a valid %lu-byte body was refused when its trailer arrived in a later read: %@", (unsigned long)length, [split substringToIndex:MIN((NSUInteger)40, split.length)]);
         XCTAssertEqual(receivedLength, length, @"the split send delivered the wrong length for %lu bytes", (unsigned long)length);
     }
@@ -288,24 +291,24 @@
 // "x-gzip" must be ACCEPTED and decoded rather than refused: RFC 9110 §8.4.1 makes it equivalent
 // to "gzip", so refusing it would swap a silent-corruption bug for an interop one.
 - (void)testUnsupportedContentEncodingIsRefusedRatherThanStored {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSData* const plain = [@"THE-REAL-PAYLOAD" dataUsingEncoding:NSUTF8StringEncoding];
-    NSData* const gzipped = GZipCompress(plain);
+    NSData *const plain = [@"THE-REAL-PAYLOAD" dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *const gzipped = GZipCompress(plain);
     XCTAssertNotNil(gzipped);
 
-    NSString* (^put)(NSString*, NSString*, NSData*) = ^(NSString* name, NSString* encoding, NSData* body) {
-        NSString* head = [NSString stringWithFormat:@"PUT /%@ HTTP/1.1\r\nHost: localhost\r\n%@Content-Length: %lu\r\n\r\n", name, encoding.length ? [NSString stringWithFormat:@"Content-Encoding: %@\r\n", encoding] : @"", (unsigned long)body.length];
-        NSMutableData* request = [[head dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+    NSString * (^put)(NSString *, NSString *, NSData *) = ^(NSString *name, NSString *encoding, NSData *body) {
+        NSString *head = [NSString stringWithFormat:@"PUT /%@ HTTP/1.1\r\nHost: localhost\r\n%@Content-Length: %lu\r\n\r\n", name, encoding.length ? [NSString stringWithFormat:@"Content-Encoding: %@\r\n", encoding] : @"", (unsigned long)body.length];
+        NSMutableData *request = [[head dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
         [request appendData:body];
         return SendRawDataRequest(server.port, request);
     };
-    NSData* (^stored)(NSString*) = ^(NSString* name) {
+    NSData * (^stored)(NSString *) = ^(NSString *name) {
         return [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:name]];
     };
 
@@ -320,8 +323,8 @@
     XCTAssertEqualObjects(stored(@"xgz.txt"), plain, @"x-gzip was not decoded");
 
     // Anything we cannot decode must be refused, and must leave nothing behind.
-    for (NSString* coding in @[ @"deflate", @"br", @"gzip, gzip", @"bogus" ]) {
-        NSString* reply = put(@"bad.txt", coding, plain);
+    for (NSString *coding in @[@"deflate", @"br", @"gzip, gzip", @"bogus"]) {
+        NSString *reply = put(@"bad.txt", coding, plain);
         XCTAssertTrue([reply hasPrefix:@"HTTP/1.1 415"], @"Content-Encoding: %@ should be refused: %@", coding, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
         XCTAssertFalse([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"bad.txt"]], @"Content-Encoding: %@ stored the encoded octets as the entity", coding);
     }
@@ -338,33 +341,33 @@
 // (malformed chunk framing, a corrupt gzip stream) and makes it give up on something that could (a
 // momentarily exhausted budget). Each of these now answers what it owes.
 - (void)testRequestBodyRefusalsAnswerTheirOwnStatus {
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addHandlerForMethod:@"POST"
                            path:@"/echo"
                    requestClass:[WSKDataRequest class]
-                   processBlock:^WSKResponse*(WSKRequest* request) {
+                   processBlock:^WSKResponse *(WSKRequest *request) {
                        return [WSKDataResponse responseWithText:@"OK"];
                    }];
     [server addHandlerForMethod:@"POST"
                            path:@"/form"
                    requestClass:[WSKMultiPartFormRequest class]
-                   processBlock:^WSKResponse*(WSKRequest* request) {
+                   processBlock:^WSKResponse *(WSKRequest *request) {
                        return [WSKDataResponse responseWithText:@"OK"];
                    }];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     // A chunk-size line that is not a hex number at all. The client's framing is wrong, so 400.
-    NSString* badChunk = SendRawRequest(server.port, @"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nabcd\r\n0\r\n\r\n");
+    NSString *badChunk = SendRawRequest(server.port, @"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nabcd\r\n0\r\n\r\n");
     XCTAssertTrue([badChunk hasPrefix:@"HTTP/1.1 400"], @"a malformed chunk length is the client's error: %@", [badChunk substringToIndex:MIN((NSUInteger)40, badChunk.length)]);
 
     // A gzip stream that satisfies its Content-Length but stops part-way through. Also the client's.
-    NSData* full = GZipCompress([NSMutableData dataWithLength:(64 * 1024)]);
+    NSData *full = GZipCompress([NSMutableData dataWithLength:(64 * 1024)]);
     XCTAssertGreaterThan(full.length, (NSUInteger)20);
-    NSData* prefix = [full subdataWithRange:NSMakeRange(0, 20)];
-    NSMutableData* truncated = [[[NSString stringWithFormat:@"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nContent-Encoding: gzip\r\nContent-Length: %lu\r\n\r\n", (unsigned long)prefix.length] dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
+    NSData *prefix = [full subdataWithRange:NSMakeRange(0, 20)];
+    NSMutableData *truncated = [[[NSString stringWithFormat:@"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nContent-Encoding: gzip\r\nContent-Length: %lu\r\n\r\n", (unsigned long)prefix.length] dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
     [truncated appendData:prefix];
-    NSString* truncatedReply = SendRawDataRequest(server.port, truncated);
+    NSString *truncatedReply = SendRawDataRequest(server.port, truncated);
     XCTAssertTrue([truncatedReply hasPrefix:@"HTTP/1.1 400"], @"a truncated gzip body is the client's error: %@", [truncatedReply substringToIndex:MIN((NSUInteger)40, truncatedReply.length)]);
 
     // A body larger than the in-memory cap is a size problem, so 413 — not "the server broke".
@@ -373,24 +376,24 @@
         WSKSetMemoryLimitsForTesting(0, 0, 0);
     }];
 
-    NSMutableString* big = [NSMutableString string];
+    NSMutableString *big = [NSMutableString string];
 
     while (big.length < 32 * 1024) {
         [big appendString:@"0123456789abcdef"];
     }
 
-    NSString* oversized = SendRawRequest(server.port, [NSString stringWithFormat:@"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)big.length, big]);
+    NSString *oversized = SendRawRequest(server.port, [NSString stringWithFormat:@"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)big.length, big]);
     XCTAssertTrue([oversized hasPrefix:@"HTTP/1.1 413"], @"an oversized body owes 413: %@", [oversized substringToIndex:MIN((NSUInteger)40, oversized.length)]);
 
     // A chunk whose DATA is not followed by CRLF. A different branch from the bad size line above,
     // seventeen lines away in the same loop, and it was the one left answering 500 — which is why
     // both spellings are asserted rather than trusting that one covers the class.
-    NSString* badTerminator = SendRawRequest(server.port, @"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nabcdXX\r\n0\r\n\r\n");
+    NSString *badTerminator = SendRawRequest(server.port, @"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nabcdXX\r\n0\r\n\r\n");
     XCTAssertTrue([badTerminator hasPrefix:@"HTTP/1.1 400"], @"a chunk not terminated by CRLF is the client's error: %@", [badTerminator substringToIndex:MIN((NSUInteger)40, badTerminator.length)]);
 
     // A multipart body with no usable boundary fails in -open:, whose error both readers used to
     // discard before aborting with a hardcoded 500.
-    NSString* noBoundary = SendRawRequest(server.port, @"POST /form HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data\r\nContent-Length: 4\r\n\r\nxxxx");
+    NSString *noBoundary = SendRawRequest(server.port, @"POST /form HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data\r\nContent-Length: 4\r\n\r\nxxxx");
     XCTAssertTrue([noBoundary hasPrefix:@"HTTP/1.1 400"], @"a multipart body with no boundary is malformed: %@", [noBoundary substringToIndex:MIN((NSUInteger)40, noBoundary.length)]);
 
     // The multipart parser fails for seven unrelated reasons through one `return NO`. Coding them
@@ -398,19 +401,19 @@
     // exhausted budget into 400, the status that says NEVER SEND THIS AGAIN. It is the same
     // mistake as answering 403 for ENOSPC, which this project fixed once already. A size cap must
     // read as a size problem.
-    NSMutableString* part = [NSMutableString stringWithString:@"--B\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\n"];
+    NSMutableString *part = [NSMutableString stringWithString:@"--B\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\n"];
 
     while (part.length < 32 * 1024) {
         [part appendString:@"0123456789abcdef"];
     }
 
     [part appendString:@"\r\n--B--\r\n"];
-    NSString* oversizedPart = SendRawRequest(server.port, [NSString stringWithFormat:@"POST /form HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data; boundary=B\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)part.length, part]);
+    NSString *oversizedPart = SendRawRequest(server.port, [NSString stringWithFormat:@"POST /form HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data; boundary=B\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)part.length, part]);
     XCTAssertTrue([oversizedPart hasPrefix:@"HTTP/1.1 413"], @"a multipart body over the size cap owes 413, not a permanent 400: %@", [oversizedPart substringToIndex:MIN((NSUInteger)40, oversizedPart.length)]);
 
     // And the half that must keep working: a body inside the cap is still served normally. A
     // status-mapping change is exactly where an over-refusal would hide.
-    NSString* fine = SendRawRequest(server.port, @"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nContent-Length: 5\r\n\r\nhello");
+    NSString *fine = SendRawRequest(server.port, @"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/octet-stream\r\nContent-Length: 5\r\n\r\nhello");
     XCTAssertTrue([fine hasPrefix:@"HTTP/1.1 200"], @"an ordinary body is unaffected: %@", [fine substringToIndex:MIN((NSUInteger)40, fine.length)]);
     XCTAssertTrue([fine hasSuffix:@"OK"], @"…and reaches the handler");
 
@@ -422,18 +425,18 @@
 // individually-legal argument parts grew without limit (200 MB of parts took the process
 // to 626 MB) until the device killed the app.
 - (void)testMultiPartRejectsUnboundedArgumentAccumulation {
-    WSKMultiPartFormRequest* request = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
+    WSKMultiPartFormRequest *request = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
     XCTAssertTrue([request hasBody]);
 
-    NSMutableData* filler = [NSMutableData dataWithLength:(512 * 1024)];
+    NSMutableData *filler = [NSMutableData dataWithLength:(512 * 1024)];
     memset(filler.mutableBytes, 'A', filler.length);
 
-    NSError* error = nil;
+    NSError *error = nil;
     BOOL rejected = NO;
 
     // 64 x 512 KB is 32 MB of argument data, twice the in-memory cap.
     for (int i = 0; i < 64; i++) {
-        NSMutableData* part = [NSMutableData data];
+        NSMutableData *part = [NSMutableData data];
         [part appendData:SSEData([NSString stringWithFormat:@"--X\r\nContent-Disposition: form-data; name=\"f%i\"\r\n\r\n", i])];
         [part appendData:filler];
         [part appendData:SSEData(@"\r\n")];
@@ -451,28 +454,28 @@
 // parsed out of a part's headers are retained per part too. A body of parts each carrying a
 // multi-megabyte name=".…" therefore grew memory without limit while the budget read zero.
 - (void)testMultiPartRejectsOversizedPartHeaders {
-    WSKMultiPartFormRequest* request = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
+    WSKMultiPartFormRequest *request = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
 
-    NSMutableString* hugeName = [NSMutableString string];
+    NSMutableString *hugeName = [NSMutableString string];
     while (hugeName.length < (64 * 1024)) {
         [hugeName appendString:@"AAAAAAAAAAAAAAAA"];
     }
 
-    NSMutableData* part = [NSMutableData data];
+    NSMutableData *part = [NSMutableData data];
     [part appendData:SSEData([NSString stringWithFormat:@"--X\r\nContent-Disposition: form-data; name=\"%@\"\r\n\r\n\r\n", hugeName])];
 
-    NSError* error = nil;
+    NSError *error = nil;
     XCTAssertFalse([request performWriteData:part error:&error], @"a part whose header block exceeds the cap should be rejected");
 }
 
 // A part whose Content-Disposition carries no "name" is malformed client input, not an
 // unreachable state: it must fail the parse rather than abort the process.
 - (void)testMultiPartRejectsPartWithoutControlNameWithoutAborting {
-    WSKMultiPartFormRequest* request = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
-    NSMutableData* body = [NSMutableData data];
+    WSKMultiPartFormRequest *request = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
+    NSMutableData *body = [NSMutableData data];
     [body appendData:SSEData(@"--X\r\nContent-Disposition: form-data; filename=\"a.txt\"\r\n\r\npayload\r\n--X--\r\n")];
 
-    NSError* error = nil;
+    NSError *error = nil;
     XCTAssertFalse([request performWriteData:body error:&error], @"a part with no control name should be rejected");
 }
 
@@ -493,13 +496,13 @@
 
     @autoreleasepool {
         // More concurrent bodies than the total budget can hold at once.
-        NSMutableArray<WSKDataRequest*>* requests = [NSMutableArray array];
-        NSMutableData* payload = [NSMutableData dataWithLength:(32 * 1024)];
+        NSMutableArray<WSKDataRequest *> *requests = [NSMutableArray array];
+        NSMutableData *payload = [NSMutableData dataWithLength:(32 * 1024)];
 
         for (int i = 0; i < 16; i++) {
-            WSKDataRequest* request = OpenBodyRequest([WSKDataRequest class], @{});
+            WSKDataRequest *request = OpenBodyRequest([WSKDataRequest class], @{});
             [requests addObject:request];
-            NSError* error = nil;
+            NSError *error = nil;
 
             if ([request performWriteData:payload error:&error]) {
                 accepted += 1;
@@ -523,8 +526,8 @@
 // reads "Executed 0 tests, with 0 failures". Read the executed count, never the failure count --
 // four of batch A's six fixes had exactly this signature.
 - (void)testDataRequestTextAndJSONReturnNilRatherThanAbortingOnTheDocumentedCase {
-    NSDictionary* octetStream = @{@"Content-Type" : @"application/octet-stream", @"Content-Length" : @"4"};
-    WSKDataRequest* binary = OpenBodyRequest([WSKDataRequest class], octetStream);
+    NSDictionary *octetStream = @{@"Content-Type": @"application/octet-stream", @"Content-Length": @"4"};
+    WSKDataRequest *binary = OpenBodyRequest([WSKDataRequest class], octetStream);
     XCTAssertNotNil(binary);
     XCTAssertTrue([binary writeData:UTF8Data(@"data") error:NULL]);
     XCTAssertTrue([binary close:NULL]);
@@ -535,7 +538,7 @@
     XCTAssertNil(binary.jsonObject, @"-jsonObject must honour its nullable declaration for a non-JSON content type");
 
     // A request with NO Content-Type at all -- the shape a bare POST produces.
-    WSKDataRequest* untyped = OpenBodyRequest([WSKDataRequest class], @{@"Content-Length" : @"2"});
+    WSKDataRequest *untyped = OpenBodyRequest([WSKDataRequest class], @{@"Content-Length": @"2"});
 
     if (untyped) {
         XCTAssertTrue([untyped writeData:UTF8Data(@"hi") error:NULL]);
@@ -545,15 +548,15 @@
     }
 
     // The positive half: the cases that MUST keep working, so the fix cannot be "always return nil".
-    NSDictionary* jsonHeaders = @{@"Content-Type" : @"application/json", @"Content-Length" : @"13"};
-    WSKDataRequest* json = OpenBodyRequest([WSKDataRequest class], jsonHeaders);
+    NSDictionary *jsonHeaders = @{@"Content-Type": @"application/json", @"Content-Length": @"13"};
+    WSKDataRequest *json = OpenBodyRequest([WSKDataRequest class], jsonHeaders);
     XCTAssertNotNil(json);
     XCTAssertTrue([json writeData:UTF8Data(@"{\"ok\":true}xx") error:NULL]);
     XCTAssertTrue([json close:NULL]);
     XCTAssertNil(json.jsonObject, @"malformed JSON is also a documented nil, not an abort");
 
-    NSDictionary* textHeaders = @{@"Content-Type" : @"text/plain; charset=utf-8", @"Content-Length" : @"5"};
-    WSKDataRequest* text = OpenBodyRequest([WSKDataRequest class], textHeaders);
+    NSDictionary *textHeaders = @{@"Content-Type": @"text/plain; charset=utf-8", @"Content-Length": @"5"};
+    WSKDataRequest *text = OpenBodyRequest([WSKDataRequest class], textHeaders);
     XCTAssertNotNil(text);
     XCTAssertTrue([text writeData:UTF8Data(@"hello") error:NULL]);
     XCTAssertTrue([text close:NULL]);
@@ -566,18 +569,18 @@
 // locally). An empty VALUE, by contrast, is an ordinary blank form field and must parse to
 // an argument holding empty data, not be confused with the nameless case.
 - (void)testMultipartRefusesANamelessPartAndAcceptsAnEmptyValue {
-    NSError* error = nil;
+    NSError *error = nil;
 
-    WSKMultiPartFormRequest* nameless = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
-    NSData* namelessBody = SSEData(@"--X\r\nContent-Disposition: form-data\r\n\r\nvalue\r\n--X--\r\n");
+    WSKMultiPartFormRequest *nameless = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
+    NSData *namelessBody = SSEData(@"--X\r\nContent-Disposition: form-data\r\n\r\nvalue\r\n--X--\r\n");
     BOOL const namelessAccepted = [nameless performWriteData:namelessBody error:&error] && [nameless performClose:&error];
     XCTAssertFalse(namelessAccepted, @"a part with no control name must fail the parse");
 
-    WSKMultiPartFormRequest* blank = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
-    NSData* blankBody = SSEData(@"--X\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\n\r\n--X--\r\n");
+    WSKMultiPartFormRequest *blank = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
+    NSData *blankBody = SSEData(@"--X\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\n\r\n--X--\r\n");
     XCTAssertTrue([blank performWriteData:blankBody error:&error], @"an empty value is an ordinary blank field: %@", error);
     XCTAssertTrue([blank performClose:&error], @"%@", error);
-    WSKMultiPartArgument* argument = [blank firstArgumentForControlName:@"note"];
+    WSKMultiPartArgument *argument = [blank firstArgumentForControlName:@"note"];
     XCTAssertNotNil(argument, @"the blank field must still be delivered");
     XCTAssertEqual(argument.data.length, (NSUInteger)0, @"a blank field's value is empty data");
 }
@@ -587,11 +590,11 @@
 // appended byte rescanned all of it, which is quadratic and reachable by any client that
 // segments the body. The cap must be judged on the bytes buffered, terminator or not.
 - (void)testMultiPartRefusesAnUnterminatedPartHeaderBlockAtTheHeaderCap {
-    WSKMultiPartFormRequest* request = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
-    NSError* error = nil;
+    WSKMultiPartFormRequest *request = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
+    NSError *error = nil;
     XCTAssertTrue([request performWriteData:SSEData(@"--X\r\n") error:&error]);
 
-    NSData* one = SSEData(@"a");  // a header block that never reaches its blank line
+    NSData *one = SSEData(@"a");  // a header block that never reaches its blank line
     NSUInteger accepted = 0;
     while (accepted < 9000 && [request performWriteData:one error:&error]) {
         accepted++;
@@ -607,17 +610,17 @@
 // re-examining. The equality check proves a boundary straddling every append edge is still
 // found and the value arrives whole.
 - (void)testMultiPartArgumentDeliveredOneByteAtATimeCostsLinearTime {
-    WSKMultiPartFormRequest* request = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
-    NSError* error = nil;
+    WSKMultiPartFormRequest *request = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
+    NSError *error = nil;
     XCTAssertTrue([request performWriteData:SSEData(@"--X\r\nContent-Disposition: form-data; name=\"big\"\r\n\r\n") error:&error]);
 
-    NSMutableData* value = [NSMutableData dataWithLength:(64 * 1024)];
+    NSMutableData *value = [NSMutableData dataWithLength:(64 * 1024)];
     memset(value.mutableBytes, 'v', value.length);
-    NSMutableData* rest = [NSMutableData dataWithData:value];
+    NSMutableData *rest = [NSMutableData dataWithData:value];
     [rest appendData:SSEData(@"\r\n--X--\r\n")];
 
     NSTimeInterval cpuBefore = ProcessCPUSeconds();
-    const unsigned char* bytes = rest.bytes;
+    const unsigned char *bytes = rest.bytes;
     for (NSUInteger i = 0; i < rest.length; i++) {
         if (![request performWriteData:[NSData dataWithBytes:(bytes + i) length:1] error:&error]) {
             XCTFail(@"write %lu refused: %@", (unsigned long)i, error);
@@ -627,7 +630,7 @@
     XCTAssertTrue([request performClose:&error], @"%@", error);
     NSTimeInterval cpuSpent = ProcessCPUSeconds() - cpuBefore;
 
-    WSKMultiPartArgument* argument = [request firstArgumentForControlName:@"big"];
+    WSKMultiPartArgument *argument = [request firstArgumentForControlName:@"big"];
     XCTAssertEqualObjects(argument.data, value, @"the value must arrive whole and exact");
     XCTAssertLessThan(cpuSpent, 1.0, @"a %lu byte value written one byte at a time cost %.2f s of CPU: the parser is not linear", (unsigned long)value.length, cpuSpent);
 }
@@ -642,9 +645,9 @@
         WSKSetMemoryLimitsForTesting(0, 0, 0);
     }];
 
-    WSKMultiPartFormRequest* request = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
-    NSError* error = nil;
-    NSMutableData* junk = [NSMutableData dataWithLength:(64 * 1024)];
+    WSKMultiPartFormRequest *request = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
+    NSError *error = nil;
+    NSMutableData *junk = [NSMutableData dataWithLength:(64 * 1024)];
     memset(junk.mutableBytes, 'z', junk.length);
     for (NSUInteger written = 0; written < 4 * 1024 * 1024; written += junk.length) {  // four times the cap
         if (![request performWriteData:junk error:&error]) {
@@ -668,18 +671,18 @@
         WSKSetMemoryLimitsForTesting(0, 0, 0);
     }];
 
-    WSKMultiPartFormRequest* request = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
-    NSError* error = nil;
+    WSKMultiPartFormRequest *request = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
+    NSError *error = nil;
     XCTAssertTrue([request performWriteData:SSEData(@"--X\r\nContent-Disposition: form-data; name=\"f\"; filename=\"big.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n") error:&error]);
 
-    NSMutableData* write = [NSMutableData dataWithLength:(3 * 1024 * 1024)];  // three times the cap, in ONE write
+    NSMutableData *write = [NSMutableData dataWithLength:(3 * 1024 * 1024)];  // three times the cap, in ONE write
     [write appendData:SSEData(@"\r\n--X--\r\n")];
     XCTAssertTrue([request performWriteData:write error:&error], @"a single write of file content larger than the cap must drain to disk, not be refused: %@", error);
     XCTAssertTrue([request performClose:&error], @"%@", error);
 
-    WSKMultiPartFile* file = [request firstFileForControlName:@"f"];
+    WSKMultiPartFile *file = [request firstFileForControlName:@"f"];
     XCTAssertNotNil(file);
-    NSDictionary* attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:file.temporaryPath error:&error];
+    NSDictionary *attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:file.temporaryPath error:&error];
     XCTAssertEqual(attributes.fileSize, (unsigned long long)(3 * 1024 * 1024), @"the file part must land whole (%@)", error);
 }
 

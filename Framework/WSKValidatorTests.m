@@ -17,9 +17,9 @@
 // build's bytes spliced onto the old one's prefix), which is the exact failure the If-Range work
 // exists to prevent, arriving through the strong validator rather than the weak one.
 - (void)testETagChangesWhenContentChangesUnderAPreservedTimestamp {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* root = MakeTempDirectory();
-    NSString* path = [root stringByAppendingPathComponent:@"build.bin"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *root = MakeTempDirectory();
+    NSString *path = [root stringByAppendingPathComponent:@"build.bin"];
 
     XCTAssertTrue([[@"" stringByPaddingToLength:900 withString:@"A" startingAtIndex:0] writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
     struct timeval times[2];
@@ -28,40 +28,40 @@
     times[1] = times[0];
     XCTAssertEqual(utimes(path.fileSystemRepresentation, times), 0);
 
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addGETHandlerForBasePath:@"/f/" directoryPath:root indexFilename:nil cacheAge:0 allowRangeRequests:YES];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* (^etagOf)(NSString*) = ^(NSString* reply) {
-        for (NSString* line in [reply componentsSeparatedByString:@"\r\n"]) {
+    NSString * (^etagOf)(NSString *) = ^(NSString *reply) {
+        for (NSString *line in [reply componentsSeparatedByString:@"\r\n"]) {
             if ([line hasPrefix:@"Etag: "]) {
                 return [line substringFromIndex:6];
             }
         }
-        return (NSString*)nil;
+        return (NSString *)nil;
     };
 
-    NSString* oldETag = etagOf(SendRawRequest(server.port, @"HEAD /f/build.bin HTTP/1.1\r\nHost: localhost\r\n\r\n"));
+    NSString *oldETag = etagOf(SendRawRequest(server.port, @"HEAD /f/build.bin HTTP/1.1\r\nHost: localhost\r\n\r\n"));
     XCTAssertNotNil(oldETag);
 
     // Same inode, different content and length, timestamp restored to the nanosecond.
     XCTAssertTrue([[@"" stringByPaddingToLength:916 withString:@"B" startingAtIndex:0] writeToFile:path atomically:NO encoding:NSUTF8StringEncoding error:NULL]);
     XCTAssertEqual(utimes(path.fileSystemRepresentation, times), 0);
 
-    NSString* newETag = etagOf(SendRawRequest(server.port, @"HEAD /f/build.bin HTTP/1.1\r\nHost: localhost\r\n\r\n"));
+    NSString *newETag = etagOf(SendRawRequest(server.port, @"HEAD /f/build.bin HTTP/1.1\r\nHost: localhost\r\n\r\n"));
     XCTAssertNotNil(newETag);
     XCTAssertNotEqualObjects(oldETag, newETag, @"the entity tag did not move when the content did");
 
-    NSString* revalidated = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /f/build.bin HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: %@\r\n\r\n", oldETag]);
+    NSString *revalidated = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /f/build.bin HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: %@\r\n\r\n", oldETag]);
     XCTAssertFalse([revalidated hasPrefix:@"HTTP/1.1 304"], @"a stale validator was told Not Modified: %@", [revalidated substringToIndex:MIN((NSUInteger)40, revalidated.length)]);
 
-    NSString* resumed = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /f/build.bin HTTP/1.1\r\nHost: localhost\r\nRange: bytes=100-199\r\nIf-Range: %@\r\n\r\n", oldETag]);
+    NSString *resumed = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /f/build.bin HTTP/1.1\r\nHost: localhost\r\nRange: bytes=100-199\r\nIf-Range: %@\r\n\r\n", oldETag]);
     XCTAssertFalse([resumed hasPrefix:@"HTTP/1.1 206"], @"a range was served against a changed representation: %@", [resumed substringToIndex:MIN((NSUInteger)40, resumed.length)]);
 
     // Revalidating with the CURRENT tag must still produce a cheap 304, or this has simply
     // disabled caching.
-    NSString* fresh = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /f/build.bin HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: %@\r\n\r\n", newETag]);
+    NSString *fresh = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /f/build.bin HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: %@\r\n\r\n", newETag]);
     XCTAssertTrue([fresh hasPrefix:@"HTTP/1.1 304"], @"an up-to-date validator no longer revalidates: %@", [fresh substringToIndex:MIN((NSUInteger)40, fresh.length)]);
 
     [server stop];
@@ -73,41 +73,41 @@
 // "only if it has not changed since <date the file is newer than>" had its resource destroyed and
 // was told the method succeeded.
 - (void)testDAVIfUnmodifiedSinceIsEnforcedBeforeTheWrite {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* target = [dir stringByAppendingPathComponent:@"f.txt"];
-    NSString* stale = @"If-Unmodified-Since: Thu, 01 Jan 1970 00:00:00 GMT\r\n";
+    NSString *target = [dir stringByAppendingPathComponent:@"f.txt"];
+    NSString *stale = @"If-Unmodified-Since: Thu, 01 Jan 1970 00:00:00 GMT\r\n";
     void (^rebuild)(void) = ^{
         XCTAssertTrue([@"ORIGINAL" writeToFile:target atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
     };
-    NSString* (^contents)(void) = ^{
+    NSString * (^contents)(void) = ^{
         return [NSString stringWithContentsOfFile:target encoding:NSUTF8StringEncoding error:NULL];
     };
 
     rebuild();
-    NSString* put = SendRawRequest(server.port, [NSString stringWithFormat:@"PUT /f.txt HTTP/1.1\r\nHost: localhost\r\n%@Content-Length: 3\r\n\r\nNEW", stale]);
+    NSString *put = SendRawRequest(server.port, [NSString stringWithFormat:@"PUT /f.txt HTTP/1.1\r\nHost: localhost\r\n%@Content-Length: 3\r\n\r\nNEW", stale]);
     XCTAssertTrue([put hasPrefix:@"HTTP/1.1 412"], @"a stale If-Unmodified-Since should refuse a PUT: %@", [put substringToIndex:MIN((NSUInteger)40, put.length)]);
     XCTAssertEqualObjects(contents(), @"ORIGINAL", @"the PUT happened despite a failed If-Unmodified-Since");
 
     rebuild();
-    NSString* deleted = SendRawRequest(server.port, [NSString stringWithFormat:@"DELETE /f.txt HTTP/1.1\r\nHost: localhost\r\n%@\r\n", stale]);
+    NSString *deleted = SendRawRequest(server.port, [NSString stringWithFormat:@"DELETE /f.txt HTTP/1.1\r\nHost: localhost\r\n%@\r\n", stale]);
     XCTAssertTrue([deleted hasPrefix:@"HTTP/1.1 412"], @"a stale If-Unmodified-Since should refuse a DELETE: %@", [deleted substringToIndex:MIN((NSUInteger)40, deleted.length)]);
     XCTAssertTrue([fm fileExistsAtPath:target], @"the DELETE happened despite a failed If-Unmodified-Since");
 
     rebuild();
-    NSString* moved = SendRawRequest(server.port, [NSString stringWithFormat:@"MOVE /f.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /moved.txt\r\n%@\r\n", stale]);
+    NSString *moved = SendRawRequest(server.port, [NSString stringWithFormat:@"MOVE /f.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /moved.txt\r\n%@\r\n", stale]);
     XCTAssertTrue([moved hasPrefix:@"HTTP/1.1 412"], @"a stale If-Unmodified-Since should refuse a MOVE: %@", [moved substringToIndex:MIN((NSUInteger)40, moved.length)]);
     XCTAssertTrue([fm fileExistsAtPath:target], @"the MOVE happened despite a failed If-Unmodified-Since");
 
     // What must keep working: a date the file is NOT newer than, and no precondition at all.
     rebuild();
-    NSString* future = @"If-Unmodified-Since: Sat, 01 Jan 2050 00:00:00 GMT\r\n";
-    NSString* allowed = SendRawRequest(server.port, [NSString stringWithFormat:@"PUT /f.txt HTTP/1.1\r\nHost: localhost\r\n%@Content-Length: 3\r\n\r\nNEW", future]);
+    NSString *future = @"If-Unmodified-Since: Sat, 01 Jan 2050 00:00:00 GMT\r\n";
+    NSString *allowed = SendRawRequest(server.port, [NSString stringWithFormat:@"PUT /f.txt HTTP/1.1\r\nHost: localhost\r\n%@Content-Length: 3\r\n\r\nNEW", future]);
     XCTAssertTrue([allowed hasPrefix:@"HTTP/1.1 204"], @"a satisfied If-Unmodified-Since should be honoured: %@", [allowed substringToIndex:MIN((NSUInteger)40, allowed.length)]);
     XCTAssertEqualObjects(contents(), @"NEW", @"a satisfied If-Unmodified-Since did not write");
 
@@ -130,56 +130,56 @@
 // MOVE and COPY — rather than only for PUT where it was found, because "closed at one of the
 // sites the rule applies to" is this codebase's most reliable defect shape.
 - (void)testDAVPreconditionsAreEnforcedBeforeTheWrite {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
 
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* target = [dir stringByAppendingPathComponent:@"f.txt"];
+    NSString *target = [dir stringByAppendingPathComponent:@"f.txt"];
     XCTAssertTrue([@"ORIGINAL" writeToFile:target atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
     // The tag the client legitimately holds, taken from the server's own GET.
-    NSString* get = SendRawRequest(server.port, @"GET /f.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *get = SendRawRequest(server.port, @"GET /f.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
     // CFHTTPMessage normalizes the field name, so it goes out as "Etag" — match it the way the
     // wire defines it, case-insensitively, rather than the way the source spells it.
     NSRange tagStart = [get rangeOfString:@"Etag: " options:NSCaseInsensitiveSearch];
     XCTAssertNotEqual(tagStart.location, (NSUInteger)NSNotFound, @"the server did not send an ETag: %@", get);
-    NSString* rest = [get substringFromIndex:NSMaxRange(tagStart)];
-    NSString* eTag = [rest substringToIndex:[rest rangeOfString:@"\r\n"].location];
+    NSString *rest = [get substringFromIndex:NSMaxRange(tagStart)];
+    NSString *eTag = [rest substringToIndex:[rest rangeOfString:@"\r\n"].location];
     XCTAssertTrue(eTag.length > 2, @"unexpected ETag %@", eTag);
 
-    NSString* (^put)(NSString*, NSString*) = ^(NSString* name, NSString* precondition) {
-        NSString* body = @"REPLACEMENT";
-        NSString* head = [NSString stringWithFormat:@"PUT /%@ HTTP/1.1\r\nHost: localhost\r\n%@Content-Length: %lu\r\n\r\n%@", name, precondition, (unsigned long)body.length, body];
+    NSString * (^put)(NSString *, NSString *) = ^(NSString *name, NSString *precondition) {
+        NSString *body = @"REPLACEMENT";
+        NSString *head = [NSString stringWithFormat:@"PUT /%@ HTTP/1.1\r\nHost: localhost\r\n%@Content-Length: %lu\r\n\r\n%@", name, precondition, (unsigned long)body.length, body];
         return SendRawRequest(server.port, head);
     };
-    NSString* (^contents)(void) = ^{
+    NSString * (^contents)(void) = ^{
         return [NSString stringWithContentsOfFile:target encoding:NSUTF8StringEncoding error:NULL];
     };
 
     // A stale If-Match must refuse and must not write.
-    NSString* stale = put(@"f.txt", @"If-Match: \"0/0/0/0\"\r\n");
+    NSString *stale = put(@"f.txt", @"If-Match: \"0/0/0/0\"\r\n");
     XCTAssertTrue([stale hasPrefix:@"HTTP/1.1 412"], @"a stale If-Match should be refused: %@", [stale substringToIndex:MIN((NSUInteger)40, stale.length)]);
     XCTAssertEqualObjects(contents(), @"ORIGINAL", @"the write happened despite a failed If-Match");
 
     // If-None-Match: * means "only if it does not exist".
-    NSString* exists = put(@"f.txt", @"If-None-Match: *\r\n");
+    NSString *exists = put(@"f.txt", @"If-None-Match: *\r\n");
     XCTAssertTrue([exists hasPrefix:@"HTTP/1.1 412"], @"If-None-Match: * against an existing resource should be refused: %@", [exists substringToIndex:MIN((NSUInteger)40, exists.length)]);
     XCTAssertEqualObjects(contents(), @"ORIGINAL", @"the write happened despite If-None-Match: *");
 
     // DELETE, MOVE and COPY carry the same guarantee.
-    NSString* deleted = SendRawRequest(server.port, @"DELETE /f.txt HTTP/1.1\r\nHost: localhost\r\nIf-Match: \"0/0/0/0\"\r\n\r\n");
+    NSString *deleted = SendRawRequest(server.port, @"DELETE /f.txt HTTP/1.1\r\nHost: localhost\r\nIf-Match: \"0/0/0/0\"\r\n\r\n");
     XCTAssertTrue([deleted hasPrefix:@"HTTP/1.1 412"], @"a stale If-Match should refuse a DELETE: %@", [deleted substringToIndex:MIN((NSUInteger)40, deleted.length)]);
     XCTAssertTrue([fm fileExistsAtPath:target], @"the delete happened despite a failed If-Match");
 
-    NSString* moved = SendRawRequest(server.port, @"MOVE /f.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /moved.txt\r\nIf-Match: \"0/0/0/0\"\r\n\r\n");
+    NSString *moved = SendRawRequest(server.port, @"MOVE /f.txt HTTP/1.1\r\nHost: localhost\r\nDestination: /moved.txt\r\nIf-Match: \"0/0/0/0\"\r\n\r\n");
     XCTAssertTrue([moved hasPrefix:@"HTTP/1.1 412"], @"a stale If-Match should refuse a MOVE: %@", [moved substringToIndex:MIN((NSUInteger)40, moved.length)]);
     XCTAssertTrue([fm fileExistsAtPath:target], @"the move happened despite a failed If-Match");
 
     // What must keep working: the matching tag, and the absence of any precondition at all.
-    NSString* matching = put(@"f.txt", [NSString stringWithFormat:@"If-Match: %@\r\n", eTag]);
+    NSString *matching = put(@"f.txt", [NSString stringWithFormat:@"If-Match: %@\r\n", eTag]);
     XCTAssertTrue([matching hasPrefix:@"HTTP/1.1 204"], @"a matching If-Match should be honoured: %@", [matching substringToIndex:MIN((NSUInteger)40, matching.length)]);
     XCTAssertEqualObjects(contents(), @"REPLACEMENT", @"a matching If-Match did not write");
 
@@ -195,25 +195,25 @@
 // recorded as refusing, and any token merely containing the letters counted. The property is
 // public API that a host app is invited to gate compression on, so it has to mean what it says.
 - (void)testAcceptEncodingIsParsedAsTokensWithQualityValues {
-    NSDictionary<NSString*, NSNumber*>* const cases = @{
-        @"gzip" : @YES,
-        @"GZIP" : @YES,             // Tokens are case-insensitive
-        @"x-gzip" : @YES,           // RFC 9110 §8.4.1 synonym
-        @"*" : @YES,                // A wildcard permits it
-        @"deflate, gzip" : @YES,
-        @"gzip;q=0.5" : @YES,
-        @"gzip;q=0" : @NO,          // Explicitly not acceptable
-        @"gzip;q=0.0" : @NO,
-        @"*;q=0" : @NO,
-        @"deflate" : @NO,
-        @"xgzipy" : @NO,            // Not a gzip token at all
-        @"identity" : @NO,
+    NSDictionary<NSString *, NSNumber *> *const cases = @{
+        @"gzip": @YES,
+        @"GZIP": @YES,    // Tokens are case-insensitive
+        @"x-gzip": @YES,  // RFC 9110 §8.4.1 synonym
+        @"*": @YES,       // A wildcard permits it
+        @"deflate, gzip": @YES,
+        @"gzip;q=0.5": @YES,
+        @"gzip;q=0": @NO,  // Explicitly not acceptable
+        @"gzip;q=0.0": @NO,
+        @"*;q=0": @NO,
+        @"deflate": @NO,
+        @"xgzipy": @NO,  // Not a gzip token at all
+        @"identity": @NO,
     };
 
-    for (NSString* header in cases) {
-        WSKRequest* request = [[WSKRequest alloc] initWithMethod:@"GET"
+    for (NSString *header in cases) {
+        WSKRequest *request = [[WSKRequest alloc] initWithMethod:@"GET"
                                                              url:LiteralURL(@"http://localhost/")
-                                                         headers:@{@"Accept-Encoding" : header}
+                                                         headers:@{@"Accept-Encoding": header}
                                                             path:@"/"
                                                            query:@{}];
         XCTAssertNotNil(request, @"header %@ should still build a request", header);
@@ -221,7 +221,7 @@
     }
 
     // No header at all is not an acceptance.
-    WSKRequest* bare = [[WSKRequest alloc] initWithMethod:@"GET" url:LiteralURL(@"http://localhost/") headers:@{} path:@"/" query:@{}];
+    WSKRequest *bare = [[WSKRequest alloc] initWithMethod:@"GET" url:LiteralURL(@"http://localhost/") headers:@{} path:@"/" query:@{}];
     XCTAssertFalse(bare.acceptsGzipContentEncoding, @"an absent Accept-Encoding is not an acceptance");
 }
 
@@ -230,29 +230,29 @@
 // whenever the replacement's mtime was not strictly newer — and the client then stores the
 // old body under the new ETag, so the stale copy is pinned for good.
 - (void)testStaleETagIsNotValidatedByAnOlderModificationDate {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* root = MakeTempDirectory();
-    NSString* path = [root stringByAppendingPathComponent:@"f.txt"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *root = MakeTempDirectory();
+    NSString *path = [root stringByAppendingPathComponent:@"f.txt"];
     XCTAssertTrue([@"ORIGINAL" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addGETHandlerForBasePath:@"/" directoryPath:root indexFilename:nil cacheAge:0 allowRangeRequests:YES];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* first = SendRawRequest(server.port, @"GET /f.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *first = SendRawRequest(server.port, @"GET /f.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertTrue([first containsString:@"200"], @"%@", first);
 
     // Replace the contents and give the file an *older* mtime, the case that made the date
     // comparison validate. The ETag changes because the inode/mtime do.
     XCTAssertTrue([@"REPLACED" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
-    NSDate* old = [NSDate dateWithTimeIntervalSince1970:1000000];
-    XCTAssertTrue([fm setAttributes:@{NSFileModificationDate : old} ofItemAtPath:path error:NULL]);
+    NSDate *old = [NSDate dateWithTimeIntervalSince1970:1000000];
+    XCTAssertTrue([fm setAttributes:@{NSFileModificationDate: old} ofItemAtPath:path error:NULL]);
 
     // A revalidation quoting the ETag of the *first* version, plus a recent date.
-    NSString* reply = SendRawRequest(server.port, @"GET /f.txt HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: \"1/1/1\"\r\nIf-Modified-Since: Thu, 01 Jan 2099 00:00:00 GMT\r\n\r\n");
+    NSString *reply = SendRawRequest(server.port, @"GET /f.txt HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: \"1/1/1\"\r\nIf-Modified-Since: Thu, 01 Jan 2099 00:00:00 GMT\r\n\r\n");
     XCTAssertNotNil(reply);
-    XCTAssertFalse([reply containsString:@"304"], @"a stale ETag must not be validated by the date: %@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+    XCTAssertFalse(ReplyHasStatus(reply, 304), @"a stale ETag must not be validated by the date: %@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
     XCTAssertTrue([reply containsString:@"REPLACED"], @"the new contents must be served: %@", reply);
 
     [server stop];
@@ -272,21 +272,21 @@
 // (Tests/WebDAV-Finder/059), so refusing outright turns every Finder resume into a full
 // re-download.
 - (void)testIfRangeDateIsHonouredOnlyWhenTheTimestampIsStrong {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* root = MakeTempDirectory();
-    NSString* path = [root stringByAppendingPathComponent:@"build.bin"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *root = MakeTempDirectory();
+    NSString *path = [root stringByAppendingPathComponent:@"build.bin"];
 
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addGETHandlerForBasePath:@"/" directoryPath:root indexFilename:nil cacheAge:0 allowRangeRequests:YES];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     // (a) Settled file: the timestamp is at least a second old, so it is strong and a resume
     // must still work. This is the Finder case.
     XCTAssertTrue([@"AAAAAAAAAAAAAAAAAAAA" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
-    NSDate* settled = [NSDate dateWithTimeIntervalSince1970:1400000000];
-    XCTAssertTrue([fm setAttributes:@{NSFileModificationDate : settled} ofItemAtPath:path error:NULL]);
-    NSString* settledRequest = [NSString stringWithFormat:@"GET /build.bin HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-4\r\nIf-Range: %@\r\n\r\n", WSKFormatRFC822(settled)];
+    NSDate *settled = [NSDate dateWithTimeIntervalSince1970:1400000000];
+    XCTAssertTrue([fm setAttributes:@{NSFileModificationDate: settled} ofItemAtPath:path error:NULL]);
+    NSString *settledRequest = [NSString stringWithFormat:@"GET /build.bin HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-4\r\nIf-Range: %@\r\n\r\n", WSKFormatRFC822(settled)];
     XCTAssertTrue([SendRawRequest(server.port, settledRequest) hasPrefix:@"HTTP/1.1 206"], @"a settled timestamp must still allow a resume");
 
     // (b) Just-written file: the timestamp is inside the current second, so it is weak and a
@@ -295,12 +295,12 @@
     // The write and the request have to land in the same wall-clock second for that to be the
     // regime under test, so a run that straddles a second boundary is retried rather than
     // asserted on — otherwise this flakes roughly once in a few hundred runs.
-    NSString* fresh = nil;
+    NSString *fresh = nil;
     for (NSUInteger attempt = 0; attempt < 5; attempt++) {
         time_t const before = time(NULL);
         XCTAssertTrue([@"BBBBBBBBBBBBBBBBBBBB" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
-        NSDate* justNow = [[fm attributesOfItemAtPath:path error:NULL] fileModificationDate];
-        NSString* freshRequest = [NSString stringWithFormat:@"GET /build.bin HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-4\r\nIf-Range: %@\r\n\r\n", WSKFormatRFC822(justNow)];
+        NSDate *justNow = [[fm attributesOfItemAtPath:path error:NULL] fileModificationDate];
+        NSString *freshRequest = [NSString stringWithFormat:@"GET /build.bin HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-4\r\nIf-Range: %@\r\n\r\n", WSKFormatRFC822(justNow)];
         fresh = SendRawRequest(server.port, freshRequest);
         if (time(NULL) == before) {
             break;
@@ -319,29 +319,29 @@
 // happens where it means something — when the validator is issued — so a date naming a second
 // that is still open is never handed out, and the splice has no date to travel on.
 - (void)testIfRangeRefusesADateMintedInsideItsOwnSecond {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* root = MakeTempDirectory();
-    NSString* path = [root stringByAppendingPathComponent:@"build.ipa"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *root = MakeTempDirectory();
+    NSString *path = [root stringByAppendingPathComponent:@"build.ipa"];
 
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addGETHandlerForBasePath:@"/" directoryPath:root indexFilename:nil cacheAge:0 allowRangeRequests:YES];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     // Publish build A, let a client take a prefix, then republish inside the SAME wall-clock
     // second — the case a build server hits when it rewrites a file in place. Retried rather
     // than asserted on if the sequence straddles a boundary, so this measures the intended
     // regime instead of racing the clock.
-    NSString* resumed = nil;
+    NSString *resumed = nil;
     time_t sealedSecond = 0;
-    NSString* lastModified = nil;
+    NSString *lastModified = nil;
     for (NSUInteger attempt = 0; attempt < 5; attempt++) {
         XCTAssertTrue([[@"" stringByPaddingToLength:4096 withString:@"A" startingAtIndex:0] writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
         time_t const before = time(NULL);
-        NSString* prefix = SendRawRequest(server.port, @"GET /build.ipa HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-1023\r\n\r\n");
+        NSString *prefix = SendRawRequest(server.port, @"GET /build.ipa HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-1023\r\n\r\n");
 
         lastModified = nil;
-        for (NSString* line in [prefix componentsSeparatedByString:@"\r\n"]) {
+        for (NSString *line in [prefix componentsSeparatedByString:@"\r\n"]) {
             if ([line hasPrefix:@"Last-Modified: "]) {
                 lastModified = [line substringFromIndex:15];
             }
@@ -358,7 +358,7 @@
 
         // And a client presenting that date anyway — fabricated, or held from elsewhere — must
         // not be given a range against the *replacement*.
-        NSString* const attempted = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /build.ipa HTTP/1.1\r\nHost: localhost\r\nRange: bytes=1024-2047\r\nIf-Range: %@\r\n\r\n", WSKFormatRFC822([NSDate dateWithTimeIntervalSince1970:(NSTimeInterval)before])]);
+        NSString *const attempted = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /build.ipa HTTP/1.1\r\nHost: localhost\r\nRange: bytes=1024-2047\r\nIf-Range: %@\r\n\r\n", WSKFormatRFC822([NSDate dateWithTimeIntervalSince1970:(NSTimeInterval)before])]);
 
         // The clock has to be re-checked AFTER the resume, not only before it. The guard below is
         // evaluated when the resume *arrives*, so a resume that lands in the next second sees a
@@ -375,7 +375,7 @@
     }
 
     XCTAssertNotNil(resumed, @"could not land the whole sequence inside one second in five attempts");
-    NSString* status = [[resumed componentsSeparatedByString:@"\r\n"] firstObject];
+    NSString *status = [[resumed componentsSeparatedByString:@"\r\n"] firstObject];
     XCTAssertTrue([status hasPrefix:@"HTTP/1.1 200"], @"a 206 spliced build B onto build A's prefix: %@", status);
 
     // The inherent limit, pinned so a later pass does not re-find it and try to "fix" it. Once
@@ -386,7 +386,7 @@
     // above); the redemption-time check is not a second line of defence and must not be described
     // as one.
     [NSThread sleepForTimeInterval:1.1];
-    NSString* afterTheSecondClosed = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /build.ipa HTTP/1.1\r\nHost: localhost\r\nRange: bytes=1024-2047\r\nIf-Range: %@\r\n\r\n", WSKFormatRFC822([NSDate dateWithTimeIntervalSince1970:(NSTimeInterval)sealedSecond])]);
+    NSString *afterTheSecondClosed = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /build.ipa HTTP/1.1\r\nHost: localhost\r\nRange: bytes=1024-2047\r\nIf-Range: %@\r\n\r\n", WSKFormatRFC822([NSDate dateWithTimeIntervalSince1970:(NSTimeInterval)sealedSecond])]);
     XCTAssertTrue([[[afterTheSecondClosed componentsSeparatedByString:@"\r\n"] firstObject] hasPrefix:@"HTTP/1.1 206"], @"a date naming a closed second is honoured; if this ever changes, the change is deliberate and this comment is wrong");
 
     [server stop];
@@ -397,35 +397,35 @@
 // build then pins a date-only client on stale bytes forever: it is told 304, keeps the old
 // body, and adopts the current ETag from that 304 — so every later revalidation matches too.
 - (void)testStaleDateDoesNotPinAClientOnAnOlderRepresentation {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* root = MakeTempDirectory();
-    NSString* path = [root stringByAppendingPathComponent:@"build.bin"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *root = MakeTempDirectory();
+    NSString *path = [root stringByAppendingPathComponent:@"build.bin"];
 
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addGETHandlerForBasePath:@"/" directoryPath:root indexFilename:nil cacheAge:0 allowRangeRequests:NO];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     // The client holds build B, dated later. The server is rolled back to build A, dated earlier.
-    NSDate* clientHolds = [NSDate dateWithTimeIntervalSince1970:1500000000];
+    NSDate *clientHolds = [NSDate dateWithTimeIntervalSince1970:1500000000];
     XCTAssertTrue([@"ROLLED-BACK-BUILD-A" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
-    XCTAssertTrue([fm setAttributes:@{NSFileModificationDate : [NSDate dateWithTimeIntervalSince1970:1400000000]} ofItemAtPath:path error:NULL]);
+    XCTAssertTrue([fm setAttributes:@{NSFileModificationDate: [NSDate dateWithTimeIntervalSince1970:1400000000]} ofItemAtPath:path error:NULL]);
 
-    NSString* stale = [NSString stringWithFormat:@"GET /build.bin HTTP/1.1\r\nHost: localhost\r\nIf-Modified-Since: %@\r\n\r\n", WSKFormatRFC822(clientHolds)];
-    NSString* reply = SendRawRequest(server.port, stale);
-    XCTAssertFalse([reply containsString:@"304"], @"an older representation must not be reported unchanged: %@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+    NSString *stale = [NSString stringWithFormat:@"GET /build.bin HTTP/1.1\r\nHost: localhost\r\nIf-Modified-Since: %@\r\n\r\n", WSKFormatRFC822(clientHolds)];
+    NSString *reply = SendRawRequest(server.port, stale);
+    XCTAssertFalse(ReplyHasStatus(reply, 304), @"an older representation must not be reported unchanged: %@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
     XCTAssertTrue([reply containsString:@"ROLLED-BACK-BUILD-A"], @"the current bytes must be served: %@", reply);
 
     // A future date must not validate anything either.
-    NSString* future = [NSString stringWithFormat:@"GET /build.bin HTTP/1.1\r\nHost: localhost\r\nIf-Modified-Since: %@\r\n\r\n", WSKFormatRFC822([NSDate dateWithTimeIntervalSince1970:4000000000])];
-    XCTAssertFalse([SendRawRequest(server.port, future) containsString:@"304"], @"a future If-Modified-Since must not validate");
+    NSString *future = [NSString stringWithFormat:@"GET /build.bin HTTP/1.1\r\nHost: localhost\r\nIf-Modified-Since: %@\r\n\r\n", WSKFormatRFC822([NSDate dateWithTimeIntervalSince1970:4000000000])];
+    XCTAssertFalse(ReplyHasStatus(SendRawRequest(server.port, future), 304), @"a future If-Modified-Since must not validate");
 
     // The ordinary unchanged-file revalidation must still work, or this is a cache regression.
-    NSString* first = SendRawRequest(server.port, @"GET /build.bin HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *first = SendRawRequest(server.port, @"GET /build.bin HTTP/1.1\r\nHost: localhost\r\n\r\n");
     NSRange r = [first rangeOfString:@"last-modified: " options:NSCaseInsensitiveSearch];
     XCTAssertNotEqual(r.location, (NSUInteger)NSNotFound, @"%@", first);
-    NSString* echoed = [[[first substringFromIndex:(r.location + r.length)] componentsSeparatedByString:@"\r\n"] firstObject];
-    NSString* same = [NSString stringWithFormat:@"GET /build.bin HTTP/1.1\r\nHost: localhost\r\nIf-Modified-Since: %@\r\n\r\n", echoed];
+    NSString *echoed = [[[first substringFromIndex:(r.location + r.length)] componentsSeparatedByString:@"\r\n"] firstObject];
+    NSString *same = [NSString stringWithFormat:@"GET /build.bin HTTP/1.1\r\nHost: localhost\r\nIf-Modified-Since: %@\r\n\r\n", echoed];
     XCTAssertTrue([SendRawRequest(server.port, same) containsString:@"304"], @"echoing back the served Last-Modified must still revalidate");
 
     [server stop];
@@ -433,35 +433,35 @@
 }
 
 - (void)testIfRangeMismatchServesTheWholeRepresentation {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* root = MakeTempDirectory();
-    NSString* path = [root stringByAppendingPathComponent:@"f.txt"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *root = MakeTempDirectory();
+    NSString *path = [root stringByAppendingPathComponent:@"f.txt"];
     XCTAssertTrue([@"AAAAAAAAAAAAAAAAAAAA" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addGETHandlerForBasePath:@"/" directoryPath:root indexFilename:nil cacheAge:0 allowRangeRequests:YES];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     // A matching If-Range still yields a partial response...
-    NSString* full = SendRawRequest(server.port, @"GET /f.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *full = SendRawRequest(server.port, @"GET /f.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
     NSRange etagRange = [full rangeOfString:@"etag: " options:NSCaseInsensitiveSearch];
     XCTAssertNotEqual(etagRange.location, (NSUInteger)NSNotFound, @"no ETag in: %@", full);
     if (etagRange.location == NSNotFound) {
         [server stop];
         return;
     }
-    NSString* tail = [full substringFromIndex:(etagRange.location + etagRange.length)];
-    NSString* etag = [[tail componentsSeparatedByString:@"\r\n"] firstObject];
+    NSString *tail = [full substringFromIndex:(etagRange.location + etagRange.length)];
+    NSString *etag = [[tail componentsSeparatedByString:@"\r\n"] firstObject];
 
     // Assert on the status line, not containsString:@"206" — the ETag embeds the inode, whose
     // digits contain "206" often enough to make that assertion flaky in both directions.
-    NSString* matching = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /f.txt HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-4\r\nIf-Range: %@\r\n\r\n", etag]);
+    NSString *matching = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /f.txt HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-4\r\nIf-Range: %@\r\n\r\n", etag]);
     XCTAssertTrue([matching hasPrefix:@"HTTP/1.1 206"], @"a matching If-Range must still serve the range: %@", matching);
 
     // ...but a stale one must serve the entire representation, not a slice of a file the
     // client has never seen.
-    NSString* stale = SendRawRequest(server.port, @"GET /f.txt HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-4\r\nIf-Range: \"0/0/0\"\r\n\r\n");
+    NSString *stale = SendRawRequest(server.port, @"GET /f.txt HTTP/1.1\r\nHost: localhost\r\nRange: bytes=0-4\r\nIf-Range: \"0/0/0\"\r\n\r\n");
     XCTAssertNotNil(stale);
     XCTAssertTrue([stale hasPrefix:@"HTTP/1.1 200"], @"a stale If-Range must not produce a partial response: %@", [stale substringToIndex:MIN((NSUInteger)40, stale.length)]);
     XCTAssertTrue([stale containsString:@"AAAAAAAAAAAAAAAAAAAA"], @"the whole representation must be served: %@", stale);
@@ -475,17 +475,17 @@
 // obsolete spellings parsed to nil and the precondition was treated as ABSENT — a
 // conditional request failing open, which is the wrong direction for a validator.
 - (void)testHTTPDateParsingAcceptsAllThreeFormatsRFC9110Requires {
-    NSDate* expected = [NSDate dateWithTimeIntervalSince1970:784111777.0];  // Sun, 06 Nov 1994 08:49:37 GMT
+    NSDate *expected = [NSDate dateWithTimeIntervalSince1970:784111777.0];  // Sun, 06 Nov 1994 08:49:37 GMT
 
-    NSDate* imf = WSKParseRFC822(@"Sun, 06 Nov 1994 08:49:37 GMT");
+    NSDate *imf = WSKParseRFC822(@"Sun, 06 Nov 1994 08:49:37 GMT");
     XCTAssertNotNil(imf, @"IMF-fixdate must parse");
     XCTAssertEqualWithAccuracy([imf timeIntervalSince1970], [expected timeIntervalSince1970], 0.5);
 
-    NSDate* rfc850 = WSKParseRFC822(@"Sunday, 06-Nov-94 08:49:37 GMT");
+    NSDate *rfc850 = WSKParseRFC822(@"Sunday, 06-Nov-94 08:49:37 GMT");
     XCTAssertNotNil(rfc850, @"RFC 850 date must parse");
     XCTAssertEqualWithAccuracy([rfc850 timeIntervalSince1970], [expected timeIntervalSince1970], 0.5);
 
-    NSDate* asctime = WSKParseRFC822(@"Sun Nov  6 08:49:37 1994");
+    NSDate *asctime = WSKParseRFC822(@"Sun Nov  6 08:49:37 1994");
     XCTAssertNotNil(asctime, @"asctime() date must parse");
     XCTAssertEqualWithAccuracy([asctime timeIntervalSince1970], [expected timeIntervalSince1970], 0.5);
 
@@ -500,16 +500,16 @@
 // evaluated and a missing resource fails "If-Match: *". Pinned in both directions because the
 // obvious "fix" for the 404 would break the rule this test exists to state.
 - (void)testConditionalRequestsOnAMissingResourceFollowTheEvaluationRule {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
-    WSKWebDAVServer* server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    WSKWebDAVServer *server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* deleted = SendRawRequest(server.port, @"DELETE /gone.txt HTTP/1.1\r\nHost: localhost\r\nIf-Match: *\r\n\r\n");
+    NSString *deleted = SendRawRequest(server.port, @"DELETE /gone.txt HTTP/1.1\r\nHost: localhost\r\nIf-Match: *\r\n\r\n");
     XCTAssertTrue([deleted containsString:@" 404"], @"DELETE of a missing resource must ignore the precondition and 404: %@", [deleted substringToIndex:MIN((NSUInteger)40, deleted.length)]);
 
-    NSString* put = SendRawRequest(server.port, @"PUT /gone.txt HTTP/1.1\r\nHost: localhost\r\nIf-Match: *\r\nContent-Length: 2\r\n\r\nhi");
+    NSString *put = SendRawRequest(server.port, @"PUT /gone.txt HTTP/1.1\r\nHost: localhost\r\nIf-Match: *\r\nContent-Length: 2\r\n\r\nhi");
     XCTAssertTrue([put containsString:@" 412"], @"PUT would create, so \"If-Match: *\" on a missing resource must fail 412: %@", [put substringToIndex:MIN((NSUInteger)40, put.length)]);
     XCTAssertFalse([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"gone.txt"]], @"a 412 must not have written anything");
 
@@ -528,9 +528,9 @@
     XCTAssertNil(WSKParseRFC822(@"Sunday, 06-Nov-9 08:49:37 GMT"), @"a 1-digit RFC 850 year is not an HTTP-date");
 
     // The three legal spellings must still parse, or this closes the hole by breaking the feature.
-    NSDate* expected = [NSDate dateWithTimeIntervalSince1970:784111777.0];
-    for (NSString* legal in @[ @"Sun, 06 Nov 1994 08:49:37 GMT", @"Sunday, 06-Nov-94 08:49:37 GMT", @"Sun Nov  6 08:49:37 1994" ]) {
-        NSDate* parsed = WSKParseRFC822(legal);
+    NSDate *expected = [NSDate dateWithTimeIntervalSince1970:784111777.0];
+    for (NSString *legal in @[@"Sun, 06 Nov 1994 08:49:37 GMT", @"Sunday, 06-Nov-94 08:49:37 GMT", @"Sun Nov  6 08:49:37 1994"]) {
+        NSDate *parsed = WSKParseRFC822(legal);
         XCTAssertNotNil(parsed, @"must still parse: %@", legal);
         XCTAssertEqualWithAccuracy([parsed timeIntervalSince1970], [expected timeIntervalSince1970], 0.5, @"%@", legal);
     }
@@ -544,12 +544,12 @@
 // The bound is deliberately loose (a 74x regression is ~1.5 ms per call, so 2000 calls would take
 // ~3 s) because timing assertions flake under load; it catches the class, not a percentage.
 - (void)testRejectingALongNonDateStaysCheap {
-    NSMutableString* padding = [NSMutableString string];
+    NSMutableString *padding = [NSMutableString string];
     while (padding.length < 60000) {
         [padding appendString:@"  "];  // Double spaces: the input that triggered the collapse.
     }
 
-    NSDate* started = [NSDate date];
+    NSDate *started = [NSDate date];
     for (NSUInteger i = 0; i < 2000; i++) {
         XCTAssertNil(WSKParseRFC822(padding));
     }
@@ -568,56 +568,56 @@
 // carry no entity tag, so the read-side evaluation must not re-run against them: the last
 // assertion pins that a conditional PUT whose precondition holds still succeeds.
 - (void)testReadRequestsEvaluateIfMatchAndIfUnmodifiedSince {
-    NSFileManager* fm = [NSFileManager defaultManager];
-    NSString* dir = MakeTempDirectory();
-    NSString* path = [dir stringByAppendingPathComponent:@"f.txt"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *dir = MakeTempDirectory();
+    NSString *path = [dir stringByAppendingPathComponent:@"f.txt"];
     XCTAssertTrue([@"ORIGINAL" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
     // Backdate the mtime so the Last-Modified seal window is closed and the date validator is
     // actually issued — If-Unmodified-Since is ignored (fail-open, §13.1.4) while it is withheld.
-    NSDate* settled = [NSDate dateWithTimeIntervalSinceNow:-30.0];
-    XCTAssertTrue([fm setAttributes:@{NSFileModificationDate : settled} ofItemAtPath:path error:NULL]);
+    NSDate *settled = [NSDate dateWithTimeIntervalSinceNow:-30.0];
+    XCTAssertTrue([fm setAttributes:@{NSFileModificationDate: settled} ofItemAtPath:path error:NULL]);
 
-    WSKWebServer* server = [[WSKWebServer alloc] init];
+    WSKWebServer *server = [[WSKWebServer alloc] init];
     [server addGETHandlerForBasePath:@"/" directoryPath:dir indexFilename:nil cacheAge:0 allowRangeRequests:YES];
-    NSDictionary* options = @{WSKOption_Port : @0, WSKOption_BindToLocalhost : @YES};
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
-    NSString* get = SendRawRequest(server.port, @"GET /f.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *get = SendRawRequest(server.port, @"GET /f.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertTrue([get hasPrefix:@"HTTP/1.1 200"], @"fixture GET failed: %@", [get substringToIndex:MIN((NSUInteger)40, get.length)]);
     NSRange tagStart = [get rangeOfString:@"Etag: " options:NSCaseInsensitiveSearch];
     XCTAssertNotEqual(tagStart.location, (NSUInteger)NSNotFound, @"the server did not send an ETag: %@", get);
-    NSString* rest = [get substringFromIndex:NSMaxRange(tagStart)];
-    NSString* eTag = [rest substringToIndex:[rest rangeOfString:@"\r\n"].location];
+    NSString *rest = [get substringFromIndex:NSMaxRange(tagStart)];
+    NSString *eTag = [rest substringToIndex:[rest rangeOfString:@"\r\n"].location];
 
-    NSString* (^getWith)(NSString*) = ^(NSString* preconditions) {
+    NSString * (^getWith)(NSString *) = ^(NSString *preconditions) {
         return SendRawRequest(server.port, [NSString stringWithFormat:@"GET /f.txt HTTP/1.1\r\nHost: localhost\r\n%@\r\n", preconditions]);
     };
 
-    NSString* stale = getWith(@"If-Match: \"0/0/0/0\"\r\n");
+    NSString *stale = getWith(@"If-Match: \"0/0/0/0\"\r\n");
     XCTAssertTrue([stale hasPrefix:@"HTTP/1.1 412"], @"a mismatching If-Match on a GET owes 412: %@", [stale substringToIndex:MIN((NSUInteger)40, stale.length)]);
 
-    NSString* matching = getWith([NSString stringWithFormat:@"If-Match: %@\r\n", eTag]);
+    NSString *matching = getWith([NSString stringWithFormat:@"If-Match: %@\r\n", eTag]);
     XCTAssertTrue([matching hasPrefix:@"HTTP/1.1 200"], @"a matching If-Match must serve normally: %@", [matching substringToIndex:MIN((NSUInteger)40, matching.length)]);
 
-    NSString* star = getWith(@"If-Match: *\r\n");
+    NSString *star = getWith(@"If-Match: *\r\n");
     XCTAssertTrue([star hasPrefix:@"HTTP/1.1 200"], @"If-Match: * against an existing representation must serve: %@", [star substringToIndex:MIN((NSUInteger)40, star.length)]);
 
     // §13.2.2 order: If-Match is evaluated ahead of If-None-Match, so a stale If-Match beats a
     // matching If-None-Match's 304.
-    NSString* ordered = getWith([NSString stringWithFormat:@"If-Match: \"0/0/0/0\"\r\nIf-None-Match: %@\r\n", eTag]);
+    NSString *ordered = getWith([NSString stringWithFormat:@"If-Match: \"0/0/0/0\"\r\nIf-None-Match: %@\r\n", eTag]);
     XCTAssertTrue([ordered hasPrefix:@"HTTP/1.1 412"], @"If-Match must be evaluated ahead of If-None-Match: %@", [ordered substringToIndex:MIN((NSUInteger)40, ordered.length)]);
 
-    NSString* head = SendRawRequest(server.port, @"HEAD /f.txt HTTP/1.1\r\nHost: localhost\r\nIf-Match: \"0/0/0/0\"\r\n\r\n");
+    NSString *head = SendRawRequest(server.port, @"HEAD /f.txt HTTP/1.1\r\nHost: localhost\r\nIf-Match: \"0/0/0/0\"\r\n\r\n");
     XCTAssertTrue([head hasPrefix:@"HTTP/1.1 412"], @"HEAD evaluates the same preconditions as GET: %@", [head substringToIndex:MIN((NSUInteger)40, head.length)]);
 
-    NSString* ius = getWith(@"If-Unmodified-Since: Thu, 01 Jan 1970 00:00:00 GMT\r\n");
+    NSString *ius = getWith(@"If-Unmodified-Since: Thu, 01 Jan 1970 00:00:00 GMT\r\n");
     XCTAssertTrue([ius hasPrefix:@"HTTP/1.1 412"], @"a GET modified since the given date owes 412: %@", [ius substringToIndex:MIN((NSUInteger)40, ius.length)]);
 
-    NSString* iusFuture = getWith(@"If-Unmodified-Since: Fri, 01 Jan 2100 00:00:00 GMT\r\n");
+    NSString *iusFuture = getWith(@"If-Unmodified-Since: Fri, 01 Jan 2100 00:00:00 GMT\r\n");
     XCTAssertTrue([iusFuture hasPrefix:@"HTTP/1.1 200"], @"unmodified since a future date must serve: %@", [iusFuture substringToIndex:MIN((NSUInteger)40, iusFuture.length)]);
 
     // The behaviour that already existed must not move: If-None-Match alone still revalidates.
-    NSString* revalidated = getWith([NSString stringWithFormat:@"If-None-Match: %@\r\n", eTag]);
+    NSString *revalidated = getWith([NSString stringWithFormat:@"If-None-Match: %@\r\n", eTag]);
     XCTAssertTrue([revalidated hasPrefix:@"HTTP/1.1 304"], @"If-None-Match revalidation must still answer 304: %@", [revalidated substringToIndex:MIN((NSUInteger)40, revalidated.length)]);
 
     [server stop];
@@ -625,15 +625,15 @@
     // A conditional WRITE whose precondition holds must be unaffected: DAV evaluates it before
     // acting and answers 201/204 with no entity tag, which the read-side evaluation must not
     // re-judge. This is the double-application trap the GET/HEAD gate exists for.
-    WSKWebDAVServer* dav = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    WSKWebDAVServer *dav = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
     XCTAssertTrue([dav startWithOptions:options error:NULL]);
-    NSString* davGet = SendRawRequest(dav.port, @"GET /f.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    NSString *davGet = SendRawRequest(dav.port, @"GET /f.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
     NSRange davTagStart = [davGet rangeOfString:@"Etag: " options:NSCaseInsensitiveSearch];
     XCTAssertNotEqual(davTagStart.location, (NSUInteger)NSNotFound);
-    NSString* davRest = [davGet substringFromIndex:NSMaxRange(davTagStart)];
-    NSString* davTag = [davRest substringToIndex:[davRest rangeOfString:@"\r\n"].location];
-    NSString* body = @"REPLACEMENT";
-    NSString* conditionalPut = SendRawRequest(dav.port, [NSString stringWithFormat:@"PUT /f.txt HTTP/1.1\r\nHost: localhost\r\nIf-Match: %@\r\nContent-Length: %lu\r\n\r\n%@", davTag, (unsigned long)body.length, body]);
+    NSString *davRest = [davGet substringFromIndex:NSMaxRange(davTagStart)];
+    NSString *davTag = [davRest substringToIndex:[davRest rangeOfString:@"\r\n"].location];
+    NSString *body = @"REPLACEMENT";
+    NSString *conditionalPut = SendRawRequest(dav.port, [NSString stringWithFormat:@"PUT /f.txt HTTP/1.1\r\nHost: localhost\r\nIf-Match: %@\r\nContent-Length: %lu\r\n\r\n%@", davTag, (unsigned long)body.length, body]);
     XCTAssertTrue([conditionalPut hasPrefix:@"HTTP/1.1 204"], @"a conditional PUT whose precondition holds must still succeed: %@", [conditionalPut substringToIndex:MIN((NSUInteger)40, conditionalPut.length)]);
 
     [dav stop];

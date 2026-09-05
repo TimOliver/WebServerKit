@@ -369,7 +369,7 @@
     // ...and read them back, by name and via allprop.
     NSString *named = send(@"PROPFIND", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\" xmlns:X=\"urn:example\"><D:prop><X:colour/></D:prop></D:propfind>");
     XCTAssertTrue([named containsString:@"blue"], @"a stored property must be readable by name: %@", named);
-    XCTAssertFalse([named containsString:@"404"], @"a stored property must not be reported missing: %@", named);
+    XCTAssertFalse(ReplyHasStatus(named, 404), @"a stored property must not be reported missing: %@", named);
 
     NSString *all = send(@"PROPFIND", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:allprop/></D:propfind>");
     XCTAssertTrue([all containsString:@"blue"], @"allprop must include stored properties: %@", all);
@@ -432,7 +432,7 @@
     NSString *names = propfind(@"0", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:propname/></D:propfind>");
     XCTAssertTrue([names hasPrefix:@"HTTP/1.1 207"], @"propname should be supported: %@", [names substringToIndex:MIN((NSUInteger)40, names.length)]);
     XCTAssertTrue([names containsString:@"getcontentlength"], @"propname must list the property names");
-    XCTAssertFalse([names containsString:@"404"], @"propname reports names, not failures: %@", names);
+    XCTAssertFalse(ReplyHasStatus(names, 404), @"propname reports names, not failures: %@", names);
 
     // Depth: infinity is refused with the machine-readable precondition RFC 4918 §9.1 defines.
     NSString *infinite = propfind(@"infinity", @"<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:allprop/></D:propfind>");
@@ -886,7 +886,7 @@
     XCTAssertTrue([@"junk" writeToFile:[ordinary stringByAppendingPathComponent:@".DS_Store"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
 
     NSString *allowed = deleteFolder(@"Ordinary");
-    XCTAssertFalse([allowed containsString:@"403"], @"a .DS_Store must not make an ordinary folder undeletable, got: %@", allowed);
+    XCTAssertFalse(ReplyHasStatus(allowed, 403), @"a .DS_Store must not make an ordinary folder undeletable, got: %@", allowed);
     XCTAssertFalse([fm fileExistsAtPath:ordinary], @"the deletable folder was not removed: %@", allowed);
 
     [server stop];

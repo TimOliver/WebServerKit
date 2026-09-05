@@ -51,8 +51,13 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
 - **Both:** refuse clearly rather than half-succeed; a refused or failed transaction leaves
   nothing behind (no staging files, temp files, held descriptors, or connection slots).
 - **Threat model:** small trusted network. No rate limiting, no auth backoff, 128-connection
-  cap — re-audit with an internet-facing lens before ever exposing publicly. Plaintext
-  transport is settled (TLS terminates upstream).
+  cap. Plaintext transport is settled (TLS terminates upstream).
+  **OWNER RULING 2026-09-05: this library will NEVER face the open internet — it is for local
+  networks only, always.** That is a standing constraint, not a current state of affairs, and it
+  is what decides trade-offs between refusing a suspicious client and serving a slow real one:
+  serve the real one. The older "re-audit with an internet-facing lens before ever exposing
+  publicly" line stands only as a description of what such an audit WOULD have to revisit — the
+  response-phase stall allowance below is the first item on that list — not as an expected event.
 - **Publish builds atomically** (`rename`/`mv`/`ditto` — never `cp` or `cat >` in place, which
   reuse the inode and feed the new bytes into in-flight downloads); per-chunk verification
   refuses a torn read but cannot make it whole. Avoid republishing while downloads are
@@ -553,14 +558,24 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   is wrong: it reports send-buffer OCCUPANCY, and the buffer is refilled as fast as it drains, so it
   reads identically for a 5 KB/s peer (491052 every tick) and one that has stopped reading (646700
   every tick). `tcpi_txbytes` is monotonic and moves only when the peer takes bytes.
-  **What it does NOT do, measured:** it does not advance smoothly. For a client reading continuously
-  at 20 KB/s it moves in BURSTS of ~35 KB every 4-6 s, driven by TCP window updates, so a tick
-  shorter than the burst interval can still see zero. The fix therefore holds at realistic idle
-  timeouts (30 s default: many bursts per tick) and NOT at very short ones — which is the same
-  race the `-idle 5` band note describes. The pinning test has to sit in the band where a write
-  spans two ticks (256 KB ÷ R > 2 × idle) while a burst falls inside one (35 KB ÷ R < idle): idle
-  5 s at ~15 KB/s, 3/3 green with the fix and 2/2 red without. That band is ~3.6× wide, so treat
-  the test as calibrated rather than robust, and verify any change by the MECHANISM.
+  **The counter alone was NOT enough, and shipping it alone broke the gate** — recorded because the
+  first version of this entry claimed otherwise. `tcpi_txbytes` does not advance smoothly: for a
+  client reading continuously at 20 KB/s it moves in BURSTS of ~35 KB every 4-6 s (TCP window
+  updates), and worse, once the peer's receive buffer is FULL the server cannot send at all, so the
+  counter freezes for (that buffer ÷ the read rate) — tens of seconds for a phone-shaped reader.
+  A two-tick rule still cuts inside that window; whether it does is a race, which is why the
+  merge passed three isolated runs and then failed in the full suite.
+  **So the response phase gets a LONGER allowance: `kMaxResponseStallTicks` (10) consecutive checks
+  with nothing transmitted**, reset by any transmitted byte — five minutes at the 30 s default. The
+  header and body phases are deliberately unchanged: those are where a dribbling client is an
+  actual attack. The cost is that a DEAD peer holds its slot for ten ticks instead of one, which is
+  the right trade under the local-network-only ruling (see Deployment shapes).
+  **A stalled peer is NOT reproducible over loopback, so that half is unpinned:** the kernel keeps
+  absorbing for a peer that never reads — measured, a client with `SO_RCVBUF` set to 16 KB before
+  connect still drained 33 MB of a 64 MB body — so the write never stalls and nothing is starved.
+  The server is right to keep such a connection (bytes genuinely are moving); it just means the
+  ten-tick bound has no in-suite test. The slow-reader half IS pinned, and is deterministic now
+  that the separation is threefold rather than a 3.6×-wide band.
 - **Dead-property storage: 64 KB per RESOURCE** (`kDAVMaxDeadPropertyStorageLength`, 2026-09-02),
   judged on the serialized plist after the merge. `kDAVMaxRequestBodyLength` bounds one request;
   nothing bounded what those requests accumulate into, so ordinary legal PROPPATCHes grew the
@@ -1243,6 +1258,16 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
 - Run every new regression test against the UNFIXED source first; for new capability, delete
   the specific line the test is about and confirm it fails. A test whose subject can be
   deleted while it stays green is measuring something adjacent.
+- **A status assertion written as `containsString:@"304"` searches the WHOLE response** — headers
+  and body — so it also matches an entity tag (`"85948824/6/1788413461/54649089"`), a
+  `Content-Length`, or a date. Found 2026-09-05 when two `WSKValidatorTests` assertions failed a
+  full-suite run and passed in isolation, reporting `HTTP/1.1 200 OK` as their evidence that the
+  reply "contained 304". The nine NEGATIVE assertions built this way (the ones that fail at random)
+  now use `ReplyHasStatus(reply, 304)`, which reads the status line only. **74 positive ones
+  remain** (`XCTAssertTrue([reply containsString:@"200"])` and friends): those fail the other way —
+  they PASS when the digits happen to appear somewhere else, hiding a defect rather than inventing
+  one. Converting them is a mechanical sweep nobody has done. A test oracle that can match anywhere
+  in its input is the same shape as the library defects this record keeps finding.
 - **Read the executed count, never the failure count** — a crashed runner reports
   "Executed 0 tests, with 0 failures". A test total that doesn't match expectation is a STOP
   signal (a four-day-old stale log once read as a passing run — use fresh log filenames).
