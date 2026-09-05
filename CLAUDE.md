@@ -3,12 +3,23 @@
 A fork of GCDWebServer with additional features for iOS/macOS web serving.
 
 This is the CONDENSED institutional memory (condensed 2026-08-17 from the full 21-pass audit
-record; a 22nd pass — spec conformance, 2026-09-02 — and a 23rd — fresh-eyes, multi-core and
-packaging, 2026-09-02/03 — are folded in place rather than appended; the 23rd's unfixed remainder
-is grouped under "Still open at tip").
+record; a 22nd pass — spec conformance, 2026-09-02 — a 23rd — fresh-eyes, multi-core and packaging,
+2026-09-02/03 — its re-verification of 2026-09-04, and a second fuzzing pass of 2026-09-05 are all
+folded in place rather than appended; the unfixed remainder is grouped under "Still open at tip").
+Lightly re-condensed 2026-09-05: entries closed during that week were collapsed to a line naming the
+fix and the invariant that now carries it, KEEPING in each case the correction the original finding
+needed — that is the part git history alone will not surface. No invariant, lesson, settled decision
+or refutation was touched.
 The complete record — every measurement, justification, and the pass-by-pass appendix — lives in
-git history: `git show 09416c2:CLAUDE.md`. Consult it before re-auditing a subsystem or reversing
-anything under "Settled decisions".
+git history: `git show 09416c2:CLAUDE.md`, and the pre-re-condense text one commit before this one.
+Consult it before re-auditing a subsystem or reversing anything under "Settled decisions".
+
+**How to read this file.** "Core invariants" are rules the code currently upholds and that a change
+must not break. "Settled decisions" are deliberate and must not be re-fixed. "Still open at tip" is
+a backlog, and every entry there is stale until re-measured — roughly one in three evaporates, and
+in the 2026-09-04 re-check none of eleven did. "Lessons" and "Recurring defect shapes" are about
+METHOD, and have paid better than any individual finding: most defects here were found by a
+technique from that list, and several were nearly missed by an oracle that could not fail.
 
 ## Build Commands
 
@@ -1075,61 +1086,24 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
   proven sensitive on the pre-fix tree), every unfixed item below is STILL PRESENT and unchanged in
   mechanism, every regression sweep held, and the pass surfaced the NEW items marked ★ plus the
   calibrations in the last sub-bullet. What remains, in the suggested order:
-  - *WebDAV.* ~~(P1) A property namespace URI containing `}` poisons the dead-property store.~~
-    ~~(P1) The qop-less RFC 2069 Digest challenge is refused outright by every neon client.~~ Both
-    fixed 2026-09-03; see the invariants. Note for anyone re-reading the originals in git history:
-    the namespace finding's `urn:a&amp;b` → `urn:a&amp;#38;b` half had the wrong mechanism
-    attributed to it (it is libxml2's own escaping of `&` inside `ns->href`, not anything this
-    code does), and the Digest fix needed one thing the finding did not mention — `qop`/`nc`
-    arrive UNQUOTED, so the shared header-parameter reader hands back `auth,` and `00000001,`.
-    ~~★ (P2) A namespace URI containing WHITESPACE is still stored and published.~~ Fixed
-    2026-09-04, and the finding was NARROWER than the defect: whitespace is six of the twelve
-    spellings NSXMLDocument refuses. Measured over 19 spellings on a live server, it also refuses
-    `>`, `%`, `^`, `` ` ``, `{`, `|`, `\` and any non-ASCII character — so the rule is "is it a
-    URI", asked of `xmlParseURI`, not a character list. See the invariant under WebDAV. The
-    finding's other half was right and useful: NSXMLParser tolerates every one of them, which is
-    exactly why the class stayed open through the `}` fix. (One correction to the original: Python
-    expat in namespace mode PARSES these, measured — only NSXMLDocument refuses.)
-    ~~(P2) Concurrent PROPPATCHes on one resource lose updates while both answer 200.~~ **Fixed
-    2026-09-05** with a per-server `_deadPropertyLock` around the read-merge-write; per resolved
-    path would be more machinery than a rare verb needs. 60 concurrent patches: 60 accepted, 1
-    stored before, 60 after. The original finding: an
-    unlocked read-modify-write of the xattr plist (`:1799` read … `:1883` write; 106/200 and
-    53/150 rounds lost a write). Fix: serialize PROPPATCH per server or per resolved path. ~~(P2)
-    MOVE/COPY do not honour alias semantics for a DANGLING alias.~~ **Fixed 2026-09-05**: both
-    existence tests in `performCOPY:isMove:` now go through `_NamedEntryExistsAtPath` (one home,
-    `lstat`), so the source can be moved or copied as the link it is and a dangling destination
-    counts as occupied — 412 without `Overwrite`, replaced with `Overwrite: T`. It also corrected a
-    pinned expectation: `testDAVCopyOntoADanglingSymlinkRefusesWithoutRemovingIt` asserted that a
-    COPY onto an occupied name refuses, which was only true because the destination read as ABSENT
-    so the Overwrite check never ran and `-copyItemAtPath:` failed with EEXIST. With the destination
-    seen correctly the default (T, §10.6) replaces it. That test now refuses with `Overwrite: F`,
-    which keeps the property it actually exists for — a refusal must not mutate the tree.
-    The original finding:
-    `-fileExistsAtPath:` at `:1254`/`:1279` follows the link, so MOVE/COPY of a dangling alias
-    → 404, MOVE onto its name with `Overwrite: T` → 403 (`renamex_np` EEXIST) and without → 403
-    where 412 is owed, and the name is invisible in listings so the client cannot tell why.
-    Fix: `lstat` for both existence tests in `performCOPY:isMove:` (a link is never a
-    collection) and hand the link's identity to the swap. ~~(P2) Bodiless 2xx responses state no
-    `Content-Length`.~~ **Fixed 2026-09-05** — and narrower than the finding proposed. The
-    serializer emits `Content-Length: 0` when `![_response hasBody]`, the status is 2xx, and it is
-    not 1xx/204/304; `_shouldKeepConnectionAlive` mirrors that clause so the two cannot drift.
-    Two things the finding did not mention. **-hasBody, not "we are not chunking":** a response of
-    UNKNOWN length still has a body, and for an HTTP/1.0 client `_shouldChunkResponse` is NO because
-    1.0 has no chunked encoding, so it is framed by the close — the first version of this fix
-    announced `Content-Length: 0` over a streamed body it then sent, a desync caught only by a test
-    written for that hazard. **2xx only:** letting a bodiless 404 state its length made it
-    keep-alive-eligible and broke the settled "every refusal closes the connection by construction"
-    property, which an existing test pins. Measured: OPTIONS and collection GET now serve 2 of 2
-    pipelined requests where they served 1.
-    **The trace corpus does not pin `Content-Length`.** 31 recorded bodiless 2xx responses were
-    updated to carry the header (proven additive: exactly one line added, remainder byte-identical),
-    but a server WITHOUT the fix still passes every suite — verified by rebuilding the example
-    against `main`'s connection layer and re-running WebDAV-Finder, which reported no mismatch.
-    CFHTTPMessage does not surface `Content-Length` among the header fields the runner compares, so
-    the corpus can neither see it added nor see it missing. The fixtures were kept anyway so the
-    recording matches what the server sends; they are documentation, not enforcement. The original
-    finding: (`WSKConnection.m:939`; `_StatusDelimitsItself` `:573` covers 1xx/204/304
+  - *WebDAV.* ~~(P1) A property namespace URI containing `}` poisons the dead-property store.~~ ~~(P1) The
+    qop-less RFC 2069 Digest challenge.~~ Fixed 2026-09-03; invariants under WebDAV and under Headers
+    and framing. Both findings needed a correction: the namespace one blamed this code for what is
+    libxml2's own escaping of `&` inside `ns->href`, and the Digest one did not mention that
+    `qop`/`nc` arrive UNQUOTED, which is what actually broke the first attempt.
+    ~~★ (P2) A namespace URI containing WHITESPACE.~~ Fixed 2026-09-04, and the finding was NARROWER
+    than the defect: whitespace is six of the twelve spellings NSXMLDocument refuses, so the rule is
+    "is it a URI" (`xmlParseURI`), not a character list. Invariant under WebDAV.
+    ~~(P2) Concurrent PROPPATCHes lose updates while both answer 200.~~ Fixed 2026-09-05 with a
+    per-server lock; 60 concurrent patches stored 1 before, 60 after. ~~(P2) MOVE/COPY do not honour alias semantics for a DANGLING alias.~~ Fixed 2026-09-05 via
+    `_NamedEntryExistsAtPath`; it also corrected a pinned expectation that only held because the
+    destination read as absent. ~~(P2) Bodiless 2xx responses state no
+    `Content-Length`.~~ Fixed 2026-09-05, narrower than proposed: it keys on `-hasBody` (an
+    unknown-length body to an HTTP/1.0 client is framed by the close, so announcing 0 over it
+    desyncs) and on 2xx only (a bodiless 404 stating its length became keep-alive-eligible,
+    breaking the settled "every refusal closes" property). The trace corpus cannot see
+    `Content-Length` in either direction — verified — so its 31 updated fixtures are documentation,
+    not enforcement. Original finding: (`WSKConnection.m:939`; `_StatusDelimitsItself` `:573` covers 1xx/204/304
     only), so on a keep-alive server every DAV OPTIONS, MKCOL, COPY/MOVE 201 and collection GET
     closes the connection — the sibling of the 304 fix one status class over; Finder's own
     `Content-Length: 0` on OPTIONS/MKCOL/MOVE/DELETE additionally excludes those requests on the
@@ -1148,11 +1122,9 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
   - *Connection.* ~~**(P1 for Shape A) The slow-reader cut.**~~ Fixed 2026-09-04; the CI flake it
     was also causing should go with it (`testPipelinedRequestIsNotReclaimedWhileItsResponseIsStillStreaming`
     failed half its runs on its own control assertion, which was this cut on a slow runner).
-    ~~★ (P2) An UNTERMINATED chunk-size line is rescanned in full on every read.~~ Fixed
-    2026-09-04, together with a sibling the finding did not name: the trailer's CRLFCRLF search had
-    the identical shape one branch over (1.37 ms of CPU per read at an 8 MB trailer). Re-measured
-    at 2.80 ms per read for the size line, not the ~6 ms first recorded — that figure came from a
-    machine at load 250-350. See the invariant under Headers and framing.
+    ~~★ (P2) An UNTERMINATED chunk-size line is rescanned in full on every read.~~ Fixed 2026-09-04
+    with a trailer sibling the finding did not name; 2.80 ms/read, not the ~6 ms first recorded (a
+    loaded machine). Invariant under Headers and framing.
     (P2, owner ruling requested) An async handler that KEEPS its completion block and never
     calls it holds its slot until process exit even after the client disconnects: no read is
     posted during a handler (`WSKConnection.m:843-877`), so a peer FIN/RST is never observed,
@@ -1191,27 +1163,12 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
     validated; the header goes out as `Etag`; `Range: bytes=0-18446744073709551615` is ignored
     (the sentinel).
   - *Host-app safety, docs, hygiene.* ~~**(P1) Changing a host-settable property while the server
-    runs is a use-after-free.**~~ **Fixed 2026-09-05** — the six object-typed ones
-    (`allowedFileExtensions` on both servers, and the uploader's `title`/`header`/`prologue`/
-    `epilogue`/`footer`) are now `atomic`, and the internal reads go through the getter instead of
-    the ivar, which is the half that matters: an atomic property whose own implementation reads
-    `_ivar` directly is protected for nobody. The scalars (`allowHiddenItems`,
-    `serverSentEventsEnabled`, `fileCacheControlMaxAge`) are left `nonatomic` deliberately — an
-    aligned word load cannot tear and there is nothing to free, so the worst case is reading the
-    previous value, which a host flipping a switch mid-request can get anyway. What this does NOT
-    buy is CONSISTENCY: one listing can still see the old allow-list for one entry and the new one
-    for the next. That is acceptable; a torn read of a freed pointer was not.
-    **How it was verified, because the crash would not reproduce:** roughly a million allow-list
-    walks against forty thousand frees, 16 clients, Release, under `MallocScribble` and then under
-    guard malloc (which unmaps freed pages) — no fault, because a freed pointer that is merely read
-    usually reads fine. The proof is in the shipped Release disassembly instead: the read was a bare
-    `movq (%rdi,%rdx), %rdx` tail-calling `_WSKEntryPassesExtensionAllowList` with no retain, and a
-    minimal ARC repro confirms clang emits no `objc_retain` for an ivar passed to a function at
-    `-Os`. After the change the same method makes 5 `objc_getProperty`/`objc_retain` calls where it
-    made 0. **Verify any future change to these by disassembly, not by waiting for a crash.** The
-    concurrency test that ships alongside passes against the UNFIXED build too and says so in its
-    own comment; it is kept only because nothing else exercises concurrent mutation.
-    The original finding, for the record: `allowedFileExtensions`, `allowHiddenItems`, `title`/`header`/
+    runs is a use-after-free.**~~ Fixed 2026-09-05: the six object-typed properties are `atomic` AND
+    read through the getter, which is the half that matters. Scalars stay `nonatomic` — nothing to
+    free. Verified by DISASSEMBLY, not by a crash: a million walks against forty thousand frees
+    under MallocScribble and then guard malloc never faulted, while the read went from a bare ivar
+    load to five retain/getProperty calls. Verify future changes here the same way. Original
+    finding: `allowedFileExtensions`, `allowHiddenItems`, `title`/`header`/
     `prologue`/`epilogue`/`footer`, `fileCacheControlMaxAge`, `serverSentEventsEnabled` are
     plain nonatomic ivars read on connection threads (`WSKWebUploader.m:880-1633`,
     `WSKWebDAVServer.m:285-2107`) and the headers state no set-before-start rule. Release, a
