@@ -1313,10 +1313,16 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
   `Content-Length`, or a date. Found 2026-09-05 when two `WSKValidatorTests` assertions failed a
   full-suite run and passed in isolation, reporting `HTTP/1.1 200 OK` as their evidence that the
   reply "contained 304". The nine NEGATIVE assertions built this way (the ones that fail at random)
-  now use `ReplyHasStatus(reply, 304)`, which reads the status line only. **74 positive ones
-  remain** (`XCTAssertTrue([reply containsString:@"200"])` and friends): those fail the other way —
-  they PASS when the digits happen to appear somewhere else, hiding a defect rather than inventing
-  one. Converting them is a mechanical sweep nobody has done. A test oracle that can match anywhere
+  now use `ReplyHasStatus(reply, 304)`, which reads the status line only. **The 73 positive ones were converted
+  2026-09-05** (`XCTAssertTrue([reply containsString:@"200"])` and friends): those failed the other
+  way — they PASSED when the digits appeared somewhere else, hiding a defect rather than inventing
+  one. Two categories were deliberately NOT converted, and that distinction is the useful part: an
+  assertion naming a status WITH its reason phrase (`containsString:@"403 Forbidden"`) is checking a
+  `<D:status>` line inside a 207 multistatus BODY, which is a different question from the response
+  status, and the reason phrase makes it unambiguous where a bare three-digit string is not. The one
+  site that had to be reverted proves it: the 507 in
+  `testDAVProppatchBoundsCumulativeDeadPropertyStorage` is reported inside the 207, not as the
+  response status, so converting it broke the test. A test oracle that can match anywhere
   in its input is the same shape as the library defects this record keeps finding.
 - **Read the executed count, never the failure count** — a crashed runner reports
   "Executed 0 tests, with 0 failures". A test total that doesn't match expectation is a STOP
