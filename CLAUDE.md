@@ -1090,16 +1090,46 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
     finding's other half was right and useful: NSXMLParser tolerates every one of them, which is
     exactly why the class stayed open through the `}` fix. (One correction to the original: Python
     expat in namespace mode PARSES these, measured — only NSXMLDocument refuses.)
-    (P2) Concurrent PROPPATCHes on one resource lose updates while both answer 200: an
+    ~~(P2) Concurrent PROPPATCHes on one resource lose updates while both answer 200.~~ **Fixed
+    2026-09-05** with a per-server `_deadPropertyLock` around the read-merge-write; per resolved
+    path would be more machinery than a rare verb needs. 60 concurrent patches: 60 accepted, 1
+    stored before, 60 after. The original finding: an
     unlocked read-modify-write of the xattr plist (`:1799` read … `:1883` write; 106/200 and
-    53/150 rounds lost a write). Fix: serialize PROPPATCH per server or per resolved path. (P2)
-    MOVE/COPY do not honour alias semantics for a DANGLING alias — only DELETE was fixed:
+    53/150 rounds lost a write). Fix: serialize PROPPATCH per server or per resolved path. ~~(P2)
+    MOVE/COPY do not honour alias semantics for a DANGLING alias.~~ **Fixed 2026-09-05**: both
+    existence tests in `performCOPY:isMove:` now go through `_NamedEntryExistsAtPath` (one home,
+    `lstat`), so the source can be moved or copied as the link it is and a dangling destination
+    counts as occupied — 412 without `Overwrite`, replaced with `Overwrite: T`. It also corrected a
+    pinned expectation: `testDAVCopyOntoADanglingSymlinkRefusesWithoutRemovingIt` asserted that a
+    COPY onto an occupied name refuses, which was only true because the destination read as ABSENT
+    so the Overwrite check never ran and `-copyItemAtPath:` failed with EEXIST. With the destination
+    seen correctly the default (T, §10.6) replaces it. That test now refuses with `Overwrite: F`,
+    which keeps the property it actually exists for — a refusal must not mutate the tree.
+    The original finding:
     `-fileExistsAtPath:` at `:1254`/`:1279` follows the link, so MOVE/COPY of a dangling alias
     → 404, MOVE onto its name with `Overwrite: T` → 403 (`renamex_np` EEXIST) and without → 403
     where 412 is owed, and the name is invisible in listings so the client cannot tell why.
     Fix: `lstat` for both existence tests in `performCOPY:isMove:` (a link is never a
-    collection) and hand the link's identity to the swap. (P2) Bodiless 2xx responses state no
-    `Content-Length` (`WSKConnection.m:939`; `_StatusDelimitsItself` `:573` covers 1xx/204/304
+    collection) and hand the link's identity to the swap. ~~(P2) Bodiless 2xx responses state no
+    `Content-Length`.~~ **Fixed 2026-09-05** — and narrower than the finding proposed. The
+    serializer emits `Content-Length: 0` when `![_response hasBody]`, the status is 2xx, and it is
+    not 1xx/204/304; `_shouldKeepConnectionAlive` mirrors that clause so the two cannot drift.
+    Two things the finding did not mention. **-hasBody, not "we are not chunking":** a response of
+    UNKNOWN length still has a body, and for an HTTP/1.0 client `_shouldChunkResponse` is NO because
+    1.0 has no chunked encoding, so it is framed by the close — the first version of this fix
+    announced `Content-Length: 0` over a streamed body it then sent, a desync caught only by a test
+    written for that hazard. **2xx only:** letting a bodiless 404 state its length made it
+    keep-alive-eligible and broke the settled "every refusal closes the connection by construction"
+    property, which an existing test pins. Measured: OPTIONS and collection GET now serve 2 of 2
+    pipelined requests where they served 1.
+    **The trace corpus does not pin `Content-Length`.** 31 recorded bodiless 2xx responses were
+    updated to carry the header (proven additive: exactly one line added, remainder byte-identical),
+    but a server WITHOUT the fix still passes every suite — verified by rebuilding the example
+    against `main`'s connection layer and re-running WebDAV-Finder, which reported no mismatch.
+    CFHTTPMessage does not surface `Content-Length` among the header fields the runner compares, so
+    the corpus can neither see it added nor see it missing. The fixtures were kept anyway so the
+    recording matches what the server sends; they are documentation, not enforcement. The original
+    finding: (`WSKConnection.m:939`; `_StatusDelimitsItself` `:573` covers 1xx/204/304
     only), so on a keep-alive server every DAV OPTIONS, MKCOL, COPY/MOVE 201 and collection GET
     closes the connection — the sibling of the 304 fix one status class over; Finder's own
     `Content-Length: 0` on OPTIONS/MKCOL/MOVE/DELETE additionally excludes those requests on the

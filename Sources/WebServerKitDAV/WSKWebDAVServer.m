@@ -103,7 +103,13 @@ NS_ASSUME_NONNULL_BEGIN
 
 NS_ASSUME_NONNULL_END
 
-@implementation WSKWebDAVServer
+@implementation WSKWebDAVServer {
+    // PROPPATCH is a read-modify-write of one xattr plist and nothing serialised it, so two clients
+    // patching the same resource both answered 200 and one write vanished — 198 of 200 lost when
+    // measured, and 60 of 60 in the pinning test. Per server rather than per resolved path:
+    // PROPPATCH is rare, and a per-path table is more machinery than the problem is worth.
+    NSObject *_deadPropertyLock;
+}
 
 @dynamic delegate;
 
@@ -113,6 +119,7 @@ NS_ASSUME_NONNULL_END
         // check containment, and that fails outright for a host-app path carrying a tilde
         // or a trailing separator — which fails closed, i.e. every request gets a 403.
         _uploadDirectory = [[path stringByStandardizingPath] copy];
+        _deadPropertyLock = [[NSObject alloc] init];
         WSKWebDAVServer *const __unsafe_unretained server = self;
 
         // 9.1 PROPFIND method
@@ -509,6 +516,29 @@ static NSString *_Nullable _DeadPropertyElement(NSString *key) {
     }
 
     return [NSString stringWithFormat:@"<W:%@ xmlns:W=\"%@\"/>", _XMLEscape(name), _XMLEscape(href)];
+}
+
+// Does the entry the client NAMED exist, and is it a collection? One home, because DELETE, MOVE and
+// COPY all act on the named entry rather than on what it points at, and answering this with
+// -fileExistsAtPath: gets a dangling alias wrong in both fields at once: it follows the final link,
+// so the link reads as absent, and it reports the TARGET's directory-ness when it does resolve.
+// A symlink is not a collection whatever it points at, so isDirectory comes from the same lstat.
+static BOOL _NamedEntryExistsAtPath(NSString *absolutePath, BOOL *outIsDirectory) {
+    struct stat info;
+
+    if (lstat([absolutePath fileSystemRepresentation], &info) != 0) {
+        if (outIsDirectory) {
+            *outIsDirectory = NO;
+        }
+
+        return NO;
+    }
+
+    if (outIsDirectory) {
+        *outIsDirectory = ((info.st_mode & S_IFMT) == S_IFDIR);
+    }
+
+    return YES;
 }
 
 static WSKErrorResponse *_ResponseIfRequestBodyTooLarge(WSKDataRequest *request) {
@@ -1345,7 +1375,9 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
     // never ran on COPY/MOVE — letting an allowed file be renamed to any extension.
     BOOL srcIsDirectory = NO;
 
-    if (![[NSFileManager defaultManager] fileExistsAtPath:srcAbsolutePath isDirectory:&srcIsDirectory]) {
+    // The named entry, not what it points at — a dangling alias is a thing this verb can move, and
+    // is the ordinary end state of publish-by-symlink. See _NamedEntryExistsAtPath.
+    if (!_NamedEntryExistsAtPath(srcAbsolutePath, &srcIsDirectory)) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", srcRelativePath];
     }
 
@@ -1370,7 +1402,10 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
 
     NSString *const overwriteHeader = request.headers[@"Overwrite"];
     BOOL dstIsDirectory = NO;
-    BOOL const existing = [[NSFileManager defaultManager] fileExistsAtPath:dstAbsolutePath isDirectory:&dstIsDirectory];
+    // Likewise for the destination: a dangling alias sitting there EXISTS, so Overwrite decides
+    // whether it may be replaced. Read as absent it produced 403 from renamex_np's EEXIST with
+    // Overwrite: T, and 403 rather than the owed 412 without.
+    BOOL const existing = _NamedEntryExistsAtPath(dstAbsolutePath, &dstIsDirectory);
 
     if (existing && ((isMove && !_HeaderTokenIs(overwriteHeader, @"T")) || (!isMove && _HeaderTokenIs(overwriteHeader, @"F")))) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_PreconditionFailed message:@"Destination \"%@\" already exists", dstRelativePath];
@@ -1890,111 +1925,117 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"Invalid DAV property update for \"%@\"", relativePath];
     }
 
-    NSMutableDictionary<NSString *, NSString *> *const properties = [_DeadPropertiesAtPath(absolutePath) mutableCopy];
+    // Declared out here because the response below is built from them; only the read, the merge and
+    // the write need to be one step.
     NSMutableArray<NSString *> *const applied = [NSMutableArray array];
     NSMutableArray<NSString *> *const refused = [NSMutableArray array];
-    BOOL changed = NO;
-
-    for (xmlNodePtr instruction = rootNode->children; instruction != NULL; instruction = instruction->next) {
-        if (instruction->type != XML_ELEMENT_NODE) {
-            continue;
-        }
-
-        BOOL const isSet = !xmlStrcmp(instruction->name, (const xmlChar *)"set");
-        BOOL const isRemove = !xmlStrcmp(instruction->name, (const xmlChar *)"remove");
-
-        if (!isSet && !isRemove) {
-            continue;
-        }
-
-        xmlNodePtr const propNode = _XMLChildWithName(instruction->children, (const xmlChar *)"prop");
-
-        for (xmlNodePtr node = propNode ? propNode->children : NULL; node != NULL; node = node->next) {
-            if (node->type != XML_ELEMENT_NODE) {
-                continue;
-            }
-
-            NSString *const localName = [NSString stringWithUTF8String:(const char *)node->name];
-            NSString *const href = _PropertyNamespaceHref(node);
-
-            if (localName.length == 0) {
-                continue;
-            }
-
-            // A prefixed name whose prefix was never declared is not well-formed XML — only
-            // XML_PARSE_RECOVER let it reach here, with the prefix baked into the local name. It
-            // cannot be written back, and STORING it would make every later allprop PROPFIND of
-            // this resource (and the Depth:1 listing of its parent) unparseable. Refuse the
-            // request rather than half-honour it.
-            if (!_PropertyLocalNameIsRepresentable(localName)) {
-                xmlFreeDoc(document);
-                return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest
-                                                         message:@"Property name \"%@\" is not a valid XML name (an undeclared namespace prefix?)", localName];
-            }
-
-            // The same refusal for the namespace half of the key, which is stored and echoed with
-            // the name and breaks the document in exactly the same way.
-            if (!_PropertyNamespaceIsRepresentable(href)) {
-                xmlFreeDoc(document);
-                return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest
-                                                         message:@"Property namespace \"%@\" cannot be stored (it contains \"}\")", href];
-            }
-
-            // A live property is computed from the filesystem, so it cannot be stored. RFC 4918
-            // §9.2 wants that reported per-property rather than the request failing as malformed.
-            if ([href isEqualToString:@"DAV:"] &&
-                ([localName isEqualToString:@"resourcetype"] || [localName isEqualToString:@"creationdate"] ||
-                 [localName isEqualToString:@"getlastmodified"] || [localName isEqualToString:@"getcontentlength"] ||
-                 [localName isEqualToString:@"getetag"] || [localName isEqualToString:@"lockdiscovery"] ||
-                 [localName isEqualToString:@"supportedlock"] || [localName isEqualToString:@"getcontenttype"])) {
-                // displayname is deliberately ABSENT from this list: RFC 4918 §15.2 says it
-                // "SHOULD NOT be protected", so it is stored as a dead property like any other and
-                // the PROPFIND writer prefers a stored value over the derived name.
-                [refused addObject:_DeadPropertyElement(_DeadPropertyKey(href, localName))];
-                continue;
-            }
-
-            NSString *const key = _DeadPropertyKey(href, localName);
-
-            if (isSet) {
-                xmlChar *const content = xmlNodeGetContent(node);
-                NSString *const value = content ? [NSString stringWithUTF8String:(const char *)content] : @"";
-
-                if (content) {
-                    xmlFree(content);
-                }
-
-                properties[key] = (value != nil) ? value : @"";
-            } else {
-                [properties removeObjectForKey:key];
-            }
-
-            [applied addObject:_DeadPropertyElement(key)];
-            changed = YES;
-        }
-    }
-
-    xmlFreeDoc(document);
 
     // The status the refused group carries. 403 is right for a property this server will not let a
     // client set; a storage failure is a different answer, and saying "forbidden" for one sends the
     // client back to retry a request that was never the problem.
     NSString *refusalStatus = @"HTTP/1.1 403 Forbidden";
 
-    // Atomic: nothing is written when any instruction was refused, and the applied ones become 424.
-    if ((refused.count == 0) && changed && !_SetDeadPropertiesAtPath(absolutePath, properties)) {
-        int const failure = errno;
-        [self logWarning:@"Failed storing DAV properties for \"%@\" (errno %i)", relativePath, failure];
+    // Read, merge and write as one step; see _deadPropertyLock.
+    @synchronized(_deadPropertyLock) {
+        NSMutableDictionary<NSString *, NSString *> *const properties = [_DeadPropertiesAtPath(absolutePath) mutableCopy];
+        BOOL changed = NO;
 
-        // Out of room — the per-resource cap, a full disk, or the user's quota — is 507, the same
-        // answer PUT/MKCOL/COPY/MOVE already give for ENOSPC and EDQUOT. Anything else (ENOTSUP on
-        // a filesystem with no extended attributes) stays 403.
-        if ((failure == EDQUOT) || (failure == ENOSPC)) {
-            refusalStatus = @"HTTP/1.1 507 Insufficient Storage";
+        for (xmlNodePtr instruction = rootNode->children; instruction != NULL; instruction = instruction->next) {
+            if (instruction->type != XML_ELEMENT_NODE) {
+                continue;
+            }
+
+            BOOL const isSet = !xmlStrcmp(instruction->name, (const xmlChar *)"set");
+            BOOL const isRemove = !xmlStrcmp(instruction->name, (const xmlChar *)"remove");
+
+            if (!isSet && !isRemove) {
+                continue;
+            }
+
+            xmlNodePtr const propNode = _XMLChildWithName(instruction->children, (const xmlChar *)"prop");
+
+            for (xmlNodePtr node = propNode ? propNode->children : NULL; node != NULL; node = node->next) {
+                if (node->type != XML_ELEMENT_NODE) {
+                    continue;
+                }
+
+                NSString *const localName = [NSString stringWithUTF8String:(const char *)node->name];
+                NSString *const href = _PropertyNamespaceHref(node);
+
+                if (localName.length == 0) {
+                    continue;
+                }
+
+                // A prefixed name whose prefix was never declared is not well-formed XML — only
+                // XML_PARSE_RECOVER let it reach here, with the prefix baked into the local name. It
+                // cannot be written back, and STORING it would make every later allprop PROPFIND of
+                // this resource (and the Depth:1 listing of its parent) unparseable. Refuse the
+                // request rather than half-honour it.
+                if (!_PropertyLocalNameIsRepresentable(localName)) {
+                    xmlFreeDoc(document);
+                    return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest
+                                                             message:@"Property name \"%@\" is not a valid XML name (an undeclared namespace prefix?)", localName];
+                }
+
+                // The same refusal for the namespace half of the key, which is stored and echoed with
+                // the name and breaks the document in exactly the same way.
+                if (!_PropertyNamespaceIsRepresentable(href)) {
+                    xmlFreeDoc(document);
+                    return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest
+                                                             message:@"Property namespace \"%@\" cannot be stored (it contains \"}\")", href];
+                }
+
+                // A live property is computed from the filesystem, so it cannot be stored. RFC 4918
+                // §9.2 wants that reported per-property rather than the request failing as malformed.
+                if ([href isEqualToString:@"DAV:"] &&
+                    ([localName isEqualToString:@"resourcetype"] || [localName isEqualToString:@"creationdate"] ||
+                     [localName isEqualToString:@"getlastmodified"] || [localName isEqualToString:@"getcontentlength"] ||
+                     [localName isEqualToString:@"getetag"] || [localName isEqualToString:@"lockdiscovery"] ||
+                     [localName isEqualToString:@"supportedlock"] || [localName isEqualToString:@"getcontenttype"])) {
+                    // displayname is deliberately ABSENT from this list: RFC 4918 §15.2 says it
+                    // "SHOULD NOT be protected", so it is stored as a dead property like any other and
+                    // the PROPFIND writer prefers a stored value over the derived name.
+                    [refused addObject:_DeadPropertyElement(_DeadPropertyKey(href, localName))];
+                    continue;
+                }
+
+                NSString *const key = _DeadPropertyKey(href, localName);
+
+                if (isSet) {
+                    xmlChar *const content = xmlNodeGetContent(node);
+                    NSString *const value = content ? [NSString stringWithUTF8String:(const char *)content] : @"";
+
+                    if (content) {
+                        xmlFree(content);
+                    }
+
+                    properties[key] = (value != nil) ? value : @"";
+                } else {
+                    [properties removeObjectForKey:key];
+                }
+
+                [applied addObject:_DeadPropertyElement(key)];
+                changed = YES;
+            }
         }
 
-        [refused addObjectsFromArray:applied];
-        [applied removeAllObjects];
+        xmlFreeDoc(document);
+
+        // Atomic: nothing is written when any instruction was refused, and the applied ones become 424.
+        if ((refused.count == 0) && changed && !_SetDeadPropertiesAtPath(absolutePath, properties)) {
+            int const failure = errno;
+            [self logWarning:@"Failed storing DAV properties for \"%@\" (errno %i)", relativePath, failure];
+
+            // Out of room — the per-resource cap, a full disk, or the user's quota — is 507, the same
+            // answer PUT/MKCOL/COPY/MOVE already give for ENOSPC and EDQUOT. Anything else (ENOTSUP on
+            // a filesystem with no extended attributes) stays 403.
+            if ((failure == EDQUOT) || (failure == ENOSPC)) {
+                refusalStatus = @"HTTP/1.1 507 Insufficient Storage";
+            }
+
+            [refused addObjectsFromArray:applied];
+            [applied removeAllObjects];
+        }
     }
 
     NSMutableString *const xmlString = [NSMutableString stringWithString:@"<?xml version=\"1.0\" encoding=\"utf-8\" ?>"];
