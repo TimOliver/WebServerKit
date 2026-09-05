@@ -1956,7 +1956,13 @@
 
     // A store poisoned by an OLDER build must heal rather than stay unreadable: the key is skipped
     // when writing the response, so one property is lost instead of the whole listing.
-    NSDictionary *const legacy = @{@"{urn:a}b}note": @"v", @"{urn:ok}fine": @"w"};
+    // Keys an OLDER build could have written, each of which the derived-name check has to catch.
+    // The last two came from re-fuzzing the property functions: "{" is no more a legal XML name
+    // character than ":" or "}" and the blacklist did not have it, and a NUL made -UTF8String
+    // validate a PREFIX while the whole string was emitted — the truncation class, seventh
+    // recurrence, in a validator written the day before.
+    NSString *const withNUL = [NSString stringWithFormat:@"{urn:ok}na%Cme", (unichar)0];
+    NSDictionary *const legacy = @{@"{urn:a}b}note": @"v", @"{urn:ok}fine": @"w", @"{urn:a}b{c": @"x", withNUL: @"y"};
     NSData *const plist = [NSPropertyListSerialization dataWithPropertyList:legacy format:NSPropertyListBinaryFormat_v1_0 options:0 error:NULL];
     XCTAssertEqual(setxattr([path fileSystemRepresentation], "com.webserverkit.dav.deadproperties", plist.bytes, plist.length, 0, 0), 0);
 

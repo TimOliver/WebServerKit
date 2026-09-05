@@ -36,6 +36,7 @@
 
 #import <libxml/parser.h>
 #import <libxml/uri.h>
+#import <libxml/valid.h>
 #import <sys/xattr.h>
 
 #import "WSKDataRequest.h"
@@ -404,6 +405,15 @@ static NSString *_DeadPropertyKey(NSString *namespaceHref, NSString *localName) 
     return namespaceHref.length ? [NSString stringWithFormat:@"{%@}%@", namespaceHref, localName] : localName;
 }
 
+// Is every byte of this string reachable through its C representation? -UTF8String stops at the
+// first NUL, so any validator built on it judges a PREFIX while the whole string is what gets
+// written out — the truncation class this record has recorded seven times, and the re-fuzz of the
+// property functions found it in BOTH validators below within minutes of each other. ONE home, so
+// the next validator added here inherits the answer.
+static BOOL _IsWholeUTF8String(NSString *string, const char *utf8) {
+    return (utf8 != NULL) && (strlen(utf8) == [string lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+}
+
 // Can this local name be written back as an XML element name? Neither a colon nor a closing brace
 // can appear in an NCName, and each arrives here for exactly one reason.
 //
@@ -424,8 +434,19 @@ static NSString *_DeadPropertyKey(NSString *namespaceHref, NSString *localName) 
 // is refused rather than stored, and any key already on disk from before these checks is skipped
 // when writing a response instead of corrupting it.
 static BOOL _PropertyLocalNameIsRepresentable(NSString *localName) {
-    return (localName.length > 0) && ([localName rangeOfString:@":" options:NSLiteralSearch].location == NSNotFound) &&
-           ([localName rangeOfString:@"}" options:NSLiteralSearch].location == NSNotFound);
+    // Ask libxml2 whether it is an NCName rather than blacklisting characters, for the same reason
+    // the namespace check asks xmlParseURI: the blacklist was wrong twice. It began as ":" alone,
+    // gained "}" when a namespace could smuggle one into the DERIVED name, and a re-fuzz of this
+    // function then produced `{n:}a{bnbn` — a key an older build could have written, whose derived
+    // name `a{bnbn` carries a "{" that is no more a legal XML name character than the other two.
+    // Any character the split can leave here is fair game, so test the actual property.
+    const char *const utf8 = [localName UTF8String];
+
+    if ((localName.length == 0) || !_IsWholeUTF8String(localName, utf8)) {
+        return NO;
+    }
+
+    return xmlValidateNCName((const xmlChar *)utf8, 0) == 0;
 }
 
 // The same question about the other half of the key, asked twice because the first answer was too
@@ -457,7 +478,13 @@ static BOOL _PropertyNamespaceIsRepresentable(NSString *namespaceHref) {
         return YES;  // A property in no namespace at all; keyed by its bare local name.
     }
 
-    xmlURIPtr const uri = xmlParseURI([namespaceHref UTF8String]);
+    const char *const utf8 = [namespaceHref UTF8String];
+
+    if (!_IsWholeUTF8String(namespaceHref, utf8)) {
+        return NO;  // A NUL would be validated away and then emitted; see _IsWholeUTF8String.
+    }
+
+    xmlURIPtr const uri = xmlParseURI(utf8);
 
     if (uri == NULL) {
         return NO;

@@ -1446,6 +1446,35 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
     fixes carries its own pinning test, and the wire matrices were replayed both directly and
     through a reverse proxy. Do not spend a future pass obtaining litmus on general principle —
     re-run it only if the DAV property or namespace code changes substantially.
+- **Fuzzing, second pass, 2026-09-05 — run because the layers the first pass covered had all been
+  rewritten** (the linear-parsers work, the chunked cursors, the removal primitive, the property
+  validators). Two targets, both with the oracle proven sensitive first by injecting a defect: a
+  one-byte overread in the multipart boundary search was caught in under 5,000 runs.
+  - *Multipart parser*, driven through `performWriteData:` in pseudo-random slices because every
+    defect this parser has had was about what happens ACROSS appends: **1,164,121 + 415,758 runs
+    CLEAN**, coverage 181, asserting `WSKReservedMemoryLength() == 0` after every teardown.
+  - *Dead-property key round trip* (`_DeadPropertyKey` → `_DeadPropertyElement`), asserting that any
+    key the server will STORE comes back as parseable XML — recurring shape 13 as an invariant.
+    **Two real findings, both in validators written the day before**, then **103,236,933 runs clean**.
+    (1) The local-name blacklist rejected `:` and `}` but not `{`, and a legacy key like `{urn:a}b{c`
+    derives the name `b{c` — reachable through the healing path, since `{` in a namespace was
+    allowed until 2026-09-04. (2) Both validators judged `-UTF8String`, which stops at the first
+    NUL, so they validated a PREFIX while the whole string was emitted — the truncation class,
+    **seventh recurrence**, found twice within minutes in `_PropertyLocalNameIsRepresentable` and
+    `_PropertyNamespaceIsRepresentable`. Fixes: ask libxml2 (`xmlValidateNCName`) instead of
+    blacklisting characters, the same move the namespace check made with `xmlParseURI`; and one home,
+    `_IsWholeUTF8String`, that both validators consult. Pinned by legacy-store cases in
+    `testDAVRefusesAPropertyNamespaceThatCannotBeWrittenBack`, red against the old blacklist.
+  - What this pass did NOT cover, and why: the chunked decoder's cursors. `readNextBodyChunk:` is a
+    method on a live `WSKConnection` needing a real socket, so it is not reachable in-process the
+    way the pure parsers are; its cursors are covered by the two CPU-bounded tests instead. A
+    socket-driven fuzzer would be a different tool.
+  - Recipe additions to the 2026-08-18 notes below: Homebrew LLVM 23 puts the runtime at
+    `/opt/homebrew/opt/llvm/lib/clang/23/lib/darwin/libclang_rt.fuzzer_osx.a`; a target that
+    `#import`s a `.m` still links the rest of the module's sources, so pass the source globs
+    UNQUOTED or the shell hands clang one long filename; and `grep -c "error:"` over a clang log
+    counts every `error:` in an Objective-C method signature, which reads as a failed build when
+    the build succeeded.
 - **Fuzzing, one bounded pass, 2026-08-18 (~79M executions, harness deliberately NOT kept).**
   libFuzzer + ASan + UBSan, 10 in-process targets over the pure parsers, the containment
   resolvers against a symlink/dot-dir fixture farm, and the framing parsers. CLEAN at:
