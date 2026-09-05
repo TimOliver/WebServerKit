@@ -291,7 +291,7 @@ static BOOL WSKInjectingMove(id self, SEL _cmd, NSString *src, NSString *dst, NS
     // Cross-origin Origin -> rejected with 403; the directory must not be created.
     NSString *body = @"path=/EvilFolder";
     NSString *crossOrigin = SendRawRequest(server.port, [NSString stringWithFormat:@"POST /create HTTP/1.1\r\nHost: %@\r\nOrigin: http://evil.example\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %lu\r\n\r\n%@", host, (unsigned long)body.length, body]);
-    XCTAssertTrue([crossOrigin containsString:@"403"], @"cross-origin mutation must be rejected, got: %@", crossOrigin);
+    XCTAssertTrue(ReplyHasStatus(crossOrigin, 403), @"cross-origin mutation must be rejected, got: %@", crossOrigin);
     XCTAssertFalse([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"EvilFolder"]], @"cross-origin request created the folder");
 
     // No Origin header (non-browser client) -> allowed.
@@ -331,7 +331,7 @@ static BOOL WSKInjectingMove(id self, SEL _cmd, NSString *src, NSString *dst, NS
 
     NSString *reply = SendRawRequest(server.port, @"GET /list HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertNotNil(reply, @"server appears to have crashed handling /list with no path parameter");
-    XCTAssertTrue([reply containsString:@"200"], @"a missing path should list the root, got: %@", reply);
+    XCTAssertTrue(ReplyHasStatus(reply, 200), @"a missing path should list the root, got: %@", reply);
     // The entries must be rooted at "/", i.e. the default was applied rather than a nil
     // path silently producing bare names. NSJSONSerialization escapes "/" as "\/".
     XCTAssertTrue([reply containsString:@"\"\\/a.txt\""], @"file entry not rooted at the default path: %@", reply);
@@ -340,7 +340,7 @@ static BOOL WSKInjectingMove(id self, SEL _cmd, NSString *src, NSString *dst, NS
     // The process must still be alive and serving.
     NSString *reply2 = SendRawRequest(server.port, @"GET /list?path=/ HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertNotNil(reply2, @"server appears to have crashed after the parameterless request");
-    XCTAssertTrue([reply2 containsString:@"200"], @"server did not respond normally afterwards: %@", reply2);
+    XCTAssertTrue(ReplyHasStatus(reply2, 200), @"server did not respond normally afterwards: %@", reply2);
 
     [server stop];
     [fm removeItemAtPath:dir error:NULL];
@@ -371,12 +371,12 @@ static BOOL WSKInjectingMove(id self, SEL _cmd, NSString *src, NSString *dst, NS
 
     // Access-Control-Request-Method alone is not a preflight and must still need auth.
     NSString *forged = SendRawRequest(server.port, @"OPTIONS / HTTP/1.1\r\nHost: localhost\r\nAccess-Control-Request-Method: POST\r\n\r\n");
-    XCTAssertTrue([forged containsString:@"401"], @"expected 401 without Origin, got: %@", forged);
+    XCTAssertTrue(ReplyHasStatus(forged, 401), @"expected 401 without Origin, got: %@", forged);
     XCTAssertFalse([forged containsString:@"handler-reached"], @"the OPTIONS handler ran unauthenticated: %@", forged);
 
     // A plain OPTIONS request is unaffected and still requires auth.
     NSString *plain = SendRawRequest(server.port, @"OPTIONS / HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    XCTAssertTrue([plain containsString:@"401"], @"expected 401 for a plain OPTIONS, got: %@", plain);
+    XCTAssertTrue(ReplyHasStatus(plain, 401), @"expected 401 for a plain OPTIONS, got: %@", plain);
 
     [server stop];
 }
@@ -394,7 +394,7 @@ static BOOL WSKInjectingMove(id self, SEL _cmd, NSString *src, NSString *dst, NS
 
     NSString *page = SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertNotNil(page);
-    XCTAssertTrue([page containsString:@"200"], @"index page did not load: %@", page);
+    XCTAssertTrue(ReplyHasStatus(page, 200), @"index page did not load: %@", page);
     // Whatever this host is called, the assignment must be a syntactically closed literal
     // and must not have left a raw "%device%" placeholder behind.
     XCTAssertTrue([page containsString:@"var _device = \""], @"device name is not emitted as a quoted literal");

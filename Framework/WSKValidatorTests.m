@@ -241,7 +241,7 @@
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     NSString *first = SendRawRequest(server.port, @"GET /f.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    XCTAssertTrue([first containsString:@"200"], @"%@", first);
+    XCTAssertTrue(ReplyHasStatus(first, 200), @"%@", first);
 
     // Replace the contents and give the file an *older* mtime, the case that made the date
     // comparison validate. The ETag changes because the inode/mtime do.
@@ -426,7 +426,7 @@
     XCTAssertNotEqual(r.location, (NSUInteger)NSNotFound, @"%@", first);
     NSString *echoed = [[[first substringFromIndex:(r.location + r.length)] componentsSeparatedByString:@"\r\n"] firstObject];
     NSString *same = [NSString stringWithFormat:@"GET /build.bin HTTP/1.1\r\nHost: localhost\r\nIf-Modified-Since: %@\r\n\r\n", echoed];
-    XCTAssertTrue([SendRawRequest(server.port, same) containsString:@"304"], @"echoing back the served Last-Modified must still revalidate");
+    XCTAssertTrue(ReplyHasStatus(SendRawRequest(server.port, same), 304), @"echoing back the served Last-Modified must still revalidate");
 
     [server stop];
     [fm removeItemAtPath:root error:NULL];

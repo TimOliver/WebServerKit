@@ -102,7 +102,7 @@
     BOOL sawEOF = NO;
     NSData *data = ReadToEOF(fd, &sawEOF);
     NSString *reply = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-    XCTAssertTrue([reply containsString:@"200"], @"expected a 200 response, got: %@", reply);
+    XCTAssertTrue(ReplyHasStatus(reply, 200), @"expected a 200 response, got: %@", reply);
     XCTAssertTrue([reply containsString:@"slow-response-body"], @"slow handler's response was cut off: %@", reply);
     close(fd);
     [server stop];
@@ -128,7 +128,7 @@
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     // Sanity: a well-formed request still works.
-    XCTAssertTrue([SendRawRequest(server.port, @"GET /a HTTP/1.1\r\nHost: localhost\r\n\r\n") containsString:@"200"]);
+    XCTAssertTrue(ReplyHasStatus(SendRawRequest(server.port, @"GET /a HTTP/1.1\r\nHost: localhost\r\n\r\n"), 200));
 
     NSDictionary *cases = @{
         @"bare LF-LF hiding later headers": @"GET /a HTTP/1.1\r\nX-Pad: p\n\nHost: evil.example\r\n\r\n",
@@ -144,7 +144,7 @@
     [cases enumerateKeysAndObjectsUsingBlock:^(NSString *name, NSString *raw, BOOL *stop) {
         NSString *reply = SendRawRequest(server.port, raw);
         XCTAssertNotNil(reply, @"%@: no reply", name);
-        XCTAssertTrue([reply containsString:@"400"], @"%@: expected 400, got: %@", name, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+        XCTAssertTrue(ReplyHasStatus(reply, 400), @"%@: expected 400, got: %@", name, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
     }];
 
     [server stop];
@@ -165,7 +165,7 @@
     NSString *huge = [@"" stringByPaddingToLength:(1024 * 1024) withString:@"A" startingAtIndex:0];
     NSString *reply = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /a HTTP/1.1\r\nHost: localhost\r\nX-Big: %@\r\n\r\n", huge]);
     XCTAssertNotNil(reply);
-    XCTAssertTrue([reply containsString:@"431"], @"expected 431 for an oversized header block, got: %@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+    XCTAssertTrue(ReplyHasStatus(reply, 431), @"expected 431 for an oversized header block, got: %@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
 
     [server stop];
 }
@@ -193,12 +193,12 @@
 
     // (a) No credentials.
     NSString *unauthenticated = SendRawRequest(server.port, @"PUT /big.bin HTTP/1.1\r\nHost: localhost\r\nContent-Length: 104857600\r\n\r\n");
-    XCTAssertTrue([unauthenticated containsString:@"401"], @"expected 401 before the body, got: %@", unauthenticated);
+    XCTAssertTrue(ReplyHasStatus(unauthenticated, 401), @"expected 401 before the body, got: %@", unauthenticated);
 
     // (b) Valid credentials but a Host the allow-list does not cover. "dXNlcjpwYXNz" is
     // base64 of "user:pass", so this fails only on the Host check.
     NSString *badHost = SendRawRequest(server.port, @"PUT /big.bin HTTP/1.1\r\nHost: evil.example\r\nAuthorization: Basic dXNlcjpwYXNz\r\nContent-Length: 104857600\r\n\r\n");
-    XCTAssertTrue([badHost containsString:@"421"], @"expected 421 before the body, got: %@", badHost);
+    XCTAssertTrue(ReplyHasStatus(badHost, 421), @"expected 421 before the body, got: %@", badHost);
 
     XCTAssertEqual([fm contentsOfDirectoryAtPath:dir error:NULL].count, (NSUInteger)0, @"nothing should have been stored");
 
@@ -1343,11 +1343,11 @@
 
     NSString *reply = SendRawRequest(server.port, @"GET /%FF HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertNotNil(reply);
-    XCTAssertTrue([reply containsString:@"400"], @"expected 400 for an undecodable request target, got: %@", reply);
+    XCTAssertTrue(ReplyHasStatus(reply, 400), @"expected 400 for an undecodable request target, got: %@", reply);
 
     // The server must still be serving afterwards.
     NSString *second = SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    XCTAssertTrue([second containsString:@"200"], @"server stopped serving after a malformed target: %@", second);
+    XCTAssertTrue(ReplyHasStatus(second, 200), @"server stopped serving after a malformed target: %@", second);
     [server stop];
 }
 
@@ -1365,7 +1365,7 @@
 
     NSString *reply = SendRawRequest(server.port, @"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/plain\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n");
     XCTAssertNotNil(reply);
-    XCTAssertTrue([reply containsString:@"400"], @"expected 400 for conflicting framing headers, got: %@", reply);
+    XCTAssertTrue(ReplyHasStatus(reply, 400), @"expected 400 for conflicting framing headers, got: %@", reply);
     [server stop];
 }
 
@@ -1465,11 +1465,11 @@
         @autoreleasepool {
             // A ranged read, the shape an interrupted download resumes with.
             NSString *ranged = SendRawRequest(server.port, @"GET /build.bin HTTP/1.1\r\nHost: localhost\r\nRange: bytes=1048576-1049599\r\n\r\n");
-            XCTAssertTrue([ranged containsString:@"206"], @"iteration %i: %@", i, [ranged substringToIndex:MIN((NSUInteger)40, ranged.length)]);
+            XCTAssertTrue(ReplyHasStatus(ranged, 206), @"iteration %i: %@", i, [ranged substringToIndex:MIN((NSUInteger)40, ranged.length)]);
 
             // An in-memory body, which is what takes a reservation from the shared budget.
             NSString *posted = SendRawRequest(server.port, post);
-            XCTAssertTrue([posted containsString:@"200"], @"iteration %i: %@", i, [posted substringToIndex:MIN((NSUInteger)40, posted.length)]);
+            XCTAssertTrue(ReplyHasStatus(posted, 200), @"iteration %i: %@", i, [posted substringToIndex:MIN((NSUInteger)40, posted.length)]);
 
             // A refusal, so the failure paths are exercised too rather than only the happy ones.
             (void)SendRawRequest(server.port, @"GET /nope.bin HTTP/1.1\r\nHost: localhost\r\n\r\n");
@@ -1617,7 +1617,7 @@
     const unsigned char refused[] = {0x00, 0x01, 0x1F, 0x7F};
     for (size_t i = 0; i < sizeof(refused); i++) {
         NSString *reply = SendRawDataRequest(server.port, requestWithValueByte(refused[i]));
-        XCTAssertTrue([reply containsString:@"400"], @"byte 0x%02X in a field value must be refused, got: %@", refused[i], [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+        XCTAssertTrue(ReplyHasStatus(reply, 400), @"byte 0x%02X in a field value must be refused, got: %@", refused[i], [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
     }
 
     const unsigned char served[] = {0x09, 0xE9};  // HTAB, and an obs-text byte
@@ -1647,7 +1647,7 @@
     NSArray<NSString *> *unsupported = @[@"HTTP/2.0", @"HTTP/3.0", @"HTTP/0.9"];
     for (NSString *version in unsupported) {
         NSString *reply = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /a %@\r\nHost: localhost\r\n\r\n", version]);
-        XCTAssertTrue([reply containsString:@"505"], @"%@ must answer 505, got: %@", version, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+        XCTAssertTrue(ReplyHasStatus(reply, 505), @"%@ must answer 505, got: %@", version, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
     }
 
     NSString *higherMinor = SendRawRequest(server.port, @"GET /a HTTP/1.2\r\nHost: localhost\r\n\r\n");
@@ -1656,7 +1656,7 @@
     NSArray<NSString *> *malformed = @[@"http/1.1", @"HTTP/1.x", @"HTTP/11.1"];
     for (NSString *version in malformed) {
         NSString *reply = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /a %@\r\nHost: localhost\r\n\r\n", version]);
-        XCTAssertTrue([reply containsString:@"400"], @"%@ is a grammar violation and must stay 400, got: %@", version, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+        XCTAssertTrue(ReplyHasStatus(reply, 400), @"%@ is a grammar violation and must stay 400, got: %@", version, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
     }
 
     [server stop];
@@ -1703,14 +1703,14 @@
     };
     [badCases enumerateKeysAndObjectsUsingBlock:^(NSString *name, NSString *raw, BOOL *stop) {
         NSString *reply = SendRawRequest(server.port, raw);
-        XCTAssertTrue([reply containsString:@"400"], @"%@: expected 400, got: %@", name, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+        XCTAssertTrue(ReplyHasStatus(reply, 400), @"%@: expected 400, got: %@", name, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
     }];
 
     NSString *sane = SendRawRequest(server.port, @"GET /a HTTP/1.1\r\nHost: localhost\r\n\r\n");
     XCTAssertTrue([sane hasPrefix:@"HTTP/1.1 200"], @"a single valid Host must still be served: %@", [sane substringToIndex:MIN((NSUInteger)40, sane.length)]);
 
     NSString *misdirected = SendRawRequest(server.port, @"GET /a HTTP/1.1\r\nHost: other.example\r\n\r\n");
-    XCTAssertTrue([misdirected containsString:@"421"], @"a well-formed but unrecognized name must stay 421, got: %@", [misdirected substringToIndex:MIN((NSUInteger)40, misdirected.length)]);
+    XCTAssertTrue(ReplyHasStatus(misdirected, 421), @"a well-formed but unrecognized name must stay 421, got: %@", [misdirected substringToIndex:MIN((NSUInteger)40, misdirected.length)]);
 
     [server stop];
 }
@@ -1731,13 +1731,13 @@
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     NSString *foreignAuthority = SendRawRequest(server.port, @"GET http://evil.example/a HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    XCTAssertTrue([foreignAuthority containsString:@"421"], @"the absolute-form authority must be validated, not the Host header: %@", [foreignAuthority substringToIndex:MIN((NSUInteger)40, foreignAuthority.length)]);
+    XCTAssertTrue(ReplyHasStatus(foreignAuthority, 421), @"the absolute-form authority must be validated, not the Host header: %@", [foreignAuthority substringToIndex:MIN((NSUInteger)40, foreignAuthority.length)]);
 
     NSString *localAuthority = SendRawRequest(server.port, @"GET http://localhost/a HTTP/1.1\r\nHost: evil.example\r\n\r\n");
     XCTAssertTrue([localAuthority hasPrefix:@"HTTP/1.1 200"], @"with absolute-form the Host header must be ignored entirely: %@", [localAuthority substringToIndex:MIN((NSUInteger)40, localAuthority.length)]);
 
     NSString *originForm = SendRawRequest(server.port, @"GET /a HTTP/1.1\r\nHost: evil.example\r\n\r\n");
-    XCTAssertTrue([originForm containsString:@"421"], @"origin-form must keep validating the Host header: %@", [originForm substringToIndex:MIN((NSUInteger)40, originForm.length)]);
+    XCTAssertTrue(ReplyHasStatus(originForm, 421), @"origin-form must keep validating the Host header: %@", [originForm substringToIndex:MIN((NSUInteger)40, originForm.length)]);
 
     [server stop];
 }
@@ -1758,11 +1758,11 @@
 
     NSString *hugeTarget = [@"/" stringByPaddingToLength:(80 * 1024) withString:@"a" startingAtIndex:0];
     NSString *reply = SendRawRequest(server.port, [NSString stringWithFormat:@"GET %@ HTTP/1.1\r\nHost: localhost\r\n\r\n", hugeTarget]);
-    XCTAssertTrue([reply containsString:@"414"], @"an oversized request-target owes 414, got: %@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+    XCTAssertTrue(ReplyHasStatus(reply, 414), @"an oversized request-target owes 414, got: %@", [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
 
     NSString *hugeHeader = [@"" stringByPaddingToLength:(80 * 1024) withString:@"A" startingAtIndex:0];
     NSString *blockReply = SendRawRequest(server.port, [NSString stringWithFormat:@"GET /a HTTP/1.1\r\nHost: localhost\r\nX-Big: %@\r\n\r\n", hugeHeader]);
-    XCTAssertTrue([blockReply containsString:@"431"], @"an oversized block with an ordinary request line must stay 431, got: %@", [blockReply substringToIndex:MIN((NSUInteger)40, blockReply.length)]);
+    XCTAssertTrue(ReplyHasStatus(blockReply, 431), @"an oversized block with an ordinary request line must stay 431, got: %@", [blockReply substringToIndex:MIN((NSUInteger)40, blockReply.length)]);
 
     [server stop];
 }
@@ -1788,7 +1788,7 @@
     };
     [notImplemented enumerateKeysAndObjectsUsingBlock:^(NSString *name, NSString *raw, BOOL *stop) {
         NSString *reply = SendRawRequest(server.port, raw);
-        XCTAssertTrue([reply containsString:@"501"], @"%@: an unimplemented coding owes 501, got: %@", name, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+        XCTAssertTrue(ReplyHasStatus(reply, 501), @"%@: an unimplemented coding owes 501, got: %@", name, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
     }];
 
     NSDictionary *stillMalformed = @{
@@ -1797,7 +1797,7 @@
     };
     [stillMalformed enumerateKeysAndObjectsUsingBlock:^(NSString *name, NSString *raw, BOOL *stop) {
         NSString *reply = SendRawRequest(server.port, raw);
-        XCTAssertTrue([reply containsString:@"400"], @"%@: a framing error must stay 400, got: %@", name, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
+        XCTAssertTrue(ReplyHasStatus(reply, 400), @"%@: a framing error must stay 400, got: %@", name, [reply substringToIndex:MIN((NSUInteger)40, reply.length)]);
     }];
 
     [server stop];

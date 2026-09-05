@@ -113,7 +113,7 @@
             // Reading publicServerURL takes _stateQueue, the same queue the callbacks now
             // take; doing it while the mapping request is in flight is the interesting case.
             (void)server.publicServerURL;
-            XCTAssertTrue([SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n") containsString:@"200"]);
+            XCTAssertTrue(ReplyHasStatus(SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"), 200));
 
             [server stop];
             XCTAssertFalse(server.isRunning, @"cycle %i did not stop", i);

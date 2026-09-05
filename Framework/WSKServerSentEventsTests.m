@@ -353,10 +353,10 @@
     XCTAssertTrue([server startWithOptions:options error:NULL]);
 
     NSString *noCors = SendRawRequest(server.port, @"GET /events HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\nSec-Fetch-Mode: no-cors\r\nSec-Fetch-Site: cross-site\r\nSec-Fetch-Dest: empty\r\n\r\n");
-    XCTAssertTrue([noCors containsString:@"406"], @"a no-cors cross-site fetch must be refused: %@", [noCors substringToIndex:MIN((NSUInteger)40, noCors.length)]);
+    XCTAssertTrue(ReplyHasStatus(noCors, 406), @"a no-cors cross-site fetch must be refused: %@", [noCors substringToIndex:MIN((NSUInteger)40, noCors.length)]);
 
     NSString *crossSite = SendRawRequest(server.port, @"GET /events HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\nSec-Fetch-Mode: cors\r\nSec-Fetch-Site: cross-site\r\nSec-Fetch-Dest: empty\r\n\r\n");
-    XCTAssertTrue([crossSite containsString:@"406"], @"a cross-site EventSource must be refused: %@", [crossSite substringToIndex:MIN((NSUInteger)40, crossSite.length)]);
+    XCTAssertTrue(ReplyHasStatus(crossSite, 406), @"a cross-site EventSource must be refused: %@", [crossSite substringToIndex:MIN((NSUInteger)40, crossSite.length)]);
 
     [server stop];
     [fm removeItemAtPath:dir error:NULL];
