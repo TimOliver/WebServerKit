@@ -393,41 +393,30 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
 - Multipart: one shared budget (`WSKMIMEStreamBudget`) across nested parsers; part-header
   blocks capped; 1024 parts max; `[super init]` and the `_tmpFile = -1` sentinel are set
   before any failure return (a nil-returning init once closed fd 0 in dealloc).
-- **Both body parsers are linear in their input (2026-09-03, 23rd pass) — and were not before.**
-  The chunked decoder dropped each consumed chunk from the FRONT of its buffer and searched from
-  offset 0, so one read holding N tiny chunks cost O(N²): 400k one-byte chunks (2.4 MB of wire)
-  burned 4.6 s of CPU, 2M (10 MB) 85 s, from any LAN peer, and a DAV PUT streams to disk so no
-  size cap bounded it. Now a cursor skips consumed chunks and the buffer is compacted once per
-  read. The multipart parser rescanned its whole working buffer on every append, and its 8 KB
-  part-header cap was judged only AFTER the terminating blank line, so an unterminated header
-  block grew to the 16 MB working buffer: 128 KB of header in 1-byte segments cost 8.5 s. Now
-  every search resumes from the last position that could still begin the token it wants
-  (`_scanOffset`), the header cap is judged on the bytes buffered, and a preamble is discarded as
-  it streams (RFC 2046 §5.1.1). Third, the working-buffer cap was applied to the size of ONE
-  `appendBytes:` call before its file content could drain, so a single loopback or
-  same-host-proxy read above 16 MB — which the kernel does hand over — answered 413 on a 1 GB
-  upload; the append now feeds 256 KB slices and parses after each. Pinned by five tests that
-  bound CPU time (load-proof, unlike wall time) and check the bytes arrive whole, all red on the
-  unfixed source (2.1 s / 9,000 header bytes accepted / 2.5 s / refused at 1 MB / 413). The
-  stalled fake-boundary behaviour is UNCHANGED by design (its pinning test still passes): a
-  token not followed by a delimiter still wedges until the cap, but at O(1) per append. What the
-  fuzzing pass could not see: libFuzzer measures crashes and hangs, not a terminating-but-
-  quadratic cost.
-  **Both of that cursor's own siblings are now closed too (2026-09-04), and it had two.** It
-  advanced only when a chunk COMPLETED, so (a) a chunk-size line that never ends — `5;` plus
-  megabytes of extension, dribbled a byte per read — rescanned the whole prefix for CRLF every
-  time, and (b) once the last-chunk marker was seen, the terminating CRLFCRLF was searched from
-  that marker on every read, so a trailer that never ends did the same. `_chunkScanOffset` and
-  `_chunkTrailerScanOffset` persist across reads and resume at the last byte that could still begin
-  their token. Measured on the wire at an 8 MB prefix: size line **2.80 ms of CPU per read → 0.067
-  ms**, trailer **1.37 ms → 0.067 ms**; at 64 KB the size line cost 0.35 ms, so the cost grew with
-  the prefix, which is the quadratic signature. A few hundred dribbled bytes a second owned a core.
-  Bounded by the 16 MB framing cap and self-healing, and pre-existing — the pre-cursor build
-  behaves identically. Each is pinned by a CPU-bounded test proven red against its OWN hunk with
-  the other fix in place. **Getting the probe right was the whole difficulty:** the kernel
-  coalesces dribbled bytes into one read unless the writes are paced AND `TCP_NODELAY` is set, and
-  without both the cost reads as LINEAR and the defect looks absent — the first measurement said
-  exactly that.
+- **Both body parsers are linear in their input, and every scan resumes rather than restarting**
+  (2026-09-03, extended 2026-09-04). Four defects of one shape. The chunked decoder dropped each
+  consumed chunk from the FRONT of its buffer: 400k one-byte chunks (2.4 MB of wire) burned 4.6 s
+  of CPU, and a DAV PUT streams to disk so no size cap bounded it. The multipart parser rescanned
+  its whole working buffer on every append, and judged its 8 KB part-header cap only AFTER the
+  terminating blank line, so an unterminated block grew to the 16 MB buffer (128 KB of header in
+  1-byte segments: 8.5 s). Then the chunked cursor itself, which advances only when a chunk
+  COMPLETES, left two siblings: a chunk-size line that never ends, and — once the last-chunk marker
+  is seen — a trailer that never ends, each rescanned in full per read (2.80 and 1.37 ms of CPU per
+  read at an 8 MB prefix, against 0.067 after; 0.35 ms at 64 KB, so cost grew with the prefix,
+  which is the quadratic signature). A few hundred dribbled bytes a second owned a core.
+  Every search now resumes from the last position that could still begin the token it wants
+  (`_scanOffset`, `_chunkScanOffset`, `_chunkTrailerScanOffset`), the header cap is judged on bytes
+  buffered, a preamble is discarded as it streams (RFC 2046 §5.1.1), and `appendBytes:` feeds
+  256 KB slices so the working-buffer cap is judged on what is RETAINED — it was applied to one
+  read's size before file content could drain, so a >16 MB loopback read answered 413 on a 1 GB
+  upload. The stalled fake-boundary wedge is UNCHANGED by design, now at O(1) per append.
+  Pinned by seven CPU-bounded tests (load-proof, unlike wall time), each proven red against its OWN
+  hunk with the others in place.
+  **Two lessons the numbers came with.** Getting the probe right was the whole difficulty: the
+  kernel coalesces dribbled bytes into one read unless the writes are paced AND `TCP_NODELAY` is
+  set, and without both the cost reads as LINEAR and the defect looks absent — the first
+  measurement said exactly that. And what the fuzzing pass could not see: libFuzzer measures
+  crashes and hangs, not a terminating-but-quadratic cost.
 - Digest auth works over full bytes (never `-UTF8String`+`strlen`); header-parameter
   extraction requires a token boundary (`nonce=` matches inside `cnonce=` otherwise);
   `filename*` uses an escaper that covers `;`.
@@ -443,27 +432,22 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   `?path=/mine.txt` served `/yours.txt` on replay; now 401. Both halves compared RAW (each side is
   verbatim wire text); absent-on-both-sides is a match, spelled out rather than left to
   messaging nil. Real clients DO put the query in the uri directive — verified, no over-refusal.
-- **The challenge is RFC 7616 (`qop="auth", algorithm=MD5`) since 2026-09-03, not the RFC 2069 form
-  it sent before.** Not a conformance nicety: every neon-based client — cadaver, davfs2, sitecopy,
-  and litmus, the conformance suite this project reaches for — REFUSES a qop-less challenge outright
-  ("legacy Digest challenge not supported") rather than falling back, so not one of them could
-  authenticate, while curl and CFNetwork accept either form and made every in-house probe pass.
-  Verified across three client families with the unfixed build as the control: cadaver (neon 0.37.1)
-  went from that refusal to a working PROPFIND/MKCOL/PUT session; curl and CFNetwork answer 200
-  against both. Which computation applies is chosen by what the CLIENT sent (§3.4.6), so the RFC
-  2069 form still verifies beside it and nothing that worked stopped working. `auth-int` is refused
-  (it folds a hash of the BODY into HA2, which this HA2 is not), and `qop` without `nc`/`cnonce` is
-  refused rather than defaulted. No `opaque`: there is no per-nonce server state to check one
-  against, so it would be a value echoed and never read.
-  **This does NOT close the replay item** recorded under "Still open at tip", whatever the finding
-  said: qop supplies `nc`, but nothing counts it, so a captured header stays replayable for the
-  nonce's 300 s lifetime. Counting needs per-nonce state with eviction — its own decision.
-  The trap inside the fix, worth knowing before touching any Digest parameter: `qop`, `nc` and
-  `algorithm` arrive UNQUOTED, and `WSKExtractHeaderValueParameter` deliberately does NOT end an
-  unquoted value at a comma (RFC 2046 lets a multipart boundary contain one; terminating there
-  truncated real uploads). So it hands back `auth,` and `00000001,` from a real client's
-  comma-separated header, and every qop credential fails on a hash of the wrong bytes. `_DigestToken`
-  cuts at the comma at the one place these are read, rather than reopening that settled decision.
+- **The challenge is RFC 7616 (`qop="auth", algorithm=MD5`) since 2026-09-03**, not the RFC 2069
+  form it sent before. Not a conformance nicety: every neon-based client — cadaver, davfs2,
+  sitecopy, and litmus, the conformance suite this project reaches for — REFUSES a qop-less
+  challenge outright rather than falling back, so not one could authenticate, while curl and
+  CFNetwork accept either form and made every in-house probe pass. Verified across three client
+  families with the unfixed build as the control. Which computation applies is chosen by what the
+  CLIENT sent (§3.4.6), so the RFC 2069 form still verifies beside it. `auth-int` is refused (it
+  folds a body hash into HA2, which this HA2 is not), and `qop` without `nc`/`cnonce` is refused
+  rather than defaulted. No `opaque`: no per-nonce state exists to check one against.
+  **This does NOT close the replay item**, whatever the finding said: qop supplies `nc`, but nothing
+  counts it, so a captured header stays replayable for the nonce's 300 s lifetime.
+  The trap, before touching any Digest parameter: `qop`, `nc` and `algorithm` arrive UNQUOTED, and
+  `WSKExtractHeaderValueParameter` deliberately does NOT end an unquoted value at a comma (RFC 2046
+  lets a multipart boundary contain one; terminating there truncated real uploads). It hands back
+  `auth,` and `00000001,`, and every qop credential then fails on a hash of the wrong bytes.
+  `_DigestToken` cuts at the comma where these are read, rather than reopening that decision.
 - The `SO_NOSIGPIPE` result is checked and the socket dropped on failure — never remove
   (SIGPIPE once killed the process roughly every 15–25 abortive closes).
 - `WSK_DCHECK` is a no-op in Release; `WSK_DNOT_REACHED()` aborts in Debug — remote-input
@@ -558,35 +542,28 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
 - Idle timeout: hard header-phase deadline; body phase uses a byte-RATE floor (effectively ~34 B/s,
   not the nominal 32, because the timer's `interval / 10` leeway shortens a tick window); response phase
   is any-byte-is-progress (SSE-safe); handler time never counts.
-- **Response-phase progress is read from the TCP layer (`tcpi_txbytes`), not from write completions
-  (2026-09-04).** The rule was always "any byte is progress"; the MEASURE could not see one.
-  `-didWriteBytes:` runs only when a whole `dispatch_write` COMPLETES, so a 256 KB chunk to a reader
-  slower than roughly buffer ÷ timeout spanned two ticks having registered nothing and the
-  starvation check closed a connection whose peer was reading throughout: at the default 30 s idle,
-  8 of 8 trials logged the cut and a 20 KB/s client pulling a 20 MB file was reset after 121 s with
-  2,272,633 bytes. A phone on a Tailscale relay is exactly that client.
-  **`SO_NWRITE` cannot be the instrument** — worth recording because it is the obvious choice and it
-  is wrong: it reports send-buffer OCCUPANCY, and the buffer is refilled as fast as it drains, so it
-  reads identically for a 5 KB/s peer (491052 every tick) and one that has stopped reading (646700
-  every tick). `tcpi_txbytes` is monotonic and moves only when the peer takes bytes.
-  **The counter alone was NOT enough, and shipping it alone broke the gate** — recorded because the
-  first version of this entry claimed otherwise. `tcpi_txbytes` does not advance smoothly: for a
-  client reading continuously at 20 KB/s it moves in BURSTS of ~35 KB every 4-6 s (TCP window
-  updates), and worse, once the peer's receive buffer is FULL the server cannot send at all, so the
-  counter freezes for (that buffer ÷ the read rate) — tens of seconds for a phone-shaped reader.
-  A two-tick rule still cuts inside that window; whether it does is a race, which is why the
-  merge passed three isolated runs and then failed in the full suite.
-  **So the response phase gets a LONGER allowance: `kMaxResponseStallTicks` (10) consecutive checks
-  with nothing transmitted**, reset by any transmitted byte — five minutes at the 30 s default. The
-  header and body phases are deliberately unchanged: those are where a dribbling client is an
-  actual attack. The cost is that a DEAD peer holds its slot for ten ticks instead of one, which is
-  the right trade under the local-network-only ruling (see Deployment shapes).
-  **A stalled peer is NOT reproducible over loopback, so that half is unpinned:** the kernel keeps
-  absorbing for a peer that never reads — measured, a client with `SO_RCVBUF` set to 16 KB before
-  connect still drained 33 MB of a 64 MB body — so the write never stalls and nothing is starved.
-  The server is right to keep such a connection (bytes genuinely are moving); it just means the
-  ten-tick bound has no in-suite test. The slow-reader half IS pinned, and is deterministic now
-  that the separation is threefold rather than a 3.6×-wide band.
+- **Response-phase progress is read from the TCP layer (`tcpi_txbytes`), and the phase gets a
+  ten-tick stall allowance** (2026-09-04). The rule was always "any byte is progress"; the MEASURE
+  could not see one. `-didWriteBytes:` runs only when a whole `dispatch_write` COMPLETES, so a
+  256 KB chunk to a reader slower than roughly buffer ÷ timeout spanned two ticks having registered
+  nothing, and the starvation check closed a connection whose peer was reading throughout: at the
+  default 30 s idle, 8 of 8 trials cut, a 20 KB/s client pulling a 20 MB file reset after 121 s with
+  2.27 MB. A phone on a Tailscale relay is exactly that client.
+  **`SO_NWRITE` cannot be the instrument**, which is worth recording because it is the obvious
+  choice: it reports send-buffer OCCUPANCY, refilled as fast as it drains, so it reads identically
+  for a 5 KB/s peer (491052 every tick) and one that has stopped reading (646700 every tick).
+  **And the counter alone was not enough** — shipping it alone broke the gate. It advances in bursts
+  of ~35 KB every 4–6 s, and once the peer's receive buffer is FULL the server cannot send at all,
+  so it freezes for (that buffer ÷ the read rate): tens of seconds for a phone-shaped reader, which
+  a two-tick rule still cuts inside. Hence `kMaxResponseStallTicks` (10) consecutive checks with
+  nothing transmitted, reset by any transmitted byte — five minutes at the 30 s default. The header
+  and body phases are deliberately unchanged: those are where a dribbling client is an actual
+  attack. A DEAD peer now holds its slot for ten ticks instead of one, which is the right trade
+  under the local-network-only ruling.
+  **The stalled half is unpinned:** loopback keeps absorbing for a peer that never reads — a client
+  with `SO_RCVBUF` 16 KB set before connect still drained 33 MB of a 64 MB body — so the write never
+  stalls and nothing is starved. The server is right to keep such a connection; it just means the
+  ten-tick bound has no in-suite test. The slow-reader half is pinned and deterministic.
 - **Dead-property storage: 64 KB per RESOURCE** (`kDAVMaxDeadPropertyStorageLength`, 2026-09-02),
   judged on the serialized plist after the merge. `kDAVMaxRequestBodyLength` bounds one request;
   nothing bounded what those requests accumulate into, so ordinary legal PROPPATCHes grew the
@@ -627,39 +604,33 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   one and not the other just moves the way in. `_DeadPropertyElement` also returns nil for a key
   it cannot represent and every call site skips it, so a share poisoned by an OLDER build heals
   on upgrade (verified by staging with the old binary and serving with the new).
-- **A property NAMESPACE containing `}` is refused 400 by both parsers too (2026-09-03), and the
-  `&` libxml2 escapes inside one is undone.** The same defect one field over, and it survived the
-  entry above because that fix validated only the LOCAL NAME. The key is `{href}localname`, read
-  back by splitting at the FIRST `}`, so `xmlns:Z="urn:a}b"` stored `{urn:a}b}note` and emitted
-  `<W:b}note xmlns:W="urn:a"/>` — whose prefix IS declared, so that entry's own oracle passed it,
-  but `b}note` is not an XML name, and a NAME cannot be escaped into legality the way a value can.
-  Measured at tip: one PROPPATCH made the file's allprop AND its parent's Depth:1 listing
-  unparseable, persistently (xattr). `_PropertyLocalNameIsRepresentable` now rejects `}` beside `:`,
-  which is what HEALS a store poisoned by an older build — the key is skipped, so one property is
-  lost instead of the whole listing. Recurring shapes 2 and 13.
-  **That check was itself too narrow, and its `{` needs-no-guard claim was wrong (2026-09-04).**
-  Asking only about `}` protected the KEY encoding and nothing else, so a namespace URI containing a
-  space was still stored and published — the sibling the re-verification found. The client that
-  cares is a Cocoa one: **NSXMLDocument refuses the WHOLE 207** when a namespace name is not a URI
-  reference, so the resource's allprop AND its parent's Depth:1 listing are unreadable to it while
-  the property exists. Measured over 19 spellings on a live server: space, tab, newline, NBSP, `>`,
-  `%`, `^`, `` ` ``, `{`, `|`, `\` and any non-ASCII character each break it; NSXMLParser, WebDAVFS,
-  neon and rclone tolerate every one, which is why only the `}` spelling — the one that ALSO breaks
-  the key — was caught the first time. The rule is therefore not "no whitespace" (that covers six of
-  the twelve breaking spellings) but "is it a URI", asked of libxml2 itself via `xmlParseURI` —
-  the same implementation the client-side check comes from. Measured against NSXMLDocument on all
-  19: they agree on 17, and the two where `xmlParseURI` is stricter (`<` and a bare quote) are
-  excluded from a URI by RFC 3986 anyway. The explicit `}` test stays in FRONT of it, because that
-  one protects the key encoding and would still be needed if libxml2 ever loosened.
-  Separately, and only visible by testing the ROUND TRIP rather than the response: **libxml2 writes
-  every `&` in `node->ns->href` as `&#38;`, and does that to nothing else** — measured across `&`,
-  `<`, `>`, `"`, `'`, tab and newline, every one of which arrives decoded. So `urn:a&b` was stored
-  and published as `urn:a&#38;b`: well-formed, but not the namespace the client named, so the
-  property it had just set could never be named again. `_PropertyNamespaceHref` undoes it in ONE
-  home both parsers share. The inverse is exact — libxml2 escapes every `&`, so every `&#38;` came
-  from one — hence a URI whose literal text is `&#38;` still round-trips. A property stored by an
-  OLDER build under the mangled key keeps its mangled namespace: deliberately not healed, since
-  decoding on READ would corrupt the literal `&#38;` that is now storable.
+- **A property key is validated on BOTH halves, by asking libxml2 rather than by blacklisting**
+  (2026-09-03 → 09-05, four rounds; the blacklist was wrong three times).
+  The key is `{href}localname`, read back by splitting at the FIRST `}`. So `xmlns:Z="urn:a}b"`
+  stored `{urn:a}b}note` and emitted `<W:b}note xmlns:W="urn:a"/>` — the prefix IS declared, so the
+  undeclared-prefix fix's own oracle passed it, but `b}note` is not an XML name and a NAME cannot be
+  escaped into legality the way a value can. One PROPPATCH made the file's allprop AND its parent's
+  Depth:1 listing unparseable, persistently (xattr).
+  Fixing only `}` was still too narrow: **NSXMLDocument — what a Cocoa client parses a 207 with —
+  refuses the whole document** for a namespace containing space, tab, newline, NBSP, `>`, `%`, `^`,
+  `` ` ``, `{`, `|`, `\` or any non-ASCII character, while NSXMLParser, WebDAVFS, neon and rclone
+  tolerate every one (which is why only `}` was caught first). So the namespace is judged by
+  `xmlParseURI` — measured against NSXMLDocument on 19 spellings, they agree on 17, and the two
+  where it is stricter are excluded from a URI by RFC 3986 anyway — and the local name by
+  `xmlValidateNCName`. The explicit `}` test stays in FRONT of the URI check: it protects the KEY
+  encoding, which would still need it if libxml2 loosened. `_DeadPropertyElement` returns nil for a
+  key it cannot represent and every call site skips it, so a store poisoned by an older build heals
+  on upgrade — one property lost instead of a whole listing. Recurring shapes 2 and 13.
+  **Two things only a round-trip test could show.** libxml2 writes every `&` in `node->ns->href` as
+  `&#38;` and does that to nothing else (measured across `&`, `<`, `>`, `"`, `'`, tab, newline), so
+  `urn:a&b` was stored and published as `urn:a&#38;b` — well-formed, but not the namespace the
+  client named, so the property could never be named again. `_PropertyNamespaceHref` undoes it in ONE
+  home both parsers share; the inverse is exact, so a URI whose literal text is `&#38;` still
+  round-trips. A key written by an OLDER build keeps its mangled namespace — deliberately not
+  healed, since decoding on READ would corrupt the now-storable literal. And both validators judged
+  `-UTF8String`, which stops at the first NUL, so they validated a PREFIX while the whole string was
+  emitted; `_IsWholeUTF8String` is the one home for that question. Seventh recurrence of the
+  truncation class, found by re-fuzzing these functions the day after writing them.
 - A `Destination` naming another server answers 502; compared by host NAME only — scheme and
   port deliberately ignored (TLS terminates upstream, ports may translate). A value starting
   `//` is a network-path reference and CARRIES an authority; `///path` parses with an EMPTY
