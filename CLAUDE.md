@@ -1125,17 +1125,24 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
     ~~★ (P2) An UNTERMINATED chunk-size line is rescanned in full on every read.~~ Fixed 2026-09-04
     with a trailer sibling the finding did not name; 2.80 ms/read, not the ~6 ms first recorded (a
     loaded machine). Invariant under Headers and framing.
-    (P2, owner ruling requested) An async handler that KEEPS its completion block and never
-    calls it holds its slot until process exit even after the client disconnects: no read is
-    posted during a handler (`WSKConnection.m:843-877`), so a peer FIN/RST is never observed,
-    and `_checkIdleTimeout` cannot fire with `_pendingIOCount == 0` — 128 parked, and three
-    minutes after every client left the server still refuses every connection. A handler that
-    DROPS the block does not park (dealloc closes the socket), but silently: no log line, no
-    500 (P3). The built-in servers are unaffected (every handler completes synchronously); a
-    host-registered route awaiting a backend that never answers is the realistic shape. Fix
-    direction: post a one-byte read while a handler is outstanding so peer EOF tears the
-    connection down (cheap, non-breaking); a `WSKOption_HandlerTimeout` answering 503 is the
-    heavier option; "handler time never counts" stays right for the idle timer itself. (P2)
+    ~~(P2) An async handler that KEEPS its completion block and never calls it holds its slot
+    until process exit even after the client disconnects.~~ **Fixed 2026-09-06, and the recorded fix
+    direction was wrong.** "Post a one-byte read while a handler is outstanding" would have detected
+    the EOF and changed nothing: the descriptor is closed and `-didEndConnection:` sent from
+    `-dealloc`, and during an async handler the completion block is the connection's ONLY strong
+    reference — which is exactly why a handler that DROPS its block already frees the slot and one
+    that keeps it never does. Detecting is not reclaiming.
+    That ownership is right (a legitimately slow handler must keep its connection alive), so it was
+    made REVOCABLE instead: the block captures a `WSKConnectionTicket` holding the strong reference,
+    the connection holds the ticket weakly, and the idle timer revokes it when `recv(MSG_PEEK)`
+    reports the peer has gone. Revoking drops the last reference and the connection deallocates as
+    if the block had been dropped; a later call finds nil and does nothing. `MSG_PEEK` so a
+    pipelined next request is not consumed. Measured: 120 clients requesting such a route and
+    disconnecting left **122 sockets held before and 2 after**. Safe to revoke from inside the timer
+    because its handler reads a WEAK self, which ARC holds strongly for the call.
+    The one thing it costs: a client that half-closes and still expects its response. That shape was
+    already treated this way wherever a read was outstanding, and this is the phase where no read
+    exists to carry the same outcome. "Handler time never counts" stays right for the idle timer. (P2)
     Three lifecycle edges: `[::]:port` held elsewhere while `0.0.0.0:port` is free aborts the
     whole start with EADDRINUSE and closes the good v4 listener, never naming the family
     (`WSKWebServer.m:829-840`; fix: v4-only with a warning, or name the family); a NEGATIVE

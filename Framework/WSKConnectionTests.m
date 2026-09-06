@@ -5,6 +5,20 @@
 
 #import "TestsSupport.h"
 
+// Its own delegate rather than WSKFullDelegate: that one exists to pin the weak-delegate swap, and
+// giving it new behaviour would blur what that test is asserting.
+@interface WSKDisconnectWatcher : NSObject <WSKDelegate>
+@property (nonatomic, copy) dispatch_block_t onDisconnect;
+@end
+
+@implementation WSKDisconnectWatcher
+- (void)webServerDidDisconnect:(WSKWebServer *)server {
+    if (_onDisconnect) {
+        _onDisconnect();
+    }
+}
+@end
+
 @interface WSKConnectionTests : XCTestCase
 @end
 
@@ -503,6 +517,51 @@
 
     XCTAssertFalse([reply containsString:@"Content-Length: 0"], @"a streamed body was announced as empty: %@", reply);
     XCTAssertTrue([reply containsString:@"PAYLOAD-PAYLOAD-PAYLOAD-"], @"the streamed body did not arrive whole: %@", reply);
+}
+
+// No read is posted while a handler runs — deliberately, since "handler time never counts" for the
+// idle timer — so a peer FIN is never observed and a handler that KEEPS its completion block and
+// never calls it holds its connection until the process exits. Measured: 120 clients requested such
+// a route and disconnected, and eight seconds later the server still held 120 sockets. The built-in
+// servers are unaffected (every handler completes synchronously); a host route awaiting a backend
+// that never answers is the realistic shape, and 128 of them is the whole server.
+//
+// The fix is not a new policy: every OTHER phase posts a read, and a read completing with EOF tears
+// the connection down. This only restores that outcome where no read exists to carry it, by asking
+// the socket directly. It costs a half-closed client that still wants its response — rare, and it
+// was already being treated this way wherever a read was outstanding.
+- (void)testConnectionIsReclaimedWhenThePeerLeavesDuringAHandler {
+    __block WSKCompletionBlock parked = nil;  // deliberately never called
+    WSKWebServer *server = [[WSKWebServer alloc] init];
+    [server addHandlerForMethod:@"GET"
+                           path:@"/park"
+                   requestClass:[WSKRequest class]
+              asyncProcessBlock:^(WSKRequest *request, WSKCompletionBlock completionBlock) {
+                  parked = [completionBlock copy];
+              }];
+
+    XCTestExpectation *disconnected = [self expectationWithDescription:@"the server released the connection"];
+    WSKDisconnectWatcher *watcher = [[WSKDisconnectWatcher alloc] init];
+    watcher.onDisconnect = ^{
+        [disconnected fulfill];
+    };
+    server.delegate = watcher;
+
+    NSDictionary *options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES, WSKOption_ConnectionIdleTimeout: @1.0};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    int fd = ConnectToLocalhostPort(server.port);
+    XCTAssertGreaterThan(fd, 0);
+    const char *request = "GET /park HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    XCTAssertEqual(send(fd, request, strlen(request), 0), (ssize_t)strlen(request));
+    [NSThread sleepForTimeInterval:0.4];  // let the handler start and park the block
+    close(fd);                            // the client leaves without ever being answered
+
+    [self waitForExpectations:@[disconnected] timeout:10.0];
+    XCTAssertNotNil(parked, @"the handler never ran, so this test proves nothing");
+
+    [server stop];
+    server.delegate = nil;
 }
 
 // Progress in the response phase is counted in -didWriteBytes:, which runs only when a whole
