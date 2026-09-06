@@ -101,6 +101,28 @@ NS_ASSUME_NONNULL_BEGIN
 
 NS_ASSUME_NONNULL_END
 
+// The strong reference a parked completion block holds, made revocable.
+//
+// A connection is owned by whoever can still answer it: during an async handler the ONLY strong
+// reference is the completion block, which is why a handler that DROPS its block deallocates the
+// connection and one that KEEPS it holds the slot until the process exits. That ownership is the
+// right design — a legitimately slow handler must keep its connection alive — but it left no way to
+// reclaim a connection whose peer has gone, and -dealloc is where the descriptor is closed and
+// -didEndConnection: is sent, so nothing short of releasing the object frees the slot. Detecting the
+// EOF is therefore NOT enough on its own, which is why the recorded "post a read while a handler is
+// outstanding" fix direction would not have worked.
+//
+// The block now captures this token instead of the connection, and the connection holds the token
+// weakly so it can revoke it. Revoking drops the last strong reference and the connection
+// deallocates exactly as it would have if the handler had dropped the block; a later call to the
+// block finds nil and does nothing.
+@interface WSKConnectionTicket : NSObject
+@property (nonatomic, nullable) WSKConnection *connection;
+@end
+
+@implementation WSKConnectionTicket
+@end
+
 @implementation WSKConnection {
     CFSocketNativeHandle _socket;
     dispatch_queue_t _connectionQueue;
@@ -130,21 +152,22 @@ NS_ASSUME_NONNULL_END
 
     BOOL _opened;
 
-    dispatch_source_t _idleTimer;           // Nil when idle timeouts are disabled
-    NSUInteger _pendingIOCount;             // Accessed on _connectionQueue only
-    NSUInteger _chunkScanOffset;            // Where the next chunk-size-line CRLF search may begin; _connectionQueue only
-    NSUInteger _chunkTrailerScanOffset;     // The same, for the trailer's CRLFCRLF search
-    NSUInteger _idleCheckedBytes;           // Accessed on _connectionQueue only
-    uint64_t _idleCheckedTransmittedBytes;  // Bytes the TCP layer had sent at the last check; _connectionQueue only
-    NSUInteger _responseStallTicks;         // Consecutive checks in the response phase with nothing transmitted; _connectionQueue only
-    BOOL _idleCheckWasBusy;                 // Accessed on _connectionQueue only
-    NSUInteger _headerPhaseTicks;           // Idle ticks elapsed before a request was matched; on _connectionQueue only
-    BOOL _requestReceived;                  // Set once the body is fully read and the handler runs; on _connectionQueue only
-    BOOL _clientIsHTTP10;                   // The client spoke HTTP/1.0 (or older): no chunked framing, no interim 1xx
-    BOOL _earlyChecksRun;                   // Host allow-list and preflight are decided once, as early as the headers allow
-    NSInteger _headerFailureStatus;         // Why the header block was rejected; 500 only if nothing more specific applies
-    NSInteger _bodyFailureStatus;           // Why the body was rejected; same idiom, because the body readers report only a BOOL
-    NSTimeInterval _idleTimeout;            // Seconds between idle-timer ticks; 0 when idle timeouts are disabled
+    dispatch_source_t _idleTimer;                // Nil when idle timeouts are disabled
+    NSUInteger _pendingIOCount;                  // Accessed on _connectionQueue only
+    NSUInteger _chunkScanOffset;                 // Where the next chunk-size-line CRLF search may begin; _connectionQueue only
+    NSUInteger _chunkTrailerScanOffset;          // The same, for the trailer's CRLFCRLF search
+    NSUInteger _idleCheckedBytes;                // Accessed on _connectionQueue only
+    uint64_t _idleCheckedTransmittedBytes;       // Bytes the TCP layer had sent at the last check; _connectionQueue only
+    __weak WSKConnectionTicket *_handlerTicket;  // The parked block's strong reference, so it can be revoked
+    NSUInteger _responseStallTicks;              // Consecutive checks in the response phase with nothing transmitted; _connectionQueue only
+    BOOL _idleCheckWasBusy;                      // Accessed on _connectionQueue only
+    NSUInteger _headerPhaseTicks;                // Idle ticks elapsed before a request was matched; on _connectionQueue only
+    BOOL _requestReceived;                       // Set once the body is fully read and the handler runs; on _connectionQueue only
+    BOOL _clientIsHTTP10;                        // The client spoke HTTP/1.0 (or older): no chunked framing, no interim 1xx
+    BOOL _earlyChecksRun;                        // Host allow-list and preflight are decided once, as early as the headers allow
+    NSInteger _headerFailureStatus;              // Why the header block was rejected; 500 only if nothing more specific applies
+    NSInteger _bodyFailureStatus;                // Why the body was rejected; same idiom, because the body readers report only a BOOL
+    NSTimeInterval _idleTimeout;                 // Seconds between idle-timer ticks; 0 when idle timeouts are disabled
 
     // Connection reuse. Deliberately restricted to requests carrying NO body, which is what keeps
     // request smuggling structurally impossible rather than a matter of parsing carefully: a
@@ -572,6 +595,16 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
     return YES;
 }
 
+// Has the peer closed its end? MSG_PEEK so nothing is consumed — a pipelined next request must
+// still be there for the header phase to read — and MSG_DONTWAIT so this never blocks the timer.
+// A return of 0 is EOF; anything else (data waiting, or EAGAIN) means the peer is still there.
+static BOOL _SocketPeerHasClosed(int socket) {
+    char byte = 0;
+    ssize_t const peeked = recv(socket, &byte, 1, MSG_PEEK | MSG_DONTWAIT);
+
+    return (peeked == 0);
+}
+
 // 2xx, the range where a bodiless response is a SUCCESSFUL one the client will want to follow with
 // another request. Refusals are framed by the close on purpose; see the Content-Length branch.
 static BOOL _StatusIsSuccessful(NSInteger statusCode) {
@@ -871,14 +904,26 @@ static BOOL _StatusDelimitsItself(NSInteger statusCode) {
         // once: a second call would overwrite _responseMessage (leaking the first
         // CFHTTPMessageRef) and race a second write chain on the same socket.
         __block BOOL processed = NO;
+        // Ownership travels through the ticket rather than a direct capture of self; see
+        // WSKConnectionTicket. _handlerTicket is weak, so the block stays the only owner.
+        WSKConnectionTicket *const ticket = [[WSKConnectionTicket alloc] init];
+        ticket.connection = self;
+        _handlerTicket = ticket;
         [self processRequest:_request
                   completion:^(WSKResponse *processResponse) {
+                      WSKConnection *const connection = ticket.connection;
+
+                      if (connection == nil) {
+                          return;  // The peer left and the connection was reclaimed; nothing to answer.
+                      }
+
                       if (processed) {
-                          WSK_LOG_ERROR(@"Ignoring extra completion block invocation for request on socket %i", self->_socket);
+                          WSK_LOG_ERROR(@"Ignoring extra completion block invocation for request on socket %i", connection->_socket);
                           return;
                       }
+
                       processed = YES;
-                      [self _finishProcessingRequest:processResponse];
+                      [connection _finishProcessingRequest:processResponse];
                   }];
     }
 }
@@ -1189,6 +1234,29 @@ static uint64_t _SocketTransmittedByteCount(int socket) {
             _idleCheckedTransmittedBytes = transmittedBytes;
             return;
         }
+    }
+
+    // While a HANDLER is outstanding no read is posted — "handler time never counts" for the idle
+    // timer, and that stays right — so a peer FIN is never observed and a handler that keeps its
+    // completion block and never calls it holds this connection until the process exits. Measured:
+    // 120 clients requested such a route and disconnected, and the server still held 120 sockets
+    // eight seconds later; 128 of them is the whole server.
+    //
+    // This is not a new policy. Every other phase has a read outstanding, and a read completing
+    // with EOF tears the connection down; asking the socket directly restores that same outcome
+    // where there is no read to carry it. The cost is a client that half-closes and still expects
+    // its response — already treated this way wherever a read was outstanding, and not a shape any
+    // client here uses. The handler itself is NOT interrupted: it may still call its block, which
+    // then finds the connection gone, exactly as it would for any peer that vanished.
+    if (_requestReceived && (_pendingIOCount == 0) && _SocketPeerHasClosed(_socket)) {
+        WSK_LOG_DEBUG(@"Reclaiming connection on socket %i: the peer left while a handler was outstanding", _socket);
+        dispatch_source_cancel(_idleTimer);
+        shutdown(_socket, SHUT_RDWR);
+        // Revoking releases this connection. Safe to do to ourselves: the timer's handler read a
+        // WEAK self, and ARC holds that strongly for the duration of this call, so -dealloc runs
+        // after this method returns rather than underneath it.
+        _handlerTicket.connection = nil;
+        return;
     }
 
     // Absolute deadline for the request-line + headers phase (before any handler is
