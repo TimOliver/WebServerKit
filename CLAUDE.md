@@ -352,6 +352,12 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   successful conditional write into a 412). `If-Match` on a MISSING resource answers 404 —
   RFC-REQUIRED, pinned in both directions; do not "correct" it. Tag comparison has one home:
   `WSKEntityTagMatchesList`.
+- PUT stages every body beside the once-resolved destination, then rechecks parent, type and
+  preconditions under a per-server commit lock through the replacement. The early check alone
+  admitted all eight competing `If-Match` writers AND all eight `If-None-Match: *` creators in
+  the regression tests. Unconditional PUTs must share the lock; staging and authorization hooks
+  must stay outside it so other transfers can proceed. Final refusals remove their staging files.
+  This coordinates PUTs on one server only; other DAV verbs and external writers are not locked.
 - All three RFC 9110 date spellings parse (calendar year anchored — ICU once read `…94` as
   year 0094 and made `If-Unmodified-Since` a permanent 412); only IMF-fixdate is formatted;
   a 64-char length precheck rejects non-dates in constant time (parsed per-request on the

@@ -110,6 +110,10 @@ NS_ASSUME_NONNULL_END
     // measured, and 60 of 60 in the pinning test. Per server rather than per resolved path:
     // PROPPATCH is rare, and a per-path table is more machinery than the problem is worth.
     NSObject *_deadPropertyLock;
+
+    // Every PUT on this server shares the final precondition check and rename. Receiving,
+    // staging, authorization callbacks, and reads stay outside this short critical section.
+    NSObject *_putCommitLock;
 }
 
 @dynamic delegate;
@@ -121,6 +125,7 @@ NS_ASSUME_NONNULL_END
         // or a trailing separator — which fails closed, i.e. every request gets a 403.
         _uploadDirectory = [[path stringByStandardizingPath] copy];
         _deadPropertyLock = [[NSObject alloc] init];
+        _putCommitLock = [[NSObject alloc] init];
         WSKWebDAVServer *const __unsafe_unretained server = self;
 
         // 9.1 PROPFIND method
@@ -921,7 +926,7 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Conflict message:@"Missing intermediate collection(s) for \"%@\"", relativePath];
     }
 
-    BOOL const existing = [[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory];
+    BOOL existing = [[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory];
 
     if (existing && isDirectory) {
         return _MethodNotAllowed(request, @"PUT not allowed on existing collection \"%@\"", relativePath);
@@ -943,28 +948,47 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Uploading file to \"%@\" is not permitted", relativePath];
     }
 
-    // Never remove the destination before its replacement is in hand. The body was
-    // streamed into NSTemporaryDirectory(), possibly on another volume, so land it beside
-    // the destination first and only then swap it in; an overwrite that fails at any point
-    // therefore leaves the existing file exactly as it was.
+    // Stage even a new file beside its destination: another PUT may create the name while
+    // this body is being prepared. NSTemporaryDirectory() may be on another volume, so the
+    // potentially long copy must finish before taking the commit lock.
     NSFileManager *const fileManager = [NSFileManager defaultManager];
-    NSString *const stagingPath = existing ? _StagingPathForPath(absolutePath) : nil;
-    NSString *const writePath = stagingPath ? stagingPath : absolutePath;
+    NSString *const stagingPath = _StagingPathForPath(absolutePath);
     NSError *error = nil;
 
-    // The identity the 405 check above cleared, so the swap can refuse to destroy anything else.
-    // Without it a collection created in the window between that check and the swap was removed
-    // recursively by the fallback inside -_replaceItemAtPath:, and the client was told 204.
-    struct stat vetted;
-    BOOL const haveVetted = existing && (lstat([absolutePath fileSystemRepresentation], &vetted) == 0);
-
-    if (![fileManager moveItemAtPath:request.temporaryPath toPath:writePath error:&error]) {
+    if (![fileManager moveItemAtPath:request.temporaryPath toPath:stagingPath error:&error]) {
+        [fileManager removeItemAtPath:stagingPath error:NULL];
         return [WSKErrorResponse responseWithServerError:WSKServerErrorStatusCodeForError(error) underlyingError:error message:@"Failed moving uploaded file to \"%@\"", relativePath];
     }
 
-    if (stagingPath && ![self _replaceItemAtPath:absolutePath withStagedItemAtPath:stagingPath expecting:(haveVetted ? &vetted : NULL)error:&error]) {
+    WSKResponse *commitFailure = nil;
+
+    @synchronized(_putCommitLock) {
+        // Recheck the state of the once-resolved destination after authorization and staging.
+        // An earlier check alone lets concurrent writers all satisfy the same stale ETag.
+        // Unconditional PUTs also take this lock, so they cannot slip between check and swap.
+        if (![fileManager fileExistsAtPath:[absolutePath stringByDeletingLastPathComponent] isDirectory:&isDirectory] || !isDirectory) {
+            commitFailure = [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Conflict message:@"Missing intermediate collection(s) for \"%@\"", relativePath];
+        } else {
+            // Use one snapshot for the collection refusal and the identity passed to the
+            // replacement helper's destructive fallback.
+            struct stat vetted;
+            existing = (lstat([absolutePath fileSystemRepresentation], &vetted) == 0);
+
+            if (existing && ((vetted.st_mode & S_IFMT) == S_IFDIR)) {
+                commitFailure = _MethodNotAllowed(request, @"PUT not allowed on existing collection \"%@\"", relativePath);
+            } else {
+                commitFailure = [self _preconditionFailureForRequest:request atPath:absolutePath];
+
+                if (!commitFailure && ![self _replaceItemAtPath:absolutePath withStagedItemAtPath:stagingPath expecting:(existing ? &vetted : NULL)error:&error]) {
+                    commitFailure = [WSKErrorResponse responseWithServerError:WSKServerErrorStatusCodeForError(error) underlyingError:error message:@"Failed moving uploaded file to \"%@\"", relativePath];
+                }
+            }
+        }
+    }
+
+    if (commitFailure) {
         [fileManager removeItemAtPath:stagingPath error:NULL];
-        return [WSKErrorResponse responseWithServerError:WSKServerErrorStatusCodeForError(error) underlyingError:error message:@"Failed moving uploaded file to \"%@\"", relativePath];
+        return commitFailure;
     }
 
     if ([self.delegate respondsToSelector:@selector(davServer:didUploadFileAtPath:)]) {
