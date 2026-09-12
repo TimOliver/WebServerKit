@@ -267,7 +267,7 @@ $(document).ready(function() {
     autoUpload: true,
     // Leave connections available for browsing and live updates while files upload.
     sequentialUploads: false,
-    limitConcurrentUploads: 2,
+    limitConcurrentUploads: 4,
     // forceIframeTransport: true,
     
     url: 'upload',
