@@ -190,6 +190,8 @@ Web Based Uploads in iOS Apps
 
 WSKWebUploader is a subclass of ```WSKWebServer``` that provides a ready-to-use HTML 5 file uploader & downloader. This lets users upload, download, delete files and create directories from a directory inside your iOS app's sandbox using a clean user interface in their web browser.
 
+Each browser tab uploads up to two files concurrently, with additional files queued automatically. Individual uploads can be cancelled while queued or in progress.
+
 Simply instantiate and run a ```WSKWebUploader``` instance then visit ```http://{YOUR-IOS-DEVICE-IP-ADDRESS}/``` from your web browser:
 
 ```objectivec
