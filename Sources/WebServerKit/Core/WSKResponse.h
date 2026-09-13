@@ -67,7 +67,9 @@ typedef void (^WSKBodyReaderCompletionBlock)(NSData *_Nullable data, NSError *_N
 - (nullable NSData *)readData:(NSError **)error;
 
 /**
- *  This method is called after all body data has been sent.
+ *  This method is called after all body data has been sent, or when sending ends
+ *  because of an error or a disconnected client. An asynchronous read may still
+ *  be outstanding; release its resources and cancel the producer as appropriate.
  */
 - (void)close;
 
@@ -79,6 +81,7 @@ typedef void (^WSKBodyReaderCompletionBlock)(NSData *_Nullable data, NSError *_N
  *  It must call the passed block when data is available, passing a non-empty
  *  NSData if there is body data available, or an empty NSData there is no more
  *  body data, or nil on error and pass an NSError along.
+ *  Call the block once per read. A late call after -close is ignored by the connection.
  */
 - (void)asyncReadDataWithCompletion:(WSKBodyReaderCompletionBlock)block;
 

@@ -33,6 +33,7 @@
 #import <netdb.h>
 #import <netinet/in.h>
 #import <netinet/tcp.h>
+#import <poll.h>
 #import <sys/socket.h>
 #import <TargetConditionals.h>
 #import <zlib.h>  // Z_DATA_ERROR / Z_NEED_DICT, to tell the client's bad stream from our allocation failure
@@ -112,16 +113,30 @@ NS_ASSUME_NONNULL_END
 // EOF is therefore NOT enough on its own, which is why the recorded "post a read while a handler is
 // outstanding" fix direction would not have worked.
 //
-// The block now captures this token instead of the connection, and the connection holds the token
-// weakly so it can revoke it. Revoking drops the last strong reference and the connection
-// deallocates exactly as it would have if the handler had dropped the block; a later call to the
-// block finds nil and does nothing.
+// Handler and body-reader callbacks capture this token instead of the connection. The reader's
+// final write completion can also capture the connection, so that reference travels here too.
+// The connection holds the token weakly. Completion consumes its ownership; disconnect revokes
+// it. Both happen on the connection queue, and later invocations find nil and do nothing.
 @interface WSKConnectionTicket : NSObject
-@property (nonatomic, nullable) WSKConnection *connection;
+@property (atomic, nullable) WSKConnection *connection;
+@property (nonatomic, copy, nullable) WriteBodyCompletionBlock bodyCompletion;
 @end
 
 @implementation WSKConnectionTicket
 @end
+
+// Callbacks supplied by applications may arrive on any thread. An atomic ticket snapshot
+// keeps the queue alive just long enough to enqueue; retained callbacks never own the queue
+// directly. Ownership and state are then consumed together here, including disconnect revocation.
+static char _connectionQueueKey;
+
+static void _PerformOnConnectionQueue(dispatch_queue_t queue, dispatch_block_t block) {
+    if (dispatch_get_specific(&_connectionQueueKey) == (__bridge void *)queue) {
+        block();
+    } else {
+        dispatch_async(queue, block);
+    }
+}
 
 @implementation WSKConnection {
     CFSocketNativeHandle _socket;
@@ -159,6 +174,7 @@ NS_ASSUME_NONNULL_END
     NSUInteger _idleCheckedBytes;                // Accessed on _connectionQueue only
     uint64_t _idleCheckedTransmittedBytes;       // Bytes the TCP layer had sent at the last check; _connectionQueue only
     __weak WSKConnectionTicket *_handlerTicket;  // The parked block's strong reference, so it can be revoked
+    __weak WSKConnectionTicket *_readerTicket;   // Also owns the write completion, which can capture this connection
     NSUInteger _responseStallTicks;              // Consecutive checks in the response phase with nothing transmitted; _connectionQueue only
     BOOL _idleCheckWasBusy;                      // Accessed on _connectionQueue only
     NSUInteger _headerPhaseTicks;                // Idle ticks elapsed before a request was matched; on _connectionQueue only
@@ -595,10 +611,16 @@ static BOOL _HeadersCarryNoBodyFraming(NSDictionary *headers) {
     return YES;
 }
 
-// Has the peer closed its end? MSG_PEEK so nothing is consumed — a pipelined next request must
-// still be there for the header phase to read — and MSG_DONTWAIT so this never blocks the timer.
-// A return of 0 is EOF; anything else (data waiting, or EAGAIN) means the peer is still there.
+// Darwin reports POLLHUP on a received FIN even when unread bytes precede it. A one-byte
+// peek alone keeps seeing those bytes forever. Neither check consumes the next pipelined
+// request, and both are nonblocking so a live slow handler keeps its full allowance.
 static BOOL _SocketPeerHasClosed(int socket) {
+    struct pollfd descriptor = {.fd = socket, .events = POLLIN};
+
+    if ((poll(&descriptor, 1, 0) > 0) && (descriptor.revents & (POLLHUP | POLLERR))) {
+        return YES;
+    }
+
     char byte = 0;
     ssize_t const peeked = recv(socket, &byte, 1, MSG_PEEK | MSG_DONTWAIT);
 
@@ -903,7 +925,6 @@ static BOOL _StatusDelimitsItself(NSInteger statusCode) {
         // Guard against an async handler that invokes its completion block more than
         // once: a second call would overwrite _responseMessage (leaking the first
         // CFHTTPMessageRef) and race a second write chain on the same socket.
-        __block BOOL processed = NO;
         // Ownership travels through the ticket rather than a direct capture of self; see
         // WSKConnectionTicket. _handlerTicket is weak, so the block stays the only owner.
         WSKConnectionTicket *const ticket = [[WSKConnectionTicket alloc] init];
@@ -911,19 +932,23 @@ static BOOL _StatusDelimitsItself(NSInteger statusCode) {
         _handlerTicket = ticket;
         [self processRequest:_request
                   completion:^(WSKResponse *processResponse) {
-                      WSKConnection *const connection = ticket.connection;
+                      WSKConnection *const owner = ticket.connection;
 
-                      if (connection == nil) {
-                          return;  // The peer left and the connection was reclaimed; nothing to answer.
-                      }
-
-                      if (processed) {
-                          WSK_LOG_ERROR(@"Ignoring extra completion block invocation for request on socket %i", connection->_socket);
+                      if (owner == nil) {
                           return;
                       }
 
-                      processed = YES;
-                      [connection _finishProcessingRequest:processResponse];
+                      _PerformOnConnectionQueue(owner->_connectionQueue, ^{
+                          WSKConnection *const connection = ticket.connection;
+                          ticket.connection = nil;
+
+                          if (connection == nil) {
+                              return;  // Already completed or revoked after disconnect.
+                          }
+
+                          connection->_handlerTicket = nil;
+                          [connection _finishProcessingRequest:processResponse];
+                      });
                   }];
     }
 }
@@ -1249,13 +1274,24 @@ static uint64_t _SocketTransmittedByteCount(int socket) {
     // client here uses. The handler itself is NOT interrupted: it may still call its block, which
     // then finds the connection gone, exactly as it would for any peer that vanished.
     if (_requestReceived && (_pendingIOCount == 0) && _SocketPeerHasClosed(_socket)) {
-        WSK_LOG_DEBUG(@"Reclaiming connection on socket %i: the peer left while a handler was outstanding", _socket);
+        WSK_LOG_DEBUG(@"Reclaiming connection on socket %i: the peer left while an asynchronous callback was outstanding", _socket);
         dispatch_source_cancel(_idleTimer);
         shutdown(_socket, SHUT_RDWR);
         // Revoking releases this connection. Safe to do to ourselves: the timer's handler read a
         // WEAK self, and ARC holds that strongly for the duration of this call, so -dealloc runs
         // after this method returns rather than underneath it.
         _handlerTicket.connection = nil;
+        _handlerTicket = nil;
+        WSKConnectionTicket *const readerTicket = _readerTicket;
+        _readerTicket = nil;
+        readerTicket.connection = nil;
+        readerTicket.bodyCompletion = nil;
+
+        if (readerTicket) {
+            // Revoke BEFORE closing: a stream's close hook may invoke its parked callback.
+            [_response performClose];
+        }
+
         return;
     }
 
@@ -1597,6 +1633,7 @@ static uint64_t _SocketTransmittedByteCount(int socket) {
         _remoteAddressData = remoteAddress;
         _socket = socket;
         _connectionQueue = dispatch_queue_create("gcdwebserver.connection", DISPATCH_QUEUE_SERIAL);
+        dispatch_queue_set_specific(_connectionQueue, &_connectionQueueKey, (__bridge void *)_connectionQueue, NULL);
         _headerFailureStatus = kWSKHTTPStatusCode_InternalServerError;
         _bodyFailureStatus = kWSKHTTPStatusCode_InternalServerError;
         WSK_LOG_DEBUG(@"Did open connection on socket %i", _socket);
@@ -2329,55 +2366,81 @@ static inline NSUInteger _ScanHexNumber(const void *bytes, NSUInteger size) {
 
 - (void)writeBodyWithCompletionBlock:(WriteBodyCompletionBlock)block {
     WSK_DCHECK([_response hasBody]);
+    WSKConnectionTicket *const ticket = [[WSKConnectionTicket alloc] init];
+    ticket.connection = self;
+    ticket.bodyCompletion = block;
+    _readerTicket = ticket;
     [_response performReadDataWithCompletion:^(NSData *data, NSError *error) {
-        if (data) {
-            if (data.length) {
-                if ([self _shouldChunkResponse]) {
-                    const char *hexString = [[NSString stringWithFormat:@"%lx", (unsigned long)data.length] UTF8String];
-                    size_t hexLength = strlen(hexString);
-                    NSData *const chunk = [NSMutableData dataWithLength:(hexLength + 2 + data.length + 2)];
+        WSKConnection *const owner = ticket.connection;
 
-                    if (chunk == nil) {
-                        WSK_LOG_ERROR(@"Failed allocating memory for response body chunk for socket %i: %@", self->_socket, error);
-                        block(NO);
-                        return;
-                    }
+        if (owner == nil) {
+            return;
+        }
 
-                    char *ptr = (char *)[(NSMutableData *)chunk mutableBytes];
-                    bcopy(hexString, ptr, hexLength);
-                    ptr += hexLength;
-                    *ptr++ = '\r';
-                    *ptr++ = '\n';
-                    bcopy(data.bytes, ptr, data.length);
-                    ptr += data.length;
-                    *ptr++ = '\r';
-                    *ptr = '\n';
-                    data = chunk;
+        _PerformOnConnectionQueue(owner->_connectionQueue, ^{
+            WSKConnection *const connection = ticket.connection;
+            WriteBodyCompletionBlock const completion = ticket.bodyCompletion;
+            ticket.connection = nil;
+            ticket.bodyCompletion = nil;
+
+            if (connection == nil) {
+                return;
+            }
+
+            connection->_readerTicket = nil;
+            [connection _writeBodyData:data error:error completionBlock:completion];
+        });
+    }];
+}
+
+- (void)_writeBodyData:(NSData *)data error:(NSError *)error completionBlock:(WriteBodyCompletionBlock)block {
+    if (data) {
+        if (data.length) {
+            if ([self _shouldChunkResponse]) {
+                const char *hexString = [[NSString stringWithFormat:@"%lx", (unsigned long)data.length] UTF8String];
+                size_t hexLength = strlen(hexString);
+                NSData *const chunk = [NSMutableData dataWithLength:(hexLength + 2 + data.length + 2)];
+
+                if (chunk == nil) {
+                    WSK_LOG_ERROR(@"Failed allocating memory for response body chunk for socket %i: %@", self->_socket, error);
+                    block(NO);
+                    return;
                 }
 
-                [self writeData:data
+                char *ptr = (char *)[(NSMutableData *)chunk mutableBytes];
+                bcopy(hexString, ptr, hexLength);
+                ptr += hexLength;
+                *ptr++ = '\r';
+                *ptr++ = '\n';
+                bcopy(data.bytes, ptr, data.length);
+                ptr += data.length;
+                *ptr++ = '\r';
+                *ptr = '\n';
+                data = chunk;
+            }
+
+            [self writeData:data
+                withCompletionBlock:^(BOOL success) {
+                    if (success) {
+                        [self writeBodyWithCompletionBlock:block];
+                    } else {
+                        block(NO);
+                    }
+                }];
+        } else {
+            if ([self _shouldChunkResponse]) {
+                [self writeData:_lastChunkData
                     withCompletionBlock:^(BOOL success) {
-                        if (success) {
-                            [self writeBodyWithCompletionBlock:block];
-                        } else {
-                            block(NO);
-                        }
+                        block(success);
                     }];
             } else {
-                if ([self _shouldChunkResponse]) {
-                    [self writeData:_lastChunkData
-                        withCompletionBlock:^(BOOL success) {
-                            block(success);
-                        }];
-                } else {
-                    block(YES);
-                }
+                block(YES);
             }
-        } else {
-            WSK_LOG_ERROR(@"Failed reading response body for socket %i: %@", self->_socket, error);
-            block(NO);
         }
-    }];
+    } else {
+        WSK_LOG_ERROR(@"Failed reading response body for socket %i: %@", self->_socket, error);
+        block(NO);
+    }
 }
 
 @end

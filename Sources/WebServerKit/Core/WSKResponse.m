@@ -91,6 +91,7 @@
 @implementation WSKGZipEncoder {
     z_stream _stream;
     BOOL _finished;
+    BOOL _closed;
 }
 
 - (instancetype)initWithResponse:(WSKResponse *_Nonnull)response reader:(id<WSKBodyReader> _Nonnull)reader {
@@ -204,6 +205,10 @@
     return encodedData;
 }
 
+// Cancellation and duplicate callbacks deliberately end without another delivery.
+// Clang's completion-handler heuristic cannot express that lifetime contract.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wcompletion-handler"
 - (void)asyncReadDataWithCompletion:(WSKBodyReaderCompletionBlock)block {
     if (![self hasAsyncReader]) {
         // The reader below is synchronous, so keep using the synchronous loop: it reads
@@ -215,51 +220,82 @@
         return;
     }
 
-    if (_finished) {
+    BOOL finished;
+
+    @synchronized(self) {
+        if (_closed) {
+            return;
+        }
+
+        finished = _finished;
+    }
+
+    if (finished) {
         block([NSData data], nil);
         return;
     }
 
-    NSError *bufferError = nil;
-    NSMutableData *const encodedData = [self _allocateEncodingBuffer:&bufferError];
-
-    if (encodedData == nil) {
-        block(nil, bufferError);
-        return;
-    }
-
+    // A pending read can outlive disconnect and -close. Do not let its callback retain
+    // the encoder or touch a z_stream that close has already released. Guard duplicate
+    // callbacks here, BEFORE encoding, as well as at the response delivery boundary.
+    __weak WSKGZipEncoder *weakEncoder = self;
+    __block BOOL delivered = NO;
     [super asyncReadDataWithCompletion:^(NSData *data, NSError *readError) {
-        if (data == nil) {
-            block(nil, readError);
+        WSKGZipEncoder *const encoder = weakEncoder;
+
+        if (encoder == nil) {
             return;
         }
 
-        NSError *encodeError = nil;
-        NSUInteger length = 0;
-        const int flush = data.length ? Z_NO_FLUSH : Z_FINISH;
+        NSData *result = nil;
+        NSError *error = readError;
 
-        if (![self _deflateData:data flush:flush into:encodedData length:&length error:&encodeError]) {
-            block(nil, encodeError);
-            return;
-        }
-
-        if ((length == 0) && !self->_finished) {
-            // zlib buffered the whole chunk. Empty data is the connection's end-of-body
-            // sentinel, and unlike the synchronous loop this path cannot read more input
-            // without recursing once per chunk, so force the pending output out instead.
-            if (![self _deflateData:[NSData data] flush:Z_SYNC_FLUSH into:encodedData length:&length error:&encodeError]) {
-                block(nil, encodeError);
+        @synchronized(encoder) {
+            if (encoder->_closed || delivered) {
                 return;
+            }
+
+            delivered = YES;
+
+            if (encoder->_finished) {
+                result = [NSData data];
+            } else if (data) {
+                NSMutableData *const encodedData = [encoder _allocateEncodingBuffer:&error];
+                NSUInteger length = 0;
+                const int flush = data.length ? Z_NO_FLUSH : Z_FINISH;
+
+                if (encodedData && [encoder _deflateData:data flush:flush into:encodedData length:&length error:&error]) {
+                    BOOL success = YES;
+
+                    if ((length == 0) && !encoder->_finished) {
+                        // Empty data means EOF to the connection. Flush buffered input so
+                        // an unfinished asynchronous stream never emits that sentinel.
+                        success = [encoder _deflateData:[NSData data] flush:Z_SYNC_FLUSH into:encodedData length:&length error:&error];
+                    }
+
+                    if (success) {
+                        encodedData.length = length;
+                        result = encodedData;
+                    }
+                }
             }
         }
 
-        encodedData.length = length;
-        block(encodedData, nil);
+        block(result, result ? nil : error);
     }];
 }
+#pragma clang diagnostic pop
 
 - (void)close {
-    deflateEnd(&_stream);
+    @synchronized(self) {
+        if (_closed) {
+            return;
+        }
+
+        _closed = YES;
+        deflateEnd(&_stream);
+    }
+
     [super close];
 }
 
@@ -370,15 +406,22 @@
     // deflateEnd() for a gzip chain and a double close() of the file descriptor for a
     // file response. Mirrors the same guard on the handler completion in
     // -[WSKConnection _startProcessingRequest].
-    __block BOOL read = NO;
+    NSObject *const gate = [[NSObject alloc] init];
+    __block WSKBodyReaderCompletionBlock pendingBlock = [block copy];
     const WSKBodyReaderCompletionBlock guardedBlock = ^(NSData *data, NSError *error) {
-        if (read) {
+        WSKBodyReaderCompletionBlock completion;
+
+        @synchronized(gate) {
+            completion = pendingBlock;
+            pendingBlock = nil;
+        }
+
+        if (completion == nil) {
             WSK_LOG_ERROR(@"Ignoring extra body reader completion block invocation");
             return;
         }
 
-        read = YES;
-        block(data, error);
+        completion(data, error);
     };
 
     if ([_reader respondsToSelector:@selector(asyncReadDataWithCompletion:)]) {

@@ -19,6 +19,35 @@
 }
 @end
 
+// A response can own producer resources independently of its socket. Observe the public close
+// hook as well as the disconnect delegate, so shutting down TCP alone cannot satisfy the test.
+@interface WSKLifetimeStreamedResponse : WSKStreamedResponse
+@property (nonatomic, copy) dispatch_block_t onClose;
+@end
+
+@implementation WSKLifetimeStreamedResponse
+- (void)close {
+    [super close];
+    if (_onClose) {
+        _onClose();
+    }
+}
+@end
+
+static NSString *ReadLifetimeResponseHeaders(int fd) {
+    NSMutableData *const received = [NSMutableData data];
+    NSData *const terminator = UTF8Data(@"\r\n\r\n");
+    char buffer[4096];
+    while ([received rangeOfData:terminator options:0 range:NSMakeRange(0, received.length)].location == NSNotFound) {
+        ssize_t const count = recv(fd, buffer, sizeof(buffer), 0);
+        if (count <= 0) {
+            break;
+        }
+        [received appendBytes:buffer length:(NSUInteger)count];
+    }
+    return [[NSString alloc] initWithData:received encoding:NSUTF8StringEncoding];
+}
+
 @interface WSKConnectionTests : XCTestCase
 @end
 
@@ -562,6 +591,238 @@
 
     [server stop];
     server.delegate = nil;
+}
+
+// Retaining a completion after calling it once is legal. The old ticket kept owning the
+// connection after the response ended, and a second request replaced the only revocable ticket.
+// Read both complete responses and close the client while the first callback remains retained:
+// the disconnect delegate, not a socket EOF, proves that the server released its connection slot.
+- (void)testCompletedHandlerCallbackDoesNotRetainAReusedConnection {
+    NSMutableArray *const callbacks = [NSMutableArray array];
+    WSKWebServer *const server = [[WSKWebServer alloc] init];
+    [server addHandlerForMethod:@"GET"
+                           path:@"/retained"
+                   requestClass:[WSKRequest class]
+              asyncProcessBlock:^(WSKRequest *request, WSKCompletionBlock completionBlock) {
+                  @synchronized(callbacks) {
+                      [callbacks addObject:[completionBlock copy]];
+                  }
+                  completionBlock([WSKDataResponse responseWithText:@"FIRST-COMPLETE"]);
+              }];
+    [server addHandlerForMethod:@"GET"
+                           path:@"/next"
+                   requestClass:[WSKRequest class]
+                   processBlock:^WSKResponse *(WSKRequest *request) {
+                       return [WSKDataResponse responseWithText:@"SECOND-COMPLETE"];
+                   }];
+    XCTestExpectation *const disconnected = [self expectationWithDescription:@"completed callback no longer owns the connection"];
+    WSKDisconnectWatcher *const watcher = [[WSKDisconnectWatcher alloc] init];
+    watcher.onDisconnect = ^{ [disconnected fulfill]; };
+    server.delegate = watcher;
+    NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES, WSKOption_ConnectionIdleTimeout: @0.1, WSKOption_ConnectionKeepAliveTimeout: @1.0, WSKOption_ConnectedStateCoalescingInterval: @0};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSArray<NSString *> *const replies = SendRawRequestsOnOneConnection(server.port, @[@"GET /retained HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                                                                                       @"GET /next HTTP/1.1\r\nHost: localhost\r\n\r\n"]);
+    XCTAssertEqual(replies.count, (NSUInteger)2, @"both requests must complete before cleanup is judged: %@", replies);
+    if (replies.count == 2) {
+        XCTAssertTrue([replies[0] containsString:@"FIRST-COMPLETE"], @"%@", replies[0]);
+        XCTAssertTrue([replies[0] containsString:@"Connection: keep-alive"], @"the first response must permit reuse: %@", replies[0]);
+        XCTAssertTrue([replies[1] containsString:@"SECOND-COMPLETE"], @"%@", replies[1]);
+    }
+
+    WSKCompletionBlock retained = nil;
+    @synchronized(callbacks) {
+        retained = (WSKCompletionBlock)callbacks.firstObject;
+    }
+    XCTAssertNotNil(retained, @"the test must keep the completed callback alive");
+    XCTWaiterResult const released = [XCTWaiter waitForExpectations:@[disconnected] timeout:5.0];
+    XCTAssertEqual(released, XCTWaiterResultCompleted, @"a completed callback retained the closed keep-alive connection");
+    server.delegate = nil;
+    // Duplicate invocations after completion must remain harmless even after the connection dies.
+    if (retained) {
+        retained([WSKDataResponse responseWithText:@"late"]);
+        retained(nil);
+    }
+    @synchronized(callbacks) {
+        [callbacks removeAllObjects];
+    }
+    retained = nil;  // Also let the unfixed implementation unwind after reporting its failure.
+    [server stop];
+}
+
+// A stream may be waiting for an external producer when its client leaves. The old EOF path
+// logged reclamation and shut down TCP, but the saved reader callback still owned the connection
+// and its response. Keep that callback alive while asserting BOTH resource close and slot release.
+- (void)testPendingAsyncReaderDoesNotRetainADisconnectedConnection {
+    [self _checkPendingReaderDisconnectWithGZip:NO];
+}
+
+- (void)testPendingGZipAsyncReaderDoesNotRetainADisconnectedConnection {
+    [self _checkPendingReaderDisconnectWithGZip:YES];
+}
+
+- (void)_checkPendingReaderDisconnectWithGZip:(BOOL)gzipEnabled {
+    NSMutableArray *const callbacks = [NSMutableArray array];
+    XCTestExpectation *const readerParked = [self expectationWithDescription:@"the async reader is waiting for its producer"];
+    XCTestExpectation *const responseClosed = [self expectationWithDescription:@"the response producer was closed"];
+    XCTestExpectation *const disconnected = [self expectationWithDescription:@"the async reader connection was released"];
+    WSKWebServer *const server = [[WSKWebServer alloc] init];
+    [server addHandlerForMethod:@"GET"
+                           path:@"/stream"
+                   requestClass:[WSKRequest class]
+                   processBlock:^WSKResponse *(WSKRequest *request) {
+                       WSKLifetimeStreamedResponse *const response = [[WSKLifetimeStreamedResponse alloc]
+                           initWithContentType:@"application/octet-stream"
+                              asyncStreamBlock:^(WSKBodyReaderCompletionBlock completionBlock) {
+                                  @synchronized(callbacks) {
+                                      [callbacks addObject:[completionBlock copy]];
+                                  }
+                                  [readerParked fulfill];
+                              }];
+                       response.gzipContentEncodingEnabled = gzipEnabled;
+                       response.onClose = ^{ [responseClosed fulfill]; };
+                       return response;
+                   }];
+    WSKDisconnectWatcher *const watcher = [[WSKDisconnectWatcher alloc] init];
+    watcher.onDisconnect = ^{ [disconnected fulfill]; };
+    server.delegate = watcher;
+    NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES, WSKOption_ConnectionIdleTimeout: @0.1, WSKOption_ConnectedStateCoalescingInterval: @0};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    int const fd = ConnectToLocalhostPort(server.port);
+    XCTAssertGreaterThan(fd, 0);
+    const char *const request = "GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    XCTAssertEqual(send(fd, request, strlen(request), 0), (ssize_t)strlen(request));
+    NSString *const headers = ReadLifetimeResponseHeaders(fd);
+    XCTAssertTrue(ReplyHasStatus(headers, 200), @"the stream must start successfully: %@", headers);
+    [self waitForExpectations:@[readerParked] timeout:5.0];
+    WSKBodyReaderCompletionBlock retained = nil;
+    @synchronized(callbacks) {
+        retained = (WSKBodyReaderCompletionBlock)callbacks.firstObject;
+    }
+    XCTAssertNotNil(retained, @"the reader never parked, so this would not exercise its ownership");
+    close(fd);  // All response headers were read, so this is an orderly FIN, not an unread-data RST.
+
+    XCTWaiterResult const released = [XCTWaiter waitForExpectations:@[responseClosed, disconnected] timeout:5.0];
+    XCTAssertEqual(released, XCTWaiterResultCompleted, @"the parked reader retained its response or connection after the client left");
+    server.delegate = nil;
+    if ((released == XCTWaiterResultCompleted) && retained) {
+        // A producer finishing after cancellation must neither write again nor close twice.
+        dispatch_apply(2, dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^(size_t index) {
+            retained(UTF8Data(@"late producer data"), nil);
+        });
+        retained([NSData data], nil);
+    }
+    @synchronized(callbacks) {
+        [callbacks removeAllObjects];
+    }
+    retained = nil;
+    [server stop];
+}
+
+// Send the next request only AFTER the first handler has parked: otherwise the initial header
+// read can consume it into carry-over data, leaving MSG_PEEK an empty queue and hiding the bug.
+// A queued byte must not conceal the FIN and retain a connection whose client has already gone.
+- (void)testQueuedRequestDoesNotHideDisconnectFromAnAsyncHandler {
+    NSMutableArray *const callbacks = [NSMutableArray array];
+    XCTestExpectation *const handlerParked = [self expectationWithDescription:@"the handler owns its pending callback"];
+    XCTestExpectation *const disconnected = [self expectationWithDescription:@"queued bytes did not hide the departed client"];
+    WSKWebServer *const server = [[WSKWebServer alloc] init];
+    [server addHandlerForMethod:@"GET"
+                           path:@"/park"
+                   requestClass:[WSKRequest class]
+              asyncProcessBlock:^(WSKRequest *request, WSKCompletionBlock completionBlock) {
+                  @synchronized(callbacks) {
+                      [callbacks addObject:[completionBlock copy]];
+                  }
+                  [handlerParked fulfill];
+              }];
+    WSKDisconnectWatcher *const watcher = [[WSKDisconnectWatcher alloc] init];
+    watcher.onDisconnect = ^{ [disconnected fulfill]; };
+    server.delegate = watcher;
+    NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES, WSKOption_ConnectionIdleTimeout: @0.1, WSKOption_ConnectionKeepAliveTimeout: @1.0, WSKOption_ConnectedStateCoalescingInterval: @0};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    int const fd = ConnectToLocalhostPort(server.port);
+    XCTAssertGreaterThan(fd, 0);
+    const char *const first = "GET /park HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    XCTAssertEqual(send(fd, first, strlen(first), 0), (ssize_t)strlen(first));
+    [self waitForExpectations:@[handlerParked] timeout:5.0];
+    const char *const next = "GET /next HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    XCTAssertEqual(send(fd, next, strlen(next), 0), (ssize_t)strlen(next));
+    close(fd);
+    WSKCompletionBlock retained = nil;
+    @synchronized(callbacks) {
+        retained = (WSKCompletionBlock)callbacks.firstObject;
+    }
+    XCTAssertNotNil(retained, @"the pending callback must survive the client");
+
+    XCTWaiterResult const released = [XCTWaiter waitForExpectations:@[disconnected] timeout:5.0];
+    XCTAssertEqual(released, XCTWaiterResultCompleted, @"unread request bytes kept a departed client's connection alive");
+    server.delegate = nil;
+    if ((released == XCTWaiterResultCompleted) && retained) {
+        retained([WSKDataResponse responseWithText:@"late"]);
+        retained(nil);
+    }
+    @synchronized(callbacks) {
+        [callbacks removeAllObjects];
+    }
+    retained = nil;
+    [server stop];
+}
+
+// The live counterpart: cleanup must not consume queued request bytes or impose the socket idle
+// deadline on a handler that still has a client. The delayed completion spans several idle ticks;
+// two complete wire responses, including the queued request's distinct body, are the oracle.
+- (void)testLiveAsyncHandlerPreservesAQueuedNextRequest {
+    NSMutableArray *const callbacks = [NSMutableArray array];
+    XCTestExpectation *const handlerParked = [self expectationWithDescription:@"the live handler is waiting"];
+    WSKWebServer *const server = [[WSKWebServer alloc] init];
+    [server addHandlerForMethod:@"GET"
+                           path:@"/slow"
+                   requestClass:[WSKRequest class]
+              asyncProcessBlock:^(WSKRequest *request, WSKCompletionBlock completionBlock) {
+                  @synchronized(callbacks) {
+                      [callbacks addObject:[completionBlock copy]];
+                  }
+                  [handlerParked fulfill];
+              }];
+    [server addHandlerForMethod:@"GET"
+                           path:@"/next"
+                   requestClass:[WSKRequest class]
+                   processBlock:^WSKResponse *(WSKRequest *request) {
+                       return [WSKDataResponse responseWithText:@"QUEUED-RESPONSE"];
+                   }];
+    NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES, WSKOption_ConnectionIdleTimeout: @0.1, WSKOption_ConnectionKeepAliveTimeout: @1.0};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    int const fd = ConnectToLocalhostPort(server.port);
+    XCTAssertGreaterThan(fd, 0);
+    const char *const first = "GET /slow HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    XCTAssertEqual(send(fd, first, strlen(first), 0), (ssize_t)strlen(first));
+    [self waitForExpectations:@[handlerParked] timeout:5.0];
+    const char *const next = "GET /next HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    XCTAssertEqual(send(fd, next, strlen(next), 0), (ssize_t)strlen(next));
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+        WSKCompletionBlock completion = nil;
+        @synchronized(callbacks) {
+            completion = (WSKCompletionBlock)callbacks.firstObject;
+            [callbacks removeAllObjects];
+        }
+        if (completion) {
+            completion([WSKDataResponse responseWithText:@"SLOW-RESPONSE"]);
+        }
+    });
+    // The delayed block captures only the array. Its local callback dies on that worker, so
+    // this test's own stack cannot retain a completed callback and spoil the live control.
+    BOOL sawEOF = NO;
+    NSData *const data = ReadToEOF(fd, &sawEOF);
+    NSString *const reply = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    XCTAssertTrue(sawEOF, @"the final response must close the connection: %@", reply);
+    XCTAssertTrue([reply containsString:@"SLOW-RESPONSE"], @"the live slow handler was reclaimed: %@", reply);
+    XCTAssertTrue([reply containsString:@"QUEUED-RESPONSE"], @"the queued next request was lost: %@", reply);
+    NSUInteger const responses = [[reply componentsSeparatedByString:@"HTTP/1.1 200 OK"] count] - 1;
+    XCTAssertEqual(responses, (NSUInteger)2, @"both requests must produce exactly one response: %@", reply);
+    close(fd);
+    [server stop];
 }
 
 // Progress in the response phase is counted in -didWriteBytes:, which runs only when a whole
