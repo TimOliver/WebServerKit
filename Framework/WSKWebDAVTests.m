@@ -7,6 +7,29 @@
 
 #import "TestsSupport.h"
 
+// Park uploads at the public authorization hook, after their first precondition check. This
+// forces the lost-update interleaving without relying on file sizes or scheduler timing.
+@interface WSKGatedUploadDAVServer : WSKWebDAVServer
+@property (nonatomic, copy) BOOL (^uploadAuthorization)(NSString *path, NSString *temporaryPath);
+@end
+
+@implementation WSKGatedUploadDAVServer
+
+- (BOOL)shouldUploadFileAtPath:(NSString *)path withTemporaryFile:(NSString *)tempPath {
+    return self.uploadAuthorization ? self.uploadAuthorization(path, tempPath) : [super shouldUploadFileAtPath:path withTemporaryFile:tempPath];
+}
+
+@end
+
+static NSString *DAVReplyETag(NSString *reply) {
+    for (NSString *line in [reply componentsSeparatedByString:@"\r\n"]) {
+        if ([line rangeOfString:@"Etag: " options:(NSCaseInsensitiveSearch | NSAnchoredSearch)].location != NSNotFound) {
+            return [line substringFromIndex:6];
+        }
+    }
+    return nil;
+}
+
 @interface WSKWebDAVTests : XCTestCase
 @end
 
@@ -1811,6 +1834,220 @@
     NSString *plainReply = SendRawRequest(server.port, plain);
     XCTAssertTrue([plainReply hasPrefix:@"HTTP/1.1 2"], @"a satisfied If-Match with no other condition must still write: %@", [plainReply substringToIndex:MIN((NSUInteger)40, plainReply.length)]);
     XCTAssertEqualObjects([NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:NULL], @"ACCEPTED");
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// Every writer observes the same initial state and reaches authorization before any commit can
+// happen. Only one may satisfy If-Match (replacement) or If-None-Match:* (creation); the others
+// must report 412 and remove the hidden staging files containing their refused uploads.
+- (void)assertConcurrentConditionalPutsAcceptOnlyOneWriterForExistingFile:(BOOL)existing {
+    NSFileManager *const fm = [NSFileManager defaultManager];
+    NSString *const dir = MakeTempDirectory();
+    NSString *const path = [dir stringByAppendingPathComponent:@"shared.txt"];
+    if (existing) {
+        XCTAssertTrue([@"ORIGINAL" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    }
+
+    WSKGatedUploadDAVServer *const server = [[WSKGatedUploadDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    NSUInteger const port = server.port;
+    NSString *condition = @"If-None-Match: *";
+    if (existing) {
+        NSString *const head = SendRawRequest(port, @"HEAD /shared.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        NSString *const etag = DAVReplyETag(head);
+        XCTAssertNotNil(etag, @"the initial file must publish a validator: %@", head);
+        if (etag == nil) {
+            [server stop];
+            [fm removeItemAtPath:dir error:NULL];
+            return;
+        }
+        condition = [@"If-Match: " stringByAppendingString:etag];
+    }
+
+    NSUInteger const writers = 8;
+    dispatch_semaphore_t const arrived = dispatch_semaphore_create(0);
+    dispatch_group_t const release = dispatch_group_create();
+    dispatch_group_enter(release);
+    server.uploadAuthorization = ^BOOL(NSString *uploadPath, NSString *temporaryPath) {
+        dispatch_semaphore_signal(arrived);
+        return dispatch_group_wait(release, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC))) == 0;
+    };
+
+    NSMutableDictionary<NSNumber *, NSString *> *const replies = [NSMutableDictionary dictionary];
+    dispatch_group_t const clients = dispatch_group_create();
+    for (NSUInteger i = 0; i < writers; i++) {
+        dispatch_group_async(clients, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            NSString *const body = [NSString stringWithFormat:@"writer-%lu", (unsigned long)i];
+            NSString *const request = [NSString stringWithFormat:@"PUT /shared.txt HTTP/1.1\r\nHost: localhost\r\n%@\r\nContent-Length: %lu\r\n\r\n%@", condition, (unsigned long)body.length, body];
+            NSString *const reply = SendRawRequest(port, request);
+            @synchronized (replies) {
+                replies[@(i)] = reply ? reply : @"";
+            }
+        });
+    }
+
+    NSUInteger parked = 0;
+    dispatch_time_t const arrivalDeadline = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC));
+    while ((parked < writers) && (dispatch_semaphore_wait(arrived, arrivalDeadline) == 0)) {
+        parked++;
+    }
+    // Release every waiter even if the assertion fails, so a regression cannot strand a server
+    // thread. A lock surrounding authorization would prevent the remaining writers arriving.
+    dispatch_group_leave(release);
+    XCTAssertEqual(parked, writers, @"all writers must pass the initial check before any commit");
+    XCTAssertEqual(dispatch_group_wait(clients, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC))), 0L);
+
+    NSUInteger accepted = 0;
+    NSUInteger refused = 0;
+    NSString *winningBody = nil;
+    @synchronized (replies) {
+        XCTAssertEqual(replies.count, writers);
+        for (NSUInteger i = 0; i < writers; i++) {
+            NSString *const reply = replies[@(i)];
+            if (ReplyHasStatus(reply, existing ? 204 : 201)) {
+                accepted++;
+                winningBody = [NSString stringWithFormat:@"writer-%lu", (unsigned long)i];
+            } else if (ReplyHasStatus(reply, 412)) {
+                refused++;
+            } else {
+                XCTFail(@"conditional writer %lu returned an unexpected response: %@", (unsigned long)i, reply);
+            }
+        }
+    }
+    XCTAssertEqual(accepted, (NSUInteger)1, @"only one writer can satisfy the original condition: %@", condition);
+    XCTAssertEqual(refused, writers - 1, @"every losing writer must report the failed precondition");
+    XCTAssertEqualObjects([NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:NULL], winningBody, @"the accepted writer's complete body must survive");
+    XCTAssertEqualObjects([fm contentsOfDirectoryAtPath:dir error:NULL], @[@"shared.txt"], @"refused writes must leave no staging files behind");
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+- (void)testDAVConcurrentConditionalPutsAcceptOnlyOneWriter {
+    [self assertConcurrentConditionalPutsAcceptOnlyOneWriterForExistingFile:YES];
+}
+
+- (void)testDAVConcurrentCreateOnlyPutsAcceptOnlyOneWriter {
+    [self assertConcurrentConditionalPutsAcceptOnlyOneWriterForExistingFile:NO];
+}
+
+// An unconditional writer can replace the version while a conditional writer is authorized.
+// The latter must discover the changed validator before committing, even though its earlier
+// check passed and the intervening request did not carry a precondition of its own.
+- (void)testDAVUnconditionalPutInvalidatesAParkedConditionalPut {
+    NSFileManager *const fm = [NSFileManager defaultManager];
+    NSString *const dir = MakeTempDirectory();
+    NSString *const path = [dir stringByAppendingPathComponent:@"shared.txt"];
+    XCTAssertTrue([@"ORIGINAL" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    WSKGatedUploadDAVServer *const server = [[WSKGatedUploadDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    NSUInteger const port = server.port;
+    NSString *const etag = DAVReplyETag(SendRawRequest(port, @"HEAD /shared.txt HTTP/1.1\r\nHost: localhost\r\n\r\n"));
+    XCTAssertNotNil(etag);
+    if (etag == nil) {
+        [server stop];
+        [fm removeItemAtPath:dir error:NULL];
+        return;
+    }
+
+    dispatch_semaphore_t const arrived = dispatch_semaphore_create(0);
+    dispatch_group_t const release = dispatch_group_create();
+    dispatch_group_enter(release);
+    server.uploadAuthorization = ^BOOL(NSString *uploadPath, NSString *temporaryPath) {
+        NSString *const body = [NSString stringWithContentsOfFile:temporaryPath encoding:NSUTF8StringEncoding error:NULL];
+        if (![body isEqualToString:@"CONDITIONAL"]) {
+            return YES;
+        }
+        dispatch_semaphore_signal(arrived);
+        return dispatch_group_wait(release, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC))) == 0;
+    };
+
+    __block NSString *conditionalReply = nil;
+    dispatch_group_t const conditionalClient = dispatch_group_create();
+    dispatch_group_async(conditionalClient, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *const request = [NSString stringWithFormat:@"PUT /shared.txt HTTP/1.1\r\nHost: localhost\r\nIf-Match: %@\r\nContent-Length: 11\r\n\r\nCONDITIONAL", etag];
+        conditionalReply = SendRawRequest(port, request);
+    });
+    long const parked = dispatch_semaphore_wait(arrived, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)));
+
+    __block NSString *unconditionalReply = nil;
+    dispatch_group_t const unconditionalClient = dispatch_group_create();
+    dispatch_group_async(unconditionalClient, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        unconditionalReply = SendRawRequest(port, @"PUT /shared.txt HTTP/1.1\r\nHost: localhost\r\nContent-Length: 13\r\n\r\nUNCONDITIONAL");
+    });
+    long const replacedWhileParked = dispatch_group_wait(unconditionalClient, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)));
+    dispatch_group_leave(release);
+    XCTAssertEqual(parked, 0L, @"the conditional PUT must pass its initial check before the other writer commits");
+    XCTAssertEqual(replacedWhileParked, 0L, @"authorization must not prevent the intervening PUT from completing");
+    XCTAssertEqual(dispatch_group_wait(unconditionalClient, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC))), 0L);
+    XCTAssertEqual(dispatch_group_wait(conditionalClient, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC))), 0L);
+    XCTAssertTrue(ReplyHasStatus(unconditionalReply, 204), @"the unconditional writer must replace the original: %@", unconditionalReply);
+    XCTAssertTrue(ReplyHasStatus(conditionalReply, 412), @"the parked writer's original validator is now stale: %@", conditionalReply);
+    XCTAssertEqualObjects([NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:NULL], @"UNCONDITIONAL", @"the refused conditional PUT must preserve the intervening writer's body");
+    XCTAssertEqualObjects([fm contentsOfDirectoryAtPath:dir error:NULL], @[@"shared.txt"], @"the refused upload must leave no staging files behind");
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// Authorization belongs outside the commit lock. A host may take time to approve a PUT, while
+// downloads and independent uploads must remain available throughout that interval.
+- (void)testDAVParkedPutDoesNotBlockReadsOrIndependentUploads {
+    NSFileManager *const fm = [NSFileManager defaultManager];
+    NSString *const dir = MakeTempDirectory();
+    NSString *const path = [dir stringByAppendingPathComponent:@"parked.txt"];
+    XCTAssertTrue([@"ORIGINAL" writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    WSKGatedUploadDAVServer *const server = [[WSKGatedUploadDAVServer alloc] initWithUploadDirectory:dir];
+
+    dispatch_semaphore_t const arrived = dispatch_semaphore_create(0);
+    dispatch_group_t const release = dispatch_group_create();
+    dispatch_group_enter(release);
+    server.uploadAuthorization = ^BOOL(NSString *uploadPath, NSString *temporaryPath) {
+        if (![[uploadPath lastPathComponent] isEqualToString:@"parked.txt"]) {
+            return YES;
+        }
+        dispatch_semaphore_signal(arrived);
+        return dispatch_group_wait(release, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC))) == 0;
+    };
+    NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    NSUInteger const port = server.port;
+
+    __block NSString *parkedReply = nil;
+    dispatch_group_t const parkedClient = dispatch_group_create();
+    dispatch_group_async(parkedClient, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        parkedReply = SendRawRequest(port, @"PUT /parked.txt HTTP/1.1\r\nHost: localhost\r\nContent-Length: 11\r\n\r\nREPLACEMENT");
+    });
+    long const parked = dispatch_semaphore_wait(arrived, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)));
+
+    __block NSString *getReply = nil;
+    __block NSString *otherPutReply = nil;
+    dispatch_group_t const independentClients = dispatch_group_create();
+    dispatch_group_async(independentClients, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        getReply = SendRawRequest(port, @"GET /parked.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    });
+    dispatch_group_async(independentClients, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        otherPutReply = SendRawRequest(port, @"PUT /other.txt HTTP/1.1\r\nHost: localhost\r\nContent-Length: 11\r\n\r\nINDEPENDENT");
+    });
+    long const finishedWhileParked = dispatch_group_wait(independentClients, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)));
+    dispatch_group_leave(release);
+    XCTAssertEqual(parked, 0L, @"the PUT must be inside authorization before probing independent requests");
+    XCTAssertEqual(finishedWhileParked, 0L, @"a pending upload authorization must not block GET or a different PUT");
+    XCTAssertEqual(dispatch_group_wait(independentClients, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC))), 0L);
+    XCTAssertEqual(dispatch_group_wait(parkedClient, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC))), 0L);
+    XCTAssertTrue(ReplyHasStatus(getReply, 200), @"the original file must remain downloadable during authorization: %@", getReply);
+    XCTAssertTrue([getReply hasSuffix:@"\r\n\r\nORIGINAL"], @"the GET must receive the complete original body: %@", getReply);
+    XCTAssertTrue(ReplyHasStatus(otherPutReply, 201), @"the independent upload must commit during authorization: %@", otherPutReply);
+    XCTAssertTrue(ReplyHasStatus(parkedReply, 204), @"the parked upload must commit after release: %@", parkedReply);
+    XCTAssertEqualObjects([NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:NULL], @"REPLACEMENT");
+    XCTAssertEqualObjects([NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:@"other.txt"] encoding:NSUTF8StringEncoding error:NULL], @"INDEPENDENT");
+    NSArray *const expectedFiles = @[@"other.txt", @"parked.txt"];
+    XCTAssertEqualObjects([[fm contentsOfDirectoryAtPath:dir error:NULL] sortedArrayUsingSelector:@selector(compare:)], expectedFiles, @"successful uploads must leave no staging files behind");
 
     [server stop];
     [fm removeItemAtPath:dir error:NULL];

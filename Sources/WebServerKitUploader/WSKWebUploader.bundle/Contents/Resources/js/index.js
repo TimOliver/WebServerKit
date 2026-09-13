@@ -265,8 +265,9 @@ $(document).ready(function() {
     dropZone: $(document),
     pasteZone: null,
     autoUpload: true,
-    sequentialUploads: true,
-    // limitConcurrentUploads: 2,
+    // Leave connections available for browsing and live updates while files upload.
+    sequentialUploads: false,
+    limitConcurrentUploads: 4,
     // forceIframeTransport: true,
     
     url: 'upload',
