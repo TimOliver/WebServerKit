@@ -513,6 +513,23 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
 - `-open`/`-close` fire once per CONNECTION; per-request work (access log, trace recording)
   lives in `-_flushRequestRecordAndLog`. A keep-alive client leaving is EOF, not an error —
   no fabricated 500 in the log.
+- **Async callbacks own a connection only until completion or disconnect.** Handler and
+  response-reader tickets are consumed/revoked on the connection queue. Saved callbacks capture
+  only their ticket, using an atomic connection snapshot to reach the queue briefly; capturing
+  the queue directly would keep it alive after the connection is gone. A reader ticket must
+  also own its final write completion (that block captures the connection); revoking only its
+  `connection` property leaves the second ownership edge alive. Clear both BEFORE calling the
+  response's `-close`, which can itself invoke a saved callback. Completed callbacks retained by
+  an app must neither pin a closed connection nor act on its next keep-alive request. With idle
+  timeouts enabled, Darwin `poll(POLLIN)` detects FIN even behind unread pipelined bytes;
+  `MSG_PEEK` alone cannot. Neither consumes a live client's next request or adds a deadline for
+  a slow handler/reader. Gzip guards late/duplicate raw callbacks BEFORE deflation, synchronizes
+  against close, and captures its encoder weakly so a saved callback cannot retain its resources.
+  Verified 2026-09-13: four regression cases fail on the old code (plain/gzip readers are separate)
+  while the live pipelined control passes; all five pass with the fix. Full gate: 242 ASan tests,
+  eight trace suites, platform builds and Swift consumers. A 60-batch soak retained 1,920 callbacks
+  and invoked them late/again 7,680 times alongside 6,284 verified 1 MiB downloads: all 8,265
+  connections and 960 streamed responses closed/deallocated, descriptors 9→9, reserved bytes 0.
 - **Lingering close.** `close(2)` with unread inbound data makes the kernel send RST, and the RST
   destroys bytes already handed to TCP — a response the client has not read yet. Measured before the
   fix on a WebDAV PUT refused for `Content-Range` while the client kept uploading: 391 B complete on
@@ -1117,6 +1134,12 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
     pipelined next request is not consumed. Measured: 120 clients requesting such a route and
     disconnecting left **122 sockets held before and 2 after**. Safe to revoke from inside the timer
     because its handler reads a WEAK self, which ARC holds strongly for the call.
+    **Correction 2026-09-13:** that fix covered only a pending handler with an empty receive
+    queue. Three P2 siblings remained: completed callbacks kept their tickets, response-reader
+    callbacks captured both the connection and its final write completion, and queued next-request
+    bytes hid FIN from `MSG_PEEK`. The async-callback invariant under File serving and connection
+    reuse now covers all three; response cancellation also guards late gzip callbacks before
+    they can encode against a closed stream.
     The one thing it costs: a client that half-closes and still expects its response. That shape was
     already treated this way wherever a read was outstanding, and this is the phase where no read
     exists to carry the same outcome. "Handler time never counts" stays right for the idle timer. (P2)
