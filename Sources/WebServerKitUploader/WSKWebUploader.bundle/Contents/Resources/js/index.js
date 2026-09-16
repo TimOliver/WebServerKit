@@ -97,11 +97,17 @@ function _flushPendingReloads() {
   }
 }
 
-function _reload(path) {
+function _reload(path, background) {
   // Coerce at the single entry point rather than at each call site: everything below
   // (and the server) treats a path as a string.
   if (!path) {
     path = "/";
+  }
+
+  // A periodic refresh is expendable. Never queue it behind a navigation or rename, and never
+  // let a hidden tab compete with the tab being used for the browser's finite connection pool.
+  if (background && (document.hidden || _reloadInFlight || _editorIsOpen())) {
+    return;
   }
 
   _requestedPath = path;
@@ -118,10 +124,19 @@ function _reload(path) {
     url: 'list',
     type: 'GET',
     data: {path: path},
-    dataType: 'json'
+    dataType: 'json',
+    // A stalled periodic request must release the reload guard so navigation can resume.
+    timeout: background ? 10000 : 0
   }).fail(function(jqXHR, textStatus, errorThrown) {
-    _showError("Failed retrieving contents of \"" + path + "\"", textStatus, errorThrown);
+    if (!background) {
+      _showError("Failed retrieving contents of \"" + path + "\"", textStatus, errorThrown);
+    }
   }).done(function(data, textStatus, jqXHR) {
+    // The user can start a rename or ask for another folder while the poll is on the wire.
+    // Leave that interaction intact; the next poll will use the latest requested directory.
+    if (background && (_editorIsOpen() || path !== _requestedPath)) {
+      return;
+    }
     var scrollPosition = $(document).scrollTop();
     
     if (!_pathRendered || (path != _path)) {
@@ -430,11 +445,53 @@ $(document).ready(function() {
   //
   // So exactly one tab holds the stream and relays what it receives to the rest. Leadership is a
   // Web Lock, which the browser releases by itself when the holding tab goes away, so there is no
-  // heartbeat, no timeout, and no way to end up with the stream unheld or held twice. Where either
-  // API is missing, the old one-stream-per-tab behaviour stands — correct for a single tab, and no
-  // worse than before for several.
-  if (typeof(EventSource) !== "undefined") {
-    var _eventChannel = (typeof(BroadcastChannel) !== "undefined") ? new BroadcastChannel('wsk-uploader-events') : null;
+  // heartbeat, no timeout, and no way to end up with the stream unheld or held twice. Web Locks
+  // requires a secure context, so ordinary HTTP LAN addresses cannot share a stream this way.
+  // Use bounded, visible-tab polling whenever sharing is unavailable instead of allocating an
+  // indefinite connection per tab. User-triggered refreshes retain their normal error messages;
+  // background failures stay silent and retry without accumulating alerts or queued reloads.
+  var _pollingStarted = false;
+  var _startPolling = function() {
+    if (_pollingStarted) {
+      return;
+    }
+    _pollingStarted = true;
+    var timer = null;
+    var poll = function() {
+      if (timer !== null) {
+        _reload(_requestedPath, true);
+      }
+    };
+    var resume = function() {
+      if (timer === null) {
+        timer = setInterval(poll, 5000);
+      }
+      poll();
+    };
+    document.addEventListener('visibilitychange', poll);
+    window.addEventListener('pagehide', function() {
+      clearInterval(timer);
+      timer = null;
+    });
+    window.addEventListener('pageshow', function(event) {
+      if (event.persisted) {
+        resume();
+      }
+    });
+    resume();
+  };
+
+  var _eventChannel = null;
+  if (typeof(EventSource) !== "undefined" && typeof(BroadcastChannel) !== "undefined" &&
+      navigator.locks && navigator.locks.request) {
+    try {
+      _eventChannel = new BroadcastChannel('wsk-uploader-events');
+    } catch (e) {
+      // Some browser privacy settings expose the API but refuse its use.
+    }
+  }
+
+  if (_eventChannel) {
 
     var _applyChangeEvent = function(data) {
       var eventPath = data.path || data.oldPath || '';
@@ -466,12 +523,10 @@ $(document).ready(function() {
       }
     };
 
-    if (_eventChannel) {
-      // A follower tab holds no socket of its own and learns about changes from the leader.
-      _eventChannel.onmessage = function(event) {
-        _applyChangeEvent(event.data);
-      };
-    }
+    // A follower tab holds no socket of its own and learns about changes from the leader.
+    _eventChannel.onmessage = function(event) {
+      _applyChangeEvent(event.data);
+    };
 
     var _openEventStream = function() {
       var eventSource = new EventSource('/events');
@@ -498,16 +553,22 @@ $(document).ready(function() {
       };
     };
 
-    if (_eventChannel && navigator.locks && navigator.locks.request) {
+    var _sharedEventsUnavailable = function() {
+      _eventChannel.close();
+      _startPolling();
+    };
+    try {
       // The promise never settles, so this tab holds the lock for as long as it lives. When it goes
       // away the browser releases the lock and whichever tab is next in the queue opens the stream.
       navigator.locks.request('wsk-uploader-events', function() {
         _openEventStream();
         return new Promise(function() {});
-      });
-    } else {
-      _openEventStream();
+      }).catch(_sharedEventsUnavailable);
+    } catch (e) {
+      _sharedEventsUnavailable();
     }
+  } else {
+    _startPolling();
   }
 
 });

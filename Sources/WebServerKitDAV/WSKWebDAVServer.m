@@ -105,15 +105,12 @@ NS_ASSUME_NONNULL_BEGIN
 NS_ASSUME_NONNULL_END
 
 @implementation WSKWebDAVServer {
-    // PROPPATCH is a read-modify-write of one xattr plist and nothing serialised it, so two clients
-    // patching the same resource both answered 200 and one write vanished — 198 of 200 lost when
-    // measured, and 60 of 60 in the pinning test. Per server rather than per resolved path:
-    // PROPPATCH is rare, and a per-path table is more machinery than the problem is worth.
-    NSObject *_deadPropertyLock;
-
-    // Every PUT on this server shares the final precondition check and rename. Receiving,
-    // staging, authorization callbacks, and reads stay outside this short critical section.
-    NSObject *_putCommitLock;
+    // PUT preserves the destination's DAV properties on its staged replacement. Its final
+    // precondition check, property copy and rename share a lock with PROPPATCH's read/merge/write,
+    // so neither operation can discard an acknowledged property update. Per server rather than
+    // per path: the property store is bounded and these commits are short. Receiving, body
+    // staging, authorization callbacks, and reads stay outside this critical section.
+    NSObject *_resourceMutationLock;
 }
 
 @dynamic delegate;
@@ -124,8 +121,7 @@ NS_ASSUME_NONNULL_END
         // check containment, and that fails outright for a host-app path carrying a tilde
         // or a trailing separator — which fails closed, i.e. every request gets a 403.
         _uploadDirectory = [[path stringByStandardizingPath] copy];
-        _deadPropertyLock = [[NSObject alloc] init];
-        _putCommitLock = [[NSObject alloc] init];
+        _resourceMutationLock = [[NSObject alloc] init];
         WSKWebDAVServer *const __unsafe_unretained server = self;
 
         // 9.1 PROPFIND method
@@ -402,6 +398,48 @@ static BOOL _SetDeadPropertiesAtPath(NSString *path, NSDictionary<NSString *, NS
     }
 
     return setxattr(filePath, [kDAVDeadPropertyAttribute UTF8String], data.bytes, data.length, 0, 0) == 0;
+}
+
+// A PUT changes content, not the resource's dead properties (including DAV:displayname).
+// Copy the stored bytes without decoding/re-encoding: even an attribute an older build or
+// another application wrote must survive. Unlike the lenient PROPFIND reader, a read failure
+// here must refuse the PUT, otherwise a successful replacement would silently erase metadata.
+// Called with _resourceMutationLock held, before anything at the destination is changed.
+- (BOOL)_copyDeadPropertiesAtPath:(NSString *)path toPath:(NSString *)stagingPath error:(NSError **)error {
+    const char *const attribute = [kDAVDeadPropertyAttribute UTF8String];
+    ssize_t const size = getxattr([path fileSystemRepresentation], attribute, NULL, 0, 0, 0);
+    int failure = 0;
+
+    if (size < 0) {
+        failure = errno;
+
+        if ((failure == ENOATTR) || (failure == ENOTSUP)) {
+            return YES;
+        }
+    } else if (size > kDAVMaxDeadPropertyStorageLength) {
+        // Honor the same bound as PROPPATCH, including attributes written outside this server.
+        failure = EDQUOT;
+    } else {
+        NSMutableData *const data = [NSMutableData dataWithLength:(NSUInteger)size];
+        ssize_t const copied = getxattr([path fileSystemRepresentation], attribute, data.mutableBytes, (size_t)size, 0, 0);
+
+        if (copied < 0) {
+            failure = errno;
+        } else if (copied != size) {
+            // An external writer changed the attribute between sizing and reading it.
+            failure = EAGAIN;
+        } else if (setxattr([stagingPath fileSystemRepresentation], attribute, data.bytes, (size_t)size, 0, 0) == 0) {
+            return YES;
+        } else {
+            failure = errno;
+        }
+    }
+
+    if (error) {
+        *error = WSKMakePosixError(failure);
+    }
+
+    return NO;
 }
 
 // "{namespace}localname", the unambiguous spelling of a qualified name, and the element markup to
@@ -962,7 +1000,7 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
 
     WSKResponse *commitFailure = nil;
 
-    @synchronized(_putCommitLock) {
+    @synchronized(_resourceMutationLock) {
         // Recheck the state of the once-resolved destination after authorization and staging.
         // An earlier check alone lets concurrent writers all satisfy the same stale ETag.
         // Unconditional PUTs also take this lock, so they cannot slip between check and swap.
@@ -978,6 +1016,10 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
                 commitFailure = _MethodNotAllowed(request, @"PUT not allowed on existing collection \"%@\"", relativePath);
             } else {
                 commitFailure = [self _preconditionFailureForRequest:request atPath:absolutePath];
+
+                if (!commitFailure && existing && ![self _copyDeadPropertiesAtPath:absolutePath toPath:stagingPath error:&error]) {
+                    commitFailure = [WSKErrorResponse responseWithServerError:WSKServerErrorStatusCodeForError(error) underlyingError:error message:@"Failed preserving DAV properties for \"%@\"", relativePath];
+                }
 
                 if (!commitFailure && ![self _replaceItemAtPath:absolutePath withStagedItemAtPath:stagingPath expecting:(existing ? &vetted : NULL)error:&error]) {
                     commitFailure = [WSKErrorResponse responseWithServerError:WSKServerErrorStatusCodeForError(error) underlyingError:error message:@"Failed moving uploaded file to \"%@\"", relativePath];
@@ -1986,8 +2028,20 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
     // client back to retry a request that was never the problem.
     NSString *refusalStatus = @"HTTP/1.1 403 Forbidden";
 
-    // Read, merge and write as one step; see _deadPropertyLock.
-    @synchronized(_deadPropertyLock) {
+    // Serialize with PUT's property snapshot and replacement, as well as other patches.
+    @synchronized(_resourceMutationLock) {
+        if (![[NSFileManager defaultManager] fileExistsAtPath:absolutePath]) {
+            xmlFreeDoc(document);
+            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
+        }
+
+        WSKResponse *const finalPreconditionFailure = [self _preconditionFailureForRequest:request atPath:absolutePath];
+
+        if (finalPreconditionFailure) {
+            xmlFreeDoc(document);
+            return finalPreconditionFailure;
+        }
+
         NSMutableDictionary<NSString *, NSString *> *const properties = [_DeadPropertiesAtPath(absolutePath) mutableCopy];
         BOOL changed = NO;
 

@@ -161,7 +161,8 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   single-port server — that fuses two independently-hardened security surfaces for no user-visible
   gain.
 - A symlinked share is supported for live updates; the one-stream-per-browser SSE relay needs
-  Web Locks + BroadcastChannel (falls back to per-tab streams without them).
+  Web Locks + BroadcastChannel. Without them (ordinary HTTP LAN origins), visible tabs poll
+  every five seconds instead of holding per-tab streams.
 
 ## Core invariants
 
@@ -357,7 +358,8 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   admitted all eight competing `If-Match` writers AND all eight `If-None-Match: *` creators in
   the regression tests. Unconditional PUTs must share the lock; staging and authorization hooks
   must stay outside it so other transfers can proceed. Final refusals remove their staging files.
-  This coordinates PUTs on one server only; other DAV verbs and external writers are not locked.
+  This coordinates PUT and PROPPATCH on one server; other DAV verbs and external writers are
+  not locked.
 - All three RFC 9110 date spellings parse (calendar year anchored — ICU once read `…94` as
   year 0094 and made `If-Unmodified-Since` a permanent 412); only IMF-fixdate is formatted;
   a 64-char length precheck rejects non-dates in constant time (parsed per-request on the
@@ -686,6 +688,19 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
 - PROPPATCH: dead properties live in ONE xattr plist keyed by Clark notation
   (`{ns}localname`), atomic per §9.2 (424 retryable); live properties 403; a no-xattr
   filesystem becomes a per-property 403, not fake storage.
+- PUT preserves that DAV xattr (including stored `displayname`) byte-for-byte on its staged
+  replacement. Its final precondition check, bounded property copy and rename share one
+  per-server lock with PROPPATCH's final precondition check and read/merge/write. Receiving,
+  body staging and upload authorization stay outside the lock. Missing/unsupported attributes
+  need no copy; other read/write errors refuse before replacement, and a store over 64 KB
+  refuses with 507. Never use the lenient PROPFIND reader for this copy: it converts errors
+  and malformed blobs into an empty dictionary, silently discarding metadata.
+  Verified 2026-09-16: six focused tests pass (five fail on the old source; the sixth is the
+  create/bare-file/conditional-refusal control). Splitting the lock while retaining the copy
+  makes both queued-PROPPATCH tests fail on lost properties or stale conditional acceptance.
+  macOS `mount_webdav` preserved the exact 145-byte property store and displayname through a
+  1 MiB overwrite; four concurrent native writes round-tripped with matching SHA-256 hashes
+  and no hidden staging residue.
 - The LOCK stub is deliberately a stub: Finder-only class-2 façade (`_IsMacFinder`; everyone
   else gets `DAV: 1` and 405), requires `Depth: 0` exactly, returns the `Lock-Token` header,
   stores nothing; `lockdiscovery` is always empty (the honest answer). Not made real:
@@ -712,8 +727,21 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   registration race) or a retain cycle strands the connection forever. The channel dies with
   its connection.
 - One stream per BROWSER via Web Locks + BroadcastChannel; `kMaxSSEChannels` (16) bounds
-  browsers, not tabs (six per-tab EventSources once deadlocked the whole UI). Closing on
-  `visibilitychange` was MEASURED worse — do not swap it in.
+  browsers, not tabs (six per-tab EventSources once deadlocked the whole UI). HTTP LAN origins
+  lack Web Locks because they are not secure contexts; missing or rejected sharing APIs use
+  five-second visible-tab polling with zero EventSources. Polls skip busy reloads/editors,
+  target `_requestedPath`, and do not overwrite an editor/navigation begun while in flight.
+  Background requests time out after ten seconds and fail silently; their timer stops on
+  pagehide and resumes on a persisted pageshow. Closing SSE on `visibilitychange` was
+  MEASURED worse — do not swap it in.
+  Reproduced 2026-09-16 in Chromium 153.0.8010.48 at an actual HTTP LAN address: six old tabs
+  held six streams, blocked a download and prevented a seventh tab from loading. Fixed: seven
+  tabs hold zero streams, four uploads run alongside a download, and all 8 MiB uploaded match.
+  Deep links, edits opened before/during a poll, pending navigation, hidden tabs, timeout/failure
+  recovery and actual BFCache restoration pass. Five missing/denied API controls enter polling;
+  seven secure-origin tabs still share one stream and relay changes.
+  The combined polling/property-preservation change passes `Run-Tests.sh`: 254 ASan tests,
+  all eight recorded trace suites, Mac/iOS/tvOS Release builds and both Swift consumer builds.
 - `/events` defence: the Origin check PLUS `Sec-Fetch-Mode`/`Sec-Fetch-Site` PLUS
   `Accept: text/event-stream` (Sec-Fetch alone fails open on older browsers).
 - Event paths resolve symlinks with `realpath(3)` on BOTH sides — the `/var` vs

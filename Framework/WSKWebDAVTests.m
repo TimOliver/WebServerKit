@@ -21,6 +21,67 @@
 
 @end
 
+// Test-only declarations of the commit seams. Nothing is added to the public DAV API.
+@interface WSKWebDAVServer (PUTMetadataTesting)
+- (BOOL)_copyDeadPropertiesAtPath:(NSString *)path toPath:(NSString *)stagingPath error:(NSError **)error;
+- (WSKResponse *)_preconditionFailureForRequest:(WSKRequest *)request atPath:(NSString *)path;
+@end
+
+@interface WSKGatedMetadataDAVServer : WSKGatedUploadDAVServer
+@property (nonatomic, copy) dispatch_block_t afterPropertyCopy;
+@property (nonatomic, copy) dispatch_block_t propertyPreconditionChecked;
+@property (nonatomic) NSError *propertyCopyError;
+@end
+
+@implementation WSKGatedMetadataDAVServer
+- (BOOL)_copyDeadPropertiesAtPath:(NSString *)path toPath:(NSString *)stagingPath error:(NSError **)error {
+    if (self.propertyCopyError) {
+        if (error) {
+            *error = self.propertyCopyError;
+        }
+        return NO;
+    }
+    BOOL const copied = [super _copyDeadPropertiesAtPath:path toPath:stagingPath error:error];
+    if (copied && self.afterPropertyCopy) {
+        self.afterPropertyCopy();
+    }
+    return copied;
+}
+
+- (WSKResponse *)_preconditionFailureForRequest:(WSKRequest *)request atPath:(NSString *)path {
+    WSKResponse *const response = [super _preconditionFailureForRequest:request atPath:path];
+    if ([request.method isEqualToString:@"PROPPATCH"] && self.propertyPreconditionChecked) {
+        self.propertyPreconditionChecked();
+    }
+    return response;
+}
+@end
+
+static NSData *DAVDeadPropertyBytes(NSString *path) {
+    const char *const attribute = "com.webserverkit.dav.deadproperties";
+    ssize_t const length = getxattr(path.fileSystemRepresentation, attribute, NULL, 0, 0, 0);
+    if (length < 0) {
+        return nil;
+    }
+    NSMutableData *const data = [NSMutableData dataWithLength:(NSUInteger)length];
+    return getxattr(path.fileSystemRepresentation, attribute, data.mutableBytes, data.length, 0, 0) == length ? data : nil;
+}
+
+static NSString *DAVMetadataPatch(NSUInteger port, NSString *instructions, NSString *condition) {
+    NSString *const body = [NSString stringWithFormat:@"<D:propertyupdate xmlns:D=\"DAV:\" xmlns:X=\"urn:put-metadata\">%@</D:propertyupdate>", instructions];
+    NSString *const request = [NSString stringWithFormat:@"PROPPATCH /f.txt HTTP/1.1\r\nHost: localhost\r\n%@Content-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@", condition, (unsigned long)UTF8Data(body).length, body];
+    return SendRawRequest(port, request);
+}
+
+static NSString *DAVMetadataPut(NSUInteger port, NSString *path, NSString *body, NSString *condition) {
+    NSString *const request = [NSString stringWithFormat:@"PUT %@ HTTP/1.1\r\nHost: localhost\r\n%@Content-Length: %lu\r\n\r\n%@", path, condition, (unsigned long)UTF8Data(body).length, body];
+    return SendRawRequest(port, request);
+}
+
+static NSString *DAVMetadataFind(NSUInteger port) {
+    return SendRawRequest(port, @"PROPFIND /f.txt HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n");
+}
+
 static NSString *DAVReplyETag(NSString *reply) {
     for (NSString *line in [reply componentsSeparatedByString:@"\r\n"]) {
         if ([line rangeOfString:@"Etag: " options:(NSCaseInsensitiveSearch | NSAnchoredSearch)].location != NSNotFound) {
@@ -1837,6 +1898,241 @@ static NSString *DAVReplyETag(NSString *reply) {
 
     [server stop];
     [fm removeItemAtPath:dir error:NULL];
+}
+
+// PUT replaces an inode, but the DAV resource at this URI keeps its dead properties. Compare
+// both the on-disk attribute and the real PROPFIND surface, including the settable displayname.
+- (void)testDAVPutReplacementPreservesDeadPropertiesAndDisplayName {
+    NSFileManager *const fm = [NSFileManager defaultManager];
+    NSString *const dir = MakeTempDirectory();
+    NSString *const path = [dir stringByAppendingPathComponent:@"f.txt"];
+    XCTAssertTrue([UTF8Data(@"ORIGINAL") writeToFile:path atomically:YES]);
+    WSKWebDAVServer *const server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    NSString *const patched = DAVMetadataPatch(server.port, @"<D:set><D:prop><X:colour>blue &amp; silver</X:colour><D:displayname>Office &amp; Travel</D:displayname></D:prop></D:set>", @"");
+    XCTAssertTrue(ReplyHasStatus(patched, 207), @"%@", patched);
+    XCTAssertTrue([patched containsString:@"HTTP/1.1 200 OK"], @"the fixture properties must be stored: %@", patched);
+    NSData *const originalProperties = DAVDeadPropertyBytes(path);
+    XCTAssertNotNil(originalProperties);
+    NSString *const originalTag = DAVReplyETag(SendRawRequest(server.port, @"HEAD /f.txt HTTP/1.1\r\nHost: localhost\r\n\r\n"));
+
+    NSString *const put = DAVMetadataPut(server.port, @"/f.txt", @"REPLACEMENT-CONTENT", @"");
+    XCTAssertTrue(ReplyHasStatus(put, 204), @"%@", put);
+    XCTAssertEqualObjects([NSData dataWithContentsOfFile:path], UTF8Data(@"REPLACEMENT-CONTENT"));
+    XCTAssertEqualObjects(DAVDeadPropertyBytes(path), originalProperties, @"replacing a resource body must preserve its stored DAV metadata byte-for-byte");
+    NSString *const listing = DAVMetadataFind(server.port);
+    XCTAssertTrue(ReplyHasStatus(listing, 207), @"%@", listing);
+    XCTAssertTrue([listing containsString:@"blue &amp; silver"], @"the dead property disappeared after PUT: %@", listing);
+    XCTAssertTrue([listing containsString:@"<D:displayname>Office &amp; Travel</D:displayname>"], @"the stored displayname disappeared after PUT: %@", listing);
+    NSString *const newTag = DAVReplyETag(SendRawRequest(server.port, @"HEAD /f.txt HTTP/1.1\r\nHost: localhost\r\n\r\n"));
+    XCTAssertNotEqualObjects(newTag, originalTag, @"preserving dead properties must not preserve the old content validator");
+    // Older versions or external tools can leave an empty or non-plist attribute. PUT must
+    // carry the raw blob, not decode it as an empty dictionary and silently erase it.
+    NSArray<NSData *> *const rawAttributes = @[[NSData data], UTF8Data(@"legacy-non-plist-metadata")];
+    for (NSData *raw in rawAttributes) {
+        XCTAssertEqual(setxattr(path.fileSystemRepresentation, "com.webserverkit.dav.deadproperties", raw.bytes, raw.length, 0, 0), 0);
+        XCTAssertEqualObjects(DAVDeadPropertyBytes(path), raw, @"the raw metadata fixture must exist");
+        NSString *const rawPut = DAVMetadataPut(server.port, @"/f.txt", @"RAW-BLOB-REPLACEMENT", @"");
+        XCTAssertTrue(ReplyHasStatus(rawPut, 204), @"raw metadata within the cap must not prevent replacement: %@", rawPut);
+        XCTAssertEqualObjects(DAVDeadPropertyBytes(path), raw, @"PUT must preserve an existing empty or malformed blob exactly");
+        XCTAssertEqualObjects([NSData dataWithContentsOfFile:path], UTF8Data(@"RAW-BLOB-REPLACEMENT"));
+    }
+    XCTAssertEqualObjects([fm contentsOfDirectoryAtPath:dir error:NULL], @[@"f.txt"]);
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// Creating a resource and replacing one without properties remain ordinary PUTs. A refused
+// conditional replacement must leave both the original payload and the existing metadata intact.
+- (void)testDAVPutMetadataPreservationLeavesCreationAndRefusalsUnchanged {
+    NSFileManager *const fm = [NSFileManager defaultManager];
+    NSString *const dir = MakeTempDirectory();
+    NSString *const path = [dir stringByAppendingPathComponent:@"f.txt"];
+    WSKWebDAVServer *const server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    NSString *const created = DAVMetadataPut(server.port, @"/f.txt", @"CREATED", @"");
+    XCTAssertTrue(ReplyHasStatus(created, 201), @"%@", created);
+    XCTAssertNil(DAVDeadPropertyBytes(path), @"a newly created resource has no inherited DAV metadata");
+    NSString *const replaced = DAVMetadataPut(server.port, @"/f.txt", @"BARE-REPLACEMENT", @"");
+    XCTAssertTrue(ReplyHasStatus(replaced, 204), @"a filesystem resource without an xattr must still be replaceable: %@", replaced);
+    XCTAssertNil(DAVDeadPropertyBytes(path));
+    NSString *const patched = DAVMetadataPatch(server.port, @"<D:set><D:prop><X:colour>unchanged-blue</X:colour><D:displayname>Unchanged name</D:displayname></D:prop></D:set>", @"");
+    XCTAssertTrue(ReplyHasStatus(patched, 207), @"%@", patched);
+    NSData *const properties = DAVDeadPropertyBytes(path);
+    XCTAssertNotNil(properties);
+    NSString *const refused = DAVMetadataPut(server.port, @"/f.txt", @"MUST-NOT-LAND", @"If-Match: \"not-the-current-etag\"\r\n");
+    XCTAssertTrue(ReplyHasStatus(refused, 412), @"%@", refused);
+    XCTAssertEqualObjects([NSData dataWithContentsOfFile:path], UTF8Data(@"BARE-REPLACEMENT"));
+    XCTAssertEqualObjects(DAVDeadPropertyBytes(path), properties);
+    XCTAssertEqualObjects([fm contentsOfDirectoryAtPath:dir error:NULL], @[@"f.txt"], @"a refused upload must not leave a staging sibling");
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// Property changes completed while an upload waits for host authorization belong to the URI
+// being replaced. Copying a snapshot before authorization would lose updates or resurrect removals.
+- (void)testDAVPutUsesPropertiesUpdatedOrRemovedDuringAuthorization {
+    for (NSNumber *removeAll in @[@NO, @YES]) {
+        NSFileManager *const fm = [NSFileManager defaultManager];
+        NSString *const dir = MakeTempDirectory();
+        NSString *const path = [dir stringByAppendingPathComponent:@"f.txt"];
+        XCTAssertTrue([UTF8Data(@"ORIGINAL") writeToFile:path atomically:YES]);
+        WSKGatedUploadDAVServer *const server = [[WSKGatedUploadDAVServer alloc] initWithUploadDirectory:dir];
+        NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+        XCTAssertTrue([server startWithOptions:options error:NULL]);
+        NSUInteger const port = server.port;
+        NSString *const initial = DAVMetadataPatch(port, @"<D:set><D:prop><X:colour>old-blue</X:colour><X:obsolete>remove-me</X:obsolete><D:displayname>Old name</D:displayname></D:prop></D:set>", @"");
+        XCTAssertTrue(ReplyHasStatus(initial, 207), @"%@", initial);
+        XCTAssertNotNil(DAVDeadPropertyBytes(path));
+        dispatch_semaphore_t const arrived = dispatch_semaphore_create(0);
+        dispatch_group_t const release = dispatch_group_create();
+        dispatch_group_enter(release);
+        server.uploadAuthorization = ^BOOL(NSString *uploadPath, NSString *temporaryPath) {
+            dispatch_semaphore_signal(arrived);
+            return dispatch_group_wait(release, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC))) == 0;
+        };
+        __block NSString *putReply = nil;
+        dispatch_group_t const putClient = dispatch_group_create();
+        dispatch_group_async(putClient, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            putReply = DAVMetadataPut(port, @"/f.txt", @"LATEST-BODY", @"");
+        });
+        long const parked = dispatch_semaphore_wait(arrived, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)));
+        NSString *const instructions = removeAll.boolValue ? @"<D:remove><D:prop><X:colour/><X:obsolete/><D:displayname/></D:prop></D:remove>" : @"<D:set><D:prop><X:colour>latest-green</X:colour><D:displayname>Latest name</D:displayname></D:prop></D:set><D:remove><D:prop><X:obsolete/></D:prop></D:remove>";
+        __block NSString *patchReply = nil;
+        dispatch_group_t const patchClient = dispatch_group_create();
+        dispatch_group_async(patchClient, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            patchReply = DAVMetadataPatch(port, instructions, @"");
+        });
+        long const patchedWhileParked = dispatch_group_wait(patchClient, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)));
+        NSData *const latestProperties = DAVDeadPropertyBytes(path);
+        dispatch_group_leave(release);  // Always release the worker, including on a failing oracle.
+        XCTAssertEqual(parked, 0L, @"the upload must be awaiting authorization");
+        XCTAssertEqual(patchedWhileParked, 0L, @"host authorization must not hold the property-commit lock");
+        XCTAssertEqual(dispatch_group_wait(patchClient, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC))), 0L);
+        XCTAssertEqual(dispatch_group_wait(putClient, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC))), 0L);
+        XCTAssertTrue(ReplyHasStatus(patchReply, 207), @"%@", patchReply);
+        XCTAssertTrue(ReplyHasStatus(putReply, 204), @"%@", putReply);
+        XCTAssertEqualObjects(DAVDeadPropertyBytes(path), latestProperties, @"PUT must preserve the metadata present at commit, including complete removal");
+        NSString *const listing = DAVMetadataFind(port);
+        XCTAssertFalse([listing containsString:@"old-blue"], @"%@", listing);
+        XCTAssertFalse([listing containsString:@"remove-me"], @"%@", listing);
+        if (removeAll.boolValue) {
+            XCTAssertNil(DAVDeadPropertyBytes(path));
+            XCTAssertTrue([listing containsString:@"<D:displayname>f.txt</D:displayname>"], @"removing displayname must restore the derived name: %@", listing);
+        } else {
+            XCTAssertNotNil(latestProperties);
+            XCTAssertTrue([listing containsString:@"latest-green"], @"%@", listing);
+            XCTAssertTrue([listing containsString:@"<D:displayname>Latest name</D:displayname>"], @"%@", listing);
+        }
+        XCTAssertEqualObjects([NSData dataWithContentsOfFile:path], UTF8Data(@"LATEST-BODY"));
+        XCTAssertEqualObjects([fm contentsOfDirectoryAtPath:dir error:NULL], @[@"f.txt"]);
+        [server stop];
+        [fm removeItemAtPath:dir error:NULL];
+    }
+}
+
+- (void)testDAVProppatchCannotBeLostBetweenPutMetadataCopyAndRename {
+    [self _assertPropertyPatchQueuedBehindPutIsConditional:NO];
+}
+
+- (void)testDAVConditionalProppatchRechecksAfterAQueuedPutReplacement {
+    [self _assertPropertyPatchQueuedBehindPutIsConditional:YES];
+}
+
+// Pause immediately after the property snapshot reaches the staged inode. A separate PROPPATCH
+// must either run wholly after the rename or be refused there if its old If-Match is now stale.
+- (void)_assertPropertyPatchQueuedBehindPutIsConditional:(BOOL)conditional {
+    NSFileManager *const fm = [NSFileManager defaultManager];
+    NSString *const dir = MakeTempDirectory();
+    NSString *const path = [dir stringByAppendingPathComponent:@"f.txt"];
+    XCTAssertTrue([UTF8Data(@"ORIGINAL") writeToFile:path atomically:YES]);
+    WSKGatedMetadataDAVServer *const server = [[WSKGatedMetadataDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    NSUInteger const port = server.port;
+    NSString *const initial = DAVMetadataPatch(port, @"<D:set><D:prop><X:colour>snapshot-blue</X:colour></D:prop></D:set>", @"");
+    XCTAssertTrue(ReplyHasStatus(initial, 207), @"%@", initial);
+    NSData *const originalProperties = DAVDeadPropertyBytes(path);
+    XCTAssertNotNil(originalProperties);
+    NSString *const etag = DAVReplyETag(SendRawRequest(port, @"HEAD /f.txt HTTP/1.1\r\nHost: localhost\r\n\r\n"));
+    XCTAssertNotNil(etag);
+    NSString *const condition = conditional ? [NSString stringWithFormat:@"If-Match: %@\r\n", etag] : @"";
+    dispatch_semaphore_t const copied = dispatch_semaphore_create(0);
+    dispatch_semaphore_t const patchChecked = dispatch_semaphore_create(0);
+    dispatch_group_t const release = dispatch_group_create();
+    dispatch_group_enter(release);
+    server.afterPropertyCopy = ^{
+        dispatch_semaphore_signal(copied);
+        dispatch_group_wait(release, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)));
+    };
+    server.propertyPreconditionChecked = ^{ dispatch_semaphore_signal(patchChecked); };
+    __block NSString *putReply = nil;
+    dispatch_group_t const putClient = dispatch_group_create();
+    dispatch_group_async(putClient, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        putReply = DAVMetadataPut(port, @"/f.txt", @"REPLACEMENT", @"");
+    });
+    long const parked = dispatch_semaphore_wait(copied, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)));
+    __block NSString *patchReply = nil;
+    dispatch_group_t const patchClient = dispatch_group_create();
+    dispatch_group_async(patchClient, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        patchReply = DAVMetadataPatch(port, @"<D:set><D:prop><X:colour>concurrent-green</X:colour></D:prop></D:set>", condition);
+    });
+    long const checked = dispatch_semaphore_wait(patchChecked, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)));
+    // With separate locks this finishes now and is then erased by the staged snapshot. With
+    // the shared lock it waits; the final body/property pair below is the correctness oracle.
+    dispatch_group_wait(patchClient, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)));
+    dispatch_group_leave(release);
+    XCTAssertEqual(parked, 0L, @"the PUT must copy metadata before its final rename");
+    XCTAssertEqual(checked, 0L, @"the PROPPATCH must reach its initial precondition check while the original inode exists");
+    XCTAssertEqual(dispatch_group_wait(putClient, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC))), 0L);
+    XCTAssertEqual(dispatch_group_wait(patchClient, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC))), 0L);
+    XCTAssertTrue(ReplyHasStatus(putReply, 204), @"%@", putReply);
+    XCTAssertTrue(ReplyHasStatus(patchReply, conditional ? 412 : 207), @"the queued property request must be judged against the committed file: %@", patchReply);
+    NSString *const listing = DAVMetadataFind(port);
+    if (conditional) {
+        XCTAssertEqualObjects(DAVDeadPropertyBytes(path), originalProperties, @"a stale conditional PROPPATCH must leave the copied metadata intact");
+        XCTAssertFalse([listing containsString:@"concurrent-green"], @"%@", listing);
+    } else {
+        XCTAssertTrue([listing containsString:@"concurrent-green"], @"an acknowledged PROPPATCH was lost during replacement: %@", listing);
+        XCTAssertFalse([listing containsString:@"snapshot-blue"], @"the staged snapshot overwrote a completed PROPPATCH: %@", listing);
+    }
+    XCTAssertEqualObjects([NSData dataWithContentsOfFile:path], UTF8Data(@"REPLACEMENT"));
+    XCTAssertEqualObjects([fm contentsOfDirectoryAtPath:dir error:NULL], @[@"f.txt"]);
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// Failure to carry the metadata is failure of the whole replacement. The original body and
+// exact attribute must survive, and the staged upload must be removed even for a storage error.
+- (void)testDAVPutMetadataCopyFailurePreservesTheOriginalAndCleansStaging {
+    for (NSNumber *oversized in @[@NO, @YES]) {
+        NSFileManager *const fm = [NSFileManager defaultManager];
+        NSString *const dir = MakeTempDirectory();
+        NSString *const path = [dir stringByAppendingPathComponent:@"f.txt"];
+        XCTAssertTrue([UTF8Data(@"ORIGINAL") writeToFile:path atomically:YES]);
+        WSKGatedMetadataDAVServer *const server = [[WSKGatedMetadataDAVServer alloc] initWithUploadDirectory:dir];
+        NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+        XCTAssertTrue([server startWithOptions:options error:NULL]);
+        NSString *const initial = DAVMetadataPatch(server.port, @"<D:set><D:prop><X:colour>protected-blue</X:colour><D:displayname>Protected name</D:displayname></D:prop></D:set>", @"");
+        XCTAssertTrue(ReplyHasStatus(initial, 207), @"%@", initial);
+        if (oversized.boolValue) {
+            NSData *const legacy = [NSMutableData dataWithLength:(64 * 1024 + 1)];
+            XCTAssertEqual(setxattr(path.fileSystemRepresentation, "com.webserverkit.dav.deadproperties", legacy.bytes, legacy.length, 0, 0), 0, @"the oversized legacy attribute is the failure fixture");
+        } else {
+            server.propertyCopyError = [NSError errorWithDomain:NSPOSIXErrorDomain code:ENOSPC userInfo:nil];
+        }
+        NSData *const originalProperties = DAVDeadPropertyBytes(path);
+        XCTAssertNotNil(originalProperties);
+        NSString *const put = DAVMetadataPut(server.port, @"/f.txt", @"MUST-NOT-LAND", @"");
+        XCTAssertTrue(ReplyHasStatus(put, 507), @"a metadata storage failure must refuse the whole replacement: %@", put);
+        XCTAssertEqualObjects([NSData dataWithContentsOfFile:path], UTF8Data(@"ORIGINAL"), @"metadata failure must preserve the old body");
+        XCTAssertTrue([DAVDeadPropertyBytes(path) isEqualToData:originalProperties], @"metadata failure must preserve the old property blob");
+        XCTAssertEqualObjects([fm contentsOfDirectoryAtPath:dir error:NULL], @[@"f.txt"], @"failed metadata copying must clean up the staged replacement");
+        [server stop];
+        [fm removeItemAtPath:dir error:NULL];
+    }
 }
 
 // Every writer observes the same initial state and reaches authorization before any commit can
