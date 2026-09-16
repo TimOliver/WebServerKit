@@ -82,6 +82,21 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   no `Host` header at all is allowed.
 - `WSKOption_ConnectionIdleTimeout` default 30 s; 0 disables — without it, 128 idle sockets
   is a permanent denial of service.
+- Both connection timeout options must be finite and in 0...2147483647 seconds; a positive
+  idle timeout must also represent at least one nanosecond. Invalid settings fail through
+  `startWithOptions:error:` before listeners or saved configuration are created. Explicit zero
+  stays supported, including idle zero with keep-alive enabled. The common upper bound leaves
+  headroom when dispatch adds uptime and fits the Keep-Alive header's integer seconds.
+  Verified 2026-09-16: three focused tests cover rejection before socket creation, configuration
+  changes or start callbacks; the same instance can then start and serve with valid options.
+  Both invalid-option tests fail on the previous source, while the zero/fraction/boundary control
+  passes on both. Exact adjacent floating-point values pin the 1 ns floor and upper limit.
+  `Run-Tests.sh` passes: 257 ASan tests, eight trace suites, Mac/iOS/tvOS Release builds and both
+  Swift consumers. A separate live startup probe accepts all 11 invalid configurations before
+  the fix and rejects all 11 afterwards. Fractional timeouts reclaim silent and kept-alive
+  sockets, explicit idle zero leaves them open until the client closes, and the maximum
+  keep-alive value is advertised correctly. Across those three controls, four concurrent workers
+  complete 96 requests with the expected body; connections and reserved bytes return to zero at rest.
 - `-preflightRequest:` overrides must decide on headers alone (the body doesn't exist yet).
 - Handlers whose response IS a long-lived resource must check `-[WSKRequest isVirtualHEAD]`
   (a mapped HEAD's body is discarded unsent).
@@ -1192,10 +1207,10 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
     exists to carry the same outcome. "Handler time never counts" stays right for the idle timer. (P2)
     Three lifecycle edges: `[::]:port` held elsewhere while `0.0.0.0:port` is free aborts the
     whole start with EADDRINUSE and closes the good v4 listener, never naming the family
-    (`WSKWebServer.m:829-840`; fix: v4-only with a warning, or name the family); a NEGATIVE
-    `ConnectionIdleTimeout`/`ConnectionKeepAliveTimeout` passes `_ValidateOptions` (class check
-    only) and `idleTimeout > 0.0` then creates NO idle timer — five idle sockets still open at
-    70 s (`:882-883`, `WSKConnection.m:1448`; fix: reject or clamp); `addHandler…`/
+    (`WSKWebServer.m:829-840`; fix: v4-only with a warning, or name the family);
+    ~~a NEGATIVE `ConnectionIdleTimeout`/`ConnectionKeepAliveTimeout` passes `_ValidateOptions`
+    and can disable idle reclamation~~ — **fixed 2026-09-16**, together with nonfinite and
+    out-of-range values; supported bounds are under Deployment requirements. `addHandler…`/
     `removeAllHandlers` while running SIGSEGVs in Release (3/3) because the unlocked
     `_handlers` mutation (`:448-457`) races the accept-time copy (`WSKConnection.m:1435`) —
     Debug aborts by design; fix: guard both under `_syncQueue` so misuse is a benign no-op.
@@ -1253,10 +1268,10 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
     `responseText`), and uploads are one un-chunked, un-resumable POST per file, strictly
     sequential, with no retry. (P3) `-[WSKDataResponse initWithHTMLTemplate:variables:]`
     substitutes verbatim with no HTML escaping and the header does not say so
-    (`WSKDataResponse.m:137`; the uploader defends by hand). (P3) A huge
-    `ConnectionIdleTimeout` (≳1.8e10 s) saturates the nanosecond conversion
-    (`WSKConnection.m:1450`) and disables the reaper; `timeout=%i` clamps for keep-alive ≥ 2^31
-    (`:959`); `_ScanHexNumber`'s "cannot overflow" holds only on LP64. (P3) `Examples/tvOS/
+    (`WSKDataResponse.m:137`; the uploader defends by hand). ~~(P3) A huge idle timeout
+    saturates the nanosecond conversion and keep-alive ≥ 2^31 overflows its integer header~~ —
+    **fixed 2026-09-16** by validating the timeout range before startup.
+    `_ScanHexNumber`'s "cannot overflow" holds only on LP64. (P3) `Examples/tvOS/
     Info.plist` lacks `NSBonjourServices`/`NSLocalNetworkUsageDescription` although the example
     advertises Bonjour; `Examples/iOS/Info.plist` declares `UIRequiredDeviceCapabilities =
     armv7` on an arm64-only app; the Mac example hard-codes port 8080, and its Debug `Delete

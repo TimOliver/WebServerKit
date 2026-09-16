@@ -194,6 +194,10 @@ extern NSString *const WSKOption_DispatchQueuePriority;
  *
  *  Set to 0.0 to disable idle timeouts entirely.
  *
+ *  Values must be finite and in the range 0...2147483647 seconds. Positive
+ *  values must be at least one nanosecond. Invalid values are rejected by
+ *  -startWithOptions:error: before the server starts listening.
+ *
  *  The default value is 30.0 seconds.
  */
 extern NSString *const WSKOption_ConnectionIdleTimeout;
@@ -216,6 +220,9 @@ extern NSString *const WSKOption_ConnectionIdleTimeout;
  *  thumbnails, stylesheets — where the handshake dominates the transfer.
  *
  *  Set to 0.0 to serve exactly one request per connection.
+ *
+ *  Values must be finite and in the range 0...2147483647 seconds. Invalid values
+ *  are rejected by -startWithOptions:error: before the server starts listening.
  *
  *  The default value is 0.0.
  */

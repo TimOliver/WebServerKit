@@ -38,6 +38,8 @@
 #endif
 #endif
 #import <dns_sd.h>
+#import <limits.h>
+#import <math.h>
 #import <netinet/in.h>
 #import <objc/runtime.h>
 #import <signal.h>
@@ -613,6 +615,28 @@ static NSString *_ValidateOptions(NSDictionary<NSString *, id> *options) {
 
     if (port && (port.unsignedIntegerValue > 65535)) {  // Also catches negatives, which wrap to a huge value.
         return [NSString stringWithFormat:@"Option \"%@\" must be in the range 0...65535", WSKOption_Port];
+    }
+
+    // Negative and NaN idle intervals bypass the reaper's > 0 check. Huge values can
+    // overflow its signed nanosecond deadline or the Keep-Alive header's int conversion.
+    // One generous seconds limit keeps both representable, with headroom for the uptime
+    // added by dispatch_time(). Zero remains the caller's explicit opt-out.
+    for (NSString *key in @[WSKOption_ConnectionIdleTimeout, WSKOption_ConnectionKeepAliveTimeout]) {
+        NSNumber *const value = options[key];
+
+        if (value) {
+            NSTimeInterval const timeout = value.doubleValue;
+
+            if (!isfinite(timeout) || (timeout < 0.0) || (timeout > (NSTimeInterval)INT_MAX)) {
+                return [NSString stringWithFormat:@"Option \"%@\" must be finite and in the range 0...%d seconds", key, INT_MAX];
+            }
+
+            // A positive fraction below one nanosecond would truncate to a zero timer
+            // interval. Keep-alive uses a seconds comparison, so it needs no such floor.
+            if ([key isEqualToString:WSKOption_ConnectionIdleTimeout] && (timeout > 0.0) && (timeout * (NSTimeInterval)NSEC_PER_SEC < 1.0)) {
+                return [NSString stringWithFormat:@"Option \"%@\" must be zero or at least one nanosecond", key];
+            }
+        }
     }
 
     id const connectionClass = options[WSKOption_ConnectionClass];

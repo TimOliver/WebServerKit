@@ -3,9 +3,37 @@
 // Split out of the single Tests.m that held all 159 tests; the grouping is by subject, not by
 // the pass that added each test.
 
+#import <float.h>
+#import <limits.h>
+#import <math.h>
 #import <stdatomic.h>
 
 #import "TestsSupport.h"
+
+@interface WSKWebServer (WSKTimeoutOptionProbe)
+- (int)_createListeningSocket:(BOOL)useIPv6
+                 localAddress:(const void *)address
+                       length:(socklen_t)length
+        maxPendingConnections:(NSUInteger)maxPendingConnections
+                        error:(NSError **)error;
+@end
+
+// Count the listener entry point instead of connecting to an invalid configuration: accepting
+// a client would exercise the very floating-point-to-integer conversions these tests guard.
+@interface WSKTimeoutOptionProbeServer : WSKWebServer
+@property (nonatomic) NSUInteger listeningSocketAttempts;
+@end
+
+@implementation WSKTimeoutOptionProbeServer
+- (int)_createListeningSocket:(BOOL)useIPv6
+                 localAddress:(const void *)address
+                       length:(socklen_t)length
+        maxPendingConnections:(NSUInteger)maxPendingConnections
+                        error:(NSError **)error {
+    self.listeningSocketAttempts += 1;
+    return [super _createListeningSocket:useIPv6 localAddress:address length:length maxPendingConnections:maxPendingConnections error:error];
+}
+@end
 
 @interface WSKServerLifecycleTests : XCTestCase
 @end
@@ -16,6 +44,120 @@
     WSKWebServer *server = [[WSKWebServer alloc] init];
 
     XCTAssertNotNil(server);
+}
+
+- (void)_drainMainQueueForTimeoutOptionCallbacks {
+    XCTestExpectation *const drained = [self expectationWithDescription:@"queued startup callbacks have run"];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [drained fulfill];
+    });
+    [self waitForExpectations:@[drained] timeout:2.0];
+}
+
+- (void)_assertTimeoutOption:(NSString *)option rejectsValues:(NSArray<NSNumber *> *)values {
+    for (NSNumber *const value in values) {
+        @autoreleasepool {
+            WSKTimeoutOptionProbeServer *const server = [[WSKTimeoutOptionProbeServer alloc] init];
+            WSKFullDelegate *const delegate = [[WSKFullDelegate alloc] init];
+            server.delegate = delegate;
+            [server addDefaultHandlerForMethod:@"GET"
+                                  requestClass:[WSKRequest class]
+                                  processBlock:^WSKResponse *(WSKRequest *request) {
+                                      return [WSKDataResponse responseWithText:@"recovered"];
+                                  }];
+            NSTimeInterval const previousIdleTimeout = server.connectionIdleTimeout;
+            NSTimeInterval const previousKeepAliveTimeout = server.connectionKeepAliveTimeout;
+            NSDictionary *const invalidOptions = @{
+                WSKOption_Port: @0,
+                WSKOption_BindToLocalhost: @YES,
+                option: value
+            };
+            NSError *error = nil;
+            BOOL const started = [server startWithOptions:invalidOptions error:&error];
+            XCTAssertFalse(started, @"%@ must reject %@", option, value);
+            XCTAssertNotNil(error, @"%@ = %@ must explain the failed start", option, value);
+            XCTAssertTrue([error.localizedDescription containsString:option], @"%@", error);
+            XCTAssertFalse(server.isRunning, @"%@ = %@ must leave the server stopped", option, value);
+            XCTAssertEqual(server.port, (NSUInteger)0);
+            XCTAssertNil(server.serverURL);
+            XCTAssertEqual(server.listeningSocketAttempts, (NSUInteger)0, @"reject before opening either listener");
+            XCTAssertEqualWithAccuracy(server.connectionIdleTimeout, previousIdleTimeout, 0.0, @"rejection must not apply configuration");
+            XCTAssertEqualWithAccuracy(server.connectionKeepAliveTimeout, previousKeepAliveTimeout, 0.0, @"rejection must not apply configuration");
+            [self _drainMainQueueForTimeoutOptionCallbacks];
+            XCTAssertFalse(delegate.sawStart, @"%@ = %@ must not announce a start", option, value);
+
+            // Baseline accepts these values. Clean up that unexpected startup without ever
+            // opening a client; after a proper refusal, recovery needs no intervening stop.
+            if (started) {
+                [server stop];
+            }
+            delegate.sawStart = NO;
+            NSDictionary *const validOptions = @{
+                WSKOption_Port: @0,
+                WSKOption_BindToLocalhost: @YES,
+                WSKOption_ConnectionIdleTimeout: @2.5,
+                WSKOption_ConnectionKeepAliveTimeout: @0.0
+            };
+            error = nil;
+            XCTAssertTrue([server startWithOptions:validOptions error:&error], @"must recover after %@ = %@: %@", option, value, error);
+            XCTAssertNil(error);
+            XCTAssertTrue(server.isRunning);
+            XCTAssertGreaterThan(server.listeningSocketAttempts, (NSUInteger)0, @"the probe must also observe a real startup");
+            XCTAssertEqualWithAccuracy(server.connectionIdleTimeout, 2.5, 0.0);
+            XCTAssertEqualWithAccuracy(server.connectionKeepAliveTimeout, 0.0, 0.0);
+            [self _drainMainQueueForTimeoutOptionCallbacks];
+            XCTAssertTrue(delegate.sawStart, @"valid recovery must still announce its start");
+            NSString *const reply = SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+            XCTAssertTrue(ReplyHasStatus(reply, 200), @"%@", reply);
+            XCTAssertTrue([reply hasSuffix:@"recovered"], @"%@", reply);
+            [server stop];
+        }
+    }
+}
+
+- (void)testInvalidIdleTimeoutsFailBeforeListeningAndAllowRecovery {
+    NSArray<NSNumber *> *const values = @[@(-1.0), @(NAN), @(INFINITY), @(-INFINITY), @(DBL_MAX), @(nextafter((double)INT_MAX, HUGE_VAL)), @(nextafter(1e-9, 0.0))];
+    [self _assertTimeoutOption:WSKOption_ConnectionIdleTimeout rejectsValues:values];
+}
+
+- (void)testInvalidKeepAliveTimeoutsFailBeforeListeningAndAllowRecovery {
+    NSArray<NSNumber *> *const values = @[@(-1.0), @(NAN), @(INFINITY), @(-INFINITY), @(DBL_MAX), @(nextafter((double)INT_MAX, HUGE_VAL))];
+    [self _assertTimeoutOption:WSKOption_ConnectionKeepAliveTimeout rejectsValues:values];
+}
+
+- (void)testTimeoutOptionsAcceptZeroFractionsAndRepresentableBoundaries {
+    NSArray<NSArray<NSNumber *> *> *const values = @[
+        @[@0.0, @0.0],
+        @[@(-0.0), @(-0.0)],
+        @[@2.5, @1.25],
+        @[@1.25, @2.5],
+        @[@0.0, @2.5],
+        @[@1e-9, @0.0],
+        @[@2.5, @(nextafter(0.0, 1.0))],
+        @[@(INT_MAX), @(INT_MAX)]
+    ];
+    WSKTimeoutOptionProbeServer *const server = [[WSKTimeoutOptionProbeServer alloc] init];
+    for (NSArray<NSNumber *> *const pair in values) {
+        NSDictionary *const options = @{
+            WSKOption_Port: @0,
+            WSKOption_BindToLocalhost: @YES,
+            WSKOption_ConnectionIdleTimeout: pair[0],
+            WSKOption_ConnectionKeepAliveTimeout: pair[1]
+        };
+        NSUInteger const previousAttempts = server.listeningSocketAttempts;
+        NSError *error = nil;
+        XCTAssertTrue([server startWithOptions:options error:&error], @"idle %@, keep-alive %@: %@", pair[0], pair[1], error);
+        XCTAssertNil(error);
+        XCTAssertTrue(server.isRunning);
+        XCTAssertGreaterThan(server.port, (NSUInteger)0);
+        XCTAssertNotNil(server.serverURL);
+        XCTAssertGreaterThan(server.listeningSocketAttempts, previousAttempts);
+        XCTAssertEqualWithAccuracy(server.connectionIdleTimeout, pair[0].doubleValue, 0.0);
+        XCTAssertEqualWithAccuracy(server.connectionKeepAliveTimeout, pair[1].doubleValue, 0.0);
+        // Startup-only at the representable extremes: a 1ns idle timer on an accepted
+        // connection would spin, and these assertions concern admission of the option.
+        [server stop];
+    }
 }
 
 // Every delegate callback checks -respondsToSelector: and then hops to the main queue, where it
