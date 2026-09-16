@@ -426,12 +426,14 @@ typedef void (^WSKBuiltInLoggerBlock)(int level, NSString *_Nonnull message) NS_
  *  Returns the number of bytes currently reserved against the in-memory budget that every
  *  server in this process shares. Request bodies held in memory — form posts, multipart
  *  uploads, WebDAV property and lock bodies, chunked framing buffers and inflated gzip
- *  output — are charged here and released when the request that owns them is deallocated.
+ *  output — are charged here while their request, parser, or multipart argument owns them.
+ *  Retaining a request or multipart argument can keep its bytes charged after the connection
+ *  ends. This measures library reservations, not total process memory.
  *
- *  This exists to be watched by long-running hosts. When no request is in flight the value
- *  should be zero; a reading that stays high while the server is idle means a reservation
- *  has outlived its request, and since the budget is a hard ceiling, every in-memory
- *  endpoint will fail once enough of them accumulate.
+ *  This exists to be watched by long-running hosts. When no request is in flight and no
+ *  request or multipart argument is retained, the value should be zero. A reading that
+ *  stays high warrants checking for retained owners: the budget is a hard ceiling, so
+ *  in-memory endpoints will fail once enough reservations accumulate.
  *
  *  @warning There is deliberately no way to reset this. Reservations are released by their
  *  owners during deallocation, so zeroing the counter would make those later releases

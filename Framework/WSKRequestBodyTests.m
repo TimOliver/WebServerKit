@@ -5,6 +5,41 @@
 
 #import "TestsSupport.h"
 
+// Binary values make the accounting oracle the exact sum of retained payload lengths, without
+// a decoded NSString copy. Framing is deliberately separate: parser working bytes must go away
+// at close even when the completed fields remain alive.
+static NSData *MultipartArgumentPart(NSString *boundary, NSString *name, NSUInteger length) {
+    NSMutableData *const part = [NSMutableData data];
+    NSString *const headers = [NSString stringWithFormat:@"--%@\r\nContent-Disposition: form-data; name=\"%@\"\r\nContent-Type: application/octet-stream\r\n\r\n", boundary, name];
+    [part appendData:UTF8Data(headers)];
+    NSMutableData *const value = [NSMutableData dataWithLength:length];
+    memset(value.mutableBytes, 'v', value.length);
+    [part appendData:value];
+    [part appendData:UTF8Data(@"\r\n")];
+    return part;
+}
+
+static NSData *MultipartArgumentBody(NSString *boundary, NSArray<NSNumber *> *lengths) {
+    NSMutableData *const body = [NSMutableData data];
+    for (NSUInteger index = 0; index < lengths.count; index++) {
+        NSString *const name = [NSString stringWithFormat:@"a%lu", (unsigned long)index];
+        [body appendData:MultipartArgumentPart(boundary, name, lengths[index].unsignedIntegerValue)];
+    }
+    [body appendData:UTF8Data([NSString stringWithFormat:@"--%@--\r\n", boundary])];
+    return body;
+}
+
+static BOOL WriteMultipartInSlices(WSKMultiPartFormRequest *request, NSData *body, NSError **error) {
+    // A small write cannot hit the working-buffer cap before the argument-sum cap being tested.
+    for (NSUInteger offset = 0; offset < body.length; offset += 128) {
+        NSRange const range = NSMakeRange(offset, MIN((NSUInteger)128, body.length - offset));
+        if (![request performWriteData:[body subdataWithRange:range] error:error]) {
+            return NO;
+        }
+    }
+    return YES;
+}
+
 @interface WSKRequestBodyTests : XCTestCase
 @end
 
@@ -516,6 +551,184 @@
 
     // Every holder is gone, so every byte must have come back.
     XCTAssertEqual(WSKReservedMemoryLength(), (NSUInteger)0, @"reservations leaked after their holders were released");
+}
+
+// Closing the parser releases its temporary buffers, but a handler can retain the completed
+// request indefinitely. Its argument payloads must still occupy the process-wide budget.
+- (void)testMultiPartArgumentsRemainChargedAfterClose {
+    XCTAssertEqual(WSKReservedMemoryLength(), (NSUInteger)0);
+    @autoreleasepool {
+        WSKMultiPartFormRequest *const request = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
+        NSData *const body = MultipartArgumentBody(@"X", @[@257, @1024]);
+        NSError *error = nil;
+        XCTAssertTrue(WriteMultipartInSlices(request, body, &error), @"%@", error);
+        XCTAssertTrue([request performClose:&error], @"%@", error);
+        XCTAssertEqual(WSKReservedMemoryLength(), (NSUInteger)1281, @"closing a parser must not uncharge its still-live arguments");
+        XCTAssertEqual(request.arguments.count, (NSUInteger)2);
+        XCTAssertEqual([request firstArgumentForControlName:@"a0"].data.length, (NSUInteger)257);
+        XCTAssertEqual([request firstArgumentForControlName:@"a1"].data.length, (NSUInteger)1024);
+    }
+    XCTAssertEqual(WSKReservedMemoryLength(), (NSUInteger)0, @"the completed request released all of its fields");
+}
+
+// Reservation ownership follows each argument independently, not the request or one shared
+// parser budget: retaining a 73-byte field must not pin its discarded 4 KB sibling's charge.
+- (void)testMultiPartRetainedArgumentsReleaseTheirOwnBytes {
+    XCTAssertEqual(WSKReservedMemoryLength(), (NSUInteger)0);
+    WSKMultiPartArgument *small = nil;
+    WSKMultiPartArgument *large = nil;
+    __weak WSKMultiPartFormRequest *releasedRequest = nil;
+    @autoreleasepool {
+        WSKMultiPartFormRequest *const request = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
+        releasedRequest = request;
+        NSError *error = nil;
+        XCTAssertTrue(WriteMultipartInSlices(request, MultipartArgumentBody(@"X", @[@73, @4096]), &error), @"%@", error);
+        XCTAssertTrue([request performClose:&error], @"%@", error);
+        small = [request firstArgumentForControlName:@"a0"];
+        large = [request firstArgumentForControlName:@"a1"];
+    }
+    XCTAssertNil(releasedRequest, @"retaining arguments must not keep their request alive");
+    XCTAssertEqual(WSKReservedMemoryLength(), (NSUInteger)4169, @"both detached argument payloads are still live");
+    XCTAssertEqual(small.data.length, (NSUInteger)73);
+    XCTAssertEqual(large.data.length, (NSUInteger)4096);
+    large = nil;
+    XCTAssertEqual(WSKReservedMemoryLength(), (NSUInteger)73, @"a small argument must not pin a sibling's reservation");
+    XCTAssertEqual(small.data.length, (NSUInteger)73, @"the remaining field is still usable");
+    small = nil;
+    XCTAssertEqual(WSKReservedMemoryLength(), (NSUInteger)0, @"the final field must return exactly its own bytes");
+}
+
+// Refusal must release parser scratch space without pretending that completed prefix fields
+// disappeared. Exercise both a truncated body and a later part rejected while parsing headers.
+- (void)testMultiPartFailedBodiesKeepRetainedPrefixArgumentsCharged {
+    for (NSNumber *malformed in @[@NO, @YES]) {
+        XCTAssertEqual(WSKReservedMemoryLength(), (NSUInteger)0);
+        WSKMultiPartArgument *retained = nil;
+        @autoreleasepool {
+            WSKMultiPartFormRequest *const request = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
+            NSMutableData *const body = [MultipartArgumentPart(@"X", @"complete", 513) mutableCopy];
+            NSString *const tail = malformed.boolValue ? @"--X\r\nContent-Disposition: form-data\r\n\r\nbad\r\n--X--\r\n" : @"--X\r\nContent-Disposition: form-data; name=\"unfinished\"\r\n\r\npartial";
+            [body appendData:UTF8Data(tail)];
+            NSError *error = nil;
+            BOOL const wrote = WriteMultipartInSlices(request, body, &error);
+            XCTAssertEqual(wrote, !malformed.boolValue, @"the fixture must reach the intended failure phase: %@", error);
+            retained = [request firstArgumentForControlName:@"complete"];
+            XCTAssertNotNil(retained, @"the first field must have completed before the later failure");
+            BOOL const closed = [request performClose:&error];
+            XCTAssertFalse(wrote && closed, @"either the write or close must refuse the malformed or truncated form");
+            XCTAssertEqual(WSKReservedMemoryLength(), (NSUInteger)513, @"failed close dropped a live prefix field's charge");
+        }
+        XCTAssertEqual(WSKReservedMemoryLength(), (NSUInteger)513, @"a retained prefix argument must survive request teardown with its charge");
+        XCTAssertEqual(retained.data.length, (NSUInteger)513);
+        retained = nil;
+        XCTAssertEqual(WSKReservedMemoryLength(), (NSUInteger)0);
+    }
+}
+
+// Parent and nested parsers append to one request. Moving global reservations onto arguments
+// must preserve the shared per-request sum, or nesting multiplies the permitted body size.
+- (void)testMultiPartNestedArgumentsShareTheLimitAndKeepTheirCharges {
+    WSKSetMemoryLimitsForTesting(1024, 4096, 16 * 1024);
+    [self addTeardownBlock:^{ WSKSetMemoryLimitsForTesting(0, 0, 0); }];
+    for (NSNumber *oversized in @[@NO, @YES]) {
+        XCTAssertEqual(WSKReservedMemoryLength(), (NSUInteger)0);
+        @autoreleasepool {
+            NSUInteger const length = oversized.boolValue ? 600 : 400;
+            NSMutableData *const body = [MultipartArgumentPart(@"X", @"outer", length) mutableCopy];
+            [body appendData:UTF8Data(@"--X\r\nContent-Disposition: form-data; name=\"mixed\"\r\nContent-Type: multipart/mixed; boundary=Y\r\n\r\n")];
+            [body appendData:MultipartArgumentBody(@"Y", @[@(length)])];
+            [body appendData:UTF8Data(@"\r\n--X--\r\n")];
+            WSKMultiPartFormRequest *const request = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
+            NSError *error = nil;
+            BOOL const wrote = WriteMultipartInSlices(request, body, &error);
+            BOOL const closed = [request performClose:&error];
+            XCTAssertEqual(wrote && closed, !oversized.boolValue, @"parent and nested fields must share the 1 KB limit: %@", error);
+            NSUInteger const expectedFields = oversized.boolValue ? 1 : 2;
+            XCTAssertEqual(request.arguments.count, expectedFields, @"the first field must complete before the nested field is considered");
+            XCTAssertEqual(WSKReservedMemoryLength(), expectedFields * length, @"only completed argument payloads should remain after close");
+            XCTAssertEqual([request firstArgumentForControlName:@"outer"].data.length, length);
+        }
+        XCTAssertEqual(WSKReservedMemoryLength(), (NSUInteger)0);
+    }
+}
+
+// Previously every successful close reset this accounting to zero while the requests still
+// owned their fields, so completed forms could grow without ever filling the aggregate budget.
+- (void)testMultiPartCompletedRequestsSaturateAndRecoverTheAggregateBudget {
+    NSUInteger const valueLength = 2048;
+    NSUInteger const totalLimit = 12 * 1024;
+    WSKSetMemoryLimitsForTesting(8 * 1024, 8 * 1024, totalLimit);
+    [self addTeardownBlock:^{ WSKSetMemoryLimitsForTesting(0, 0, 0); }];
+    XCTAssertEqual(WSKReservedMemoryLength(), (NSUInteger)0);
+    NSMutableArray<WSKMultiPartFormRequest *> *const held = [NSMutableArray array];
+    NSData *const body = MultipartArgumentBody(@"X", @[@(valueLength)]);
+    NSUInteger refused = 0;
+    for (NSUInteger attempt = 0; attempt < 12; attempt++) {
+        @autoreleasepool {
+            WSKMultiPartFormRequest *const request = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
+            NSError *error = nil;
+            BOOL const wrote = WriteMultipartInSlices(request, body, &error);
+            if (wrote) {
+                XCTAssertTrue([request performClose:&error], @"%@", error);
+                [held addObject:request];
+            } else {
+                refused += 1;
+                XCTAssertEqualObjects(error.domain, kWSKErrorDomain);
+                XCTAssertEqual(error.code, (NSInteger)kWSKRequestBodyError_ServerAtCapacity, @"aggregate exhaustion must remain distinguishable from a malformed form");
+                [request performClose:NULL];
+            }
+        }
+        XCTAssertEqual(WSKReservedMemoryLength(), held.count * valueLength, @"only completed fields should remain charged between requests");
+        XCTAssertLessThanOrEqual(WSKReservedMemoryLength(), totalLimit);
+    }
+    XCTAssertGreaterThan(held.count, (NSUInteger)0, @"the budget must allow an ordinary form");
+    XCTAssertGreaterThan(refused, (NSUInteger)0, @"completed forms must eventually fill the budget");
+    if (held.count) {
+        @autoreleasepool {
+            [held removeLastObject];
+        }
+        XCTAssertEqual(WSKReservedMemoryLength(), held.count * valueLength);
+        @autoreleasepool {
+            WSKMultiPartFormRequest *const replacement = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
+            NSError *error = nil;
+            XCTAssertTrue(WriteMultipartInSlices(replacement, body, &error), @"releasing one completed request must make room for its replacement: %@", error);
+            XCTAssertTrue([replacement performClose:&error], @"%@", error);
+            [held addObject:replacement];
+        }
+        XCTAssertEqual(WSKReservedMemoryLength(), held.count * valueLength);
+    }
+    [held removeAllObjects];
+    XCTAssertEqual(WSKReservedMemoryLength(), (NSUInteger)0, @"all successfully parsed and refused forms released their reservations");
+}
+
+// Separate parsers can finish on different connection queues. The final charge must equal
+// the payloads retained across all of them; checking after dispatch_apply avoids sampling a
+// transient working-buffer reservation as though it were a completed argument.
+- (void)testMultiPartConcurrentCompletedRequestsKeepTheirAggregateCharges {
+    NSUInteger const valueLength = 1024;
+    NSUInteger const totalLimit = 64 * 1024;  // Room for all 24 payloads AND every parser working buffer.
+    WSKSetMemoryLimitsForTesting(4 * 1024, 4 * 1024, totalLimit);
+    [self addTeardownBlock:^{ WSKSetMemoryLimitsForTesting(0, 0, 0); }];
+    XCTAssertEqual(WSKReservedMemoryLength(), (NSUInteger)0);
+    NSMutableArray<WSKMultiPartFormRequest *> *const held = [NSMutableArray array];
+    NSData *const body = MultipartArgumentBody(@"X", @[@(valueLength)]);
+    dispatch_apply(24, dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^(size_t index) {
+        @autoreleasepool {
+            WSKMultiPartFormRequest *const request = OpenBodyRequest([WSKMultiPartFormRequest class], @{@"Content-Type": @"multipart/form-data; boundary=X"});
+            BOOL const wrote = WriteMultipartInSlices(request, body, NULL);
+            BOOL const closed = [request performClose:NULL];
+            if (wrote && closed) {
+                @synchronized(held) {
+                    [held addObject:request];
+                }
+            }
+        }
+    });
+    XCTAssertEqual(held.count, (NSUInteger)24, @"the generous budget must admit every concurrent form");
+    XCTAssertEqual(WSKReservedMemoryLength(), held.count * valueLength, @"every completed request still owns its argument");
+    XCTAssertLessThanOrEqual(held.count * valueLength, totalLimit, @"live payload bytes exceeded the global limit");
+    [held removeAllObjects];
+    XCTAssertEqual(WSKReservedMemoryLength(), (NSUInteger)0);
 }
 
 // Both properties are declared nullable and documented as returning nil when the body cannot be

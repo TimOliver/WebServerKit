@@ -45,7 +45,8 @@ NS_ASSUME_NONNULL_BEGIN
 #define kWSKMaxDecompressedBodyLength (64 * 1024 * 1024)
 
 /**
- *  Ceiling on request data held in memory across *all* live connections at once.
+ *  Ceiling on request data held in memory across all servers, including retained
+ *  requests and multipart arguments whose connections have already ended.
  *
  *  The two limits above are per-request, and they do not compose: with
  *  kWSKMaxConnections concurrent requests the real ceiling was their product —

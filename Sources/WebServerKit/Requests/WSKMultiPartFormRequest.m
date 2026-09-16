@@ -52,7 +52,7 @@
 // these headers are retained per part, so they need bounding just as the content does.
 #define kMultiPartMaxHeadersLength (8 * 1024)
 
-// The in-memory budget is shared between a parser and every sub-parser it spawns: a
+// The per-body limits are shared between a parser and every sub-parser it spawns: a
 // nested "multipart/mixed" part appends into the same argument and file arrays as its
 // parent, so a per-parser counter would let nesting multiply the real ceiling.
 @interface WSKMIMEStreamBudget : NSObject {
@@ -60,23 +60,9 @@
     NSUInteger argumentBytes;  // Total bytes retained by argument parts so far
     NSUInteger partCount;      // Total completed parts (arguments and files) so far
 }
-// This body's share of the process-wide in-memory ceiling, covering the argument parts it
-// retains. Per-request limits do not compose, so without this a flood of individually-legal
-// bodies still exhausts the process. Working buffers are charged separately, per parser,
-// because they shrink again as parts are consumed.
-@property (nonatomic, readonly) WSKMemoryReservation *reservation;
 @end
 
 @implementation WSKMIMEStreamBudget
-
-- (instancetype)init {
-    if ((self = [super init])) {
-        _reservation = [[WSKMemoryReservation alloc] init];
-    }
-
-    return self;
-}
-
 @end
 
 typedef enum {
@@ -117,10 +103,16 @@ static NSData *_dashNewlineData = nil;
 
 @end
 
-@implementation WSKMultiPartArgument
+@implementation WSKMultiPartArgument {
+    // Parsing ends before the request's fields are released, and an app can retain a
+    // field after releasing the request. Charge each field for its own lifetime so
+    // keeping one field does not pin the reservations for all of its siblings.
+    WSKMemoryReservation *_reservation;
+}
 
-- (instancetype)initWithControlName:(NSString *_Nonnull)name contentType:(NSString *_Nonnull)type data:(NSData *_Nonnull)data {
+- (instancetype)initWithControlName:(NSString *_Nonnull)name contentType:(NSString *_Nonnull)type data:(NSData *_Nonnull)data reservation:(WSKMemoryReservation *_Nonnull)reservation {
     if ((self = [super initWithControlName:name contentType:type])) {
+        _reservation = reservation;
         _data = data;
 
         if ([self.contentType hasPrefix:@"text/"]) {
@@ -473,22 +465,30 @@ static NSData *_dashNewlineData = nil;
                             WSK_LOG_ERROR(@"Multipart form arguments retained in memory exceed the %lu byte limit", (unsigned long)WSKMaxInMemoryBodyLength());
                             _failureCode = kWSKRequestBodyError_TooLarge;
                             success = NO;
-                        } else if (![_budget.reservation reserveBytes:(_budget->argumentBytes + dataLength)]) {
-                            WSK_LOG_ERROR(@"Refusing multipart argument: the server is already holding its %lu byte in-memory limit across all connections", (unsigned long)kWSKMaxTotalInMemoryLength);
-                            _failureCode = kWSKRequestBodyError_ServerAtCapacity;
-                            success = NO;
                         } else {
-                            _budget->partCount += 1;
-                            _budget->argumentBytes += dataLength;
-                            // -subdataWithRange: rather than -initWithBytes:length: over the raw
-                            // pointer: same copy of the same bytes, but bounds-checked, and with no
-                            // pointer for an empty argument value (an ordinary blank form field) to
-                            // turn into the recurring nil-into-Foundation class — .bytes is nullable
-                            // and -initWithBytes: declares its pointer non-null, which is what the
-                            // analyzer's nullability checker flagged.
-                            NSData *const data = [_data subdataWithRange:NSMakeRange(0, dataLength)];
-                            WSKMultiPartArgument *const argument = [[WSKMultiPartArgument alloc] initWithControlName:_controlName contentType:_contentType data:data];
-                            [_arguments addObject:argument];
+                            // Reserve before copying. Both the parser buffer and the completed
+                            // field exist during the copy, so both must remain charged. The field
+                            // takes ownership of this reservation; parser teardown must not return
+                            // bytes that a completed or partially parsed request still retains.
+                            WSKMemoryReservation *const reservation = [[WSKMemoryReservation alloc] init];
+
+                            if (![reservation reserveBytes:dataLength]) {
+                                WSK_LOG_ERROR(@"Refusing multipart argument: the server is already holding its %lu byte in-memory limit across all connections", (unsigned long)kWSKMaxTotalInMemoryLength);
+                                _failureCode = kWSKRequestBodyError_ServerAtCapacity;
+                                success = NO;
+                            } else {
+                                _budget->partCount += 1;
+                                _budget->argumentBytes += dataLength;
+                                // -subdataWithRange: rather than -initWithBytes:length: over the raw
+                                // pointer: same copy of the same bytes, but bounds-checked, and with no
+                                // pointer for an empty argument value (an ordinary blank form field) to
+                                // turn into the recurring nil-into-Foundation class — .bytes is nullable
+                                // and -initWithBytes: declares its pointer non-null, which is what the
+                                // analyzer's nullability checker flagged.
+                                NSData *const data = [_data subdataWithRange:NSMakeRange(0, dataLength)];
+                                WSKMultiPartArgument *const argument = [[WSKMultiPartArgument alloc] initWithControlName:_controlName contentType:_contentType data:data reservation:reservation];
+                                [_arguments addObject:argument];
+                            }
                         }
                     }
 

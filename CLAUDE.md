@@ -399,6 +399,23 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
 - Multipart: one shared budget (`WSKMIMEStreamBudget`) across nested parsers; part-header
   blocks capped; 1024 parts max; `[super init]` and the `_tmpFile = -1` sentinel are set
   before any failure return (a nil-returning init once closed fd 0 in dealloc).
+  **Completed arguments own their own global memory reservations** (2026-09-16). The shared
+  parser budget counts per-body argument bytes and parts; it must not own the global charge,
+  because `-close:` drops the parser while the request still retains its fields (the audit held
+  72 MiB in nine completed requests while the global counter read zero). Reserve before copying
+  each argument, alongside the still-live working buffer. Each `WSKMultiPartArgument` retains
+  its charge until deallocation, including after request teardown and after a later part fails;
+  retaining one field must not pin sibling charges. This follows the library's owner-level
+  accounting convention: it is not an RSS bound or accounting for separately retained data/text
+  aliases or decoded string allocations. File parts keep streaming to disk as before.
+  Six regression tests fail against the old accounting and pass with this ownership; the full
+  248-test ASan suite, eight trace suites, platform builds and Swift consumers pass. The wire
+  control reproduced 72 MiB held with zero reserved before the fix; afterwards six 8 MiB forms
+  stay charged and the next receives 503 because its working buffer plus copy would exceed the
+  64 MiB total. Releasing holders restores capacity. Eight batches of four concurrent uploads
+  return exactly each released field's bytes; a verified 20 MiB file still streams to disk,
+  malformed-upload temp files disappear, and 154 concurrent download controls succeed, with
+  all 196 connections released, descriptors 9→9 and reserved bytes 0 after cleanup.
 - **Both body parsers are linear in their input, and every scan resumes rather than restarting**
   (2026-09-03, extended 2026-09-04). Four defects of one shape. The chunked decoder dropped each
   consumed chunk from the FRONT of its buffer: 400k one-byte chunks (2.4 MB of wire) burned 4.6 s
@@ -559,7 +576,9 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
 - 16 MB in-memory body; 64 MB decompressed (enforced inside the inflate loop, anti-zip-bomb).
   Consult `WSKMaxInMemoryBodyLength()`/`WSKMaxDecompressedBodyLength()`, never the `kWSK…`
   constants directly (test overrides depend on it).
-- Budget exhaustion = 500, settled. A failed body read (disconnect, bad framing, cap) aborts
+- Budget exhaustion = 503 (`ServerAtCapacity`). **Correction 2026-09-16:** the old record said
+  500; the connection mapper already returned 503 before the multipart ownership fix, and its
+  wire probe confirms that existing behavior. A failed body read (disconnect, bad framing, cap) aborts
   the request — never process a partial body as complete. Bodies streamed to disk are
   deliberately unlimited.
 - Idle timeout: hard header-phase deadline; body phase uses a byte-RATE floor (effectively ~34 B/s,
@@ -861,7 +880,7 @@ Each was deliberate; full reasons in the archived record (`git show 09416c2:CLAU
 - Case-variant PUT on case-insensitive volumes is inherent (rclone behaves identically);
   a case-only rename via MOVE is refused 403 (an unconditional remove once deleted the only
   copy).
-- The lock stub stays a stub; budget exhaustion stays 500; the HEAD-body RFC violation
+- The lock stub stays a stub; budget exhaustion stays 503 (corrected under Limits); the HEAD-body RFC violation
   (HEAD-map option NO + registered HEAD handler) is recorded, not fixed — fix off the WIRE
   method if it ever becomes reachable.
 - Host validation: IP literals by shape, never resolved; no-Host allowed; port comparison

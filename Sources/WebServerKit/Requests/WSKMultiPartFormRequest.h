@@ -60,6 +60,8 @@ NS_ASSUME_NONNULL_BEGIN
 /**
  *  The WSKMultiPartArgument subclass of WSKMultiPart wraps
  *  the content of a part as data in memory.
+ *  Its content bytes count against the shared in-memory budget until this
+ *  argument is deallocated, including when it outlives its request.
  */
 @interface WSKMultiPartArgument : WSKMultiPart
 
