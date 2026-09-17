@@ -57,6 +57,33 @@
 }
 @end
 
+@interface WSKGatedMutationDAVServer : WSKGatedMetadataDAVServer
+@property (nonatomic, copy) void (^mutationPreconditionChecked)(WSKRequest *request);
+@property (nonatomic, copy) BOOL (^mutationAuthorization)(NSString *method, NSString *sourcePath, NSString *destinationPath);
+@end
+
+@implementation WSKGatedMutationDAVServer
+- (WSKResponse *)_preconditionFailureForRequest:(WSKRequest *)request atPath:(NSString *)path {
+    WSKResponse *const response = [super _preconditionFailureForRequest:request atPath:path];
+    if (self.mutationPreconditionChecked) {
+        self.mutationPreconditionChecked(request);
+    }
+    return response;
+}
+
+- (BOOL)shouldDeleteItemAtPath:(NSString *)path {
+    return self.mutationAuthorization ? self.mutationAuthorization(@"DELETE", path, nil) : [super shouldDeleteItemAtPath:path];
+}
+
+- (BOOL)shouldMoveItemFromPath:(NSString *)fromPath toPath:(NSString *)toPath {
+    return self.mutationAuthorization ? self.mutationAuthorization(@"MOVE", fromPath, toPath) : [super shouldMoveItemFromPath:fromPath toPath:toPath];
+}
+
+- (BOOL)shouldCopyItemFromPath:(NSString *)fromPath toPath:(NSString *)toPath {
+    return self.mutationAuthorization ? self.mutationAuthorization(@"COPY", fromPath, toPath) : [super shouldCopyItemFromPath:fromPath toPath:toPath];
+}
+@end
+
 static NSData *DAVDeadPropertyBytes(NSString *path) {
     const char *const attribute = "com.webserverkit.dav.deadproperties";
     ssize_t const length = getxattr(path.fileSystemRepresentation, attribute, NULL, 0, 0, 0);
@@ -2345,6 +2372,275 @@ static NSString *DAVReplyETag(NSString *reply) {
     NSArray *const expectedFiles = @[@"other.txt", @"parked.txt"];
     XCTAssertEqualObjects([[fm contentsOfDirectoryAtPath:dir error:NULL] sortedArrayUsingSelector:@selector(compare:)], expectedFiles, @"successful uploads must leave no staging files behind");
 
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// Each public authorization hook runs after the early If-Match check. Hold that hook while a
+// PUT acknowledges a new source, then require the original request to refuse before removing,
+// moving or copying the replacement. Both destination states matter: refusal must neither
+// create a destination nor destroy an existing one, and must leave no hidden staging files.
+- (void)_assertConditionalMutationRejectsSourceChangedDuringAuthorization:(NSString *)method {
+    BOOL const isDelete = [method isEqualToString:@"DELETE"];
+    NSArray<NSNumber *> *const destinationStates = isDelete ? @[@NO] : @[@NO, @YES];
+    for (NSNumber *const destinationExists in destinationStates) {
+        NSFileManager *const fm = [NSFileManager defaultManager];
+        NSString *const dir = MakeTempDirectory();
+        NSString *const sourcePath = [dir stringByAppendingPathComponent:@"source.txt"];
+        NSString *const destinationPath = [dir stringByAppendingPathComponent:@"destination.txt"];
+        NSData *const replacement = UTF8Data(@"replacement-B-after-PUT");
+        NSData *const previousDestination = UTF8Data(@"destination-must-survive");
+        XCTAssertTrue([UTF8Data(@"original-A") writeToFile:sourcePath atomically:YES]);
+        if (destinationExists.boolValue) {
+            XCTAssertTrue([previousDestination writeToFile:destinationPath atomically:YES]);
+        }
+
+        dispatch_semaphore_t const arrived = dispatch_semaphore_create(0);
+        dispatch_group_t const release = dispatch_group_create();
+        dispatch_group_enter(release);
+        WSKGatedMutationDAVServer *const server = [[WSKGatedMutationDAVServer alloc] initWithUploadDirectory:dir];
+        server.mutationAuthorization = ^BOOL(NSString *verb, NSString *fromPath, NSString *toPath) {
+            dispatch_semaphore_signal(arrived);
+            return dispatch_group_wait(release, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC))) == 0;
+        };
+        NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+        XCTAssertTrue([server startWithOptions:options error:NULL]);
+        NSUInteger const port = server.port;
+        NSString *const etag = DAVReplyETag(SendRawRequest(port, @"HEAD /source.txt HTTP/1.1\r\nHost: localhost\r\n\r\n"));
+        XCTAssertNotNil(etag);
+        if (etag == nil) {
+            dispatch_group_leave(release);
+            [server stop];
+            [fm removeItemAtPath:dir error:NULL];
+            continue;
+        }
+
+        NSString *const destinationHeaders = isDelete ? @"" : @"Destination: /destination.txt\r\nOverwrite: T\r\n";
+        NSString *const request = [NSString stringWithFormat:@"%@ /source.txt HTTP/1.1\r\nHost: localhost\r\nIf-Match: %@\r\n%@\r\n", method, etag, destinationHeaders];
+        __block NSString *mutationReply = nil;
+        dispatch_group_t const mutationClient = dispatch_group_create();
+        dispatch_group_async(mutationClient, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            mutationReply = SendRawRequest(port, request);
+        });
+        long const parked = dispatch_semaphore_wait(arrived, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)));
+        __block NSString *putReply = nil;
+        dispatch_group_t const putClient = dispatch_group_create();
+        dispatch_group_async(putClient, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            putReply = DAVMetadataPut(port, @"/source.txt", @"replacement-B-after-PUT", @"");
+        });
+        long const replacedWhileParked = dispatch_group_wait(putClient, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)));
+        // Release even after a failed arrival/progress assertion; a broken lock scope must not
+        // strand the authorization hook or keep a test connection alive until suite teardown.
+        dispatch_group_leave(release);
+        XCTAssertEqual(parked, 0L, @"%@ must first reach authorization with a matching source tag", method);
+        XCTAssertEqual(replacedWhileParked, 0L, @"%@ authorization must not hold the mutation lock while PUT needs it", method);
+        XCTAssertEqual(dispatch_group_wait(putClient, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC))), 0L);
+        XCTAssertEqual(dispatch_group_wait(mutationClient, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC))), 0L);
+        XCTAssertTrue(ReplyHasStatus(putReply, 204), @"PUT must acknowledge its replacement before %@ resumes: %@", method, putReply);
+        XCTAssertTrue(ReplyHasStatus(mutationReply, 412), @"%@ must refuse the now-stale source validator: %@", method, mutationReply);
+        XCTAssertEqualObjects([NSData dataWithContentsOfFile:sourcePath], replacement, @"%@ must preserve the acknowledged PUT body", method);
+        if (destinationExists.boolValue) {
+            XCTAssertEqualObjects([NSData dataWithContentsOfFile:destinationPath], previousDestination, @"a refused %@ must preserve the old destination", method);
+        } else {
+            XCTAssertFalse([fm fileExistsAtPath:destinationPath], @"a refused %@ must not create its destination", method);
+        }
+        NSArray<NSString *> *const expectedFiles = destinationExists.boolValue ? @[@"destination.txt", @"source.txt"] : @[@"source.txt"];
+        XCTAssertEqualObjects([[fm contentsOfDirectoryAtPath:dir error:NULL] sortedArrayUsingSelector:@selector(compare:)], expectedFiles, @"a refused %@ must leave no staging residue", method);
+        [server stop];
+        [fm removeItemAtPath:dir error:NULL];
+    }
+}
+
+- (void)testDAVConditionalDeleteRefusesSourceReplacedDuringAuthorization {
+    [self _assertConditionalMutationRejectsSourceChangedDuringAuthorization:@"DELETE"];
+}
+
+- (void)testDAVConditionalMoveRefusesSourceReplacedDuringAuthorization {
+    [self _assertConditionalMutationRejectsSourceChangedDuringAuthorization:@"MOVE"];
+}
+
+- (void)testDAVConditionalCopyRefusesSourceReplacedDuringAuthorization {
+    [self _assertConditionalMutationRejectsSourceChangedDuringAuthorization:@"COPY"];
+}
+
+// The final check must not reject an unchanged validator or disable ordinary replacements.
+- (void)testDAVConditionalMutationsWithUnchangedSourcesStillSucceed {
+    for (NSString *const method in @[@"DELETE", @"MOVE", @"COPY"]) {
+        BOOL const isDelete = [method isEqualToString:@"DELETE"];
+        NSArray<NSNumber *> *const destinationStates = isDelete ? @[@NO] : @[@NO, @YES];
+        for (NSNumber *const destinationExists in destinationStates) {
+            NSFileManager *const fm = [NSFileManager defaultManager];
+            NSString *const dir = MakeTempDirectory();
+            NSString *const sourcePath = [dir stringByAppendingPathComponent:@"source.txt"];
+            NSString *const destinationPath = [dir stringByAppendingPathComponent:@"destination.txt"];
+            NSData *const source = UTF8Data(@"unchanged-source");
+            XCTAssertTrue([source writeToFile:sourcePath atomically:YES]);
+            if (destinationExists.boolValue) {
+                XCTAssertTrue([UTF8Data(@"old-destination") writeToFile:destinationPath atomically:YES]);
+            }
+            WSKWebDAVServer *const server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+            NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+            XCTAssertTrue([server startWithOptions:options error:NULL]);
+            NSString *const etag = DAVReplyETag(SendRawRequest(server.port, @"HEAD /source.txt HTTP/1.1\r\nHost: localhost\r\n\r\n"));
+            XCTAssertNotNil(etag);
+            NSString *const destinationHeaders = isDelete ? @"" : @"Destination: /destination.txt\r\nOverwrite: T\r\n";
+            NSString *const request = [NSString stringWithFormat:@"%@ /source.txt HTTP/1.1\r\nHost: localhost\r\nIf-Match: %@\r\n%@\r\n", method, etag, destinationHeaders];
+            NSString *const reply = SendRawRequest(server.port, request);
+            NSInteger const expectedStatus = (isDelete || destinationExists.boolValue) ? 204 : 201;
+            XCTAssertTrue(ReplyHasStatus(reply, expectedStatus), @"%@ with an unchanged validator must succeed: %@", method, reply);
+            BOOL const isCopy = [method isEqualToString:@"COPY"];
+            if (isCopy) {
+                XCTAssertEqualObjects([NSData dataWithContentsOfFile:sourcePath], source);
+            } else {
+                XCTAssertFalse([fm fileExistsAtPath:sourcePath]);
+            }
+            if (!isDelete) {
+                XCTAssertEqualObjects([NSData dataWithContentsOfFile:destinationPath], source);
+            }
+            NSArray<NSString *> *const expectedFiles = isDelete ? @[] : (isCopy ? @[@"destination.txt", @"source.txt"] : @[@"destination.txt"]);
+            XCTAssertEqualObjects([[fm contentsOfDirectoryAtPath:dir error:NULL] sortedArrayUsingSelector:@selector(compare:)], expectedFiles);
+            [server stop];
+            [fm removeItemAtPath:dir error:NULL];
+        }
+    }
+}
+
+// A final recheck alone still leaves a check-to-commit window. Pause after that check while
+// PUT has reached authorization: mutation commits must serialize, but GET must remain live.
+// The final source/destination bodies detect a missing shared lock, independent of the bounded
+// wait that gives the competing PUT an opportunity to complete on an unfixed implementation.
+- (void)testDAVMutationCommitsSerializeWithPutWhileReadsProceed {
+    for (NSString *const method in @[@"DELETE", @"MOVE", @"COPY"]) {
+        NSFileManager *const fm = [NSFileManager defaultManager];
+        NSString *const dir = MakeTempDirectory();
+        NSString *const sourcePath = [dir stringByAppendingPathComponent:@"source.txt"];
+        NSString *const destinationPath = [dir stringByAppendingPathComponent:@"destination.txt"];
+        NSData *const original = UTF8Data(@"original-A");
+        NSData *const replacement = UTF8Data(@"replacement-B-after-commit");
+        XCTAssertTrue([original writeToFile:sourcePath atomically:YES]);
+        dispatch_semaphore_t const checked = dispatch_semaphore_create(0);
+        dispatch_semaphore_t const putAuthorized = dispatch_semaphore_create(0);
+        dispatch_group_t const release = dispatch_group_create();
+        dispatch_group_enter(release);
+        __block NSUInteger checks = 0;
+        __block long resumed = -1;
+        WSKGatedMutationDAVServer *const server = [[WSKGatedMutationDAVServer alloc] initWithUploadDirectory:dir];
+        server.mutationPreconditionChecked = ^(WSKRequest *request) {
+            if ([request.method isEqualToString:method] && (++checks == 2)) {
+                dispatch_semaphore_signal(checked);
+                resumed = dispatch_group_wait(release, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)));
+            }
+        };
+        server.uploadAuthorization = ^BOOL(NSString *path, NSString *temporaryPath) {
+            dispatch_semaphore_signal(putAuthorized);
+            return YES;
+        };
+        NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+        XCTAssertTrue([server startWithOptions:options error:NULL]);
+        NSUInteger const port = server.port;
+        NSString *const etag = DAVReplyETag(SendRawRequest(port, @"HEAD /source.txt HTTP/1.1\r\nHost: localhost\r\n\r\n"));
+        XCTAssertNotNil(etag);
+        BOOL const isDelete = [method isEqualToString:@"DELETE"];
+        NSString *const destinationHeaders = isDelete ? @"" : @"Destination: /destination.txt\r\nOverwrite: T\r\n";
+        NSString *const request = [NSString stringWithFormat:@"%@ /source.txt HTTP/1.1\r\nHost: localhost\r\nIf-Match: %@\r\n%@\r\n", method, etag, destinationHeaders];
+        __block NSString *mutationReply = nil;
+        dispatch_group_t const mutationClient = dispatch_group_create();
+        dispatch_group_async(mutationClient, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            mutationReply = SendRawRequest(port, request);
+        });
+        long const parked = dispatch_semaphore_wait(checked, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)));
+        __block NSString *putReply = nil;
+        dispatch_group_t const putClient = dispatch_group_create();
+        dispatch_group_async(putClient, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            putReply = DAVMetadataPut(port, @"/source.txt", @"replacement-B-after-commit", @"");
+        });
+        long const authorized = dispatch_semaphore_wait(putAuthorized, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)));
+        long const completedBeforeRelease = dispatch_group_wait(putClient, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)));
+        __block NSString *getReply = nil;
+        dispatch_group_t const getClient = dispatch_group_create();
+        dispatch_group_async(getClient, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            getReply = SendRawRequest(port, @"GET /source.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        });
+        long const readWhileParked = dispatch_group_wait(getClient, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)));
+        dispatch_group_leave(release);
+        XCTAssertEqual(parked, 0L, @"%@ must have a final precondition check before committing", method);
+        XCTAssertEqual(authorized, 0L, @"PUT body receipt and authorization must stay outside the mutation lock");
+        XCTAssertNotEqual(completedBeforeRelease, 0L, @"PUT must wait for the %@ transaction to finish", method);
+        XCTAssertEqual(readWhileParked, 0L, @"GET must not wait for a mutation transaction");
+        XCTAssertEqual(dispatch_group_wait(getClient, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC))), 0L);
+        XCTAssertEqual(dispatch_group_wait(mutationClient, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC))), 0L);
+        XCTAssertEqual(dispatch_group_wait(putClient, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC))), 0L);
+        XCTAssertEqual(resumed, 0L, @"the test must release the gate before its safety deadline");
+        XCTAssertTrue(ReplyHasStatus(getReply, 200), @"%@", getReply);
+        XCTAssertTrue([getReply hasSuffix:@"\r\n\r\noriginal-A"], @"readers must see the unchanged source before %@ commits: %@", method, getReply);
+        XCTAssertTrue(ReplyHasStatus(mutationReply, isDelete ? 204 : 201), @"%@", mutationReply);
+        BOOL const isCopy = [method isEqualToString:@"COPY"];
+        XCTAssertTrue(ReplyHasStatus(putReply, isCopy ? 204 : 201), @"PUT must observe the completed %@: %@", method, putReply);
+        XCTAssertEqualObjects([NSData dataWithContentsOfFile:sourcePath], replacement, @"the later PUT must remain at the source name");
+        if (!isDelete) {
+            XCTAssertEqualObjects([NSData dataWithContentsOfFile:destinationPath], original, @"%@ must act on the representation whose validator it checked", method);
+        }
+        NSArray<NSString *> *const expectedFiles = isDelete ? @[@"source.txt"] : @[@"destination.txt", @"source.txt"];
+        XCTAssertEqualObjects([[fm contentsOfDirectoryAtPath:dir error:NULL] sortedArrayUsingSelector:@selector(compare:)], expectedFiles, @"serialized commits must leave no staging residue");
+        [server stop];
+        [fm removeItemAtPath:dir error:NULL];
+    }
+}
+
+// PUT's sibling staging file is not a DAV resource. A concurrent MOVE of its parent must not
+// carry that staging file away, make PUT fail, and expose an abandoned hidden upload afterward.
+- (void)testDAVMovingParentWaitsForPutCommitAndCarriesNoStagingFile {
+    NSFileManager *const fm = [NSFileManager defaultManager];
+    NSString *const dir = MakeTempDirectory();
+    NSString *const parentPath = [dir stringByAppendingPathComponent:@"collection"];
+    NSString *const sourcePath = [parentPath stringByAppendingPathComponent:@"source.txt"];
+    XCTAssertTrue([fm createDirectoryAtPath:parentPath withIntermediateDirectories:NO attributes:nil error:NULL]);
+    XCTAssertTrue([UTF8Data(@"original-A") writeToFile:sourcePath atomically:YES]);
+    dispatch_semaphore_t const copied = dispatch_semaphore_create(0);
+    dispatch_semaphore_t const moveAuthorized = dispatch_semaphore_create(0);
+    dispatch_group_t const release = dispatch_group_create();
+    dispatch_group_enter(release);
+    __block long resumed = -1;
+    WSKGatedMutationDAVServer *const server = [[WSKGatedMutationDAVServer alloc] initWithUploadDirectory:dir];
+    server.afterPropertyCopy = ^{
+        dispatch_semaphore_signal(copied);
+        resumed = dispatch_group_wait(release, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)));
+    };
+    server.mutationAuthorization = ^BOOL(NSString *method, NSString *fromPath, NSString *toPath) {
+        dispatch_semaphore_signal(moveAuthorized);
+        return YES;
+    };
+    NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    NSUInteger const port = server.port;
+    __block NSString *putReply = nil;
+    dispatch_group_t const putClient = dispatch_group_create();
+    dispatch_group_async(putClient, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        putReply = DAVMetadataPut(port, @"/collection/source.txt", @"replacement-B-before-move", @"");
+    });
+    long const parked = dispatch_semaphore_wait(copied, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)));
+    NSArray<NSString *> *const stagedFiles = [fm contentsOfDirectoryAtPath:parentPath error:NULL];
+    XCTAssertEqual(stagedFiles.count, (NSUInteger)2, @"the PUT must already own a sibling staging file when MOVE starts");
+    __block NSString *moveReply = nil;
+    dispatch_group_t const moveClient = dispatch_group_create();
+    dispatch_group_async(moveClient, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        moveReply = SendRawRequest(port, @"MOVE /collection HTTP/1.1\r\nHost: localhost\r\nDestination: /moved\r\n\r\n");
+    });
+    long const authorized = dispatch_semaphore_wait(moveAuthorized, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)));
+    long const completedBeforeRelease = dispatch_group_wait(moveClient, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)));
+    dispatch_group_leave(release);
+    XCTAssertEqual(parked, 0L, @"PUT must have staged its body before MOVE reaches authorization");
+    XCTAssertEqual(authorized, 0L, @"MOVE authorization must remain outside the mutation lock");
+    XCTAssertNotEqual(completedBeforeRelease, 0L, @"the parent MOVE must wait for its child's PUT commit");
+    XCTAssertEqual(dispatch_group_wait(putClient, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC))), 0L);
+    XCTAssertEqual(dispatch_group_wait(moveClient, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC))), 0L);
+    XCTAssertEqual(resumed, 0L);
+    XCTAssertTrue(ReplyHasStatus(putReply, 204), @"the staged PUT must commit before its parent moves: %@", putReply);
+    XCTAssertTrue(ReplyHasStatus(moveReply, 201), @"%@", moveReply);
+    NSString *const movedPath = [dir stringByAppendingPathComponent:@"moved/source.txt"];
+    XCTAssertEqualObjects([NSData dataWithContentsOfFile:movedPath], UTF8Data(@"replacement-B-before-move"));
+    NSArray<NSString *> *const expectedFiles = @[@"moved", @"moved/source.txt"];
+    XCTAssertEqualObjects([[fm subpathsOfDirectoryAtPath:dir error:NULL] sortedArrayUsingSelector:@selector(compare:)], expectedFiles, @"MOVE must carry only the committed resource, never PUT's hidden staging file");
     [server stop];
     [fm removeItemAtPath:dir error:NULL];
 }

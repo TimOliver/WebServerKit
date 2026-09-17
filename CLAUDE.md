@@ -368,13 +368,35 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   successful conditional write into a 412). `If-Match` on a MISSING resource answers 404 —
   RFC-REQUIRED, pinned in both directions; do not "correct" it. Tag comparison has one home:
   `WSKEntityTagMatchesList`.
-- PUT stages every body beside the once-resolved destination, then rechecks parent, type and
-  preconditions under a per-server commit lock through the replacement. The early check alone
+- PUT rechecks parent, type and preconditions, stages every body beside the authorized
+  destination, and replaces it under a per-server mutation lock. The early check alone
   admitted all eight competing `If-Match` writers AND all eight `If-None-Match: *` creators in
-  the regression tests. Unconditional PUTs must share the lock; staging and authorization hooks
-  must stay outside it so other transfers can proceed. Final refusals remove their staging files.
-  This coordinates PUT and PROPPATCH on one server; other DAV verbs and external writers are
-  not locked.
+  the regression tests. Unconditional PUTs must share the lock. Request-body reception and
+  authorization hooks stay outside it; sibling staging and its failure cleanup stay INSIDE so a
+  directory MOVE cannot carry the stage away, and COPY cannot duplicate an in-progress stage.
+  DELETE, COPY/MOVE, MKCOL and PROPPATCH share this lock through their filesystem transactions.
+  DELETE/COPY/MOVE repeat their current-state policy and conditional checks after authorization;
+  mutation paths must still resolve to the authorized paths. A large COPY, recursive removal or
+  cross-volume PUT staging can delay other mutation commits. GET, PROPFIND and network transfer
+  continue independently. This is per server: external writers and a second server sharing the
+  same directory are not coordinated, and the accepted external directory-rename race remains.
+  Reproduced 2026-09-17 on 61cccc9: after a successful PUT while authorization was parked,
+  conditional DELETE removed the new bytes, MOVE relocated them, and COPY copied them (including
+  overwriting an existing destination). A separate parent-directory MOVE carried away a PUT's
+  hidden staging file: MOVE returned 201, PUT returned 500, and the stage remained in the moved
+  directory. Five of six focused tests fail on the old source; unchanged-source controls pass.
+  All six pass with the fix. A mutant retaining the final checks but separating DELETE/MOVE/COPY
+  from PUT's lock fails both transaction tests on actual bytes, namespace state and staging
+  residue, with all synchronization gates reached. GET still completes while a mutation waits.
+  The full gate passes: 263 ASan tests, eight recorded trace suites, Mac/iOS/tvOS Release builds
+  and both Swift consumers.
+  Live macOS WebDAVFS overwrite and four parallel writes match their hashes; native filesystem
+  copy uses read+PUT, so COPY is also exercised explicitly over HTTP. In 24 four-way conditional
+  PUT/DELETE/MOVE/COPY races, exactly one destructive writer succeeds and each accepted COPY has
+  the original bytes. Four paced readers complete 88 checksum-verified 32 MiB downloads (2.75 GiB)
+  with 161 mutations observed while downloads are active. At rest: no temporary or hidden staging
+  files, no reserved bytes or active downloads, and only the stats request's connection remains.
+  The native mount, probe host and temporary share are removed afterwards.
 - All three RFC 9110 date spellings parse (calendar year anchored — ICU once read `…94` as
   year 0094 and made `If-Unmodified-Since` a permanent 412); only IMF-fixdate is formatted;
   a 64-char length precheck rejects non-dates in constant time (parsed per-request on the
@@ -705,9 +727,9 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   filesystem becomes a per-property 403, not fake storage.
 - PUT preserves that DAV xattr (including stored `displayname`) byte-for-byte on its staged
   replacement. Its final precondition check, bounded property copy and rename share one
-  per-server lock with PROPPATCH's final precondition check and read/merge/write. Receiving,
-  body staging and upload authorization stay outside the lock. Missing/unsupported attributes
-  need no copy; other read/write errors refuse before replacement, and a store over 64 KB
+  per-server lock with PROPPATCH's final precondition check and read/merge/write and the other
+  DAV mutations. Body reception and upload authorization stay outside the lock. Missing/unsupported
+  attributes need no copy; other read/write errors refuse before replacement, and a store over 64 KB
   refuses with 507. Never use the lenient PROPFIND reader for this copy: it converts errors
   and malformed blobs into an empty dictionary, silently discarding metadata.
   Verified 2026-09-16: six focused tests pass (five fail on the old source; the sixth is the

@@ -105,11 +105,11 @@ NS_ASSUME_NONNULL_BEGIN
 NS_ASSUME_NONNULL_END
 
 @implementation WSKWebDAVServer {
-    // PUT preserves the destination's DAV properties on its staged replacement. Its final
-    // precondition check, property copy and rename share a lock with PROPPATCH's read/merge/write,
-    // so neither operation can discard an acknowledged property update. Per server rather than
-    // per path: the property store is bounded and these commits are short. Receiving, body
-    // staging, authorization callbacks, and reads stay outside this critical section.
+    // Coordinate final validation with every DAV filesystem mutation, including sibling staging
+    // and rollback. A directory MOVE/COPY must not carry another request's staging file away.
+    // Receiving request bodies, authorization callbacks and reads stay outside this lock. A large
+    // COPY or recursive removal can delay other commits; using one lock also covers path aliases
+    // and overlapping collections without retaining a growing registry of per-path locks.
     NSObject *_resourceMutationLock;
 }
 
@@ -986,24 +986,25 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Uploading file to \"%@\" is not permitted", relativePath];
     }
 
-    // Stage even a new file beside its destination: another PUT may create the name while
-    // this body is being prepared. NSTemporaryDirectory() may be on another volume, so the
-    // potentially long copy must finish before taking the commit lock.
+    // Receive the body before taking the lock, but keep sibling staging inside it: a concurrent
+    // directory MOVE could otherwise relocate that temporary file beyond this request's cleanup.
     NSFileManager *const fileManager = [NSFileManager defaultManager];
     NSString *const stagingPath = _StagingPathForPath(absolutePath);
     NSError *error = nil;
 
-    if (![fileManager moveItemAtPath:request.temporaryPath toPath:stagingPath error:&error]) {
-        [fileManager removeItemAtPath:stagingPath error:NULL];
-        return [WSKErrorResponse responseWithServerError:WSKServerErrorStatusCodeForError(error) underlyingError:error message:@"Failed moving uploaded file to \"%@\"", relativePath];
-    }
-
     WSKResponse *commitFailure = nil;
 
     @synchronized(_resourceMutationLock) {
-        // Recheck the state of the once-resolved destination after authorization and staging.
+        // Recheck the state of the authorized destination before staging or committing.
         // An earlier check alone lets concurrent writers all satisfy the same stale ETag.
         // Unconditional PUTs also take this lock, so they cannot slip between check and swap.
+        BOOL hidden = NO;
+        NSString *const currentPath = [self _resolvedPathForRelativePath:relativePath hidden:&hidden];
+
+        if (hidden || ![currentPath isEqualToString:absolutePath]) {
+            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Upload destination changed for \"%@\"", relativePath];
+        }
+
         if (![fileManager fileExistsAtPath:[absolutePath stringByDeletingLastPathComponent] isDirectory:&isDirectory] || !isDirectory) {
             commitFailure = [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Conflict message:@"Missing intermediate collection(s) for \"%@\"", relativePath];
         } else {
@@ -1017,6 +1018,10 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
             } else {
                 commitFailure = [self _preconditionFailureForRequest:request atPath:absolutePath];
 
+                if (!commitFailure && ![fileManager moveItemAtPath:request.temporaryPath toPath:stagingPath error:&error]) {
+                    commitFailure = [WSKErrorResponse responseWithServerError:WSKServerErrorStatusCodeForError(error) underlyingError:error message:@"Failed moving uploaded file to \"%@\"", relativePath];
+                }
+
                 if (!commitFailure && existing && ![self _copyDeadPropertiesAtPath:absolutePath toPath:stagingPath error:&error]) {
                     commitFailure = [WSKErrorResponse responseWithServerError:WSKServerErrorStatusCodeForError(error) underlyingError:error message:@"Failed preserving DAV properties for \"%@\"", relativePath];
                 }
@@ -1026,10 +1031,13 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
                 }
             }
         }
+
+        if (commitFailure) {
+            [fileManager removeItemAtPath:stagingPath error:NULL];
+        }
     }
 
     if (commitFailure) {
-        [fileManager removeItemAtPath:stagingPath error:NULL];
         return commitFailure;
     }
 
@@ -1099,7 +1107,6 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
 
     NSString *const relativePath = request.path;
     NSString *absolutePath = [_uploadDirectory stringByAppendingPathComponent:WSKNormalizePath(relativePath)];
-    BOOL isDirectory = NO;
 
     // Refuse to operate on the upload directory itself: "DELETE /" collapses to it
     // and would remove the entire share.
@@ -1118,87 +1125,107 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
 
     absolutePath = resolvedPath;
 
-    // lstat, not -fileExistsAtPath:. This verb acts on the entry the client NAMED — the resolver
-    // above returned the alias itself, deliberately — and -fileExistsAtPath: follows the final
-    // link, so it answers about the TARGET. A dangling alias therefore read as "does not exist":
-    // DELETE said 404 while the link stayed, and every write verb refused the name because it did
-    // exist. The name was wedged, clearable only from the filesystem. A dangling alias is the
-    // ordinary end state of the publish-by-symlink pattern this library supports (the target is
-    // replaced or removed and the alias outlives it), and DELETE is exactly how a client tidies
-    // one up.
-    //
-    // isDirectory follows from the same observation: a symlink is not a collection, whatever it
-    // points at. That keeps this verb consistent with what it will actually remove — the link —
-    // rather than vetting and Depth-checking a subtree it never touches.
-    struct stat namedInfo;
+    // Use the same policy checks before authorization and at the mutation boundary. A request
+    // parked in a host hook must not later delete a different type or an unvetted collection.
+    WSKResponse * (^validate)(void) = ^WSKResponse * {
+        // lstat, not -fileExistsAtPath:. This verb acts on the entry the client NAMED — the resolver
+        // above returned the alias itself, deliberately — and -fileExistsAtPath: follows the final
+        // link, so it answers about the TARGET. A dangling alias therefore read as "does not exist":
+        // DELETE said 404 while the link stayed, and every write verb refused the name because it did
+        // exist. The name was wedged, clearable only from the filesystem. A dangling alias is the
+        // ordinary end state of the publish-by-symlink pattern this library supports (the target is
+        // replaced or removed and the alias outlives it), and DELETE is exactly how a client tidies
+        // one up.
+        //
+        // isDirectory follows from the same observation: a symlink is not a collection, whatever it
+        // points at. That keeps this verb consistent with what it will actually remove — the link —
+        // rather than vetting and Depth-checking a subtree it never touches.
+        struct stat namedInfo;
 
-    if (lstat([absolutePath fileSystemRepresentation], &namedInfo) != 0) {
-        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
-    }
-
-    isDirectory = ((namedInfo.st_mode & S_IFMT) == S_IFDIR);
-
-    if (isHidden) {
-        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not allowed", relativePath];
-    }
-
-    // RFC 4918 §9.6.1 forbids any Depth but infinity on a DELETE of a COLLECTION, and every other
-    // spelling was already refused above — leaving "0" as the one invalid value that got through,
-    // and the one whose plain reading ("do not touch the members") is the opposite of what happened:
-    // 204, subtree destroyed. §9.6.1 does also fix the semantics at infinity, so answering the
-    // request as infinity was defensible; expanding a request the client deliberately scoped narrow
-    // is not, and this library refuses rather than approximating. Asked here rather than at the
-    // header check above because it needs to know the target is a collection — on a plain file "0"
-    // and "infinity" mean the same thing and it keeps working.
-    if (isDirectory && depthHeader && _HeaderTokenIs(depthHeader, @"0")) {
-        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest
-                                                 message:@"'Depth: 0' is not allowed when deleting the collection \"%@\" (RFC 4918 §9.6.1)", relativePath];
-    }
-
-    NSString *const undeletable = [self _firstUnvettableItemAtPath:absolutePath isDirectory:isDirectory];
-
-    if (undeletable) {
-        if (isDirectory) {
-            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not allowed: it contains \"%@\"", relativePath, undeletable];
+        if (lstat([absolutePath fileSystemRepresentation], &namedInfo) != 0) {
+            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
         }
 
-        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not allowed", relativePath];
-    }
+        BOOL const isDirectory = ((namedInfo.st_mode & S_IFMT) == S_IFDIR);
 
-    // A removal that only partly succeeds is the worst outcome this library recognises, and
-    // -removeItemAtPath: produces one by design: it deletes as it walks and stops at the first
-    // member it cannot unlink, keeping everything it already destroyed and reporting a bare
-    // failure. Refuse before touching anything instead.
-    NSString *const unremovable = WSKFirstUnremovableItemAtPath(absolutePath);
+        if (isHidden) {
+            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not allowed", relativePath];
+        }
 
-    if (unremovable) {
-        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not allowed: \"%@\" cannot be removed", relativePath, unremovable];
-    }
+        // RFC 4918 §9.6.1 forbids any Depth but infinity on a DELETE of a COLLECTION, and every other
+        // spelling was already refused above — leaving "0" as the one invalid value that got through,
+        // and the one whose plain reading ("do not touch the members") is the opposite of what happened:
+        // 204, subtree destroyed. §9.6.1 does also fix the semantics at infinity, so answering the
+        // request as infinity was defensible; expanding a request the client deliberately scoped narrow
+        // is not, and this library refuses rather than approximating. Asked here rather than at the
+        // header check above because it needs to know the target is a collection — on a plain file "0"
+        // and "infinity" mean the same thing and it keeps working.
+        if (isDirectory && depthHeader && _HeaderTokenIs(depthHeader, @"0")) {
+            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest
+                                                     message:@"'Depth: 0' is not allowed when deleting the collection \"%@\" (RFC 4918 §9.6.1)", relativePath];
+        }
 
-    WSKResponse *const preconditionFailure = [self _preconditionFailureForRequest:request atPath:absolutePath];
+        NSString *const undeletable = [self _firstUnvettableItemAtPath:absolutePath isDirectory:isDirectory];
 
-    if (preconditionFailure) {
-        return preconditionFailure;
+        if (undeletable) {
+            if (isDirectory) {
+                return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not allowed: it contains \"%@\"", relativePath, undeletable];
+            }
+
+            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not allowed", relativePath];
+        }
+
+        // A removal that only partly succeeds is the worst outcome this library recognises, and
+        // -removeItemAtPath: produces one by design: it deletes as it walks and stops at the first
+        // member it cannot unlink, keeping everything it already destroyed and reporting a bare
+        // failure. Refuse before touching anything instead.
+        NSString *const unremovable = WSKFirstUnremovableItemAtPath(absolutePath);
+
+        if (unremovable) {
+            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not allowed: \"%@\" cannot be removed", relativePath, unremovable];
+        }
+
+        return [self _preconditionFailureForRequest:request atPath:absolutePath];
+    };
+    WSKResponse *const initialFailure = validate();
+
+    if (initialFailure) {
+        return initialFailure;
     }
 
     if (![self shouldDeleteItemAtPath:absolutePath]) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Deleting \"%@\" is not permitted", relativePath];
     }
 
-    // Atomic from the client's point of view, and answering with an errno so a lost race reads as
-    // one: the removability walk above vets a SNAPSHOT, which cannot close a window against a
-    // second client writing into the tree. See WSKRemoveItemAtPath.
-    int failure = 0;
+    @synchronized(_resourceMutationLock) {
+        BOOL hidden = NO;
+        NSString *const currentPath = [self _namedEntryPathForRelativePath:relativePath hidden:&hidden];
 
-    if (!WSKRemoveItemAtPath(absolutePath, &failure)) {
-        NSInteger const status = WSKStatusCodeForRemovalErrno(failure);
-        NSError *const error = WSKMakePosixError(failure);
-
-        if (status < 500) {
-            return [WSKErrorResponse responseWithClientError:(WSKClientErrorHTTPStatusCode)status message:@"Failed deleting \"%@\": %s", relativePath, strerror(failure)];
+        if (hidden || ![currentPath isEqualToString:absolutePath]) {
+            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Delete target changed for \"%@\"", relativePath];
         }
 
-        return [WSKErrorResponse responseWithServerError:(WSKServerErrorHTTPStatusCode)status underlyingError:error message:@"Failed deleting \"%@\"", relativePath];
+        WSKResponse *const finalFailure = validate();
+
+        if (finalFailure) {
+            return finalFailure;
+        }
+
+        // Atomic from the client's point of view, and answering with an errno so a lost race reads as
+        // one: the removability walk above vets a SNAPSHOT, which cannot close a window against a
+        // second client writing into the tree. See WSKRemoveItemAtPath.
+        int failure = 0;
+
+        if (!WSKRemoveItemAtPath(absolutePath, &failure)) {
+            NSInteger const status = WSKStatusCodeForRemovalErrno(failure);
+            NSError *const error = WSKMakePosixError(failure);
+
+            if (status < 500) {
+                return [WSKErrorResponse responseWithClientError:(WSKClientErrorHTTPStatusCode)status message:@"Failed deleting \"%@\": %s", relativePath, strerror(failure)];
+            }
+
+            return [WSKErrorResponse responseWithServerError:(WSKServerErrorHTTPStatusCode)status underlyingError:error message:@"Failed deleting \"%@\"", relativePath];
+        }
     }
 
     if ([self.delegate respondsToSelector:@selector(davServer:didDeleteItemAtPath:)]) {
@@ -1260,53 +1287,66 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Creating directory \"%@\" is not permitted", relativePath];
     }
 
-    // RFC 4918 §9.3.1: a URL that already identifies a resource MUST answer 405, not a 5xx.
-    // createDirectoryAtPath:withIntermediateDirectories:NO reports EEXIST as
-    // NSFileWriteFileExistsError, which WSKServerErrorStatusCodeForError does not recognise, so it
-    // fell through to 500 — and "MKCOL each ancestor, treat 405 as already-exists" is how every
-    // client creates a tree, so a 5xx reads as "the server broke" and the whole copy aborts.
-    // Keyed on the RESOLVED path so it asks about the same entry creation will attempt, and placed
-    // after the permission checks so an existing item the caller may not touch still reports the
-    // refusal rather than its existence. Tested against an existing FILE as well as a collection:
-    // §9.3.1 says "resource", not "collection", and both took the 500 branch.
-    if ([[NSFileManager defaultManager] fileExistsAtPath:absolutePath]) {
-        return _MethodNotAllowed(request, @"Collection \"%@\" already exists", relativePath);
-    }
+    @synchronized(_resourceMutationLock) {
+        BOOL hidden = NO;
+        NSString *const currentPath = [self _resolvedPathForRelativePath:relativePath hidden:&hidden];
 
-    NSError *error = nil;
+        if (hidden || ![currentPath isEqualToString:absolutePath]) {
+            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Collection destination changed for %@", relativePath];
+        }
 
-    if (![[NSFileManager defaultManager] createDirectoryAtPath:absolutePath withIntermediateDirectories:NO attributes:nil error:&error]) {
-        // The preflight above cannot close the window between asking and creating, so an entry
-        // that appears in it must still answer 405 rather than the 500 the mapping would give.
-        for (NSError *candidate = error; candidate != nil; candidate = candidate.userInfo[NSUnderlyingErrorKey]) {
-            BOOL const cocoaExists = [candidate.domain isEqualToString:NSCocoaErrorDomain] && (candidate.code == NSFileWriteFileExistsError);
-            BOOL const posixExists = [candidate.domain isEqualToString:NSPOSIXErrorDomain] && (candidate.code == EEXIST);
+        if (![[NSFileManager defaultManager] fileExistsAtPath:[absolutePath stringByDeletingLastPathComponent] isDirectory:&isDirectory] || !isDirectory) {
+            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Conflict message:@"Missing intermediate collection(s) for %@", relativePath];
+        }
 
-            if (cocoaExists || posixExists) {
-                return _MethodNotAllowed(request, @"Collection \"%@\" already exists", relativePath);
+        // RFC 4918 §9.3.1: a URL that already identifies a resource MUST answer 405, not a 5xx.
+        // createDirectoryAtPath:withIntermediateDirectories:NO reports EEXIST as
+        // NSFileWriteFileExistsError, which WSKServerErrorStatusCodeForError does not recognise, so it
+        // fell through to 500 — and "MKCOL each ancestor, treat 405 as already-exists" is how every
+        // client creates a tree, so a 5xx reads as "the server broke" and the whole copy aborts.
+        // Keyed on the RESOLVED path so it asks about the same entry creation will attempt, and placed
+        // after the permission checks so an existing item the caller may not touch still reports the
+        // refusal rather than its existence. Tested against an existing FILE as well as a collection:
+        // §9.3.1 says "resource", not "collection", and both took the 500 branch.
+        if ([[NSFileManager defaultManager] fileExistsAtPath:absolutePath]) {
+            return _MethodNotAllowed(request, @"Collection \"%@\" already exists", relativePath);
+        }
+
+        NSError *error = nil;
+
+        if (![[NSFileManager defaultManager] createDirectoryAtPath:absolutePath withIntermediateDirectories:NO attributes:nil error:&error]) {
+            // The preflight above cannot close the window between asking and creating, so an entry
+            // that appears in it must still answer 405 rather than the 500 the mapping would give.
+            for (NSError *candidate = error; candidate != nil; candidate = candidate.userInfo[NSUnderlyingErrorKey]) {
+                BOOL const cocoaExists = [candidate.domain isEqualToString:NSCocoaErrorDomain] && (candidate.code == NSFileWriteFileExistsError);
+                BOOL const posixExists = [candidate.domain isEqualToString:NSPOSIXErrorDomain] && (candidate.code == EEXIST);
+
+                if (cocoaExists || posixExists) {
+                    return _MethodNotAllowed(request, @"Collection \"%@\" already exists", relativePath);
+                }
+            }
+
+            return [WSKErrorResponse responseWithServerError:WSKServerErrorStatusCodeForError(error) underlyingError:error message:@"Failed creating directory \"%@\"", relativePath];
+        }
+
+#ifdef __WEBSERVERKIT_ENABLE_TESTING__
+        NSString *const creationDateHeader = request.headers[@"X-WebServerKit-CreationDate"];
+
+        if (creationDateHeader) {
+            NSDate *const date = WSKParseISO8601(creationDateHeader);
+
+            if (!date || ![[NSFileManager defaultManager] setAttributes:@{NSFileCreationDate: date} ofItemAtPath:absolutePath error:&error]) {
+                // This step runs AFTER the collection exists, so returning without removing it
+                // tells the client the method failed while the retry gets 405 because the
+                // collection is there. "A refused transaction leaves nothing behind" applies to
+                // the failure paths too.
+                [[NSFileManager defaultManager] removeItemAtPath:absolutePath error:NULL];
+                return [WSKErrorResponse responseWithServerError:kWSKHTTPStatusCode_InternalServerError underlyingError:error message:@"Failed setting creation date for directory \"%@\"", relativePath];
             }
         }
 
-        return [WSKErrorResponse responseWithServerError:WSKServerErrorStatusCodeForError(error) underlyingError:error message:@"Failed creating directory \"%@\"", relativePath];
-    }
-
-#ifdef __WEBSERVERKIT_ENABLE_TESTING__
-    NSString *const creationDateHeader = request.headers[@"X-WebServerKit-CreationDate"];
-
-    if (creationDateHeader) {
-        NSDate *const date = WSKParseISO8601(creationDateHeader);
-
-        if (!date || ![[NSFileManager defaultManager] setAttributes:@{NSFileCreationDate: date} ofItemAtPath:absolutePath error:&error]) {
-            // This step runs AFTER the collection exists, so returning without removing it
-            // tells the client the method failed while the retry gets 405 because the
-            // collection is there. "A refused transaction leaves nothing behind" applies to
-            // the failure paths too.
-            [[NSFileManager defaultManager] removeItemAtPath:absolutePath error:NULL];
-            return [WSKErrorResponse responseWithServerError:kWSKHTTPStatusCode_InternalServerError underlyingError:error message:@"Failed setting creation date for directory \"%@\"", relativePath];
-        }
-    }
-
 #endif
+    }
 
     if ([self.delegate respondsToSelector:@selector(davServer:didCreateDirectoryAtPath:)]) {
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -1456,90 +1496,122 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
     srcAbsolutePath = resolvedSrcPath;
     dstAbsolutePath = resolvedDstPath;
 
-    BOOL isDirectory;
+    __block BOOL srcIsDirectory = NO;
+    __block BOOL existing = NO;
+    // Authorization may yield to another writer. Reuse these checks under the mutation lock,
+    // including destination policy: the source and destination can both change in that window.
+    WSKResponse * (^validate)(void) = ^WSKResponse * {
+        BOOL isDirectory;
 
-    if (![[NSFileManager defaultManager] fileExistsAtPath:[dstAbsolutePath stringByDeletingLastPathComponent] isDirectory:&isDirectory] || !isDirectory) {
-        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Conflict message:@"Invalid destination \"%@\"", dstRelativePath];
-    }
-
-    // The extension allow-list applies to files, not directories, so derive that from
-    // the SOURCE item. The previous code reused the destination-parent's isDirectory
-    // (always a directory), so `!isDirectory` was always false and the extension check
-    // never ran on COPY/MOVE — letting an allowed file be renamed to any extension.
-    BOOL srcIsDirectory = NO;
-
-    // The named entry, not what it points at — a dangling alias is a thing this verb can move, and
-    // is the ordinary end state of publish-by-symlink. See _NamedEntryExistsAtPath.
-    if (!_NamedEntryExistsAtPath(srcAbsolutePath, &srcIsDirectory)) {
-        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", srcRelativePath];
-    }
-
-    NSString *const srcName = [srcAbsolutePath lastPathComponent];
-
-    if (srcIsHidden || (!srcIsDirectory && ![self _checkFileExtension:srcName])) {
-        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"%@ from \"%@\" is not allowed", isMove ? @"Moving" : @"Copying", srcRelativePath];
-    }
-
-    NSString *const dstName = [dstAbsolutePath lastPathComponent];
-
-    if (dstIsHidden || (!srcIsDirectory && ![self _checkFileExtension:dstName])) {
-        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"%@ to \"%@\" is not allowed", isMove ? @"Moving" : @"Copying", dstRelativePath];
-    }
-
-    // The precondition names the resource the Request-URI addresses, i.e. the SOURCE.
-    WSKResponse *const preconditionFailure = [self _preconditionFailureForRequest:request atPath:srcAbsolutePath];
-
-    if (preconditionFailure) {
-        return preconditionFailure;
-    }
-
-    NSString *const overwriteHeader = request.headers[@"Overwrite"];
-    BOOL dstIsDirectory = NO;
-    // Likewise for the destination: a dangling alias sitting there EXISTS, so Overwrite decides
-    // whether it may be replaced. Read as absent it produced 403 from renamex_np's EEXIST with
-    // Overwrite: T, and 403 rather than the owed 412 without.
-    BOOL const existing = _NamedEntryExistsAtPath(dstAbsolutePath, &dstIsDirectory);
-
-    if (existing && ((isMove && !_HeaderTokenIs(overwriteHeader, @"T")) || (!isMove && _HeaderTokenIs(overwriteHeader, @"F")))) {
-        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_PreconditionFailed message:@"Destination \"%@\" already exists", dstRelativePath];
-    }
-
-    // The SOURCE has to clear the same bar as a DELETE of it would, and for the same reason: a
-    // client told it may not touch "Coll/sub/secret.pem" must not be able to relocate or
-    // duplicate that file by naming its PARENT — a recursive operation doing what a direct
-    // request refuses. Deliberately vetted for COPY too, which destroys nothing: duplicating a
-    // file the client may not read is still acting on it.
-    //
-    // The COST, accepted and pinned by the test: a collection holding anything outside the
-    // allow-list becomes unmovable, not merely undeletable — exactly the cost already accepted
-    // for DELETE, and the inconsistency was the defect.
-    if (srcIsDirectory) {
-        NSString *const unvettable = [self _firstUnvettableItemAtPath:srcAbsolutePath isDirectory:YES];
-
-        if (unvettable) {
-            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"%@ \"%@\" is not allowed: it contains \"%@\"", isMove ? @"Moving" : @"Copying", srcRelativePath, unvettable];
-        }
-    }
-
-    // An overwrite destroys the destination just as a DELETE would, so it has to clear the same
-    // bar. The two extension checks above cannot stand in for this: both are skipped when the
-    // source is a collection, and the destination form only ever judges a *name*, which says
-    // nothing about what a collection named "Backup.txt" contains. Checked here, before any
-    // filesystem work, so a refusal leaves the destination exactly as it was.
-    if (existing) {
-        NSString *const undeletable = [self _firstUnvettableItemAtPath:dstAbsolutePath isDirectory:dstIsDirectory];
-
-        if (undeletable) {
-            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"%@ to \"%@\" is not allowed: it would destroy \"%@\"", isMove ? @"Moving" : @"Copying", dstRelativePath, undeletable];
+        if (![[NSFileManager defaultManager] fileExistsAtPath:[dstAbsolutePath stringByDeletingLastPathComponent] isDirectory:&isDirectory] || !isDirectory) {
+            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Conflict message:@"Invalid destination \"%@\"", dstRelativePath];
         }
 
-        // The overwrite removes the destination, so it inherits the partial-removal problem
-        // too — without this, a failed operation AND a gutted destination.
-        NSString *const unremovable = WSKFirstUnremovableItemAtPath(dstAbsolutePath);
+        // The extension allow-list applies to files, not directories, so derive that from
+        // the SOURCE item. The previous code reused the destination-parent's isDirectory
+        // (always a directory), so `!isDirectory` was always false and the extension check
+        // never ran on COPY/MOVE — letting an allowed file be renamed to any extension.
 
-        if (unremovable) {
-            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"%@ to \"%@\" is not allowed: \"%@\" cannot be removed", isMove ? @"Moving" : @"Copying", dstRelativePath, unremovable];
+        // The named entry, not what it points at — a dangling alias is a thing this verb can move, and
+        // is the ordinary end state of publish-by-symlink. See _NamedEntryExistsAtPath.
+        if (!_NamedEntryExistsAtPath(srcAbsolutePath, &srcIsDirectory)) {
+            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", srcRelativePath];
         }
+
+        NSString *const srcName = [srcAbsolutePath lastPathComponent];
+
+        if (srcIsHidden || (!srcIsDirectory && ![self _checkFileExtension:srcName])) {
+            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"%@ from \"%@\" is not allowed", isMove ? @"Moving" : @"Copying", srcRelativePath];
+        }
+
+        NSString *const dstName = [dstAbsolutePath lastPathComponent];
+
+        if (dstIsHidden || (!srcIsDirectory && ![self _checkFileExtension:dstName])) {
+            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"%@ to \"%@\" is not allowed", isMove ? @"Moving" : @"Copying", dstRelativePath];
+        }
+
+        // The precondition names the resource the Request-URI addresses, i.e. the SOURCE.
+        WSKResponse *const preconditionFailure = [self _preconditionFailureForRequest:request atPath:srcAbsolutePath];
+
+        if (preconditionFailure) {
+            return preconditionFailure;
+        }
+
+        NSString *const overwriteHeader = request.headers[@"Overwrite"];
+        BOOL dstIsDirectory = NO;
+        // Likewise for the destination: a dangling alias sitting there EXISTS, so Overwrite decides
+        // whether it may be replaced. Read as absent it produced 403 from renamex_np's EEXIST with
+        // Overwrite: T, and 403 rather than the owed 412 without.
+        existing = _NamedEntryExistsAtPath(dstAbsolutePath, &dstIsDirectory);
+
+        if (existing && ((isMove && !_HeaderTokenIs(overwriteHeader, @"T")) || (!isMove && _HeaderTokenIs(overwriteHeader, @"F")))) {
+            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_PreconditionFailed message:@"Destination \"%@\" already exists", dstRelativePath];
+        }
+
+        // The SOURCE has to clear the same bar as a DELETE of it would, and for the same reason: a
+        // client told it may not touch "Coll/sub/secret.pem" must not be able to relocate or
+        // duplicate that file by naming its PARENT — a recursive operation doing what a direct
+        // request refuses. Deliberately vetted for COPY too, which destroys nothing: duplicating a
+        // file the client may not read is still acting on it.
+        //
+        // The COST, accepted and pinned by the test: a collection holding anything outside the
+        // allow-list becomes unmovable, not merely undeletable — exactly the cost already accepted
+        // for DELETE, and the inconsistency was the defect.
+        if (srcIsDirectory) {
+            NSString *const unvettable = [self _firstUnvettableItemAtPath:srcAbsolutePath isDirectory:YES];
+
+            if (unvettable) {
+                return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"%@ \"%@\" is not allowed: it contains \"%@\"", isMove ? @"Moving" : @"Copying", srcRelativePath, unvettable];
+            }
+        }
+
+        // An overwrite destroys the destination just as a DELETE would, so it has to clear the same
+        // bar. The two extension checks above cannot stand in for this: both are skipped when the
+        // source is a collection, and the destination form only ever judges a *name*, which says
+        // nothing about what a collection named "Backup.txt" contains. Checked here, before any
+        // filesystem work, so a refusal leaves the destination exactly as it was.
+        if (existing) {
+            NSString *const undeletable = [self _firstUnvettableItemAtPath:dstAbsolutePath isDirectory:dstIsDirectory];
+
+            if (undeletable) {
+                return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"%@ to \"%@\" is not allowed: it would destroy \"%@\"", isMove ? @"Moving" : @"Copying", dstRelativePath, undeletable];
+            }
+
+            // The overwrite removes the destination, so it inherits the partial-removal problem
+            // too — without this, a failed operation AND a gutted destination.
+            NSString *const unremovable = WSKFirstUnremovableItemAtPath(dstAbsolutePath);
+
+            if (unremovable) {
+                return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"%@ to \"%@\" is not allowed: \"%@\" cannot be removed", isMove ? @"Moving" : @"Copying", dstRelativePath, unremovable];
+            }
+        }
+
+        // Reject a MOVE/COPY whose destination resolves to the source file itself — an exact
+        // self-move, or a case-only rename on a case-insensitive volume (different path
+        // strings, one underlying inode). Replacing the "destination" below would otherwise
+        // destroy the source, i.e. the only copy of the file. RFC 4918 forbids this.
+        if ([self _fileAtPath:srcAbsolutePath isSameAsPath:dstAbsolutePath]) {
+            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"%@ \"%@\" onto itself is not allowed", isMove ? @"Moving" : @"Copying", srcRelativePath];
+        }
+
+        // Refuse a copy or move into the source's own subtree, which RFC 4918 §9.8.5 requires
+        // to be a 403. Without it -[NSFileManager copyItemAtPath:] creates the destination
+        // inside the tree it is still walking and re-enters it, nesting directories until a
+        // path exceeds PATH_MAX. The copy then fails — and its own cleanup fails for the same
+        // reason — so a request that answers 403 still leaves ~250 nested directories in the
+        // share that the server can no longer delete through its own API. Checked before the
+        // staging path is derived, since a staging sibling of the destination is inside the
+        // source too.
+        if (_PathIsInsideDirectoryOnDisk(dstAbsolutePath, srcAbsolutePath)) {
+            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"%@ \"%@\" into its own subtree \"%@\" is not allowed", isMove ? @"Moving" : @"Copying", srcRelativePath, dstRelativePath];
+        }
+
+        return nil;
+    };
+    WSKResponse *const initialFailure = validate();
+
+    if (initialFailure) {
+        return initialFailure;
     }
 
     if (isMove) {
@@ -1555,94 +1627,93 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
     NSError *error = nil;
     NSFileManager *const fileManager = [NSFileManager defaultManager];
 
-    // Reject a MOVE/COPY whose destination resolves to the source file itself — an exact
-    // self-move, or a case-only rename on a case-insensitive volume (different path
-    // strings, one underlying inode). Replacing the "destination" below would otherwise
-    // destroy the source, i.e. the only copy of the file. RFC 4918 forbids this.
-    if ([self _fileAtPath:srcAbsolutePath isSameAsPath:dstAbsolutePath]) {
-        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"%@ \"%@\" onto itself is not allowed", isMove ? @"Moving" : @"Copying", srcRelativePath];
-    }
+    // COPY must keep its source tree stable while staging; a final stat of the collection
+    // cannot detect replacement of an arbitrary descendant. MOVE also keeps rollback protected.
+    @synchronized(_resourceMutationLock) {
+        BOOL sourceHidden = NO;
+        BOOL destinationHidden = NO;
+        NSString *const currentSource = [self _namedEntryPathForRelativePath:srcRelativePath hidden:&sourceHidden];
+        NSString *const currentDestination = [self _namedEntryPathForRelativePath:dstRelativePath hidden:&destinationHidden];
 
-    // Refuse a copy or move into the source's own subtree, which RFC 4918 §9.8.5 requires
-    // to be a 403. Without it -[NSFileManager copyItemAtPath:] creates the destination
-    // inside the tree it is still walking and re-enters it, nesting directories until a
-    // path exceeds PATH_MAX. The copy then fails — and its own cleanup fails for the same
-    // reason — so a request that answers 403 still leaves ~250 nested directories in the
-    // share that the server can no longer delete through its own API. Checked before the
-    // staging path is derived, since a staging sibling of the destination is inside the
-    // source too.
-    if (_PathIsInsideDirectoryOnDisk(dstAbsolutePath, srcAbsolutePath)) {
-        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"%@ \"%@\" into its own subtree \"%@\" is not allowed", isMove ? @"Moving" : @"Copying", srcRelativePath, dstRelativePath];
-    }
-
-    // Overwriting is only reachable when the precondition check above permitted it (MOVE
-    // needs Overwrite:T, COPY needs Overwrite!=F). Build the replacement under a staging
-    // name rather than removing the destination first: copying a tree takes as long as the
-    // tree is big, and a failure part way through the old destroy-then-create left the
-    // client with neither the old item nor a whole new one.
-    // Staged unconditionally. With `existing ? ... : nil`, a destination that looked absent made
-    // writePath the destination itself — so the cleanup below, written for "a failed tree copy
-    // leaves a partial tree behind", recursively removed whatever occupied that name by the time
-    // the copy failed (a collection another client just created; a pre-existing dangling symlink,
-    // which -fileExistsAtPath: reports as absent because it follows links).
-    //
-    // Staging always means writePath is never a path this request did not create, so the cleanup
-    // is safe by construction rather than by the caller remembering which branch it is in. The
-    // swap then decides whether replacing is allowed: `expecting` is NULL when nothing was
-    // vetted, which makes it EXCLUSIVE, so an item that appeared in the window survives and the
-    // request refuses. Staging unconditionally WITHOUT the exclusive swap is worse than the
-    // defect — it moves the destruction into the swap's fallback and answers 201.
-    struct stat vettedDst;
-    BOOL const haveVettedDst = existing && (lstat([dstAbsolutePath fileSystemRepresentation], &vettedDst) == 0);
-    NSString *const stagingPath = _StagingPathForPath(dstAbsolutePath);
-    NSString *const writePath = stagingPath;
-
-    if (isMove) {
-        if (![fileManager moveItemAtPath:srcAbsolutePath toPath:writePath error:&error]) {
-            // A full volume is not a permission problem, and 403 tells the client it is never
-            // allowed to do this rather than that there is no room for it right now.
-            if (WSKServerErrorStatusCodeForError(error) == kWSKHTTPStatusCode_InsufficientStorage) {
-                return [WSKErrorResponse responseWithServerError:kWSKHTTPStatusCode_InsufficientStorage underlyingError:error message:@"Failed moving \"%@\" to \"%@\"", srcRelativePath, dstRelativePath];
-            }
-
-            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden underlyingError:error message:@"Failed moving \"%@\" to \"%@\"", srcRelativePath, dstRelativePath];
+        if (sourceHidden || destinationHidden || ![currentSource isEqualToString:srcAbsolutePath] || ![currentDestination isEqualToString:dstAbsolutePath]) {
+            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Source or destination changed for %@", request.method];
         }
-    } else if (shallowCopy && srcIsDirectory) {
-        // The collection without its members. Built under the same staging name and swapped in by
-        // the same exclusive path as every other spelling, so the destination is replaced only if
-        // it was vetted — a separate "just mkdir it" shortcut here would sidestep that.
-        // Deliberately NOT applied to a plain file: it has no internal members, so Depth: 0 and
-        // Depth: infinity mean the same thing and copying the bytes is the only sensible reading.
-        if (![fileManager createDirectoryAtPath:writePath withIntermediateDirectories:NO attributes:nil error:&error]) {
-            if (WSKServerErrorStatusCodeForError(error) == kWSKHTTPStatusCode_InsufficientStorage) {
-                return [WSKErrorResponse responseWithServerError:kWSKHTTPStatusCode_InsufficientStorage underlyingError:error message:@"Failed copying \"%@\" to \"%@\"", srcRelativePath, dstRelativePath];
-            }
 
-            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden underlyingError:error message:@"Failed copying \"%@\" to \"%@\"", srcRelativePath, dstRelativePath];
+        WSKResponse *const finalFailure = validate();
+
+        if (finalFailure) {
+            return finalFailure;
         }
-    } else {
-        if (![fileManager copyItemAtPath:srcAbsolutePath toPath:writePath error:&error]) {
-            [fileManager removeItemAtPath:writePath error:NULL];  // A failed tree copy leaves a partial tree behind.
 
-            if (WSKServerErrorStatusCodeForError(error) == kWSKHTTPStatusCode_InsufficientStorage) {
-                return [WSKErrorResponse responseWithServerError:kWSKHTTPStatusCode_InsufficientStorage underlyingError:error message:@"Failed copying \"%@\" to \"%@\"", srcRelativePath, dstRelativePath];
-            }
+        // Overwriting is only reachable when the precondition check above permitted it (MOVE
+        // needs Overwrite:T, COPY needs Overwrite!=F). Build the replacement under a staging
+        // name rather than removing the destination first: copying a tree takes as long as the
+        // tree is big, and a failure part way through the old destroy-then-create left the
+        // client with neither the old item nor a whole new one.
+        // Staged unconditionally. With `existing ? ... : nil`, a destination that looked absent made
+        // writePath the destination itself — so the cleanup below, written for "a failed tree copy
+        // leaves a partial tree behind", recursively removed whatever occupied that name by the time
+        // the copy failed (a collection another client just created; a pre-existing dangling symlink,
+        // which -fileExistsAtPath: reports as absent because it follows links).
+        //
+        // Staging always means writePath is never a path this request did not create, so the cleanup
+        // is safe by construction rather than by the caller remembering which branch it is in. The
+        // swap then decides whether replacing is allowed: `expecting` is NULL when nothing was
+        // vetted, which makes it EXCLUSIVE, so an item that appeared in the window survives and the
+        // request refuses. Staging unconditionally WITHOUT the exclusive swap is worse than the
+        // defect — it moves the destruction into the swap's fallback and answers 201.
+        struct stat vettedDst;
+        BOOL const haveVettedDst = existing && (lstat([dstAbsolutePath fileSystemRepresentation], &vettedDst) == 0);
+        NSString *const stagingPath = _StagingPathForPath(dstAbsolutePath);
+        NSString *const writePath = stagingPath;
 
-            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden underlyingError:error message:@"Failed copying \"%@\" to \"%@\"", srcRelativePath, dstRelativePath];
-        }
-    }
-
-    if (![self _replaceItemAtPath:dstAbsolutePath withStagedItemAtPath:stagingPath expecting:(haveVettedDst ? &vettedDst : NULL)error:&error]) {
-        // The swap is the only step that can fail with the replacement already built, so
-        // unwind it: put a MOVE's source back rather than stranding it under the staging
-        // name, and drop a COPY's staged duplicate. Either way the destination is intact.
         if (isMove) {
-            [fileManager moveItemAtPath:stagingPath toPath:srcAbsolutePath error:NULL];
+            if (![fileManager moveItemAtPath:srcAbsolutePath toPath:writePath error:&error]) {
+                // A full volume is not a permission problem, and 403 tells the client it is never
+                // allowed to do this rather than that there is no room for it right now.
+                if (WSKServerErrorStatusCodeForError(error) == kWSKHTTPStatusCode_InsufficientStorage) {
+                    return [WSKErrorResponse responseWithServerError:kWSKHTTPStatusCode_InsufficientStorage underlyingError:error message:@"Failed moving \"%@\" to \"%@\"", srcRelativePath, dstRelativePath];
+                }
+
+                return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden underlyingError:error message:@"Failed moving \"%@\" to \"%@\"", srcRelativePath, dstRelativePath];
+            }
+        } else if (shallowCopy && srcIsDirectory) {
+            // The collection without its members. Built under the same staging name and swapped in by
+            // the same exclusive path as every other spelling, so the destination is replaced only if
+            // it was vetted — a separate "just mkdir it" shortcut here would sidestep that.
+            // Deliberately NOT applied to a plain file: it has no internal members, so Depth: 0 and
+            // Depth: infinity mean the same thing and copying the bytes is the only sensible reading.
+            if (![fileManager createDirectoryAtPath:writePath withIntermediateDirectories:NO attributes:nil error:&error]) {
+                if (WSKServerErrorStatusCodeForError(error) == kWSKHTTPStatusCode_InsufficientStorage) {
+                    return [WSKErrorResponse responseWithServerError:kWSKHTTPStatusCode_InsufficientStorage underlyingError:error message:@"Failed copying \"%@\" to \"%@\"", srcRelativePath, dstRelativePath];
+                }
+
+                return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden underlyingError:error message:@"Failed copying \"%@\" to \"%@\"", srcRelativePath, dstRelativePath];
+            }
         } else {
-            [fileManager removeItemAtPath:stagingPath error:NULL];
+            if (![fileManager copyItemAtPath:srcAbsolutePath toPath:writePath error:&error]) {
+                [fileManager removeItemAtPath:writePath error:NULL];  // A failed tree copy leaves a partial tree behind.
+
+                if (WSKServerErrorStatusCodeForError(error) == kWSKHTTPStatusCode_InsufficientStorage) {
+                    return [WSKErrorResponse responseWithServerError:kWSKHTTPStatusCode_InsufficientStorage underlyingError:error message:@"Failed copying \"%@\" to \"%@\"", srcRelativePath, dstRelativePath];
+                }
+
+                return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden underlyingError:error message:@"Failed copying \"%@\" to \"%@\"", srcRelativePath, dstRelativePath];
+            }
         }
 
-        return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden underlyingError:error message:@"Failed replacing \"%@\"", dstRelativePath];
+        if (![self _replaceItemAtPath:dstAbsolutePath withStagedItemAtPath:stagingPath expecting:(haveVettedDst ? &vettedDst : NULL)error:&error]) {
+            // The swap is the only step that can fail with the replacement already built, so
+            // unwind it: put a MOVE's source back rather than stranding it under the staging
+            // name, and drop a COPY's staged duplicate. Either way the destination is intact.
+            if (isMove) {
+                [fileManager moveItemAtPath:stagingPath toPath:srcAbsolutePath error:NULL];
+            } else {
+                [fileManager removeItemAtPath:stagingPath error:NULL];
+            }
+
+            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden underlyingError:error message:@"Failed replacing \"%@\"", dstRelativePath];
+        }
     }
 
     if (isMove) {
@@ -2030,9 +2101,22 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
 
     // Serialize with PUT's property snapshot and replacement, as well as other patches.
     @synchronized(_resourceMutationLock) {
-        if (![[NSFileManager defaultManager] fileExistsAtPath:absolutePath]) {
+        BOOL hidden = NO;
+        NSString *const currentPath = [self _resolvedPathForRelativePath:relativePath hidden:&hidden];
+
+        if (hidden || ![currentPath isEqualToString:absolutePath]) {
+            xmlFreeDoc(document);
+            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Property target changed for %@", relativePath];
+        }
+
+        if (![[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory]) {
             xmlFreeDoc(document);
             return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
+        }
+
+        if (!isDirectory && ![self _checkFileExtension:[absolutePath lastPathComponent]]) {
+            xmlFreeDoc(document);
+            return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Setting properties on %@ is not allowed", relativePath];
         }
 
         WSKResponse *const finalPreconditionFailure = [self _preconditionFailureForRequest:request atPath:absolutePath];
