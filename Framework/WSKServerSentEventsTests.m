@@ -4,6 +4,7 @@
 // the pass that added each test.
 
 #import "TestsSupport.h"
+#import "WSKWebUploaderSSEResponse.h"
 
 // The uploader declares its NSFilePresenter conformance in a class extension inside its own .m, so
 // the selector is invisible here. Re-declaring the conformance — and nothing else — is enough to
@@ -31,6 +32,51 @@
 @end
 
 @implementation WSKServerSentEventsTests
+
+// A conditional response can replace a stream before the connection opens its body. The
+// registry's teardown callback must still run when that unused response is released.
+- (void)testUnopenedSSEResponseReleasesItsOwnerOnDeallocation {
+    __block NSUInteger closeCount = 0;
+    __block NSUInteger readCount = 0;
+    __weak WSKWebUploaderSSEResponse *weakResponse = nil;
+    @autoreleasepool {
+        WSKWebUploaderSSEResponse *const response =
+            [[WSKWebUploaderSSEResponse alloc] initWithContentType:@"text/event-stream"
+                                                  asyncStreamBlock:^(WSKBodyReaderCompletionBlock completion) {
+                                                      readCount += 1;
+                                                      completion([NSData data], nil);
+                                                  }];
+        weakResponse = response;
+        response.onClose = ^{ closeCount += 1; };
+        XCTAssertEqual(closeCount, (NSUInteger)0);
+        XCTAssertNotNil(response);
+    }
+    XCTAssertNil(weakResponse);
+    XCTAssertEqual(closeCount, (NSUInteger)1, @"discarding an unopened response must release its registered channel");
+    XCTAssertEqual(readCount, (NSUInteger)0, @"discarding a response must not start its stream");
+}
+
+- (void)testClosedSSEResponseDoesNotNotifyItsOwnerAgainOnDeallocation {
+    __block NSUInteger closeCount = 0;
+    __weak WSKWebUploaderSSEResponse *weakResponse = nil;
+    @autoreleasepool {
+        WSKWebUploaderSSEResponse *const response =
+            [[WSKWebUploaderSSEResponse alloc] initWithContentType:@"text/event-stream"
+                                                  asyncStreamBlock:^(WSKBodyReaderCompletionBlock completion) {
+                                                      completion([NSData data], nil);
+                                                  }];
+        weakResponse = response;
+        response.onClose = ^{ closeCount += 1; };
+        [response prepareForReading];
+        XCTAssertTrue([response performOpen:NULL]);
+        [response performClose];
+        [response performClose];
+        XCTAssertEqual(closeCount, (NSUInteger)1);
+        XCTAssertNil(response.onClose);
+    }
+    XCTAssertNil(weakResponse);
+    XCTAssertEqual(closeCount, (NSUInteger)1, @"normal completion and deallocation must not release a channel twice");
+}
 
 // Reaches -_relativePathForAbsolutePath: by selector: it is private to the uploader, and the SSE
 // path derivation is exactly what this suite exists to pin. Lived on the old monolithic Tests
@@ -315,6 +361,45 @@
 
     [server stop];
     [fm removeItemAtPath:dir error:NULL];
+}
+
+// The handler registers a channel before HTTP conditions replace its response. Without
+// unopened-response teardown, completed conditional GETs fill all 16 channel slots until
+// two heartbeat ticks later. A real subscriber must be accepted immediately after the burst.
+- (void)_assertConditionalEventsReleaseChannels:(NSString *)condition status:(NSInteger)status {
+    NSFileManager *const fm = [NSFileManager defaultManager];
+    NSString *const dir = MakeTempDirectory();
+    WSKWebUploader *const server = [[WSKWebUploader alloc] initWithUploadDirectory:dir];
+    NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    NSString *const headers = @"Host: localhost\r\nAccept: text/event-stream\r\nSec-Fetch-Dest: empty\r\nSec-Fetch-Mode: cors\r\nSec-Fetch-Site: same-origin\r\n";
+    NSTimeInterval const started = NSProcessInfo.processInfo.systemUptime;
+    for (NSUInteger i = 0; i < 24; ++i) {
+        NSString *const request = [NSString stringWithFormat:@"GET /events HTTP/1.1\r\n%@%@\r\n\r\n", headers, condition];
+        NSString *const reply = SendRawRequestUntilMarker(server.port, request, @"\r\n\r\n", 1.0);
+        BOOL const hasExpectedStatus = ReplyHasStatus(reply, status);
+        XCTAssertTrue(hasExpectedStatus, @"conditional request %lu must complete with %ld: %@", (unsigned long)i, (long)status, reply);
+        if (!hasExpectedStatus) {
+            break;  // Do not repeat stream reads if conditional handling itself regresses.
+        }
+    }
+    NSString *const acceptedMarker = @"retry: 3000\n\n";
+    NSString *const request = [NSString stringWithFormat:@"GET /events HTTP/1.1\r\n%@\r\n", headers];
+    NSString *const reply = SendRawRequestUntilMarker(server.port, request, acceptedMarker, 3.0);
+    XCTAssertTrue(ReplyHasStatus(reply, 200), @"%@", reply);
+    XCTAssertFalse([reply containsString:@"retry: 30000"], @"discarded responses must not exhaust the channel registry: %@", reply);
+    XCTAssertTrue([reply containsString:acceptedMarker], @"a genuine subscriber must still receive the accepted stream preamble: %@", reply);
+    XCTAssertLessThan(NSProcessInfo.processInfo.systemUptime - started, 10.0, @"the heartbeat reaper must not be what freed these channels");
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+- (void)testIfMatchRefusalOnEventsDoesNotConsumeSSEChannels {
+    [self _assertConditionalEventsReleaseChannels:@"If-Match: \"not-current\"" status:412];
+}
+
+- (void)testIfNoneMatchWildcardOnEventsDoesNotConsumeSSEChannels {
+    [self _assertConditionalEventsReleaseChannels:@"If-None-Match: *" status:304];
 }
 
 // The Sec-Fetch-* checks that keep a cross-origin page from pinning every SSE channel fail

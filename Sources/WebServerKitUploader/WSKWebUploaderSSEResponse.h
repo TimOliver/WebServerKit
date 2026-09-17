@@ -45,7 +45,9 @@ NS_ASSUME_NONNULL_BEGIN
  *  ticks. Sixteen abandoned streams therefore denied live updates to a real client for 45-60s — a
  *  browser tab navigating away is enough, no hostility required.
  *
- *  `onClose` fires exactly once, after the superclass has closed.
+ *  `onClose` fires exactly once, after the superclass has closed or when an unopened response is
+ *  discarded. The callback runs on the thread closing or releasing the response; its owner must
+ *  dispatch to its own queue if needed.
  */
 @interface WSKWebUploaderSSEResponse : WSKStreamedResponse
 @property (nonatomic, copy, nullable) dispatch_block_t onClose;

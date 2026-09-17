@@ -2863,6 +2863,8 @@ static inline BOOL _CompareResources(NSString *responseETag, NSString *requestET
 }
 
 - (WSKResponse *)overrideResponse:(WSKResponse *)response forRequest:(WSKRequest *)request {
+    BOOL const isRead = [request.method isEqualToString:@"GET"] || [request.method isEqualToString:@"HEAD"];
+
     // RFC 9110 §13.2.1: If-Match and If-Unmodified-Since apply to EVERY method, and a false
     // condition owes 412 — on a GET as much as on a PUT. The write verbs evaluate them in
     // WSKWebDAVServer BEFORE acting, and their success responses carry no entity tag, which is
@@ -2873,8 +2875,7 @@ static inline BOOL _CompareResources(NSString *responseETag, NSString *requestET
     // If-None-Match / If-Modified-Since pair below. The failure this closes was safe-direction —
     // the current representation was served to a client asking for exactly-that-representation —
     // but "the server ignored my precondition" is still the wrong answer to give.
-    if ((response.statusCode >= 200) && (response.statusCode < 300) &&
-        ([request.method isEqualToString:@"GET"] || [request.method isEqualToString:@"HEAD"])) {
+    if ((response.statusCode >= 200) && (response.statusCode < 300) && isRead) {
         NSString *const ifMatch = request.headers[@"If-Match"];
         NSString *const ifUnmodifiedSince = request.headers[@"If-Unmodified-Since"];
 
@@ -2898,16 +2899,39 @@ static inline BOOL _CompareResources(NSString *responseETag, NSString *requestET
         }
     }
 
+    // A successful read identifies a current representation even when it has no ETag or body.
+    // With a nil tag, the shared matcher can match only the standalone wildcard (including OWS).
+    // Keep this read-only: a PUT that just created a resource must not become a post-write 412.
+    NSString *const ifNoneMatch = request.ifNoneMatch;
+    BOOL const readWildcardMatches = isRead && (ifNoneMatch != nil) && WSKEntityTagMatchesList(YES, nil, ifNoneMatch, NO);
+
     if ((response.statusCode >= 200) && (response.statusCode < 300) &&
-        _CompareResources(response.eTag, request.ifNoneMatch, response.lastModifiedDate, request.ifModifiedSince)) {
+        (readWildcardMatches || _CompareResources(response.eTag, ifNoneMatch, response.lastModifiedDate, request.ifModifiedSince))) {
         NSInteger code = kWSKHTTPStatusCode_PreconditionFailed;
-        if ([request.method isEqualToString:@"HEAD"] || [request.method isEqualToString:@"GET"]) {
+        if (isRead) {
             code = kWSKHTTPStatusCode_NotModified;
         }
         WSKResponse *const newResponse = [WSKResponse responseWithStatusCode:code];
         newResponse.cacheControlMaxAge = response.cacheControlMaxAge;
         newResponse.lastModifiedDate = response.lastModifiedDate;
         newResponse.eTag = response.eTag;
+
+        if (code == kWSKHTTPStatusCode_NotModified) {
+            // RFC 9110 section 15.4.5: preserve the cache metadata a 200 would have sent.
+            // ETag and Last-Modified already use typed properties above. Enumerate because the
+            // additional-header dictionary's lookup is case-sensitive, unlike HTTP field names.
+            // Do not copy arbitrary headers: payload framing or encoding from the discarded
+            // response must not leak into this bodyless 304 (nor cache policy into a 412).
+            [response.additionalHeaders enumerateKeysAndObjectsUsingBlock:^(NSString *header, NSString *value, BOOL *stop) {
+                NSString *const name = [header lowercaseString];
+
+                if ([name isEqualToString:@"cache-control"] || [name isEqualToString:@"content-location"] ||
+                    [name isEqualToString:@"date"] || [name isEqualToString:@"expires"] || [name isEqualToString:@"vary"]) {
+                    [newResponse setValue:value forAdditionalHeader:header];
+                }
+            }];
+        }
+
         WSK_DCHECK(newResponse);
         return newResponse;
     }

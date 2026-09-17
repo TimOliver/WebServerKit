@@ -33,6 +33,18 @@
 
 @implementation WSKWebUploaderSSEResponse
 
+- (void)dealloc {
+    // Conditional handling can replace a response before it is opened. There is no body reader
+    // to close in that case, but the owner still needs to release the registered SSE channel.
+    dispatch_block_t const block = _onClose;
+
+    _onClose = nil;
+
+    if (block) {
+        block();
+    }
+}
+
 - (void)close {
     // Taken once: -close is reachable more than once, and the block drops the channel.
     dispatch_block_t const block = _onClose;

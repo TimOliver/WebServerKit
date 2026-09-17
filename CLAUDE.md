@@ -355,6 +355,22 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   issue-time withholding is the WHOLE protection; do not try to "strengthen" the resume-path
   check. PROPFIND's `getlastmodified` shares the seal.
 - `If-Modified-Since` uses EXACT equality; `If-None-Match` takes precedence (RFC 9110).
+- Generated 304 responses preserve custom `Cache-Control`, `Content-Location`, `Date`, `Expires`
+  and `Vary` fields, selecting additional-header names case-insensitively. ETag and Last-Modified
+  still use their typed response properties. Never copy the entire additional-header dictionary:
+  payload framing, encoding and unrelated headers do not belong on the substituted bodyless
+  response. The cache-header copy applies only to 304, not to a generated 412.
+- `If-None-Match: *` matches successful GET/HEAD representations even without an ETag or body.
+  The shared tag matcher recognizes the standalone wildcard with whitespace; explicit tag
+  comparison and If-Modified-Since precedence stay as before. The new wildcard path is read-only:
+  judging a successful DAV creation afterwards would turn its 201 into a 412 after writing.
+  Verified 2026-09-17: baseline failures pin missing custom 304 metadata and wildcard 200s;
+  five regression tests cover mixed-case fields, bodyless and mapped/explicit HEAD, conditional
+  precedence, keep-alive framing and DAV creation. Combined with four discarded-SSE regressions,
+  `Run-Tests.sh` passes 272 ASan tests, eight traces, Mac/iOS/tvOS Release and both Swift consumers.
+  A live Release probe completes 2,800 responses over 40 reused connections across four clients,
+  verifies 200 MiB by SHA-256, and returns descriptors to baseline with no reserved bytes or active
+  body readers. All 803 opened readers close; discarded 304/HEAD payloads never open a reader.
 - **Only step 2 of RFC 9110 §13.2.2 is conditional on step 1.** If-Unmodified-Since is skipped
   when If-Match is present; If-None-Match (step 3) is evaluated whatever the earlier steps
   answered. The WebDAV write-verb chain was one `else if` ladder, so a SATISFIED If-Match
@@ -763,6 +779,12 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   call `-close` on the channel (heartbeat reap, `-stop`, disabling SSE, losing the
   registration race) or a retain cycle strands the connection forever. The channel dies with
   its connection.
+- `WSKWebUploaderSSEResponse` also runs its owner cleanup once if discarded before opening,
+  including substitution by a conditional 304 or 412. Normal close consumes the callback;
+  deallocation invokes only a remaining callback, never the unopened body reader's close.
+  Without this fallback, conditional requests filled all 16 slots until heartbeat reclamation.
+  Regression bursts of 24 requests per condition must immediately admit a real subscriber,
+  before the heartbeat can conceal a leak; explicit close followed by deallocation notifies once.
 - One stream per BROWSER via Web Locks + BroadcastChannel; `kMaxSSEChannels` (16) bounds
   browsers, not tabs (six per-tab EventSources once deadlocked the whole UI). HTTP LAN origins
   lack Web Locks because they are not secure contexts; missing or rejected sharing APIs use
@@ -989,13 +1011,14 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
     Opt-in gzip reuses the identity representation's strong ETag and no response ever carries
     `Vary: Accept-Encoding`; outbound gzip is applied on the handler's flag without consulting
     `Accept-Encoding` at all. 415 for an undecodable `Content-Encoding` omits `Accept-Encoding`.
-  - *Cache metadata.* A 304 drops the 200's `Cache-Control`, `Vary` and additionalHeaders (the
-    `cacheControlMaxAge` copied onto it is dead code); non-2xx responses carry no cache metadata,
-    leaving error pages heuristically cacheable; `public` is emitted unconditionally with any
-    positive max-age; max-age formats through an `(int)` cast (negative above INT_MAX).
-  - *Conditionals.* If-None-Match is never evaluated when the 2xx carries no ETag, so
-    `If-None-Match: *` cannot fire against an ETag-less representation. On non-GET/HEAD the read
-    -side check runs AFTER the handler, so a 412 can follow a side effect that already happened.
+  - *Cache metadata.* Generated 304 cache fields are now preserved (see Validators), including
+    custom directives and `Vary`; arbitrary additional headers deliberately are not. Other
+    non-2xx responses carry no cache metadata, leaving error pages heuristically cacheable;
+    `public` is emitted unconditionally with any positive max-age; max-age formats through an
+    `(int)` cast (negative above INT_MAX).
+  - *Conditionals.* ETag-less wildcard GET/HEAD is fixed (see Validators). On non-GET/HEAD the
+    response-side check still runs AFTER the handler, so a 412 can follow a side effect that
+    already happened; that check still requires an ETag for If-None-Match matching.
     An unsatisfiable Range bypasses precondition evaluation entirely (416 even when If-Match
     fails).
   - *exFAT + an NFC-spelled name: DELETE answers 500 and the file SURVIVES.* Found 2026-09-02 by

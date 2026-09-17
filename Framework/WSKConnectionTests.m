@@ -48,6 +48,53 @@ static NSString *ReadLifetimeResponseHeaders(int fd) {
     return [[NSString alloc] initWithData:received encoding:NSUTF8StringEncoding];
 }
 
+static NSDictionary<NSString *, NSString *> *CacheRevalidationHeaders(NSString *reply) {
+    NSMutableDictionary<NSString *, NSString *> *const headers = [NSMutableDictionary dictionary];
+    for (NSString *const line in [reply componentsSeparatedByString:@"\r\n"]) {
+        if (line.length == 0) {
+            break;
+        }
+        NSRange const colon = [line rangeOfString:@":"];
+        if (colon.location != NSNotFound) {
+            NSString *const name = [[line substringToIndex:colon.location] lowercaseString];
+            headers[name] = [[line substringFromIndex:NSMaxRange(colon)] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        }
+    }
+    return headers;
+}
+
+static NSString *CacheRevalidationBody(NSString *reply) {
+    if (reply == nil) {
+        return nil;
+    }
+    NSRange const separator = [reply rangeOfString:@"\r\n\r\n"];
+    return separator.location == NSNotFound ? nil : [reply substringFromIndex:NSMaxRange(separator)];
+}
+
+static WSKDataResponse *CacheRevalidationResponse(NSString *cacheControl, BOOL tagged) {
+    WSKDataResponse *const response = [WSKDataResponse responseWithText:@"CACHED-BODY"];
+    response.cacheControlMaxAge = 3600;
+    response.eTag = tagged ? @"\"cache-v1\"" : nil;
+    response.lastModifiedDate = WSKParseRFC822(@"Sun, 06 Nov 1994 08:49:37 GMT");
+    // Public custom cache headers override the convenience max-age setting on the 200 and
+    // must survive generated 304s too. Primary validators use their supported typed API.
+    NSDictionary<NSString *, NSString *> *const headers = @{
+        @"cAcHe-CoNtRoL": cacheControl,
+        @"vArY": @"Accept-Encoding, Accept-Language",
+        @"eXpIrEs": @"Tue, 01 Jan 2030 00:00:00 GMT",
+        @"cOnTeNt-LoCaTiOn": @"/canonical/cache.txt",
+        @"dAtE": @"Wed, 01 Jan 2020 00:00:00 GMT",
+        @"Content-Language": @"en",
+        @"Content-Disposition": @"attachment; filename=cache.txt",
+        @"Proxy-Connection": @"keep-alive",
+        @"X-Representation-Only": @"must-not-copy"
+    };
+    for (NSString *const name in headers) {
+        [response setValue:headers[name] forAdditionalHeader:name];
+    }
+    return response;
+}
+
 @interface WSKConnectionTests : XCTestCase
 @end
 
@@ -1222,6 +1269,169 @@ static NSString *ReadLifetimeResponseHeaders(int fd) {
         XCTAssertEqualObjects(cacheControlOf(revalidated), expected, @"the 304 must carry the same Cache-Control the 200 did (%@ base): %@", base, revalidated);
     }
 
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// A generated 304 updates the stored response's cache metadata. Losing a custom private or
+// no-store directive and substituting the convenience property's public max-age changes policy.
+- (void)testGeneratedNotModifiedPreservesCustomCacheMetadataOnly {
+    for (NSString *const policy in @[@"private, no-store", @"private, max-age=60, must-revalidate"]) {
+        WSKWebServer *const server = [[WSKWebServer alloc] init];
+        [server addHandlerForMethod:@"GET"
+                               path:@"/cache"
+                       requestClass:[WSKRequest class]
+                       processBlock:^WSKResponse *(WSKRequest *request) {
+                           return CacheRevalidationResponse(policy, YES);
+                       }];
+        NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+        XCTAssertTrue([server startWithOptions:options error:NULL]);
+        NSString *const full = SendRawRequest(server.port, @"GET /cache HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        NSDictionary<NSString *, NSString *> *const fullHeaders = CacheRevalidationHeaders(full);
+        XCTAssertTrue(ReplyHasStatus(full, 200), @"%@", full);
+        XCTAssertEqualObjects(CacheRevalidationBody(full), @"CACHED-BODY");
+        NSDictionary<NSString *, NSString *> *const expected = @{
+            @"cache-control": policy,
+            @"vary": @"Accept-Encoding, Accept-Language",
+            @"expires": @"Tue, 01 Jan 2030 00:00:00 GMT",
+            @"content-location": @"/canonical/cache.txt",
+            @"date": @"Wed, 01 Jan 2020 00:00:00 GMT",
+            @"etag": @"\"cache-v1\"",
+            @"last-modified": @"Sun, 06 Nov 1994 08:49:37 GMT"
+        };
+        for (NSString *const name in expected) {
+            XCTAssertEqualObjects(fullHeaders[name], expected[name], @"the fixture's 200 must publish %@", name);
+        }
+        for (NSString *const method in @[@"GET", @"HEAD"]) {
+            NSString *const request = [NSString stringWithFormat:@"%@ /cache HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: \"cache-v1\"\r\nConnection: close\r\n\r\n", method];
+            NSString *const reply = SendRawRequest(server.port, request);
+            NSDictionary<NSString *, NSString *> *const headers = CacheRevalidationHeaders(reply);
+            XCTAssertTrue(ReplyHasStatus(reply, 304), @"%@", reply);
+            XCTAssertEqualObjects(CacheRevalidationBody(reply), @"", @"a generated 304 must have no payload");
+            for (NSString *const name in expected) {
+                XCTAssertEqualObjects(headers[name], expected[name], @"%@ revalidation must preserve %@", method, name);
+            }
+            for (NSString *const name in @[@"content-type", @"content-length", @"transfer-encoding", @"content-encoding", @"content-language", @"content-disposition", @"proxy-connection", @"x-representation-only", @"keep-alive"]) {
+                XCTAssertNil(headers[name], @"a generated 304 must not copy %@", name);
+            }
+            XCTAssertEqualObjects([headers[@"connection"] lowercaseString], @"close");
+        }
+        [server stop];
+    }
+}
+
+// Wildcard matching asks whether a representation exists, not whether the handler supplies
+// validators or a body. Both mapped and explicit HEAD must make the same decision as GET.
+- (void)testIfNoneMatchWildcardRevalidatesETaglessGetAndMappedHead {
+    for (NSString *const fixture in @[@"body", @"bodyless", @"explicit HEAD"]) {
+        BOOL const hasBody = [fixture isEqualToString:@"body"];
+        BOOL const explicitHEAD = [fixture isEqualToString:@"explicit HEAD"];
+        WSKWebServer *const server = [[WSKWebServer alloc] init];
+        [server addHandlerForMethod:explicitHEAD ? @"HEAD" : @"GET"
+                               path:@"/cache"
+                       requestClass:[WSKRequest class]
+                       processBlock:^WSKResponse *(WSKRequest *request) {
+                           WSKResponse *const response = hasBody ? CacheRevalidationResponse(@"private, no-store", NO) : [WSKResponse responseWithStatusCode:200];
+                           response.lastModifiedDate = nil;
+                           return response;
+                       }];
+        NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES, WSKOption_AutomaticallyMapHEADToGET: @(!explicitHEAD)};
+        XCTAssertTrue([server startWithOptions:options error:NULL]);
+        NSArray<NSString *> *const methods = explicitHEAD ? @[@"HEAD"] : @[@"GET", @"HEAD"];
+        for (NSString *const method in methods) {
+            NSString *const unconditional = [NSString stringWithFormat:@"%@ /cache HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", method];
+            NSString *const full = SendRawRequest(server.port, unconditional);
+            NSString *const expectedBody = (hasBody && [method isEqualToString:@"GET"]) ? @"CACHED-BODY" : @"";
+            XCTAssertTrue(ReplyHasStatus(full, 200), @"%@ %@ must be an existing successful representation: %@", fixture, method, full);
+            XCTAssertEqualObjects(CacheRevalidationBody(full), expectedBody);
+            XCTAssertNil(CacheRevalidationHeaders(full)[@"etag"]);
+            XCTAssertNil(CacheRevalidationHeaders(full)[@"last-modified"]);
+            for (NSString *const wildcard in @[@"*", @"\t * \t"]) {
+                NSString *const request = [NSString stringWithFormat:@"%@ /cache HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: %@\r\nConnection: close\r\n\r\n", method, wildcard];
+                NSString *const reply = SendRawRequest(server.port, request);
+                XCTAssertTrue(ReplyHasStatus(reply, 304), @"%@ %@ without validators still has a current representation: %@", fixture, method, reply);
+                XCTAssertEqualObjects(CacheRevalidationBody(reply), @"", @"wildcard revalidation must suppress the body");
+                XCTAssertNil(CacheRevalidationHeaders(reply)[@"etag"]);
+                XCTAssertNil(CacheRevalidationHeaders(reply)[@"last-modified"]);
+            }
+        }
+        [server stop];
+    }
+}
+
+- (void)testETaglessRevalidationPreservesPrecedenceAndErrorResponses {
+    WSKWebServer *const server = [[WSKWebServer alloc] init];
+    [server addHandlerForMethod:@"GET"
+                           path:@"/cache"
+                   requestClass:[WSKRequest class]
+                   processBlock:^WSKResponse *(WSKRequest *request) {
+                       return CacheRevalidationResponse(@"private, no-store", NO);
+                   }];
+    NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    NSString *const explicitMiss = SendRawRequest(server.port, @"GET /cache HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: \"unknown\"\r\nIf-Modified-Since: Sun, 06 Nov 1994 08:49:37 GMT\r\nConnection: close\r\n\r\n");
+    XCTAssertTrue(ReplyHasStatus(explicitMiss, 200), @"an explicit tag cannot match an ETagless response, and must suppress the matching date: %@", explicitMiss);
+    XCTAssertEqualObjects(CacheRevalidationBody(explicitMiss), @"CACHED-BODY");
+    NSString *const dateMatch = SendRawRequest(server.port, @"GET /cache HTTP/1.1\r\nHost: localhost\r\nIf-Modified-Since: Sun, 06 Nov 1994 08:49:37 GMT\r\nConnection: close\r\n\r\n");
+    XCTAssertTrue(ReplyHasStatus(dateMatch, 304), @"the date really matches when If-None-Match is absent: %@", dateMatch);
+    NSString *const failedMatch = SendRawRequest(server.port, @"GET /cache HTTP/1.1\r\nHost: localhost\r\nIf-Match: \"unknown\"\r\nIf-None-Match: *\r\nConnection: close\r\n\r\n");
+    XCTAssertTrue(ReplyHasStatus(failedMatch, 412), @"If-Match failure takes precedence over wildcard revalidation: %@", failedMatch);
+    NSString *const missing = SendRawRequest(server.port, @"GET /missing HTTP/1.1\r\nHost: localhost\r\nIf-Match: \"unknown\"\r\nIf-None-Match: *\r\nConnection: close\r\n\r\n");
+    XCTAssertTrue(ReplyHasStatus(missing, 404), @"a failed resource lookup must retain its status: %@", missing);
+    [server stop];
+}
+
+- (void)testWildcardNotModifiedKeepsTheConnectionFramedForTheNextBody {
+    WSKWebServer *const server = [[WSKWebServer alloc] init];
+    [server addHandlerForMethod:@"GET"
+                           path:@"/cache"
+                   requestClass:[WSKRequest class]
+                   processBlock:^WSKResponse *(WSKRequest *request) {
+                       return CacheRevalidationResponse(@"private, no-store", NO);
+                   }];
+    NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES, WSKOption_ConnectionKeepAliveTimeout: @5.0};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    NSArray<NSString *> *const requests = @[
+        @"GET /cache HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: *\r\n\r\n",
+        @"HEAD /cache HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: *\r\n\r\n",
+        @"GET /cache HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    ];
+    NSArray<NSString *> *const replies = SendRawRequestsOnOneConnection(server.port, requests);
+    XCTAssertEqual(replies.count, (NSUInteger)3, @"both 304s and the following 200 must share one connection");
+    if (replies.count == 3) {
+        for (NSUInteger index = 0; index < 2; index++) {
+            NSString *const reply = replies[index];
+            NSDictionary<NSString *, NSString *> *const headers = CacheRevalidationHeaders(reply);
+            XCTAssertTrue(ReplyHasStatus(reply, 304), @"%@", reply);
+            XCTAssertEqualObjects(CacheRevalidationBody(reply), @"");
+            XCTAssertEqualObjects(headers[@"cache-control"], @"private, no-store");
+            XCTAssertEqualObjects(headers[@"vary"], @"Accept-Encoding, Accept-Language");
+            XCTAssertEqualObjects([headers[@"connection"] lowercaseString], @"keep-alive");
+            XCTAssertNil(headers[@"content-length"]);
+            XCTAssertNil(headers[@"transfer-encoding"]);
+        }
+        XCTAssertTrue(ReplyHasStatus(replies[2], 200), @"%@", replies[2]);
+        XCTAssertEqualObjects(CacheRevalidationBody(replies[2]), @"CACHED-BODY", @"the following body must be neither omitted nor prefixed with stale response bytes");
+    }
+    [server stop];
+}
+
+// DAV evaluates write preconditions before committing. The read-side wildcard fix must not
+// reinterpret its already-successful create response as a post-mutation precondition failure.
+- (void)testReadWildcardRevalidationDoesNotRejectSuccessfulDAVCreation {
+    NSFileManager *const fm = [NSFileManager defaultManager];
+    NSString *const dir = MakeTempDirectory();
+    NSString *const path = [dir stringByAppendingPathComponent:@"created.txt"];
+    WSKWebDAVServer *const server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    NSString *const created = SendRawRequest(server.port, @"PUT /created.txt HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: *\r\nContent-Length: 5\r\n\r\nFIRST");
+    XCTAssertTrue(ReplyHasStatus(created, 201), @"a committed creation must remain successful: %@", created);
+    XCTAssertEqualObjects([NSData dataWithContentsOfFile:path], UTF8Data(@"FIRST"));
+    NSString *const refused = SendRawRequest(server.port, @"PUT /created.txt HTTP/1.1\r\nHost: localhost\r\nIf-None-Match: *\r\nContent-Length: 6\r\n\r\nSECOND");
+    XCTAssertTrue(ReplyHasStatus(refused, 412), @"the existing resource still fails the write precondition: %@", refused);
+    XCTAssertEqualObjects([NSData dataWithContentsOfFile:path], UTF8Data(@"FIRST"));
+    XCTAssertEqualObjects([fm contentsOfDirectoryAtPath:dir error:NULL], @[@"created.txt"]);
     [server stop];
     [fm removeItemAtPath:dir error:NULL];
 }
