@@ -35,10 +35,282 @@
 }
 @end
 
+@interface WSKWebServer (WSKBonjourFailureProbe)
+- (CFNetServiceRef)_createBonjourServiceWithName:(NSString *)name type:(NSString *)type port:(SInt32)port CF_RETURNS_RETAINED;
+- (CFNetServiceRef)_copyBonjourService:(CFNetServiceRef)service CF_RETURNS_RETAINED;
+- (BOOL)_setBonjourClient:(CFNetServiceRef)service callback:(CFNetServiceClientCallBack)callback context:(CFNetServiceClientContext *)context;
+- (BOOL)_registerBonjourService:(CFNetServiceRef)service error:(CFStreamError *)error;
+- (BOOL)_resolveBonjourService:(CFNetServiceRef)service error:(CFStreamError *)error;
+@end
+
+// Retain exactly the callback's CF context and service, as CF may do while dispatching an
+// event. Keeping these beyond stop exercises the real production callback's lifetime guard.
+@interface WSKBonjourCallbackProbe : NSObject
+@property (nonatomic, strong) id service;
+@property (nonatomic, strong) id context;
+@property (nonatomic) CFNetServiceClientCallBack callback;
+- (void)deliverError:(CFStreamError)error;
+@end
+
+@implementation WSKBonjourCallbackProbe
+- (void)deliverError:(CFStreamError)error {
+    self.callback((__bridge CFNetServiceRef)self.service, &error, (__bridge void *)self.context);
+}
+@end
+
+@interface WSKBonjourFailureProbeServer : WSKWebServer
+@property (nonatomic, copy) NSString *failureStage;
+@property (nonatomic) NSUInteger clientAttempts;
+@property (nonatomic) NSUInteger registrationAttempts;
+@property (nonatomic) NSUInteger resolutionAttempts;
+@property (nonatomic, strong) NSMutableArray<WSKBonjourCallbackProbe *> *callbacks;
+@end
+
+@implementation WSKBonjourFailureProbeServer
+- (instancetype)init {
+    if ((self = [super init])) {
+        _callbacks = [NSMutableArray array];
+    }
+    return self;
+}
+- (CFNetServiceRef)_createBonjourServiceWithName:(NSString *)name type:(NSString *)type port:(SInt32)port {
+    return [self.failureStage isEqualToString:@"registration creation"] ? NULL : [super _createBonjourServiceWithName:name type:type port:port];
+}
+- (CFNetServiceRef)_copyBonjourService:(CFNetServiceRef)service {
+    return [self.failureStage isEqualToString:@"resolution creation"] ? NULL : [super _copyBonjourService:service];
+}
+- (BOOL)_setBonjourClient:(CFNetServiceRef)service callback:(CFNetServiceClientCallBack)callback context:(CFNetServiceClientContext *)context {
+    self.clientAttempts += 1;
+    NSString *const stage = self.clientAttempts == 1 ? @"registration client" : @"resolution client";
+    if ([self.failureStage isEqualToString:stage]) {
+        return NO;
+    }
+    BOOL const installed = [super _setBonjourClient:service callback:callback context:context];
+    if (installed) {
+        WSKBonjourCallbackProbe *const probe = [[WSKBonjourCallbackProbe alloc] init];
+        probe.service = (__bridge id)service;
+        probe.context = (__bridge id)context->info;
+        probe.callback = callback;
+        [self.callbacks addObject:probe];
+    }
+    return installed;
+}
+- (BOOL)_registerBonjourService:(CFNetServiceRef)service error:(CFStreamError *)error {
+    self.registrationAttempts += 1;
+    if ([self.failureStage isEqualToString:@"registration start"]) {
+        *error = (CFStreamError){kCFStreamErrorDomainNetServices, kCFNetServicesErrorBadArgument};
+        return NO;
+    }
+    return YES;  // No actual advertisement: the test drives the captured CF callbacks.
+}
+- (BOOL)_resolveBonjourService:(CFNetServiceRef)service error:(CFStreamError *)error {
+    self.resolutionAttempts += 1;
+    if ([self.failureStage isEqualToString:@"resolution start"]) {
+        *error = (CFStreamError){kCFStreamErrorDomainPOSIX, EACCES};
+        return NO;
+    }
+    return YES;
+}
+@end
+
+@interface WSKBonjourFailureDelegate : NSObject <WSKDelegate>
+@property (nonatomic, strong) NSMutableArray<NSError *> *errors;
+@property (nonatomic) NSUInteger successCount;
+@property (nonatomic) BOOL allCallbacksOnMain;
+@property (nonatomic, copy) void (^onFailure)(WSKWebServer *server);
+@end
+
+@implementation WSKBonjourFailureDelegate
+- (instancetype)init {
+    if ((self = [super init])) {
+        _errors = [NSMutableArray array];
+        _allCallbacksOnMain = YES;
+    }
+    return self;
+}
+- (void)webServer:(WSKWebServer *)server didFailBonjourRegistrationWithError:(NSError *)error {
+    self.allCallbacksOnMain &= [NSThread isMainThread];
+    // These synchronously enter _stateQueue: calling the delegate under it would deadlock.
+    (void)server.isRunning;
+    (void)server.serverURL;
+    (void)server.bonjourServerURL;
+    [self.errors addObject:error];
+    if (self.onFailure) {
+        self.onFailure(server);
+    }
+}
+- (void)webServerDidCompleteBonjourRegistration:(WSKWebServer *)server {
+    self.allCallbacksOnMain &= [NSThread isMainThread];
+    (void)server.bonjourServerURL;
+    self.successCount += 1;
+}
+@end
+
 @interface WSKServerLifecycleTests : XCTestCase
 @end
 
 @implementation WSKServerLifecycleTests
+
+- (NSDictionary *)_bonjourProbeOptions {
+    return @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES, WSKOption_BonjourName: @"WSK failure regression"};
+}
+
+- (void)testBonjourInitializationAndStartFailuresReachDelegateWithoutStoppingHTTP {
+    for (NSString *const stage in @[@"registration creation", @"resolution creation", @"registration client", @"resolution client", @"registration start", @"resolution start"]) {
+        WSKBonjourFailureProbeServer *const server = [[WSKBonjourFailureProbeServer alloc] init];
+        server.failureStage = stage;
+        WSKBonjourFailureDelegate *const delegate = [[WSKBonjourFailureDelegate alloc] init];
+        server.delegate = delegate;
+        [server addDefaultHandlerForMethod:@"GET"
+                              requestClass:[WSKRequest class]
+                              processBlock:^WSKResponse *(WSKRequest *request) {
+                                  return [WSKDataResponse responseWithText:@"still serving"];
+                              }];
+        NSError *startError = nil;
+        XCTAssertTrue([server startWithOptions:[self _bonjourProbeOptions] error:&startError], @"%@", stage);
+        XCTAssertNil(startError, @"Bonjour failure is asynchronous and does not fail HTTP startup");
+        if ([stage isEqualToString:@"resolution start"] && server.callbacks.count == 2) {
+            [server.callbacks[0] deliverError:(CFStreamError){0}];
+        }
+        [self _drainMainQueueForTimeoutOptionCallbacks];
+        XCTAssertEqual(delegate.errors.count, (NSUInteger)1, @"%@ must report exactly one failure", stage);
+        NSError *const error = delegate.errors.firstObject;
+        NSString *const operation = [stage hasPrefix:@"registration"] ? @"registration" : @"resolution";
+        XCTAssertEqualObjects(error.userInfo[@"BonjourOperation"], operation);
+        BOOL const resolutionStart = [stage isEqualToString:@"resolution start"];
+        XCTAssertEqualObjects(error.domain, resolutionStart ? NSPOSIXErrorDomain : NSNetServicesErrorDomain);
+        NSInteger const expectedCode = resolutionStart ? EACCES : ([stage isEqualToString:@"registration start"] ? kCFNetServicesErrorBadArgument : kCFNetServicesErrorUnknown);
+        XCTAssertEqual(error.code, expectedCode);
+        XCTAssertEqualObjects(error.userInfo[@"CFStreamErrorDomain"], @(resolutionStart ? kCFStreamErrorDomainPOSIX : kCFStreamErrorDomainNetServices));
+        XCTAssertTrue(delegate.allCallbacksOnMain);
+        XCTAssertEqual(delegate.successCount, (NSUInteger)0);
+        XCTAssertTrue(server.isRunning);
+        NSString *const reply = SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        XCTAssertTrue(ReplyHasStatus(reply, 200), @"%@", reply);
+        XCTAssertTrue([reply hasSuffix:@"still serving"]);
+        if ([stage hasSuffix:@"client"] || [stage hasSuffix:@"creation"]) {
+            XCTAssertEqual(server.registrationAttempts, (NSUInteger)0, @"client setup failure must never enter CF's synchronous registration mode");
+        }
+        [server stop];
+    }
+}
+
+- (void)testBonjourAsynchronousFailuresPreserveCodesAndReportOnce {
+    for (NSNumber *const resolving in @[@NO, @YES]) {
+        for (NSNumber *const code in @[@(-72008), @(kCFNetServicesErrorTimeout)]) {
+            WSKBonjourFailureProbeServer *const server = [[WSKBonjourFailureProbeServer alloc] init];
+            WSKBonjourFailureDelegate *const delegate = [[WSKBonjourFailureDelegate alloc] init];
+            server.delegate = delegate;
+            XCTAssertTrue([server startWithOptions:[self _bonjourProbeOptions] error:NULL]);
+            XCTAssertEqual(server.callbacks.count, (NSUInteger)2);
+            if (server.callbacks.count == 2) {
+                if (resolving.boolValue) {
+                    [server.callbacks[0] deliverError:(CFStreamError){0}];
+                    XCTAssertEqual(server.resolutionAttempts, (NSUInteger)1);
+                }
+                WSKBonjourCallbackProbe *const callback = server.callbacks[resolving.boolValue ? 1 : 0];
+                CFStreamError const error = {kCFStreamErrorDomainNetServices, code.intValue};
+                [callback deliverError:error];
+                [callback deliverError:error];
+                [server.callbacks[1] deliverError:(CFStreamError){0}];
+            }
+            [self _drainMainQueueForTimeoutOptionCallbacks];
+            XCTAssertEqual(delegate.errors.count, (NSUInteger)1);
+            XCTAssertEqual(delegate.errors.firstObject.code, code.integerValue);
+            XCTAssertEqualObjects(delegate.errors.firstObject.domain, NSNetServicesErrorDomain);
+            XCTAssertEqualObjects(delegate.errors.firstObject.userInfo[@"BonjourOperation"], resolving.boolValue ? @"resolution" : @"registration");
+            XCTAssertEqual(delegate.successCount, (NSUInteger)0, @"terminal failure must not be followed by a stale success");
+            XCTAssertTrue(delegate.allCallbacksOnMain);
+            XCTAssertTrue(server.isRunning);
+            [server stop];
+        }
+    }
+}
+
+- (void)testBonjourCallbacksFromPreviousStartsAreDiscarded {
+    for (NSNumber *const queueFailure in @[@NO, @YES]) {
+        WSKBonjourFailureProbeServer *const server = [[WSKBonjourFailureProbeServer alloc] init];
+        WSKBonjourFailureDelegate *const delegate = [[WSKBonjourFailureDelegate alloc] init];
+        server.delegate = delegate;
+        NSDictionary *const options = [self _bonjourProbeOptions];
+        XCTAssertTrue([server startWithOptions:options error:NULL]);
+        NSArray<WSKBonjourCallbackProbe *> *const previous = [server.callbacks copy];
+        XCTAssertEqual(previous.count, (NSUInteger)2);
+        if (previous.count == 2) {
+            [previous[1] deliverError:(CFStreamError){0}];  // Success is queued but main has not delivered it.
+            if (queueFailure.boolValue) {
+                [previous[0] deliverError:(CFStreamError){kCFStreamErrorDomainNetServices, kCFNetServicesErrorBadArgument}];
+            }
+        }
+        [server stop];
+        [server.callbacks removeAllObjects];
+        XCTAssertTrue([server startWithOptions:options error:NULL]);
+        NSUInteger const resolutionAttempts = server.resolutionAttempts;
+        if (previous.count == 2) {
+            [previous[0] deliverError:(CFStreamError){0}];
+            [previous[1] deliverError:(CFStreamError){kCFStreamErrorDomainNetServices, kCFNetServicesErrorTimeout}];
+        }
+        XCTAssertEqual(server.resolutionAttempts, resolutionAttempts, @"old registration must not resolve the new listener's service");
+        [self _drainMainQueueForTimeoutOptionCallbacks];
+        XCTAssertEqual(delegate.errors.count, (NSUInteger)0);
+        XCTAssertEqual(delegate.successCount, (NSUInteger)0);
+        XCTAssertEqual(server.callbacks.count, (NSUInteger)2);
+        if (server.callbacks.count == 2) {
+            [server.callbacks[0] deliverError:(CFStreamError){0}];
+            [server.callbacks[1] deliverError:(CFStreamError){0}];
+        }
+        [self _drainMainQueueForTimeoutOptionCallbacks];
+        XCTAssertEqual(delegate.successCount, (NSUInteger)1, @"the new listener must still deliver success");
+        if (server.callbacks.count == 2) {
+            [server.callbacks[0] deliverError:(CFStreamError){kCFStreamErrorDomainNetServices, kCFNetServicesErrorUnknown}];
+        }
+        [self _drainMainQueueForTimeoutOptionCallbacks];
+        XCTAssertEqual(delegate.errors.count, (NSUInteger)1, @"publication may fail after a successful resolution");
+        [server stop];
+    }
+}
+
+- (void)testBonjourFailureDelegateCanBeReplacedOrStopTheServer {
+    WSKBonjourFailureProbeServer *const server = [[WSKBonjourFailureProbeServer alloc] init];
+    server.failureStage = @"registration start";
+    WSKBonjourFailureDelegate *const delegate = [[WSKBonjourFailureDelegate alloc] init];
+    WSKPartialDelegate *const partial = [[WSKPartialDelegate alloc] init];
+    server.delegate = delegate;
+    XCTAssertTrue([server startWithOptions:[self _bonjourProbeOptions] error:NULL]);
+    server.delegate = partial;
+    [self _drainMainQueueForTimeoutOptionCallbacks];
+    XCTAssertEqual(delegate.errors.count, (NSUInteger)0, @"do not retain or notify the replaced delegate");
+    [server stop];
+    server.delegate = delegate;
+    delegate.onFailure = ^(WSKWebServer *failedServer) {
+        [failedServer stop];
+    };
+    XCTAssertTrue([server startWithOptions:[self _bonjourProbeOptions] error:NULL]);
+    [self _drainMainQueueForTimeoutOptionCallbacks];
+    XCTAssertEqual(delegate.errors.count, (NSUInteger)1);
+    XCTAssertFalse(server.isRunning, @"delegate stop must complete outside the state queue");
+    XCTAssertTrue(delegate.allCallbacksOnMain);
+    [server stop];  // Also clean up when the deliberately broken notification leaves it running.
+}
+
+- (void)testRetainedBonjourCallbackDoesNotRetainStoppedServer {
+    __weak WSKWebServer *weakServer = nil;
+    NSArray<WSKBonjourCallbackProbe *> *callbacks = nil;
+    @autoreleasepool {
+        WSKBonjourFailureProbeServer *const server = [[WSKBonjourFailureProbeServer alloc] init];
+        weakServer = server;
+        XCTAssertTrue([server startWithOptions:[self _bonjourProbeOptions] error:NULL]);
+        callbacks = [server.callbacks copy];
+        [server stop];
+        [self _drainMainQueueForTimeoutOptionCallbacks];
+    }
+    [self _drainMainQueueForTimeoutOptionCallbacks];
+    XCTAssertNil(weakServer, @"CF retaining an old callback context must not retain the stopped server");
+    XCTAssertEqual(callbacks.count, (NSUInteger)2);
+    for (WSKBonjourCallbackProbe *const callback in callbacks) {
+        [callback deliverError:(CFStreamError){kCFStreamErrorDomainNetServices, kCFNetServicesErrorUnknown}];
+    }
+}
 
 - (void)testWebServer {
     WSKWebServer *server = [[WSKWebServer alloc] init];

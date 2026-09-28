@@ -154,11 +154,14 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
     tested on a real device, because the simulator does not enforce local network privacy** — so
     the Bonjour verification recorded below, being simulator-only, says nothing about it. Declare
     both keys in the tvOS Info.plist anyway: zero cost, and insurance if Apple ever enforces there.
-  - Bonjour registration failure is LOG-ONLY: `webServerDidCompleteBonjourRegistration:` fires only
-    on success, so an app cannot tell "still registering" from "will never register". On iOS the
-    missing-keys case is `kCFNetServicesErrorMissingRequiredConfiguration` (-72008), which is
-    exactly the actionable one — surfacing it would let a client say "grant Local Network access"
-    instead of showing an empty list. Not built; recorded as the obvious next hardening step.
+  - Bonjour failures used to be LOG-ONLY. They now reach the optional
+    `webServer:didFailBonjourRegistrationWithError:` delegate method, including setup,
+    registration and resolution failures. HTTP remains available. The error preserves the
+    underlying domain/code and identifies the phase; apps should distinguish configuration
+    errors from permission denial rather than prescribing a permission change for every error.
+    Delivery is main-thread, outside the state queue, at most once per listener start. Queued
+    notifications from a stopped/restarted attempt are discarded; an immediate setup failure
+    can arrive before `webServerDidStart:`. No automatic retry or advertisement withdrawal.
 - **Finder Network-sidebar presence is a Bonjour type, not a feature**: advertise
   `_webdav._tcp` (+ TXT `path=/`) on a WSKWebDAVServer and NetFS lists the device;
   double-click mounts via mount_webdav. `_http._tcp` only reaches Safari's Bonjour menu.
@@ -831,6 +834,13 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   re-resolves on a miss WITHOUT caching back, and compares against `root + "/"`.
 - `-bonjourName` reads `_registrationService` (the service that actually registered, which
   carries an auto-rename).
+- Bonjour service operations and callback state are confined to `_stateQueue`. Each start
+  has a CF-retained callback token with a weak server, so callbacks retained after cancellation
+  cannot pin a stopped server or affect a replacement listener. Delegate delivery rechecks the
+  token and captures the current weak delegate once on main, after leaving `_stateQueue`.
+  Five deterministic tests cover all setup stages, asynchronous errors and success, stale
+  events/notifications, delegate replacement/reentrant stop, and callback-context release.
+  Notification, generation-guard, stale-service, and strong-context mutants all fail the tests.
 - **The iOS background task is acquired at the didEnterBackground TRANSITION, iff connected —
   never at connect time** (a browser holding `/events` open used to pin a task through ordinary
   foreground use, tripping the OS's 30 s advisory). Both suspension modes observe the
@@ -888,6 +898,24 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   re-taken on the tuned tree, unchanged.
 - Perspective: Puck's network ceiling (Tailscale over WiFi) is ~30–60 MB/s; the server is not
   the bottleneck. Benchmarks live in the scratch harness (`bench.py` + `wskhost.m`).
+- **Repeatable endurance coverage (2026-09-28):** `Scripts/Endurance/run.py` now checks in
+  the mixed-transfer workload. It owns a loopback-only Release host, separate uploader/DAV
+  shares and isolated Foundation temp storage. Four incomplete uploads must coexist before
+  downloads can complete; hashes, keep-alive reuse, cancellation, If-Range resume and
+  changed-file fallback are checked. Stdio metrics add no HTTP connection. Fixed post-warmup
+  baselines require zero live connections/reservations, no residual files and no FD growth;
+  `phys_footprint` gets an explicit allocator allowance. Ordinary rounds keep the same PID
+  and server instances; lifecycle rounds run afterwards and never reset the baselines.
+  Reports use append-only JSONL samples and a bounded summary. `Run-Tests.sh` adds a short
+  smoke and five fault-fixture checks, including a real-socket transaction-deadline test
+  proven red when a close-framed response prematurely cancels its timer.
+  Measured: 120 seconds, 65 continuous rounds, 528 completed uploads, 132 cancelled uploads,
+  132 resumed downloads, 264 reused connections and 7,952,400,384 hash-verified bytes
+  (counts include warmup and the final lifecycle phase). All 2,532 connections released;
+  running FDs 8→8, stopped FDs 4→4, reserved bytes zero and no temp/staging residue.
+  This is repeatable local evidence, not an overnight or physical-device run. The new Bonjour
+  behavior passes five new ASan regressions within the 283-test suite, eight traces, all
+  platform/Swift builds, and three real Bonjour registration/stop cycles.
 
 ### Style (enforced by `Scripts/lint-objc.py`, run first by Run-Tests.sh)
 
@@ -1114,8 +1142,9 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
     (a no-cors GET with `referrerPolicy: no-referrer` sends neither Origin nor Referer, and the
     Origin check only refuses when an authority was extracted); the `Accept` gate passes when the
     header is ABSENT (zeroed-NSRange shape). The 129th connection at the cap is accepted and hard
-    -closed (usually RST, never an HTTP status). The Bonjour registration callback reads
-    `_resolutionService` on the main thread outside `_stateQueue`. Response-phase progress is
+    -closed (usually RST, never an HTTP status). The Bonjour registration callback's former
+    `_resolutionService` race is fixed with state-queue confinement and per-start callback
+    identity (see Long-lived surfaces). Response-phase progress is
     measured per write-buffer completion, so a reader slower than ~bufferSize/timeout can be cut.
     ~~Promoted to a P1 for Shape A.~~ **Fixed 2026-09-04** — see the invariant under Limits. The
     quantification below stands as the reproduction recipe:

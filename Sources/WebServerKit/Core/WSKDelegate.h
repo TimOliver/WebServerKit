@@ -54,6 +54,30 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)webServerDidCompleteBonjourRegistration:(WSKWebServer *)server;
 
 /**
+ *  Called on the main thread when Bonjour registration or resolution fails to
+ *  initialize, fails to start, or reports an asynchronous error (including a
+ *  resolution timeout). HTTP serving continues; a resolution failure does not
+ *  withdraw an advertisement that already registered. No retry is initiated.
+ *  An initialization failure may be delivered before webServerDidStart:.
+ *
+ *  At most one failure is reported for each listener start, including automatic
+ *  starts after suspension. A later failure may follow a successful registration
+ *  callback. Pending notifications are discarded if their listener has stopped
+ *  or restarted before delivery; a callback already in flight may finish after
+ *  another thread calls stop. Delegate code may read server properties or stop
+ *  the server.
+ *
+ *  The error preserves the CFStreamError code. NetServices, POSIX, and OSStatus
+ *  domains map to NSNetServicesErrorDomain, NSPOSIXErrorDomain, and
+ *  NSOSStatusErrorDomain respectively; other domains use
+ *  "WebServerKitBonjourErrorDomain". The userInfo keys "CFStreamErrorDomain"
+ *  (NSNumber) and "BonjourOperation" ("registration" or "resolution") identify
+ *  the original domain and failing phase. Initialization failures without an
+ *  underlying error use NSNetServicesUnknownError in NSNetServicesErrorDomain.
+ */
+- (void)webServer:(WSKWebServer *)server didFailBonjourRegistrationWithError:(NSError *)error;
+
+/**
  *  This method is called after the NAT port mapping for the server has been
  *  updated.
  *

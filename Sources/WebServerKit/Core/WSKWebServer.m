@@ -129,11 +129,23 @@ static void _ExecuteMainThreadRunLoopSources(void) {
 
 #endif
 
+// CF retains the callback context independently of the listener lifetime. A weak server
+// avoids a service/server cycle; the identity rejects callbacks from a previous start.
+@interface WSKBonjourAttempt : NSObject
+@property (nonatomic, weak) WSKWebServer *server;
+@property (nonatomic) BOOL reportedFailure;  // Accessed only on the server's state queue.
+@end
+
+@implementation WSKBonjourAttempt
+@end
+
 // Private helpers that assume they are already running on _stateQueue. They exist so the
 // public accessors can funnel through that queue without any of them re-entering it.
 @interface WSKWebServer ()
 - (BOOL)_startWithOptions:(NSDictionary<NSString *, id> *)options inBackground:(BOOL)inBackground error:(NSError **)error;
 - (void)_stopWithOptions;
+- (void)_didRegisterBonjourService:(CFNetServiceRef)service error:(CFStreamError)error attempt:(WSKBonjourAttempt *)attempt;
+- (void)_didResolveBonjourService:(CFNetServiceRef)service error:(CFStreamError)error attempt:(WSKBonjourAttempt *)attempt;
 @end
 
 // Same contract, for the helpers implemented alongside their public counterparts in the
@@ -172,6 +184,7 @@ static void _ExecuteMainThreadRunLoopSources(void) {
     CFTimeInterval _disconnectDelay;
     dispatch_source_t _source4;
     dispatch_source_t _source6;
+    WSKBonjourAttempt *_bonjourAttempt;  // Owned by _stateQueue, invalidated before cancelling CF services.
     CFNetServiceRef _registrationService;
     CFNetServiceRef _resolutionService;
     DNSServiceRef _dnsService;
@@ -461,37 +474,116 @@ static void _ExecuteMainThreadRunLoopSources(void) {
 static void _NetServiceRegisterCallBack(CFNetServiceRef service, CFStreamError *error, void *info) {
     WSK_DCHECK([NSThread isMainThread]);
     @autoreleasepool {
-        if (error->error) {
-            WSK_LOG_ERROR(@"Bonjour registration error %i (domain %i)", (int)error->error, (int)error->domain);
-        } else {
-            WSKWebServer *const server = (__bridge WSKWebServer *)info;
-            WSK_LOG_VERBOSE(@"Bonjour registration complete for %@", [server class]);
-
-            // Resolution can fail to start for environmental reasons (mDNSResponder
-            // unavailable, service already cancelled), so log it instead of aborting.
-            if (!CFNetServiceResolveWithTimeout(server->_resolutionService, kBonjourResolutionTimeout, NULL)) {
-                WSK_LOG_ERROR(@"Failed starting Bonjour resolution");
-            }
-        }
+        WSKBonjourAttempt *const attempt = (__bridge WSKBonjourAttempt *)info;
+        WSKWebServer *const server = attempt.server;
+        [server _didRegisterBonjourService:service error:(error ? *error : (CFStreamError){0})attempt:attempt];
     }
 }
 
 static void _NetServiceResolveCallBack(CFNetServiceRef service, CFStreamError *error, void *info) {
     WSK_DCHECK([NSThread isMainThread]);
     @autoreleasepool {
-        if (error->error) {
-            if ((error->domain != kCFStreamErrorDomainNetServices) && (error->error != kCFNetServicesErrorTimeout)) {
-                WSK_LOG_ERROR(@"Bonjour resolution error %i (domain %i)", (int)error->error, (int)error->domain);
-            }
-        } else {
-            WSKWebServer *const server = (__bridge WSKWebServer *)info;
-            WSK_LOG_INFO(@"%@ now locally reachable at %@", [server class], server.bonjourServerURL);
+        WSKBonjourAttempt *const attempt = (__bridge WSKBonjourAttempt *)info;
+        WSKWebServer *const server = attempt.server;
+        [server _didResolveBonjourService:service error:(error ? *error : (CFStreamError){0})attempt:attempt];
+    }
+}
 
-            if ([server.delegate respondsToSelector:@selector(webServerDidCompleteBonjourRegistration:)]) {
-                [server.delegate webServerDidCompleteBonjourRegistration:server];
+// These narrow wrappers keep environment-dependent CF failures testable without publishing
+// real services. Callers hold _stateQueue for every service operation, including initiation.
+- (CFNetServiceRef)_createBonjourServiceWithName:(NSString *)name type:(NSString *)type port:(SInt32)port CF_RETURNS_RETAINED {
+    return CFNetServiceCreate(kCFAllocatorDefault, CFSTR("local."), (__bridge CFStringRef)type, (__bridge CFStringRef)name, port);
+}
+
+- (CFNetServiceRef)_copyBonjourService:(CFNetServiceRef)service CF_RETURNS_RETAINED {
+    return CFNetServiceCreateCopy(kCFAllocatorDefault, service);
+}
+
+- (BOOL)_setBonjourClient:(CFNetServiceRef)service callback:(CFNetServiceClientCallBack)callback context:(CFNetServiceClientContext *)context {
+    return CFNetServiceSetClient(service, callback, context);
+}
+
+- (BOOL)_registerBonjourService:(CFNetServiceRef)service error:(CFStreamError *)error {
+    return CFNetServiceRegisterWithOptions(service, 0, error);
+}
+
+- (BOOL)_resolveBonjourService:(CFNetServiceRef)service error:(CFStreamError *)error {
+    return CFNetServiceResolveWithTimeout(service, kBonjourResolutionTimeout, error);
+}
+
+// Called on _stateQueue. Delivery revalidates the attempt, then leaves that queue before
+// invoking app code, which is allowed to read public state or stop/restart the server.
+- (void)_notifyBonjourAttempt:(WSKBonjourAttempt *)attempt error:(NSError *)error {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        __block BOOL current = NO;
+        dispatch_sync(self->_stateQueue, ^{
+            current = (self->_bonjourAttempt == attempt) && self->_source4 && (error || !attempt.reportedFailure);
+        });
+        if (!current) {
+            return;
+        }
+        id<WSKDelegate> const delegate = self->_delegate;
+        if (error) {
+            if ([delegate respondsToSelector:@selector(webServer:didFailBonjourRegistrationWithError:)]) {
+                [delegate webServer:self didFailBonjourRegistrationWithError:error];
+            }
+        } else if ([delegate respondsToSelector:@selector(webServerDidCompleteBonjourRegistration:)]) {
+            [delegate webServerDidCompleteBonjourRegistration:self];
+        }
+    });
+}
+
+- (void)_reportBonjourError:(CFStreamError)streamError operation:(NSString *)operation {
+    WSKBonjourAttempt *const attempt = _bonjourAttempt;
+    if (!attempt || attempt.reportedFailure) {
+        return;
+    }
+    attempt.reportedFailure = YES;
+    if (!streamError.error) {
+        streamError = (CFStreamError){kCFStreamErrorDomainNetServices, kCFNetServicesErrorUnknown};
+    }
+    NSString *const domain = streamError.domain == kCFStreamErrorDomainNetServices ? NSNetServicesErrorDomain : (streamError.domain == kCFStreamErrorDomainPOSIX ? NSPOSIXErrorDomain : (streamError.domain == kCFStreamErrorDomainMacOSStatus ? NSOSStatusErrorDomain : @"WebServerKitBonjourErrorDomain"));
+    NSString *const description = [NSString stringWithFormat:@"Bonjour %@ failed (error %ld, domain %ld)", operation, (long)streamError.error, (long)streamError.domain];
+    NSError *const error = [NSError errorWithDomain:domain
+                                               code:streamError.error
+                                           userInfo:@{
+                                               NSLocalizedDescriptionKey: description,
+                                               @"BonjourOperation": operation,
+                                               @"CFStreamErrorDomain": @(streamError.domain)
+                                           }];
+    WSK_LOG_ERROR(@"%@", description);
+    [self _notifyBonjourAttempt:attempt error:error];
+}
+
+- (void)_didRegisterBonjourService:(CFNetServiceRef)service error:(CFStreamError)error attempt:(WSKBonjourAttempt *)attempt {
+    dispatch_sync(_stateQueue, ^{
+        if ((self->_bonjourAttempt != attempt) || (service != self->_registrationService) || attempt.reportedFailure) {
+            return;
+        }
+        if (error.error) {
+            [self _reportBonjourError:error operation:@"registration"];
+        } else {
+            WSK_LOG_VERBOSE(@"Bonjour registration complete for %@", [self class]);
+            CFStreamError resolveError = {0};
+            if (![self _resolveBonjourService:self->_resolutionService error:&resolveError]) {
+                [self _reportBonjourError:resolveError operation:@"resolution"];
             }
         }
-    }
+    });
+}
+
+- (void)_didResolveBonjourService:(CFNetServiceRef)service error:(CFStreamError)error attempt:(WSKBonjourAttempt *)attempt {
+    dispatch_sync(_stateQueue, ^{
+        if ((self->_bonjourAttempt != attempt) || (service != self->_resolutionService) || attempt.reportedFailure) {
+            return;
+        }
+        if (error.error) {
+            [self _reportBonjourError:error operation:@"resolution"];
+        } else {
+            WSK_LOG_INFO(@"%@ now locally reachable at %@", [self class], [self _bonjourServerURL]);
+            [self _notifyBonjourAttempt:attempt error:nil];
+        }
+    });
 }
 
 // Reached only from _SocketCallBack's DNSServiceProcessResult, which already holds
@@ -950,17 +1042,11 @@ static inline NSString *_EncodeBase64(NSString *string) {
     WSK_LOG_INFO(@"%@ will answer to host names %@ (and any IP address literal) on port %i", [self class], [[allowedHostNames allObjects] componentsJoinedByString:@", "], (int)_port);
 
     if (bonjourName) {
-        _registrationService = CFNetServiceCreate(kCFAllocatorDefault, CFSTR("local."), (__bridge CFStringRef)bonjourType, (__bridge CFStringRef)(bonjourName.length ? bonjourName : _serverName), (SInt32)_port);
-
+        _bonjourAttempt = [[WSKBonjourAttempt alloc] init];
+        _bonjourAttempt.server = self;
+        _registrationService = [self _createBonjourServiceWithName:(bonjourName.length ? bonjourName : _serverName) type:bonjourType port:(SInt32)_port];
         if (_registrationService) {
-            CFNetServiceClientContext context = {
-                0, (__bridge void *)self, NULL, NULL, NULL};
-
-            CFNetServiceSetClient(_registrationService, _NetServiceRegisterCallBack, &context);
-            CFNetServiceScheduleWithRunLoop(_registrationService, CFRunLoopGetMain(), kCFRunLoopCommonModes);
-            CFStreamError streamError = {
-                0};
-
+            CFNetServiceClientContext context = {0, (__bridge void *)_bonjourAttempt, CFRetain, CFRelease, NULL};
             NSDictionary *const txtDataDictionary = _GetOption(_options, WSKOption_BonjourTXTData, nil);
 
             // Built up in a heap dictionary rather than stack arrays sized from the
@@ -995,18 +1081,23 @@ static inline NSString *_EncodeBase64(NSString *string) {
                 }
             }
 
-            CFNetServiceRegisterWithOptions(_registrationService, 0, &streamError);
-
-            _resolutionService = CFNetServiceCreateCopy(kCFAllocatorDefault, _registrationService);
-
-            if (_resolutionService) {
-                CFNetServiceSetClient(_resolutionService, _NetServiceResolveCallBack, &context);
-                CFNetServiceScheduleWithRunLoop(_resolutionService, CFRunLoopGetMain(), kCFRunLoopCommonModes);
+            _resolutionService = [self _copyBonjourService:_registrationService];
+            if (!_resolutionService) {
+                [self _reportBonjourError:(CFStreamError){0} operation:@"resolution"];
+            } else if (![self _setBonjourClient:_registrationService callback:_NetServiceRegisterCallBack context:&context]) {
+                [self _reportBonjourError:(CFStreamError){0} operation:@"registration"];
+            } else if (![self _setBonjourClient:_resolutionService callback:_NetServiceResolveCallBack context:&context]) {
+                [self _reportBonjourError:(CFStreamError){0} operation:@"resolution"];
             } else {
-                WSK_LOG_ERROR(@"Failed creating CFNetService for resolution");
+                CFNetServiceScheduleWithRunLoop(_registrationService, CFRunLoopGetMain(), kCFRunLoopCommonModes);
+                CFNetServiceScheduleWithRunLoop(_resolutionService, CFRunLoopGetMain(), kCFRunLoopCommonModes);
+                CFStreamError streamError = {0};
+                if (![self _registerBonjourService:_registrationService error:&streamError]) {
+                    [self _reportBonjourError:streamError operation:@"registration"];
+                }
             }
         } else {
-            WSK_LOG_ERROR(@"Failed creating CFNetService for registration");
+            [self _reportBonjourError:(CFStreamError){0} operation:@"registration"];
         }
     }
 
@@ -1068,6 +1159,7 @@ static inline NSString *_EncodeBase64(NSString *string) {
 // the main queue.
 - (void)_stop {
     WSK_DCHECK(_source4 != NULL);
+    _bonjourAttempt = nil;  // Invalidate queued notifications and CF callbacks before cancellation.
 
     if (_dnsService) {
         _dnsAddress = nil;

@@ -23,6 +23,7 @@ Extra built-in features:
 * [Chunked transfer encoding](https://en.wikipedia.org/wiki/Chunked_transfer_encoding) for request and response HTTP bodies
 * [HTTP compression](https://en.wikipedia.org/wiki/HTTP_compression) with gzip for request and response HTTP bodies
 * [HTTP range](https://en.wikipedia.org/wiki/Byte_serving) support for requests of local files
+* Optional HTTP/1.1 keep-alive for requests without bodies
 * [Basic](https://en.wikipedia.org/wiki/Basic_access_authentication) and [Digest Access](https://en.wikipedia.org/wiki/Digest_access_authentication) authentications for password protection
 * Automatically handle transitions between foreground, background and suspended modes in iOS apps
 * Full support for both IPv4 and IPv6
@@ -33,7 +34,6 @@ Included extensions:
 * [WSKWebDAVServer](WSKWebDAVServer/WSKWebDAVServer.h): subclass of ```WSKWebServer``` that implements a class 1 [WebDAV](https://en.wikipedia.org/wiki/WebDAV) server (with partial class 2 support for macOS Finder)
 
 What's not supported (but not really required from an embedded HTTP server):
-* Keep-alive connections
 * HTTPS
 
 Requirements:
@@ -259,12 +259,35 @@ int main(int argc, const char* argv[]) {
     
     WSKWebServer* webServer = [[WSKWebServer alloc] init];
     [webServer addGETHandlerForBasePath:@"/" directoryPath:NSHomeDirectory() indexFilename:nil cacheAge:3600 allowRangeRequests:YES];
-    [webServer runWithPort:8080];
+    [webServer runWithPort:8080 bonjourName:nil];
     
   }
   return 0;
 }
 ```
+
+LAN Sharing and Long-Lived File Serving
+======================================
+
+WebServerKit is intended for trusted local networks. For short sharing sessions, start and stop the uploader and WebDAV server together, and handle startup errors from either server. Their ports and lifetimes are independent. Test background transitions and local-network permissions on a real iOS device; simulator results do not cover those conditions.
+
+For a long-lived binary server:
+
+* Register read-only GET handlers with Range support for interrupted downloads. Prefer immutable, versioned filenames. Publish completed files with an atomic rename on the same filesystem; never overwrite a file in place while it is being served. Retain older versions while clients may still be downloading them.
+* Set `WSKOption_ConnectionKeepAliveTimeout` to a positive value such as `@5.0` to reuse eligible connections. It defaults to zero. Reuse requires a request without `Content-Length` or `Transfer-Encoding`, an HTTP/1.1 client, and a response with a known length; uploads still close their connection after the response.
+* Keep a finite `WSKOption_ConnectionIdleTimeout` (the default is 30 seconds). Both timeout options reject negative, non-finite, and excessively large values through `startWithOptions:error:`.
+* If a local reverse proxy uses a custom hostname, include it in `WSKOption_AllowedHostNames`. Bind to localhost when only that proxy should reach the server.
+* Monitor `+[WSKWebServer reservedInMemoryByteCount]`. It should return to zero after requests and any retained request or multipart objects are released. This is the library's shared reservation budget, not total process memory; there is deliberately no reset API.
+
+Bonjour discovery failures can be handled through the optional delegate method below. The error identifies registration or resolution in `userInfo[@"BonjourOperation"]` and preserves the underlying error code/domain. It does not mean HTTP startup failed: the server can continue serving through its direct address. Notifications run on the main thread, at most once per listener start, and queued notifications from a stopped or restarted listener are discarded. An immediate discovery failure may arrive before `webServerDidStart:`.
+
+```objectivec
+- (void)webServer:(WSKWebServer *)server didFailBonjourRegistrationWithError:(NSError *)error {
+    NSLog(@"Discovery unavailable: %@; direct address: %@", error, server.serverURL);
+}
+```
+
+Run `./Run-Tests.sh` for the validation gate, including a short concurrent-transfer check. The [endurance runner](Scripts/Endurance/README.md) supports longer continuous runs, checks upload/download hashes and cancellation cleanup, and records connections, descriptors, memory reservations, and process footprint.
 
 Using WSKWebServer
 ==================
@@ -360,12 +383,12 @@ WSKWebServer & Background Mode for iOS Apps
 
 When doing networking operations in iOS apps, you must handle carefully [what happens when iOS puts the app in the background](https://developer.apple.com/library/ios/technotes/tn2277/_index.html). Typically you must stop any network servers while the app is in the background and restart them when the app comes back to the foreground. This can become quite complex considering servers might have ongoing connections when they need to be stopped.
 
-Fortunately, WSKWebServer does all of this automatically for you:
-- WSKWebServer begins a [background task](https://developer.apple.com/library/archive/documentation/iPhone/Conceptual/iPhoneOSProgrammingGuide/BackgroundExecution/BackgroundExecution.html) whenever the first HTTP connection is opened and ends it only when the last one is closed. This prevents iOS from suspending the app after it goes in the background, which would immediately kill HTTP connections to the client.
- - While the app is in the background, as long as new HTTP connections keep being initiated, the background task will continue to exist and iOS will not suspend the app **for up to 10 minutes** (unless under sudden and unexpected memory pressure).
- - If the app is still in the background when the last HTTP connection is closed, WSKWebServer will suspend itself and stop accepting new connections as if you had called ```-stop``` (this behavior can be disabled with the ```WSKOption_AutomaticallySuspendInBackground``` option).
-- If the app goes in the background while no HTTP connections are opened, WSKWebServer will immediately suspend itself and stop accepting new connections as if you had called ```-stop``` (this behavior can be disabled with the ```WSKOption_AutomaticallySuspendInBackground``` option).
-- If the app comes back to the foreground and WSKWebServer had been suspended, it will automatically resume itself and start accepting again new HTTP connections as if you had called ```-start```.
+WSKWebServer handles these transitions automatically:
+
+- When the app enters the background with active connections, the server requests a background task to give transfers time to finish. It does not acquire that task merely because a foreground connection opens.
+- The system controls the available background time. New requests do not grant indefinite runtime; apps must handle expiration and interrupted transfers.
+- With the default `WSKOption_AutomaticallySuspendInBackground: @YES`, the server stops listening when it becomes idle in the background, or immediately if it was already idle. It resumes when the app returns to the foreground.
+- Setting that option to `@NO` disables the library's automatic suspension; it does not prevent the operating system from suspending the app. Keep the default on tvOS.
 
 HTTP connections are often initiated in batches (or bursts), for instance when loading a web page with multiple resources. This makes it difficult to accurately detect when the *very last* HTTP connection has been closed: it's possible 2 consecutive HTTP connections part of the same batch would be separated by a small delay instead of overlapping. It would be bad for the client if WSKWebServer suspended itself right in between. The ```WSKOption_ConnectedStateCoalescingInterval``` option solves this problem elegantly by forcing WSKWebServer to wait some extra delay before performing any action after the last HTTP connection has been closed, just in case a new HTTP connection is initiated within this delay.
 

@@ -1,11 +1,13 @@
 #!/bin/bash -eu -o pipefail
 
 # The single entry point for everything CI runs, so "it passes locally" and "it passes
-# in CI" cannot drift apart. Three things happen here:
+# in CI" cannot drift apart. The gate covers:
 #
 #   1. the XCTest suite (Framework/Tests.m), built with the address sanitizer
 #   2. the recorded-trace corpus under Tests/, replayed against a real server
 #   3. a Release build of the shipping framework for every platform
+#   4. SwiftPM and Xcode consumer builds, plus a live Swift consumer check
+#   5. the endurance runner's oracles and a concurrent-transfer smoke check
 #
 # Deployment targets are deliberately NOT overridden. This script used to build with
 # MACOSX_DEPLOYMENT_TARGET=10.7 and IPHONEOS_DEPLOYMENT_TARGET=8.0 to check the oldest
@@ -93,6 +95,10 @@ swift build
 # code has to survive being CALLED on a connection queue, which only a request shows.
 swift run --package-path Scripts/SwiftConsumer --scratch-path "$BUILD_DIR/SwiftConsumer" SwiftConsumer
 (cd Scripts/SwiftConsumer && xcodebuild build -scheme SwiftConsumer -destination 'platform=macOS' -derivedDataPath "$BUILD_DIR/SwiftConsumerXcode" "${SIGNING[@]}")
+
+echo "=== Endurance smoke check ==="
+python3 -m unittest discover -s Scripts/Endurance -p 'test_*.py'
+python3 Scripts/Endurance/run.py --cycles 1 --restart-cycles 1 --pause 0 --report "$BUILD_DIR/endurance.json"
 
 echo ""
 echo "All tests completed successfully."
