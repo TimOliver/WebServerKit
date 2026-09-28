@@ -219,6 +219,16 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   hands BACK the path it observed (`outResolvedPath`, added 2026-09-02) so a caller can derive
   the metadata it publishes from the SAME observation that classified the entry — see the
   PROPFIND entry under WebDAV for what a second observation cost.
+  Since 2026-09-28 the helper enforces containment for ordinary entries too, including a
+  symlinked parent. One resolution supplies containment, share-relative hidden checks and the
+  path classified with `lstat`; refused or unsupported entries clear both outputs. Successful
+  entries return a resolved path and leaf name, including ordinary files. Benign aliases,
+  symlinked shares and both-name extension checks remain supported. This closes a latent
+  contract gap: current enumerators already passed resolved parents. Three direct regressions
+  fail on the old helper (28 assertions), and all 29 path ASan tests pass after the fix.
+  A bounded warm-file comparison (eight alternating passes, both outputs requested) measured
+  median thread CPU for 5,000 ordinary entries at 314 ms before and 114 ms after. This checks
+  classifier cost only, not end-to-end server throughput or other filesystems.
 - The extension allow-list judges BOTH names a symlink presents — alias AND resolved target
   (`WSKEntryPassesExtensionAllowList`, one home).
 - The uploader's mutating endpoints hold `_fileOperationLock` (four sites; any new
@@ -705,6 +715,23 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
 
 ### WebDAV
 
+- **File PROPFIND metadata comes from one opened inode** (2026-09-28). After containment
+  and extension checks, open the classifier's resolved path with `O_NOFOLLOW | O_NONBLOCK`,
+  require a regular file, and derive size, birth/modification dates, ETag and the timestamp
+  seal from one `fstat`. Read stored properties through that descriptor too, then close it
+  before XML generation, including propname's early return. A disappeared or nonregular
+  replacement is omitted; directory metadata retains its existing behavior. This pins file
+  identity during atomic publication, not a transaction across in-place writes or concurrent
+  PROPPATCH on the same inode. Do not reintroduce pathname observations for individual fields.
+  Two deterministic regressions replace a benign file before capture or at XML emission;
+  both fail on the previous source (15 assertions), covering sizes, creation dates, ETags,
+  sealed/unsealed modification dates, custom properties and stored displaynames. Descriptor
+  cleanup is checked across allprop, propname, named properties, failed opens and nonregular
+  replacements. The 78-test WebDAV ASan suite passes. Together with the containment change,
+  the complete gate passes 301 ASan tests, all eight unchanged trace suites, Mac/iOS/tvOS
+  Release builds, Swift consumers and concurrent-transfer endurance smoke. Native
+  `mount_webdav` verifies 14 file readbacks, metadata for 15 resources and write/rename/delete;
+  all 85 connections close, descriptors return 8→8, and reservations and temporary files are zero.
 - **Named PROPFIND matches the namespace AND local name** (2026-09-28). Only the exact
   `DAV:` namespace selects a live property; arbitrary/default prefixes are equivalent.
   Foreign and unqualified names such as `getetag` use the same dead-property keys as
@@ -752,9 +779,10 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   target's etag. A PROPFIND-driven client sizes its copy from the listing, so mount_webdav and
   rclone truncated the build silently, with no date validator published to notice by. Depth:0 was
   always right (performPROPFIND hands in the follow-resolver's answer); Depth:1 now reads
-  `WSKServableFileTypeAtPath`'s `outResolvedPath`, so ONE observation feeds every published
-  metadatum. Fixed 2026-09-02; the code comments at the old sites asserted the opposite of the
-  measured behaviour. Recurring shape 6.
+  `WSKServableFileTypeAtPath`'s `outResolvedPath`. Fixed 2026-09-02; this selected the right
+  target path, but separate metadata calls could still mix atomic replacements of that path.
+  The descriptor snapshot above closes that remaining gap. The old code comments asserted
+  the opposite of the measured behaviour. Recurring shape 6.
 - **A property name carrying an UNDECLARED namespace prefix is refused 400 by both parsers.**
   libxml2 runs with `XML_PARSE_RECOVER` (settled), so `<Z:note>` with no `xmlns:Z` survives with
   the prefix baked into the local name — `node->name` is literally `"Z:note"`, `node->ns` NULL.
@@ -1073,17 +1101,6 @@ Each was deliberate; full reasons in the archived record (`git show 09416c2:CLAU
 
 Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3.
 
-- **`WSKServableFileTypeAtPath` skips its containment check whenever the final component is
-  not itself a symlink** (found by fuzzing 2026-08-18; `abs/passwd` through a link to `/etc`
-  classifies `NSFileTypeRegular` while `WSKResolvedPathIsWithinDirectory` refuses it).
-  `-attributesOfItemAtPath:` does not follow a FINAL link but does follow INTERMEDIATE ones,
-  and the early `return type` for a non-link runs before any containment test. **Latent, not
-  reachable today**: all three enumerators (uploader `/list`, base-path index, PROPFIND) pass
-  an already-RESOLVED directory and append one raw entry name, so only the final component can
-  be a link — measured 0 disagreements across 19 real fixture entries, against 2 when the
-  directory portion is unresolved. It is the "advertise iff served" rule holding by caller
-  discipline rather than by the one function that owns it; a future caller passing an
-  unresolved directory reopens it.
 - **The allow-list vetting walk judges a symlink's TARGET, not the alias** — fail-closed
   over-refusal contradicting "symlinks are aliases"; needs an OWNER RULING, not a fix (the
   obvious `lstat` fix re-refuses via `_checkFileExtension:` for extensionless link names).

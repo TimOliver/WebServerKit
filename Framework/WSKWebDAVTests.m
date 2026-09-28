@@ -25,6 +25,53 @@
 @interface WSKWebDAVServer (PUTMetadataTesting)
 - (BOOL)_copyDeadPropertiesAtPath:(NSString *)path toPath:(NSString *)stagingPath error:(NSError **)error;
 - (WSKResponse *)_preconditionFailureForRequest:(WSKRequest *)request atPath:(NSString *)path;
+- (BOOL)_checkFileExtensionForName:(NSString *)name resolvedName:(NSString *)resolvedName;
+- (void)_addPropertyResponseForItem:(NSString *)itemPath resource:(NSString *)resourcePath properties:(NSInteger)properties kind:(NSInteger)kind unsupported:(NSArray<NSString *> *)unsupported lockCapable:(BOOL)lockCapable xmlString:(NSMutableString *)xmlString;
+@end
+
+@interface WSKSnapshotDAVServer : WSKWebDAVServer
+@property (nonatomic, copy) dispatch_block_t afterExtensionCheck;
+@end
+
+@implementation WSKSnapshotDAVServer
+- (BOOL)_checkFileExtensionForName:(NSString *)name resolvedName:(NSString *)resolvedName {
+    BOOL const allowed = [super _checkFileExtensionForName:name resolvedName:resolvedName];
+    if (self.afterExtensionCheck) {
+        self.afterExtensionCheck();
+    }
+    return allowed;
+}
+@end
+
+// Replace an ordinary published file exactly when XML emission starts. This exercises a
+// concurrent publisher without sleeps, global swizzles, or a production-only test hook.
+@interface WSKSnapshotXMLString : NSMutableString
+@property (nonatomic) NSMutableString *storage;
+@property (nonatomic, copy) dispatch_block_t beforeResponse;
+@end
+
+@implementation WSKSnapshotXMLString
+- (instancetype)init {
+    if ((self = [super init])) {
+        _storage = [NSMutableString string];
+    }
+    return self;
+}
+- (NSUInteger)length {
+    return self.storage.length;
+}
+- (unichar)characterAtIndex:(NSUInteger)index {
+    return [self.storage characterAtIndex:index];
+}
+- (void)replaceCharactersInRange:(NSRange)range withString:(NSString *)string {
+    [self.storage replaceCharactersInRange:range withString:string];
+}
+- (void)appendString:(NSString *)string {
+    if ([string isEqualToString:@"<D:response>"] && self.beforeResponse) {
+        self.beforeResponse();
+    }
+    [self.storage appendString:string];
+}
 @end
 
 @interface WSKGatedMetadataDAVServer : WSKGatedUploadDAVServer
@@ -445,6 +492,109 @@ static NSString *DAVCustomMetadataValue(NSString *uri, NSString *name) {
             XCTAssertEqualObjects(properties[@"{DAV:}getlastmodified"][@"value"], @"Sat, 01 Jan 2000 00:00:00 GMT");
         }
     }
+}
+
+- (void)_checkDAVMetadataReplacementBeforeSnapshot:(BOOL)beforeSnapshot {
+    NSFileManager *const fm = [NSFileManager defaultManager];
+    // Exercise both sides of the Last-Modified seal: a replacement must not lend its
+    // seal to a future-dated predecessor, or suppress the predecessor's sealed date.
+    for (NSNumber *const futureOriginal in @[@NO, @YES]) {
+        NSString *const dir = MakeTempDirectory();
+        NSString *const path = [dir stringByAppendingPathComponent:@"build.txt"];
+        NSString *const staging = [dir stringByAppendingPathComponent:@"replacement.txt"];
+        NSArray<NSString *> *const paths = @[path, staging];
+        NSDate *const oldDate = [NSDate dateWithTimeIntervalSince1970:946684800.0];
+        NSDate *const futureDate = [NSDate dateWithTimeIntervalSinceNow:86400.0];
+        for (NSUInteger index = 0; index < paths.count; index++) {
+            XCTAssertTrue([UTF8Data(index ? @"REPLACEMENT-BUILD" : @"OLD") writeToFile:paths[index] atomically:YES]);
+            NSDictionary *const dead = @{@"{urn:snapshot}version": index ? @"new" : @"old", @"{DAV:}displayname": index ? @"New build" : @"Old build"};
+            NSData *const data = [NSPropertyListSerialization dataWithPropertyList:dead format:NSPropertyListBinaryFormat_v1_0 options:0 error:NULL];
+            XCTAssertEqual(setxattr(paths[index].fileSystemRepresentation, "com.webserverkit.dav.deadproperties", data.bytes, data.length, 0, 0), 0);
+            BOOL const future = (index == 0) == futureOriginal.boolValue;
+            NSDictionary *const attributes = @{NSFileCreationDate: [NSDate dateWithTimeIntervalSince1970:915148800.0 + (double)index * 86400.0], NSFileModificationDate: future ? futureDate : oldDate};
+            XCTAssertTrue([fm setAttributes:attributes ofItemAtPath:paths[index] error:NULL]);
+        }
+        WSKSnapshotDAVServer *const server = [[WSKSnapshotDAVServer alloc] initWithUploadDirectory:dir];
+        NSUInteger const expectedIndex = beforeSnapshot ? 1 : 0;
+        struct stat expectedInfo;
+        XCTAssertEqual(stat(paths[expectedIndex].fileSystemRepresentation, &expectedInfo), 0);
+        NSDictionary *const expectedAttributes = [fm attributesOfItemAtPath:paths[expectedIndex] error:NULL];
+        NSString *const expectedETag = WSKEntityTagForFileInfo(&expectedInfo);
+        BOOL const expectedSealed = beforeSnapshot ? futureOriginal.boolValue : !futureOriginal.boolValue;
+        __block NSUInteger replacements = 0;
+        dispatch_block_t const publish = ^{
+            replacements++;
+            XCTAssertEqual(rename(staging.fileSystemRepresentation, path.fileSystemRepresentation), 0);
+        };
+        WSKSnapshotXMLString *const xml = [[WSKSnapshotXMLString alloc] init];
+        if (beforeSnapshot) {
+            server.afterExtensionCheck = publish;
+        } else {
+            xml.beforeResponse = publish;
+        }
+        [xml appendString:@"<D:multistatus xmlns:D=\"DAV:\">"];
+        NSUInteger const descriptors = OpenFileDescriptorCount();
+        // The private builder's nine live bits, with named-property (kind 2) statuses.
+        [server _addPropertyResponseForItem:path resource:@"/build.txt" properties:((1 << 9) - 1) kind:2 unsupported:@[@"{urn:snapshot}version"] lockCapable:NO xmlString:xml];
+        XCTAssertEqual(OpenFileDescriptorCount(), descriptors);
+        [xml appendString:@"</D:multistatus>"];
+        XCTAssertEqual(replacements, (NSUInteger)1);
+        NSString *const reply = [@"HTTP/1.1 207 Multi-Status\r\n\r\n" stringByAppendingString:xml];
+        NSDictionary *const properties = [self _davPropertyResults:reply][@"/build.txt"];
+        XCTAssertEqualObjects(properties[@"{DAV:}getetag"][@"value"], expectedETag);
+        XCTAssertEqualObjects(properties[@"{DAV:}getcontentlength"][@"value"], beforeSnapshot ? @"17" : @"3");
+        NSDate *const expectedCreationDate = expectedAttributes.fileCreationDate;
+        XCTAssertNotNil(expectedCreationDate);
+        if (expectedCreationDate) {
+            XCTAssertEqualObjects(properties[@"{DAV:}creationdate"][@"value"], WSKFormatISO8601(expectedCreationDate));
+        }
+        XCTAssertEqualObjects(properties[@"{DAV:}getlastmodified"][@"status"], expectedSealed ? @200 : @404);
+        XCTAssertEqualObjects(properties[@"{DAV:}getlastmodified"][@"value"], expectedSealed ? @"Sat, 01 Jan 2000 00:00:00 GMT" : @"");
+        XCTAssertEqualObjects(properties[@"{urn:snapshot}version"][@"value"], beforeSnapshot ? @"new" : @"old");
+        XCTAssertEqualObjects(properties[@"{DAV:}displayname"][@"value"], beforeSnapshot ? @"New build" : @"Old build");
+        XCTAssertTrue([fm removeItemAtPath:dir error:NULL]);
+    }
+}
+
+- (void)testDAVMetadataUsesOneFileVersionAfterAtomicReplacement {
+    [self _checkDAVMetadataReplacementBeforeSnapshot:YES];
+}
+
+- (void)testDAVMetadataKeepsOneFileVersionDuringXMLEmission {
+    [self _checkDAVMetadataReplacementBeforeSnapshot:NO];
+}
+
+- (void)testDAVMetadataSnapshotsReleaseDescriptorsOnEveryExit {
+    NSFileManager *const fm = [NSFileManager defaultManager];
+    NSString *const dir = MakeTempDirectory();
+    NSString *const path = [dir stringByAppendingPathComponent:@"build.txt"];
+    WSKSnapshotDAVServer *const server = [[WSKSnapshotDAVServer alloc] initWithUploadDirectory:dir];
+    XCTAssertTrue([UTF8Data(@"BUILD") writeToFile:path atomically:YES]);
+    NSUInteger const descriptors = OpenFileDescriptorCount();
+    for (NSUInteger iteration = 0; iteration < 32; iteration++) {
+        for (NSInteger kind = 0; kind < 3; kind++) {
+            NSMutableString *const xml = [NSMutableString string];
+            [server _addPropertyResponseForItem:path resource:@"/build.txt" properties:((1 << 9) - 1) kind:kind unsupported:@[] lockCapable:NO xmlString:xml];
+            XCTAssertTrue([xml containsString:@"<D:response>"]);
+            XCTAssertEqual(OpenFileDescriptorCount(), descriptors);
+        }
+    }
+    for (NSNumber *const directoryReplacement in @[@NO, @YES]) {
+        server.afterExtensionCheck = ^{
+            XCTAssertTrue([fm removeItemAtPath:path error:NULL]);
+            if (directoryReplacement.boolValue) {
+                XCTAssertTrue([fm createDirectoryAtPath:path withIntermediateDirectories:NO attributes:nil error:NULL]);
+            }
+        };
+        NSMutableString *const xml = [NSMutableString string];
+        [server _addPropertyResponseForItem:path resource:@"/build.txt" properties:((1 << 9) - 1) kind:0 unsupported:@[] lockCapable:NO xmlString:xml];
+        XCTAssertEqual(xml.length, (NSUInteger)0);
+        XCTAssertEqual(OpenFileDescriptorCount(), descriptors);
+        if (!directoryReplacement.boolValue) {
+            XCTAssertTrue([UTF8Data(@"BUILD") writeToFile:path atomically:YES]);
+        }
+    }
+    XCTAssertTrue([fm removeItemAtPath:dir error:NULL]);
 }
 
 - (void)testDAVNamedPropfindDistinguishesStoredNamespaceCollisions {

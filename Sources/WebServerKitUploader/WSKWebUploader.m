@@ -890,7 +890,7 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
 }
 
 // Both names an entry presents must satisfy the allow-list; see WSKEntryPassesExtensionAllowList.
-// `resolvedName` is nil for anything that is not a link, which reduces to the single-name rule.
+// An absent or identical resolved name reduces to the single-name rule.
 - (BOOL)_checkFileExtensionForName:(NSString *)namedName resolvedName:(nullable NSString *)resolvedName {
     return WSKEntryPassesExtensionAllowList(namedName, resolvedName, self.allowedFileExtensions);
 }

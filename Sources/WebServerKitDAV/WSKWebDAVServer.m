@@ -323,7 +323,7 @@ static inline BOOL _HeaderTokenIs(NSString *value, NSString *token) {
 }
 
 // Both names an entry presents must satisfy the allow-list; see WSKEntryPassesExtensionAllowList.
-// `resolvedName` is nil for anything that is not a link, which reduces to the single-name rule.
+// An absent or identical resolved name reduces to the single-name rule.
 - (BOOL)_checkFileExtensionForName:(NSString *)namedName resolvedName:(nullable NSString *)resolvedName {
     return WSKEntryPassesExtensionAllowList(namedName, resolvedName, self.allowedFileExtensions);
 }
@@ -366,9 +366,10 @@ static inline BOOL _HeaderTokenIs(NSString *value, NSString *token) {
 // putting it there would widen the API for a build-graph reason. See the structural-cleanup note.
 static NSString *const kDAVDeadPropertyAttribute = @"com.webserverkit.dav.deadproperties";
 
-static NSDictionary<NSString *, NSString *> *_DeadPropertiesAtPath(NSString *path) {
+static NSDictionary<NSString *, NSString *> *_DeadPropertiesAtPathOrDescriptor(NSString *path, int descriptor) {
     const char *const filePath = [path fileSystemRepresentation];
-    ssize_t const size = getxattr(filePath, [kDAVDeadPropertyAttribute UTF8String], NULL, 0, 0, 0);
+    const char *const attribute = [kDAVDeadPropertyAttribute UTF8String];
+    ssize_t const size = (descriptor >= 0) ? fgetxattr(descriptor, attribute, NULL, 0, 0, 0) : getxattr(filePath, attribute, NULL, 0, 0, 0);
 
     if (size <= 0) {
         return @{};  // None stored, or the filesystem does not keep them.
@@ -376,7 +377,8 @@ static NSDictionary<NSString *, NSString *> *_DeadPropertiesAtPath(NSString *pat
 
     NSMutableData *const data = [NSMutableData dataWithLength:(NSUInteger)size];
 
-    if (getxattr(filePath, [kDAVDeadPropertyAttribute UTF8String], data.mutableBytes, (size_t)size, 0, 0) != size) {
+    ssize_t const read = (descriptor >= 0) ? fgetxattr(descriptor, attribute, data.mutableBytes, (size_t)size, 0, 0) : getxattr(filePath, attribute, data.mutableBytes, (size_t)size, 0, 0);
+    if (read != size) {
         return @{};
     }
 
@@ -385,6 +387,10 @@ static NSDictionary<NSString *, NSString *> *_DeadPropertiesAtPath(NSString *pat
     // Whatever was in the attribute is not necessarily what we put there — another tool can write
     // this xattr — so the shape is checked rather than assumed.
     return [stored isKindOfClass:[NSDictionary class]] ? (NSDictionary<NSString *, NSString *> *)stored : @{};
+}
+
+static NSDictionary<NSString *, NSString *> *_DeadPropertiesAtPath(NSString *path) {
+    return _DeadPropertiesAtPathOrDescriptor(path, -1);
 }
 
 // What one resource may accumulate in dead properties, across every PROPPATCH ever sent to it.
@@ -1828,20 +1834,47 @@ static NSString *_DAVResourceHref(NSString *resourcePath) {
         NSString *resolvedItemPath = nil;
         NSString *const type = WSKServableFileTypeAtPath(itemPath, _uploadDirectory, _allowHiddenItems, &resolvedName, &resolvedItemPath);
         BOOL const isFile = [type isEqualToString:NSFileTypeRegular];
-        BOOL isDirectory = [type isEqualToString:NSFileTypeDirectory];
-
-        // EVERY published metadatum below reads metadataPath — the classifier's own observation,
-        // which for a symlink child is the target a GET of this entry serves. The Depth:1
-        // enumeration hands in the raw child name, and deriving attributes from it split one
-        // propstat between two inodes: attributesOfItemAtPath: (which does not follow a final
-        // link) published the LINK's byte count and dates while stat() published the TARGET's
-        // entity tag beside them, and open(O_NOFOLLOW) failed ELOOP so no getlastmodified went
-        // out at all — a PROPFIND-driven copy of the alias truncated to the link inode's length.
-        // The itemPath fallback only matters when type is nil, and then nothing is published.
-        NSString *const metadataPath = resolvedItemPath ?: itemPath;
-        NSDictionary *const attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:metadataPath error:NULL];
+        BOOL const isDirectory = [type isEqualToString:NSFileTypeDirectory];
+        // A Depth:1 symlink describes its target, just as GET does. Do not resolve again.
+        NSString *const metadataPath = resolvedItemPath;
+        if (!metadataPath) {
+            return;
+        }
 
         if ((isFile && [self _checkFileExtensionForName:[itemPath lastPathComponent] resolvedName:resolvedName]) || isDirectory) {
+            NSDate *creationDate = nil;
+            NSDate *lastModified = nil;
+            unsigned long long contentLength = 0;
+            NSString *entityTag = nil;
+            NSDictionary<NSString *, NSString *> *dead = nil;
+            if (isFile) {
+                // Atomic publication may replace the name between any two filesystem calls.
+                // Pin one inode for size, dates, ETag, timestamp seal and stored properties.
+                // NONBLOCK also makes an intervening non-regular replacement safe to inspect.
+                int const descriptor = open([metadataPath fileSystemRepresentation], O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+                if (descriptor < 0) {
+                    return;
+                }
+                struct stat info;
+                if ((fstat(descriptor, &info) != 0) || !S_ISREG(info.st_mode)) {
+                    close(descriptor);
+                    return;
+                }
+                creationDate = [NSDate dateWithTimeIntervalSince1970:(NSTimeInterval)info.st_birthtimespec.tv_sec];
+                contentLength = (unsigned long long)info.st_size;
+                entityTag = WSKEntityTagForFileInfo(&info);
+                // Match GET's whole-second date and seal, both from this same observation.
+                if ((properties & kDAVProperty_LastModified) && WSKLastModifiedDateIsSealed(descriptor, &info)) {
+                    lastModified = [NSDate dateWithTimeIntervalSince1970:(NSTimeInterval)info.st_mtimespec.tv_sec];
+                }
+                dead = _DeadPropertiesAtPathOrDescriptor(metadataPath, descriptor);
+                close(descriptor);  // No descriptor survives into XML generation or its early returns.
+            } else {
+                NSDictionary *const attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:metadataPath error:NULL];
+                creationDate = attributes.fileCreationDate;
+                dead = _DeadPropertiesAtPath(metadataPath);
+            }
+
             [xmlString appendString:@"<D:response>"];
             [xmlString appendFormat:@"<D:href>%@</D:href>", escapedPath];
 
@@ -1869,7 +1902,7 @@ static NSString *_DAVResourceHref(NSString *resourcePath) {
                     [xmlString appendString:@"<D:getcontenttype/>"];
                 }
 
-                for (NSString *key in _DeadPropertiesAtPath(metadataPath)) {
+                for (NSString *key in dead) {
                     if ([key isEqualToString:displayNameKey]) {
                         continue;  // Already listed above
                     }
@@ -1892,9 +1925,6 @@ static NSString *_DAVResourceHref(NSString *resourcePath) {
             // on one child and unavailable on the next. Empty values still count as returned.
             DAVProperties returnedProperties = 0;
 
-            // Read before the property block because displayname consults it for a stored value.
-            NSDictionary<NSString *, NSString *> *const dead = _DeadPropertiesAtPath(metadataPath);
-
             if (properties & kDAVProperty_ResourceType) {
                 if (isDirectory) {
                     [xmlString appendString:@"<D:resourcetype><D:collection/></D:resourcetype>"];
@@ -1904,59 +1934,25 @@ static NSString *_DAVResourceHref(NSString *resourcePath) {
                 returnedProperties |= kDAVProperty_ResourceType;
             }
 
-            if ((properties & kDAVProperty_CreationDate) && attributes[NSFileCreationDate]) {
-                [xmlString appendFormat:@"<D:creationdate>%@</D:creationdate>", WSKFormatISO8601((NSDate *)[attributes fileCreationDate])];
+            if ((properties & kDAVProperty_CreationDate) && creationDate) {
+                [xmlString appendFormat:@"<D:creationdate>%@</D:creationdate>", WSKFormatISO8601(creationDate)];
                 returnedProperties |= kDAVProperty_CreationDate;
             }
 
-            if ((properties & kDAVProperty_LastModified) && isFile && attributes[NSFileModificationDate]) {  // Last modification date is not useful for directories as it changes implicitely and 'Last-Modified' header is not provided for directories anyway
-                // The same seal the GET path applies when it MINTS a Last-Modified, for the
-                // same reason: without it PROPFIND publishes precisely the date WSKFileResponse
-                // refuses to issue — one still inside its own timestamp bucket, so a later
-                // If-Range resume carrying it could splice two builds under one 206.
-                //
-                // Opened O_NOFOLLOW because the containment and hidden-item rules have already
-                // judged the resolved path; this only needs the descriptor to ask the filesystem
-                // its timestamp granularity. If it cannot be opened, no successful value is
-                // published, just as for an unsealed date. metadataPath, not
-                // itemPath: a symlink child made this open fail ELOOP on every request, so the
-                // alias never published a date at all — O_NOFOLLOW is only compatible with a
-                // path whose final component is already resolved.
-                int const descriptor = open([metadataPath fileSystemRepresentation], O_RDONLY | O_NOFOLLOW);
-
-                if (descriptor >= 0) {
-                    struct stat info;
-
-                    if ((fstat(descriptor, &info) == 0) && WSKLastModifiedDateIsSealed(descriptor, &info)) {
-                        [xmlString appendFormat:@"<D:getlastmodified>%@</D:getlastmodified>", WSKFormatRFC822((NSDate *)[attributes fileModificationDate])];
-                        returnedProperties |= kDAVProperty_LastModified;
-                    }
-
-                    close(descriptor);
-                }
+            if ((properties & kDAVProperty_LastModified) && lastModified) {
+                [xmlString appendFormat:@"<D:getlastmodified>%@</D:getlastmodified>", WSKFormatRFC822(lastModified)];
+                returnedProperties |= kDAVProperty_LastModified;
             }
 
-            if ((properties & kDAVProperty_ContentLength) && !isDirectory && attributes[NSFileSize]) {
-                [xmlString appendFormat:@"<D:getcontentlength>%llu</D:getcontentlength>", [attributes fileSize]];
+            if ((properties & kDAVProperty_ContentLength) && isFile) {
+                [xmlString appendFormat:@"<D:getcontentlength>%llu</D:getcontentlength>", contentLength];
                 returnedProperties |= kDAVProperty_ContentLength;
             }
 
-            // Minted by WSKEntityTagForFileInfo — the SAME single formatter WSKFileResponse uses, so
-            // the tag a client is handed by PROPFIND is byte-identical to the one GET issues and the
-            // one If-Match compares against. A second formatter here would make every precondition
-            // fail rather than protect anything, which is why this shares that home rather than
-            // building a tag from the attributes dictionary already in hand.
-            //
-            // Only for a regular file: a collection has no entity tag, and inventing one would make
-            // an If-Match on a folder compare against a value nothing else ever produces. Uses
-            // lstat-free stat() on the already-resolved path, matching what the GET path observes.
-            if ((properties & kDAVProperty_ETag) && isFile) {
-                struct stat info;
-
-                if (stat([metadataPath fileSystemRepresentation], &info) == 0) {
-                    [xmlString appendFormat:@"<D:getetag>%@</D:getetag>", WSKEntityTagForFileInfo(&info)];
-                    returnedProperties |= kDAVProperty_ETag;
-                }
+            // The shared formatter matches GET and If-Match. Collections have no entity tag.
+            if ((properties & kDAVProperty_ETag) && entityTag) {
+                [xmlString appendFormat:@"<D:getetag>%@</D:getetag>", entityTag];
+                returnedProperties |= kDAVProperty_ETag;
             }
 
             // The same MIME lookup WSKFileResponse performs, for the same reason as the entity tag:

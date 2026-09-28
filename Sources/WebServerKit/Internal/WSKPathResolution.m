@@ -245,64 +245,49 @@ NSString *WSKServableFileTypeAtPath(NSString *path, NSString *directory, BOOL al
         *outResolvedPath = nil;
     }
 
-    NSDictionary *const attributes = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:NULL];
-    NSString *const type = attributes[NSFileType];
+    // Resolve every entry, including ordinary leaves reached through a symlinked parent. The
+    // returned path and relative spelling are one observation used for every check below.
+    NSString *relativePath = nil;
+    NSString *const resolvedPath = WSKResolveWithinDirectory(path, directory, &relativePath);
 
-    if (![type isEqualToString:NSFileTypeSymbolicLink]) {
-        // Not a link: the type was observed at `path` itself, so that IS the resolved path.
-        if (outResolvedPath) {
-            *outResolvedPath = path;
+    if (resolvedPath == nil) {
+        return nil;
+    }
+
+    if (!allowHiddenItems) {
+        for (NSString *const component in [relativePath pathComponents]) {
+            if (WSKNameIsHidden(component)) {
+                return nil;
+            }
         }
-
-        return type;
-    }
-
-    // Judge the link by what it points at, and only when that is something this server would
-    // actually serve: inside the directory, and a regular file or a directory itself.
-    if (!WSKResolvedPathIsWithinDirectory(path, directory)) {
-        return nil;
-    }
-
-    // Hiddenness as well as containment: a link whose own name carries no dot but which resolves
-    // inside a dot-directory would otherwise be ADVERTISED by all three listings and then refused
-    // 403 by every handler. "Advertise iff served" is the rule, in both directions.
-    if (!allowHiddenItems && WSKResolvedPathHasHiddenComponent(path, directory)) {
-        return nil;
     }
 
     struct stat info;
 
-    if (stat([path fileSystemRepresentation], &info) != 0) {
-        return nil;  // Dangling, or a loop: there is nothing to advertise.
+    if (lstat([resolvedPath fileSystemRepresentation], &info) != 0) {
+        return nil;
     }
 
-    // Derived here and handed out precisely so no caller resolves a second time: two observations
-    // of a filesystem that need not agree is the class behind the retargeted-symlink escapes.
-    if (outResolvedName || outResolvedPath) {
-        char resolvedBuffer[PATH_MAX];
-
-        if (realpath([path fileSystemRepresentation], resolvedBuffer) != NULL) {
-            NSString *const resolved = [[NSFileManager defaultManager] stringWithFileSystemRepresentation:resolvedBuffer length:strlen(resolvedBuffer)];
-
-            if (outResolvedName) {
-                *outResolvedName = [resolved lastPathComponent];
-            }
-
-            if (outResolvedPath) {
-                *outResolvedPath = resolved;
-            }
-        }
-    }
+    NSString *type = nil;
 
     if ((info.st_mode & S_IFMT) == S_IFDIR) {
-        return NSFileTypeDirectory;
+        type = NSFileTypeDirectory;
+    } else if ((info.st_mode & S_IFMT) == S_IFREG) {
+        type = NSFileTypeRegular;
+    } else {
+        return nil;
     }
 
-    if ((info.st_mode & S_IFMT) == S_IFREG) {
-        return NSFileTypeRegular;
+    // Publish only the location just classified, never resolve the caller's path again.
+    if (outResolvedName) {
+        *outResolvedName = [resolvedPath lastPathComponent];
     }
 
-    return nil;
+    if (outResolvedPath) {
+        *outResolvedPath = resolvedPath;
+    }
+
+    return type;
 }
 
 // The two path resolvers every path-taking verb in this library goes through. ONE implementation,

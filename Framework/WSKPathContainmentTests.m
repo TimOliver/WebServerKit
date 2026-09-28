@@ -798,6 +798,128 @@
     [fm removeItemAtPath:dir error:NULL];
 }
 
+// The classifier owns containment even when the caller has not already resolved the parent.
+// Every fixture is a benign temporary file; this exercises the helper contract directly.
+- (void)testServableClassifierRefusesEntriesOutsideItsDirectory {
+    NSFileManager *const fm = [NSFileManager defaultManager];
+    NSString *const base = MakeTempDirectory();
+    NSString *const share = [base stringByAppendingPathComponent:@"share"];
+    NSString *const sibling = [base stringByAppendingPathComponent:@"share-sibling"];
+    XCTAssertTrue([fm createDirectoryAtPath:share withIntermediateDirectories:NO attributes:nil error:NULL]);
+    XCTAssertTrue([fm createDirectoryAtPath:sibling withIntermediateDirectories:NO attributes:nil error:NULL]);
+    XCTAssertTrue([@"fixture" writeToFile:[sibling stringByAppendingPathComponent:@"note.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([fm createSymbolicLinkAtPath:[share stringByAppendingPathComponent:@"sibling"] withDestinationPath:sibling error:NULL]);
+    XCTAssertTrue([fm createSymbolicLinkAtPath:[share stringByAppendingPathComponent:@"missing-link"] withDestinationPath:@"missing.txt" error:NULL]);
+    XCTAssertTrue([fm createSymbolicLinkAtPath:[share stringByAppendingPathComponent:@"loop"] withDestinationPath:@"loop" error:NULL]);
+
+    NSArray<NSString *> *const paths = @[
+        sibling,
+        [sibling stringByAppendingPathComponent:@"note.txt"],
+        [share stringByAppendingPathComponent:@"sibling"],
+        [share stringByAppendingPathComponent:@"sibling/note.txt"],
+        [share stringByAppendingPathComponent:@"missing.txt"],
+        [share stringByAppendingPathComponent:@"missing-link"],
+        [share stringByAppendingPathComponent:@"loop"]
+    ];
+    for (NSString *const path in paths) {
+        NSString *resolvedName = @"stale name";
+        NSString *resolvedPath = @"stale path";
+        XCTAssertNil(WSKServableFileTypeAtPath(path, share, YES, &resolvedName, &resolvedPath), @"%@", path);
+        XCTAssertNil(resolvedName, @"a refusal must clear the target name: %@", path);
+        XCTAssertNil(resolvedPath, @"a refusal must clear the metadata path: %@", path);
+        XCTAssertNil(WSKServableFileTypeAtPath(path, share, NO, NULL, NULL), @"optional outputs must not affect containment: %@", path);
+    }
+
+    [fm removeItemAtPath:base error:NULL];
+}
+
+- (void)testServableClassifierReturnsCanonicalTargetsAndPreservesExtensionChecks {
+    NSFileManager *const fm = [NSFileManager defaultManager];
+    NSString *const base = MakeTempDirectory();
+    NSString *const share = [base stringByAppendingPathComponent:@"share"];
+    NSString *const folder = [share stringByAppendingPathComponent:@"folder"];
+    XCTAssertTrue([fm createDirectoryAtPath:folder withIntermediateDirectories:YES attributes:nil error:NULL]);
+    XCTAssertTrue([@"text" writeToFile:[folder stringByAppendingPathComponent:@"real.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([@"binary" writeToFile:[folder stringByAppendingPathComponent:@"real.bin"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([fm createSymbolicLinkAtPath:[share stringByAppendingPathComponent:@"folder-alias"] withDestinationPath:@"folder" error:NULL]);
+    XCTAssertTrue([fm createSymbolicLinkAtPath:[share stringByAppendingPathComponent:@"good.txt"] withDestinationPath:@"folder/real.txt" error:NULL]);
+    XCTAssertTrue([fm createSymbolicLinkAtPath:[share stringByAppendingPathComponent:@"alias.txt"] withDestinationPath:@"folder/real.bin" error:NULL]);
+    XCTAssertTrue([fm createSymbolicLinkAtPath:[share stringByAppendingPathComponent:@"alias.bin"] withDestinationPath:@"folder/real.txt" error:NULL]);
+    NSString *const shareAlias = [base stringByAppendingPathComponent:@"share-alias"];
+    XCTAssertTrue([fm createSymbolicLinkAtPath:shareAlias withDestinationPath:@"share" error:NULL]);
+    char canonicalBuffer[PATH_MAX];
+    XCTAssertNotEqual(realpath(share.fileSystemRepresentation, canonicalBuffer), NULL);
+    NSString *const canonicalShare = [fm stringWithFileSystemRepresentation:canonicalBuffer length:strlen(canonicalBuffer)];
+
+    // Input, target relative to the share, type, and the two-name extension verdict.
+    NSArray<NSArray *> *const rows = @[
+        @[@"folder/real.txt", @"folder/real.txt", NSFileTypeRegular, @YES],
+        @[@"folder-alias/real.txt", @"folder/real.txt", NSFileTypeRegular, @YES],
+        @[@"good.txt", @"folder/real.txt", NSFileTypeRegular, @YES],
+        @[@"alias.txt", @"folder/real.bin", NSFileTypeRegular, @NO],
+        @[@"alias.bin", @"folder/real.txt", NSFileTypeRegular, @NO],
+        @[@"folder-alias", @"folder", NSFileTypeDirectory, @YES],
+        @[@"", @"", NSFileTypeDirectory, @YES]
+    ];
+    for (NSArray *const row in rows) {
+        NSString *const name = row[0];
+        NSString *const expectedPath = [canonicalShare stringByAppendingPathComponent:row[1]];
+        NSString *resolvedName = nil;
+        NSString *resolvedPath = nil;
+        NSString *const type = WSKServableFileTypeAtPath([shareAlias stringByAppendingPathComponent:name], shareAlias, NO, &resolvedName, &resolvedPath);
+        XCTAssertEqualObjects(type, row[2], @"%@", name);
+        XCTAssertEqualObjects(resolvedPath, expectedPath, @"metadata must use the classified canonical target: %@", name);
+        XCTAssertEqualObjects(resolvedName, [expectedPath lastPathComponent], @"%@", name);
+        if ([type isEqualToString:NSFileTypeRegular]) {
+            NSNumber *const allowed = row[3];
+            XCTAssertEqual(WSKEntryPassesExtensionAllowList([name lastPathComponent], resolvedName, @[@"txt"]), allowed.boolValue, @"%@", name);
+            XCTAssertEqualObjects([NSData dataWithContentsOfFile:resolvedPath], [NSData dataWithContentsOfFile:expectedPath]);
+        }
+    }
+
+    [fm removeItemAtPath:base error:NULL];
+}
+
+- (void)testServableClassifierChecksHiddenTargetsRelativeToItsDirectory {
+    NSFileManager *const fm = [NSFileManager defaultManager];
+    NSString *const base = MakeTempDirectory();
+    NSString *const share = [base stringByAppendingPathComponent:@".host/share"];
+    NSString *const hidden = [share stringByAppendingPathComponent:@".hidden"];
+    XCTAssertTrue([fm createDirectoryAtPath:hidden withIntermediateDirectories:YES attributes:nil error:NULL]);
+    XCTAssertTrue([@"visible" writeToFile:[share stringByAppendingPathComponent:@"visible.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([@"hidden" writeToFile:[hidden stringByAppendingPathComponent:@"note.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([fm createSymbolicLinkAtPath:[share stringByAppendingPathComponent:@"folder-alias"] withDestinationPath:@".hidden" error:NULL]);
+    XCTAssertTrue([fm createSymbolicLinkAtPath:[share stringByAppendingPathComponent:@"file-alias.txt"] withDestinationPath:@".hidden/note.txt" error:NULL]);
+    char canonicalBuffer[PATH_MAX];
+    XCTAssertNotEqual(realpath(share.fileSystemRepresentation, canonicalBuffer), NULL);
+    NSString *const canonicalShare = [fm stringWithFileSystemRepresentation:canonicalBuffer length:strlen(canonicalBuffer)];
+
+    // Dot components above the configured share do not hide any of its contents.
+    for (NSString *const relative in @[@"", @"visible.txt"]) {
+        NSString *resolvedPath = nil;
+        NSString *const type = WSKServableFileTypeAtPath([share stringByAppendingPathComponent:relative], share, NO, NULL, &resolvedPath);
+        XCTAssertEqualObjects(type, relative.length ? NSFileTypeRegular : NSFileTypeDirectory);
+        XCTAssertEqualObjects(resolvedPath, [canonicalShare stringByAppendingPathComponent:relative]);
+    }
+
+    for (NSString *const relative in @[@".hidden", @".hidden/note.txt", @"folder-alias", @"folder-alias/note.txt", @"file-alias.txt"]) {
+        NSString *const path = [share stringByAppendingPathComponent:relative];
+        NSString *resolvedName = @"stale name";
+        NSString *resolvedPath = @"stale path";
+        XCTAssertNil(WSKServableFileTypeAtPath(path, share, NO, &resolvedName, &resolvedPath), @"%@", relative);
+        XCTAssertNil(resolvedName, @"%@", relative);
+        XCTAssertNil(resolvedPath, @"%@", relative);
+        BOOL const isDirectory = [relative isEqualToString:@".hidden"] || [relative isEqualToString:@"folder-alias"];
+        NSString *const expectedPath = [canonicalShare stringByAppendingPathComponent:isDirectory ? @".hidden" : @".hidden/note.txt"];
+        NSString *const expectedType = isDirectory ? NSFileTypeDirectory : NSFileTypeRegular;
+        XCTAssertEqualObjects(WSKServableFileTypeAtPath(path, share, YES, &resolvedName, &resolvedPath), expectedType, @"hidden items explicitly enabled: %@", relative);
+        XCTAssertEqualObjects(resolvedPath, expectedPath, @"%@", relative);
+        XCTAssertEqualObjects(resolvedName, [expectedPath lastPathComponent], @"%@", relative);
+    }
+
+    [fm removeItemAtPath:base error:NULL];
+}
+
 // -addGETHandlerForBasePath: was the one file-serving path with no containment check: it
 // only stripped ".." textually, and lstat/O_NOFOLLOW refuse a symlink solely as the *final*
 // component. Any symlinked directory under the served root therefore served whatever it

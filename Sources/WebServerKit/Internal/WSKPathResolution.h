@@ -323,17 +323,19 @@ NSString *_Nullable WSKResolveNamedEntryWithinDirectory(NSString *path, NSString
  *  0 having copied only what the listing reported, then deletes the source, so the entries it never
  *  saw are gone.
  *
- *  A link is only classified when its target resolves INSIDE `directory` — otherwise it would be
- *  advertised and then refused on access, which is the same disagreement with the sign flipped. A
- *  dangling link resolves to nothing and is likewise not classified.
+ *  Every entry is resolved once and classified only when its target is a regular file or
+ *  directory inside `directory` (or `directory` itself). This includes an ordinary leaf reached
+ *  through an intermediate symlink. Missing, dangling, unresolvable and outside entries return
+ *  nil. Hidden target components are checked relative to the resolved share when hidden items
+ *  are disabled; callers still filter the name they enumerate, including hidden alias names.
  *
- *  `outResolvedPath` is the path the classified TYPE was observed at — `path` itself for anything
- *  but a symlink, the link's resolved target for a symlink (nil when that resolution fails, in
- *  which case the type is nil too and there is nothing to describe). It exists so an enumeration
- *  can derive the metadata it publishes (size, dates, entity tag) from the SAME observation that
- *  classified the entry: PROPFIND once published the link inode's byte count beside the target's
- *  entity tag because its property builder asked the filesystem again with the unresolved name —
- *  recurring shape 6, two observations that need not agree. Callers must not resolve again.
+ *  `outResolvedName` receives the resolved leaf name for extension allow-list checks, including
+ *  ordinary files. `outResolvedPath` receives the fully resolved path used for the type lookup.
+ *  Both outputs are nil on refusal. An enumeration must derive its metadata (size, dates, entity
+ *  tag) from that returned path without resolving again: PROPFIND once published the link inode's
+ *  byte count beside the target's entity tag because its property builder used the unresolved
+ *  name. As with WSKResolveWithinDirectory(), this does not make later filesystem operations
+ *  atomic against directory renames.
  */
 NSString *_Nullable WSKServableFileTypeAtPath(NSString *path, NSString *directory, BOOL allowHiddenItems, NSString *_Nullable __autoreleasing *_Nullable outResolvedName, NSString *_Nullable __autoreleasing *_Nullable outResolvedPath);
 
