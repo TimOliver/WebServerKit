@@ -45,6 +45,99 @@ static BOOL WriteMultipartInSlices(WSKMultiPartFormRequest *request, NSData *bod
 
 @implementation WSKRequestBodyTests
 
+// Each field has its own boundary before '=' is considered. Previously a flag
+// became part of the following key, and an empty name terminated the whole form.
+- (void)testURLEncodedFormSeparatesFlagsEmptyNamesAndEmptyFields {
+    NSArray<NSArray *> *const cases = @[
+        @[@"flag&path=book.cbz", @{@"flag": @"", @"path": @"book.cbz"}],
+        @[@"path=book.cbz&flag", @{@"path": @"book.cbz", @"flag": @""}],
+        @[@"flag", @{@"flag": @""}],
+        @[@"&&flag&&path=&", @{@"flag": @"", @"path": @""}],
+        @[@"=unnamed&path=x", @{@"": @"unnamed", @"path": @"x"}],
+        @[@"=&path=x", @{@"": @"", @"path": @"x"}],
+        @[@"=", @{@"": @""}],
+        @[@"flag=old&flag", @{@"flag": @""}],
+        @[@"&&", @{}],
+        @[@"", @{}]
+    ];
+    for (NSArray *const entry in cases) {
+        XCTAssertEqualObjects(WSKParseURLEncodedForm(entry[0]), entry[1], @"%@", entry[0]);
+    }
+}
+
+- (void)testURLEncodedFormPreservesDecodingAndLastValidDuplicate {
+    NSString *const input = @"first=1&first=2&first=%FF&plus=a+b%2Bc&encoded%26key=a%3Db%26c&equals=x=y=z&name=%E6%97%A5%E6%9C%AC&bad=%GG&%FF=bad&tail=ok&space=+x+&semi=a;b&literal=%2526%253D";
+    NSDictionary *const expected = @{
+        @"first": @"2",
+        @"plus": @"a b+c",
+        @"encoded&key": @"a=b&c",
+        @"equals": @"x=y=z",
+        @"name": @"日本",
+        @"tail": @"ok",
+        @"space": @" x ",
+        @"semi": @"a;b",
+        @"literal": @"%26%3D"
+    };
+    XCTAssertEqualObjects(WSKParseURLEncodedForm(input), expected);
+    NSDictionary *const duplicate = @{@"a": @"last"};
+    XCTAssertEqualObjects(WSKParseURLEncodedForm(@"a=first&%61=last"), duplicate, @"duplicates are resolved after decoding");
+}
+
+- (void)testURLEncodedFormTreatsSeparatorsLiterally {
+    // Combining characters are data even immediately after an ASCII delimiter.
+    // NSString's composed-sequence search must not hide either separator.
+    NSDictionary *const expected = @{@"left": @"x", @"\u0301name": @"y", @"value": @"\u0301z", @"last": @"ok"};
+    XCTAssertEqualObjects(WSKParseURLEncodedForm(@"left=x&\u0301name=y&value=\u0301z&last=ok"), expected);
+    NSDictionary *const spaces = @{@"plus \u0301name": @"v \u0301", @"encoded+\u0301": @"+\u0301"};
+    XCTAssertEqualObjects(WSKParseURLEncodedForm(@"plus+\u0301name=v+\u0301&encoded%2B\u0301=%2B\u0301"), spaces);
+}
+
+- (void)testURLEncodedFieldsRoundTripThroughQueryAndFormBody {
+    WSKWebServer *const server = [[WSKWebServer alloc] init];
+    [server addHandlerForMethod:@"GET"
+                           path:@"/fields"
+                   requestClass:[WSKRequest class]
+                   processBlock:^WSKResponse *(WSKRequest *request) {
+                       NSDictionary *const query = request.query;
+                       return [WSKDataResponse responseWithJSONObject:query ? query : @{}];
+                   }];
+    [server addHandlerForMethod:@"POST"
+                           path:@"/fields"
+                   requestClass:[WSKURLEncodedFormRequest class]
+                   processBlock:^WSKResponse *(WSKRequest *request) {
+                       return [WSKDataResponse responseWithJSONObject:((WSKURLEncodedFormRequest *)request).arguments];
+                   }];
+    NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    NSString *const fields = @"flag&=unnamed&path=Book%20%231%2B%25.cbz&&empty=&repeat=old&repeat=new&bad=%FF&last";
+    NSDictionary *const expected = @{
+        @"flag": @"",
+        @"": @"unnamed",
+        @"path": @"Book #1+%.cbz",
+        @"empty": @"",
+        @"repeat": @"new",
+        @"last": @""
+    };
+    NSArray<NSString *> *const requests = @[
+        [NSString stringWithFormat:@"GET /fields?%@ HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", fields],
+        [NSString stringWithFormat:@"POST /fields HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n%@", (unsigned long)UTF8Data(fields).length, fields]
+    ];
+    for (NSString *const request in requests) {
+        NSString *const reply = SendRawRequest(server.port, request);
+        XCTAssertTrue(ReplyHasStatus(reply, 200), @"%@", reply);
+        NSRange const separator = [reply rangeOfString:@"\r\n\r\n" options:NSLiteralSearch];
+        XCTAssertNotEqual(separator.location, NSNotFound, @"%@", reply);
+        if (separator.location != NSNotFound) {
+            NSData *const body = UTF8Data([reply substringFromIndex:NSMaxRange(separator)]);
+            NSError *error = nil;
+            id const actual = [NSJSONSerialization JSONObjectWithData:body options:0 error:&error];
+            XCTAssertNil(error, @"%@", reply);
+            XCTAssertEqualObjects(actual, expected, @"%@", request);
+        }
+    }
+    [server stop];
+}
+
 // A body buffered entirely in memory (e.g. a DAV PROPFIND/LOCK body or a data
 // request) must be rejected once it exceeds the in-memory cap, rather than
 // growing unbounded and exhausting memory on the device.

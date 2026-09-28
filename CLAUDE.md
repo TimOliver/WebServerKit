@@ -452,6 +452,14 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
 
 ### Headers and framing
 
+- **Query/form fields are bounded before looking for `=`** (2026-09-28). A valueless
+  `flag` maps to an empty value, empty names are preserved, and empty `&` fields are ignored.
+  Only the first `=` splits a field. The `&`, `=` and `+` operations use `NSLiteralSearch`:
+  Foundation's default composed-character search can hide each beside a combining mark.
+  Replace literal `+` before percent-decoding; never decode twice. Existing compatibility
+  policies remain: malformed escapes/invalid percent-encoded UTF-8 skip the pair, and the
+  last successfully decoded duplicate wins. Four regressions cover the parser plus live
+  GET queries and POST form bodies; failure cases were verified against the old parser.
 - ONE validating pass over the header block: paired CRLF only, no obs-fold, `1*tchar` names,
   C0/DEL refused in field values (HTAB and obs-text pass), more than one `Host` line = 400
   (counted on RAW lines — CF merges duplicates), version grammar first (bad grammar 400,
@@ -697,6 +705,18 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
 
 ### WebDAV
 
+- **PROPFIND and PROPPATCH share `_DAVResourceHref`** (2026-09-28). The decoded resource
+  path is percent-encoded once, then escaped for its XML context. PROPPATCH formerly only
+  XML-escaped the decoded path, so spaces, fragments, queries and literal percent sequences
+  could publish a different resource identity. The shared allowlist preserves prior PROPFIND
+  bytes. Two regressions cover successful and atomic-refused updates across 14 names each,
+  including reserved characters, NFC/NFD, emoji, literal `%20`/`%2F` and a nested path. They
+  parse the XML, check explicit URI spellings and fetch each returned href unchanged.
+  Combined with the query/form fix, `Run-Tests.sh` passes 289 ASan tests, all eight trace
+  suites, Mac/iOS/tvOS Release builds, SwiftPM and both Swift consumers, five endurance
+  oracle tests and the concurrent-transfer smoke check. A native macOS `mount_webdav`
+  check reads all 14 names and writes, renames and deletes another reserved-character name;
+  after unmount, all 85 connections are closed, reservations and temporary files are zero.
 - Class 1 is complete; PROPFIND publishes nine properties. `getetag`/`getcontenttype` come
   from the SAME functions GET uses (never a second derivation) and are FILE-only —
   collections have no entity tag. `displayname` prefers a stored (PROPPATCH-set) value,
@@ -1104,13 +1124,9 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
     clustered in what the fix touched. Revisit only if a share on removable media becomes a real
     configuration, and then together with the ENAMETOOLONG status question, which is the same
     "a filesystem error is not a server fault" decision.
-  - *Multipart part-header normalisation.* `WSKNormalizeHeaderValue`'s `;` search is non-literal
-    and its input IS UTF-8-decoded, so a combining mark after the `;` in a part's
-    `Content-Disposition` lowercases the entire value and the upload lands under a case-mangled
-    name (measured; no bypass, fails closed elsewhere). The one client-REACHABLE member of the
-    non-literal-search list above — fixing it is a one-word change (`NSLiteralSearch`), and the
-    reason it is listed rather than done is that the framing parsers deserve their own measured
-    pass rather than a drive-by.
+  - *Multipart part-header normalisation.* Already fixed: `WSKNormalizeHeaderValue` uses
+    `NSLiteralSearch` for `;`, preserving filename case beside a combining mark. The uploader
+    regression remains in place; this stale finding was corrected on 2026-09-28.
   - *Framing and dispatch corners.* `Transfer-Encoding: identity` alone is processed as "no body"
     rather than the 400 §6.3 rule 3 owes (both in-tree handlers fail closed: 411/403). Legal BWS
     before a chunk extension (`5 ;x=y`) answers 400. Two or more empty lines before the request
@@ -1129,7 +1145,7 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
   - *WebDAV.* Named PROPFIND matches the nine live properties by LOCAL NAME only, so a
     foreign-namespace `getetag` gets the DAV value; a requested live property that is
     conditionally unavailable (a sealed date) is silently omitted instead of getting a 404
-    propstat; PROPPATCH's response href is not percent-encoded; PROPPATCH flattens dead-property
+    propstat; PROPPATCH flattens dead-property
     VALUES to text (child elements, attributes, `xml:lang` lost); duplicate instructions for one
     property repeat the element inside one propstat; PROPFIND of a FIFO/socket returns a 207 with
     zero responses instead of 404; COPY/MOVE never produce the §9.8.3 207 for a member failure
@@ -1158,8 +1174,7 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
     path pulling a build is exactly this client; it is also the cause of the CI flake. Fix: count
     movement of `_totalBytesWritten` (bytes the socket accepted), or exempt a connection whose
     only pending I/O is a partially drained outbound write.
-    `WSKParseURLEncodedForm` lets a valueless parameter absorb the following pair (`?flag&path=x`
-    loses `path`), and a leading `=` discards the whole remainder.
+    The query/form parsing findings were fixed on 2026-09-28; see Headers and framing.
 - **ENAMETOOLONG answers 500, both servers.** A filename ≥ NAME_MAX (a 300-char component
   measured 500 on `/upload` AND WebDAV PUT) is client-supplied input the filesystem cannot store,
   so 4xx is owed, not a server fault. Not fixed with the disk-full pass deliberately: the status is

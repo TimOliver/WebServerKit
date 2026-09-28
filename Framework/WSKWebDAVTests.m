@@ -118,10 +118,146 @@ static NSString *DAVReplyETag(NSString *reply) {
     return nil;
 }
 
+// File downloads can contain non-UTF-8 bytes in attachment headers. Keep the header and
+// payload encodings separate so the href oracle compares the actual resource bytes.
+static NSData *DAVFetchHref(NSUInteger port, NSString *href, NSString **headers) {
+    *headers = nil;
+    int const fd = ConnectToLocalhostPort(port);
+    if (fd < 0) {
+        return nil;
+    }
+    NSString *const request = [NSString stringWithFormat:@"GET %@ HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", href];
+    NSData *const requestData = UTF8Data(request);
+    NSUInteger sent = 0;
+    while (sent < requestData.length) {
+        ssize_t const count = send(fd, (const uint8_t *)requestData.bytes + sent, requestData.length - sent, 0);
+        if (count <= 0) {
+            break;
+        }
+        sent += (NSUInteger)count;
+    }
+    BOOL sawEOF = NO;
+    NSData *const reply = ReadToEOF(fd, &sawEOF);
+    close(fd);
+    NSRange const separator = [reply rangeOfData:UTF8Data(@"\r\n\r\n") options:0 range:NSMakeRange(0, reply.length)];
+    if (!sawEOF || separator.location == NSNotFound) {
+        return nil;
+    }
+    *headers = [[NSString alloc] initWithData:[reply subdataWithRange:NSMakeRange(0, NSMaxRange(separator))] encoding:NSISOLatin1StringEncoding];
+    return [reply subdataWithRange:NSMakeRange(NSMaxRange(separator), reply.length - NSMaxRange(separator))];
+}
+
 @interface WSKWebDAVTests : XCTestCase
 @end
 
 @implementation WSKWebDAVTests
+
+// The expected hrefs are explicit URI spellings, not the production encoder repeated in a
+// test. Parse XML first, then use the returned href unchanged as another HTTP request target.
+- (void)_assertDAVResponse:(NSString *)reply href:(NSString *)expected decodedPath:(NSString *)decodedPath port:(NSUInteger)port contents:(NSString *)contents {
+    XCTAssertTrue(ReplyHasStatus(reply, 207), @"%@", reply);
+    if (!reply.length) {
+        return;
+    }
+    NSRange const separator = [reply rangeOfString:@"\r\n\r\n"];
+    XCTAssertNotEqual(separator.location, NSNotFound);
+    if (separator.location == NSNotFound) {
+        return;
+    }
+    NSString *const body = [reply substringFromIndex:NSMaxRange(separator)];
+    NSError *error = nil;
+    NSXMLDocument *const document = [[NSXMLDocument alloc] initWithXMLString:body options:0 error:&error];
+    XCTAssertNotNil(document, @"%@", error);
+    // Cocoa's XPath namespace-uri() returns an empty value for these prefixed nodes;
+    // verify the parsed node URIs directly instead of making that predicate the oracle.
+    NSArray<NSXMLNode *> *const hrefs = [document nodesForXPath:@"/*[local-name()='multistatus']/*[local-name()='response']/*[local-name()='href']" error:&error];
+    XCTAssertEqualObjects(document.rootElement.URI, @"DAV:");
+    XCTAssertEqualObjects(hrefs.firstObject.URI, @"DAV:");
+    XCTAssertEqualObjects(hrefs.firstObject.parent.URI, @"DAV:");
+    XCTAssertNil(error);
+    XCTAssertEqual(hrefs.count, (NSUInteger)1, @"%@", body);
+    NSString *const href = hrefs.firstObject.stringValue;
+    XCTAssertEqualObjects(href, expected);
+    if (!href.length) {
+        return;
+    }
+    XCTAssertTrue([href canBeConvertedToEncoding:NSASCIIStringEncoding], @"href must be a URI, including UTF-8 percent escapes: %@", href);
+    NSURLComponents *const components = [NSURLComponents componentsWithString:href];
+    XCTAssertNotNil(components);
+    XCTAssertNil(components.scheme);
+    XCTAssertNil(components.host);
+    XCTAssertNil(components.query);
+    XCTAssertNil(components.fragment);
+    XCTAssertEqualObjects(components.percentEncodedPath, href, @"URL parsing must not need to repair the published href");
+    XCTAssertEqualObjects(components.path, decodedPath, @"one URI decode must recover the same resource path");
+    if (href.length) {
+        NSString *headers = nil;
+        NSData *const fetchedBody = DAVFetchHref(port, href, &headers);
+        XCTAssertTrue(ReplyHasStatus(headers, 200), @"published href %@ must fetch the resource: %@", href, headers);
+        XCTAssertEqualObjects(fetchedBody, UTF8Data(contents), @"published href must address the exact original resource");
+    }
+}
+
+- (void)_checkDAVProppatchResponseHrefsWithRefusedProperty:(BOOL)refused {
+    NSFileManager *const fm = [NSFileManager defaultManager];
+    NSString *const dir = MakeTempDirectory();
+    WSKWebDAVServer *const server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    NSArray<NSArray<NSString *> *> *const cases = @[
+        @[@"plain.txt", @"plain.txt"],
+        @[@"space name.txt", @"space%20name.txt"],
+        @[@"hash#name.txt", @"hash%23name.txt"],
+        @[@"percent%name.txt", @"percent%25name.txt"],
+        @[@"plus+name.txt", @"plus%2Bname.txt"],
+        @[@"question?name.txt", @"question%3Fname.txt"],
+        @[@"amp&name.txt", @"amp%26name.txt"],
+        @[@"quote'name.txt", @"quote'name.txt"],
+        @[@"日本語 🐈.txt", @"%E6%97%A5%E6%9C%AC%E8%AA%9E%20%F0%9F%90%88.txt"],
+        @[@"NFC-café.txt", @"NFC-caf%C3%A9.txt"],
+        @[@"NFD-cafe\u0301.txt", @"NFD-cafe%CC%81.txt"],
+        @[@"literal%20name.txt", @"literal%2520name.txt"],
+        @[@"literal%2Fname.txt", @"literal%252Fname.txt"],
+        @[@"folder #+%/child?.txt", @"folder%20%23%2B%25/child%3F.txt"]
+    ];
+    for (NSArray<NSString *> *const row in cases) {
+        NSString *const path = [dir stringByAppendingPathComponent:row[0]];
+        XCTAssertTrue([fm createDirectoryAtPath:[path stringByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:NULL]);
+        NSString *const contents = [@"resource: " stringByAppendingString:row[0]];
+        XCTAssertTrue([contents writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+        NSString *const target = [@"/" stringByAppendingString:row[1]];
+        NSString *const decodedPath = [@"/" stringByAppendingString:row[0]];
+        NSString *const protectedProperty = refused ? @"<D:getcontentlength>999</D:getcontentlength>" : @"";
+        NSString *const body = [NSString stringWithFormat:@"<D:propertyupdate xmlns:D=\"DAV:\" xmlns:X=\"urn:href-test\"><D:set><D:prop><X:colour>blue</X:colour>%@</D:prop></D:set></D:propertyupdate>", protectedProperty];
+        NSString *const patchRequest = [NSString stringWithFormat:@"PROPPATCH %@ HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n%@", target, (unsigned long)UTF8Data(body).length, body];
+        NSString *const patch = SendRawRequest(server.port, patchRequest);
+        [self _assertDAVResponse:patch href:target decodedPath:decodedPath port:server.port contents:contents];
+        if (refused) {
+            XCTAssertTrue([patch containsString:@"<D:status>HTTP/1.1 403 Forbidden</D:status>"]);
+            XCTAssertTrue([patch containsString:@"<D:status>HTTP/1.1 424 Failed Dependency</D:status>"]);
+            XCTAssertNil(DAVDeadPropertyBytes(path), @"the dead property must not be partially committed when the live property is refused");
+        } else {
+            XCTAssertTrue([patch containsString:@"<D:status>HTTP/1.1 200 OK</D:status>"]);
+            NSData *const propertyData = DAVDeadPropertyBytes(path);
+            XCTAssertNotNil(propertyData);
+            NSDictionary *const properties = propertyData ? [NSPropertyListSerialization propertyListWithData:propertyData options:0 format:NULL error:NULL] : nil;
+            XCTAssertEqualObjects(properties[@"{urn:href-test}colour"], @"blue");
+        }
+        NSString *const findRequest = [NSString stringWithFormat:@"PROPFIND %@ HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", target];
+        NSString *const find = SendRawRequest(server.port, findRequest);
+        [self _assertDAVResponse:find href:target decodedPath:decodedPath port:server.port contents:contents];
+    }
+    [server stop];
+    XCTAssertTrue([fm removeItemAtPath:dir error:NULL]);
+}
+
+- (void)testDAVProppatchSuccessHrefsRoundTripReservedAndUnicodePaths {
+    [self _checkDAVProppatchResponseHrefsWithRefusedProperty:NO];
+}
+
+- (void)testDAVProppatchAtomicRefusalHrefsRoundTripReservedAndUnicodePaths {
+    [self _checkDAVProppatchResponseHrefsWithRefusedProperty:YES];
+}
 
 - (void)testDAVServer {
     NSString *const dir = MakeTempDirectory();
@@ -2206,7 +2342,7 @@ static NSString *DAVReplyETag(NSString *reply) {
             NSString *const body = [NSString stringWithFormat:@"writer-%lu", (unsigned long)i];
             NSString *const request = [NSString stringWithFormat:@"PUT /shared.txt HTTP/1.1\r\nHost: localhost\r\n%@\r\nContent-Length: %lu\r\n\r\n%@", condition, (unsigned long)body.length, body];
             NSString *const reply = SendRawRequest(port, request);
-            @synchronized (replies) {
+            @synchronized(replies) {
                 replies[@(i)] = reply ? reply : @"";
             }
         });
@@ -2226,7 +2362,7 @@ static NSString *DAVReplyETag(NSString *reply) {
     NSUInteger accepted = 0;
     NSUInteger refused = 0;
     NSString *winningBody = nil;
-    @synchronized (replies) {
+    @synchronized(replies) {
         XCTAssertEqual(replies.count, writers);
         for (NSUInteger i = 0; i < writers; i++) {
             NSString *const reply = replies[@(i)];

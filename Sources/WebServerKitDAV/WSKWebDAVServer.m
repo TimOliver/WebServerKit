@@ -1784,10 +1784,16 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
     return [NSString stringWithFormat:@"</%@:%@>", [href isEqualToString:@"DAV:"] ? @"D" : @"W", _XMLEscape(name)];
 }
 
-- (void)_addPropertyResponseForItem:(NSString *)itemPath resource:(NSString *)resourcePath properties:(DAVProperties)properties kind:(DAVPropFindKind)kind unsupported:(NSArray<NSString *> *)unsupported lockCapable:(BOOL)lockCapable xmlString:(NSMutableString *)xmlString {
+// Request paths are already decoded. Encode them once as URI paths before embedding in
+// XML, including literal percent signs; another decode would change the resource identity.
+static NSString *_DAVResourceHref(NSString *resourcePath) {
     NSMutableCharacterSet *const allowed = [[NSCharacterSet URLPathAllowedCharacterSet] mutableCopy];
     [allowed removeCharactersInString:@"<&>?+"];
-    NSString *const escapedPath = [resourcePath stringByAddingPercentEncodingWithAllowedCharacters:allowed];
+    return [resourcePath stringByAddingPercentEncodingWithAllowedCharacters:allowed];
+}
+
+- (void)_addPropertyResponseForItem:(NSString *)itemPath resource:(NSString *)resourcePath properties:(DAVProperties)properties kind:(DAVPropFindKind)kind unsupported:(NSArray<NSString *> *)unsupported lockCapable:(BOOL)lockCapable xmlString:(NSMutableString *)xmlString {
+    NSString *const escapedPath = _DAVResourceHref(resourcePath);
 
     if (escapedPath) {
         // Classified by what a symlink points at, so the listing describes what is actually served.
@@ -2230,7 +2236,8 @@ static inline xmlNodePtr _XMLChildWithName(xmlNodePtr child, const xmlChar *name
     NSMutableString *const xmlString = [NSMutableString stringWithString:@"<?xml version=\"1.0\" encoding=\"utf-8\" ?>"];
     [xmlString appendString:@"<D:multistatus xmlns:D=\"DAV:\">\n"];
     [xmlString appendString:@"<D:response>"];
-    [xmlString appendFormat:@"<D:href>%@</D:href>", _XMLEscape([relativePath hasPrefix:@"/"] ? relativePath : [@"/" stringByAppendingString:relativePath])];
+    NSString *const resourcePath = [relativePath hasPrefix:@"/"] ? relativePath : [@"/" stringByAppendingString:relativePath];
+    [xmlString appendFormat:@"<D:href>%@</D:href>", _XMLEscape(_DAVResourceHref(resourcePath))];
 
     if (refused.count > 0) {
         [xmlString appendString:@"<D:propstat><D:prop>"];

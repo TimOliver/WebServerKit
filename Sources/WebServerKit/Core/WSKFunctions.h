@@ -64,9 +64,16 @@ NSString *_Nullable WSKEscapeURLString(NSString *string);
 NSString *_Nullable WSKUnescapeURLString(NSString *string);
 
 /**
- *  Extracts the unescaped names and values from an
- *  "application/x-www-form-urlencoded" form.
- *  http://www.w3.org/TR/html401/interact/forms.html#h-17.13.4.1
+ *  Extracts names and values from an "application/x-www-form-urlencoded" form
+ *  or URL query string (without the leading '?'). Empty '&'-separated fields
+ *  are ignored. Each other field is split at its first '='; a field without
+ *  '=' has an empty value, and an empty name is preserved.
+ *
+ *  Literal '+' becomes a space before percent-decoding. A field with malformed
+ *  escapes or invalid percent-encoded UTF-8 is skipped. When decoded names
+ *  repeat, the last successfully decoded value wins, including an empty value.
+ *  These decoding and dictionary policies are retained for compatibility; field
+ *  splitting follows https://url.spec.whatwg.org/#urlencoded-parsing.
  */
 NSDictionary<NSString *, NSString *> *WSKParseURLEncodedForm(NSString *form);
 

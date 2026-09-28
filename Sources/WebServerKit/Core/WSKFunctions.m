@@ -353,30 +353,32 @@ NSString *WSKUnescapeURLString(NSString *string) {
 
 NSDictionary<NSString *, NSString *> *WSKParseURLEncodedForm(NSString *form) {
     NSMutableDictionary *const parameters = [NSMutableDictionary dictionary];
-    NSScanner *const scanner = [[NSScanner alloc] initWithString:form];
+    NSUInteger const length = form.length;
+    NSUInteger offset = 0;
 
-    [scanner setCharactersToBeSkipped:nil];
-
-    while (1) {
-        NSString *key = nil;
-
-        if (![scanner scanUpToString:@"=" intoString:&key] || [scanner isAtEnd]) {
-            break;
+    while (offset < length) {
+        // Bound the field BEFORE looking for '=': a flag must not consume the
+        // next field's key. Walk forward without allocating an array of fields.
+        NSRange const separator = [form rangeOfString:@"&" options:NSLiteralSearch range:NSMakeRange(offset, length - offset)];
+        NSUInteger const end = (separator.location == NSNotFound) ? length : separator.location;
+        NSRange const field = NSMakeRange(offset, end - offset);
+        offset = (separator.location == NSNotFound) ? length : NSMaxRange(separator);
+        if (field.length == 0) {
+            continue;
         }
 
-        [scanner setScanLocation:([scanner scanLocation] + 1)];
+        // Only the first literal '=' separates name and value. An absent '='
+        // means an empty value; an initial '=' means an empty name.
+        NSRange const equals = [form rangeOfString:@"=" options:NSLiteralSearch range:field];
+        NSUInteger const keyEnd = (equals.location == NSNotFound) ? end : equals.location;
+        NSUInteger const valueStart = (equals.location == NSNotFound) ? end : NSMaxRange(equals);
+        NSString *key = [form substringWithRange:NSMakeRange(field.location, keyEnd - field.location)];
+        NSString *value = [form substringWithRange:NSMakeRange(valueStart, end - valueStart)];
 
-        NSString *value = nil;
-        [scanner scanUpToString:@"&" intoString:&value];
-
-        if (value == nil) {
-            value = @"";
-        }
-
-        key = [key stringByReplacingOccurrencesOfString:@"+" withString:@" "];
-        NSString *const unescapedKey = key ? WSKUnescapeURLString(key) : nil;
-        value = [value stringByReplacingOccurrencesOfString:@"+" withString:@" "];
-        NSString *const unescapedValue = value ? WSKUnescapeURLString(value) : nil;
+        key = [key stringByReplacingOccurrencesOfString:@"+" withString:@" " options:NSLiteralSearch range:NSMakeRange(0, key.length)];
+        NSString *const unescapedKey = WSKUnescapeURLString(key);
+        value = [value stringByReplacingOccurrencesOfString:@"+" withString:@" " options:NSLiteralSearch range:NSMakeRange(0, value.length)];
+        NSString *const unescapedValue = WSKUnescapeURLString(value);
 
         if (unescapedKey && unescapedValue) {
             [parameters setObject:unescapedValue forKey:unescapedKey];
@@ -386,12 +388,6 @@ NSDictionary<NSString *, NSString *> *WSKParseURLEncodedForm(NSString *form) {
             // rather than an unreachable state: drop the pair instead of aborting in debug.
             WSK_LOG_WARNING(@"Failed parsing URL encoded form for key \"%@\" and value \"%@\"", key, value);
         }
-
-        if ([scanner isAtEnd]) {
-            break;
-        }
-
-        [scanner setScanLocation:([scanner scanLocation] + 1)];
     }
     return parameters;
 }
