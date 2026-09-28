@@ -43,8 +43,10 @@ NSString *WSKEntityTagForFileInfo(const struct stat *info) {
 
 // "*" matches any existing representation. Otherwise the list is compared entry by entry.
 // If-Match requires the STRONG comparison (RFC 9110 §13.1.1), where a "W/" tag can never match;
-// If-None-Match uses the weak one, where the prefix is stripped from the client's side. Tags
-// this server issues are always strong. Hoisted here from the WebDAV write-verb preconditions
+// WebDAV If-None-Match uses the weak one, stripping the prefix from the client's side against
+// a strong file tag. Selected gzip tags are weak and cannot satisfy this helper's strong check;
+// read-side If-None-Match uses the connection's comparison, which strips BOTH prefixes.
+// Hoisted here from the WebDAV write-verb preconditions
 // when the connection's read verbs gained the same evaluation, so both sides judge the tag a
 // GET hands out by one rule.
 BOOL WSKEntityTagMatchesList(BOOL resourceExists, NSString *currentTag, NSString *list, BOOL strong) {

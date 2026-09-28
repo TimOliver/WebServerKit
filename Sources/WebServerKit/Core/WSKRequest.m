@@ -362,22 +362,27 @@ static BOOL _ParseTransferEncoding(NSString *header, BOOL *outRejected) {
     return NO;
 }
 
-// Does "Accept-Encoding" actually permit gzip? (RFC 9110 §12.5.3.) A token-exact parse
+// Does "Accept-Encoding" permit this coding? (RFC 9110 §12.5.3.) A token-exact parse
 // with q-values: a substring search says YES to "gzip;q=0" — a client explicitly refusing
 // it — which is wrong in the direction that sends a body the client cannot read. "x-gzip"
 // is the RFC 9110 §8.4.1 synonym the request-decoding side below already honours.
-static BOOL _AcceptEncodingAllowsGzip(NSString *header) {
+// Identity is acceptable unless excluded. For gzip, retain the conservative public API's
+// requirement for affirmative acceptance, including when the header is absent or empty.
+static BOOL _AcceptEncodingAllowsCoding(NSString *header, NSString *coding, BOOL defaultAllowed) {
     if (header.length == 0) {
-        return NO;
+        return defaultAllowed;
     }
 
-    BOOL allowed = NO;
+    BOOL hasWildcard = NO;
+    BOOL wildcardAllowed = NO;
 
     for (NSString *element in [header componentsSeparatedByString:@","]) {
         NSArray<NSString *> *const parts = [element componentsSeparatedByString:@";"];
         NSString *const token = [[parts.firstObject stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]] lowercaseString];
 
-        if (!([token isEqualToString:@"gzip"] || [token isEqualToString:@"x-gzip"] || [token isEqualToString:@"*"])) {
+        BOOL const matches = [token isEqualToString:coding] || ([coding isEqualToString:@"gzip"] && [token isEqualToString:@"x-gzip"]);
+
+        if (!matches && ![token isEqualToString:@"*"]) {
             continue;
         }
 
@@ -392,15 +397,16 @@ static BOOL _AcceptEncodingAllowsGzip(NSString *header) {
             }
         }
 
-        // An explicit "gzip" beats a wildcard, so a later exact refusal must be able to win.
+        // An explicit coding beats a wildcard, regardless of their order in the field.
         if ([token isEqualToString:@"*"]) {
-            allowed = allowed || !refused;
+            hasWildcard = YES;
+            wildcardAllowed = wildcardAllowed || !refused;
         } else {
             return !refused;
         }
     }
 
-    return allowed;
+    return hasWildcard ? wildcardAllowed : defaultAllowed;
 }
 
 // Parse a "Content-Encoding" list (RFC 9110 §8.4). Returns NO when the coding cannot be
@@ -554,13 +560,17 @@ static BOOL _ParseContentEncoding(NSString *header, BOOL *outGZip) {
             }
         }
 
-        _acceptsGzipContentEncoding = _AcceptEncodingAllowsGzip(_headers[@"Accept-Encoding"]);
+        _acceptsGzipContentEncoding = _AcceptEncodingAllowsCoding(_headers[@"Accept-Encoding"], @"gzip", NO);
 
         _decoders = [[NSMutableArray alloc] init];
         _attributes = [[NSMutableDictionary alloc] init];
     }
 
     return self;
+}
+
+- (BOOL)acceptsIdentityContentEncoding {
+    return _AcceptEncodingAllowsCoding(_headers[@"Accept-Encoding"], @"identity", YES);
 }
 
 - (BOOL)hasBody {

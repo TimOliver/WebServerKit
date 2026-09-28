@@ -151,14 +151,21 @@ typedef void (^WSKBodyReaderCompletionBlock)(NSData *_Nullable data, NSError *_N
 @property (nonatomic, copy, nullable) NSString *eTag;
 
 /**
- *  Enables gzip encoding for the response body.
+ *  Enables gzip encoding for the response body when the client accepts it. An absent or
+ *  empty "Accept-Encoding" selects identity. Partial responses are never gzip-encoded.
+ *  If the available encoding is explicitly forbidden, the connection responds with 406.
  *
  *  The default value is NO.
  *
- *  @warning Enabling gzip encoding will remove any "Content-Length" header
- *  since the length of the body is not known anymore. The client will still
- *  be able to determine the body length when connection is closed per
- *  HTTP/1.1 specifications.
+ *  Set this for every eligible response, letting the connection negotiate with the client;
+ *  this keeps "Vary: Accept-Encoding" on both compressed and uncompressed variants.
+ *  A selected gzip response uses a distinct weak ETag derived from the supplied eTag,
+ *  and omits Last-Modified to prevent resuming compressed data with identity byte ranges.
+ *  Set validators for the uncompressed body;
+ *  the connection selects encoding and adjusts validators before evaluating preconditions.
+ *
+ *  @warning Selected gzip encoding removes Content-Length because the encoded length is
+ *  unknown. HTTP/1.1 uses chunked framing; HTTP/1.0 delimits the body by closing the connection.
  */
 @property (nonatomic, getter=isGZipContentEncodingEnabled) BOOL gzipContentEncodingEnabled;
 

@@ -254,6 +254,7 @@ extern NSString *WSKStringFromSockAddr(const struct sockaddr *addr, BOOL include
 @interface WSKRequest ()
 @property (nonatomic, readonly) BOOL usesChunkedTransferEncoding;
 @property (nonatomic, getter=isVirtualHEAD) BOOL virtualHEAD;
+@property (nonatomic, readonly) BOOL acceptsIdentityContentEncoding;
 @property (nonatomic) NSData *localAddressData;
 @property (nonatomic) NSData *remoteAddressData;
 - (BOOL)prepareForWriting;
@@ -266,6 +267,7 @@ extern NSString *WSKStringFromSockAddr(const struct sockaddr *addr, BOOL include
 @interface WSKResponse ()
 @property (nonatomic, readonly) NSDictionary<NSString *, NSString *> *additionalHeaders;
 @property (nonatomic, readonly) BOOL usesChunkedTransferEncoding;
+- (BOOL)isPartialContent;
 - (void)prepareForReading;
 - (BOOL)performOpen:(NSError **)error;
 - (void)performReadDataWithCompletion:(WSKBodyReaderCompletionBlock)block;

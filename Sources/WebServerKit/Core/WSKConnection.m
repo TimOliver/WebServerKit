@@ -970,6 +970,75 @@ static BOOL _StatusDelimitsItself(NSInteger statusCode) {
     return _response.usesChunkedTransferEncoding && !_clientIsHTTP10;
 }
 
+- (WSKResponse *)_responseBySelectingContentEncoding:(WSKResponse *)response forRequest:(WSKRequest *)request {
+    if (!response.isGZipContentEncodingEnabled || !response.hasBody) {
+        return response;
+    }
+
+    // Every variant of this opted-in resource depends on Accept-Encoding, including identity
+    // and generated 304s. Consolidate case-variant keys before the serializer overwrites them.
+    NSMutableArray<NSString *> *const varyHeaders = [NSMutableArray array];
+    NSMutableArray<NSString *> *const varyTokens = [NSMutableArray array];
+    NSMutableSet<NSString *> *const seenTokens = [NSMutableSet set];
+    for (NSString *const header in response.additionalHeaders) {
+        if ([header caseInsensitiveCompare:@"Vary"] != NSOrderedSame) {
+            continue;
+        }
+
+        [varyHeaders addObject:header];
+
+        for (NSString *const component in [response.additionalHeaders[header] componentsSeparatedByString:@","]) {
+            NSString *const token = [component stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+            NSString *const lowerToken = token.lowercaseString;
+
+            if (token.length && ![seenTokens containsObject:lowerToken]) {
+                [varyTokens addObject:token];
+                [seenTokens addObject:lowerToken];
+            }
+        }
+    }
+
+    for (NSString *const header in varyHeaders) {
+        [response setValue:nil forAdditionalHeader:header];
+    }
+
+    if (![seenTokens containsObject:@"accept-encoding"]) {
+        [varyTokens addObject:@"Accept-Encoding"];
+    }
+
+    NSString *const vary = [seenTokens containsObject:@"*"] ? @"*" : [varyTokens componentsJoinedByString:@", "];
+    [response setValue:vary forAdditionalHeader:@"Vary"];
+
+    // Range offsets describe identity bytes. A client forbidding identity cannot receive that
+    // partial representation; report negotiation failure instead of compressing those offsets.
+    BOOL const useGZip = request.acceptsGzipContentEncoding && !response.isPartialContent;
+    response.gzipContentEncodingEnabled = useGZip;
+
+    if (!useGZip) {
+        if (!request.acceptsIdentityContentEncoding) {
+            WSKResponse *const refusal = [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotAcceptable
+                                                                           message:@"No acceptable content encoding for this response"];
+            [refusal setValue:vary forAdditionalHeader:@"Vary"];
+            return refusal;
+        }
+
+        return response;
+    }
+
+    // Selection precedes preconditions. Use a distinct opaque value so a cached identity body
+    // cannot revalidate as gzip. The tag is WEAK: asynchronous flush boundaries can change gzip
+    // bytes without changing the source representation. It must never authorize byte resumption.
+    if (response.eTag != nil) {
+        NSString *const encodedTag = [[response.eTag dataUsingEncoding:NSUTF8StringEncoding] base64EncodedStringWithOptions:0];
+        response.eTag = [NSString stringWithFormat:@"W/\"wsk-gzip-%@\"", encodedTag];
+    }
+
+    // A date issued for gzip could otherwise authorize an identity-file If-Range response.
+    // Identity retains its sealed date (including Finder's date-based resume support).
+    response.lastModifiedDate = nil;
+    return response;
+}
+
 // http://www.w3.org/Protocols/rfc2616/rfc2616-sec10.html
 - (void)_finishProcessingRequest:(WSKResponse *)response {
     WSK_DCHECK(_responseMessage == NULL);
@@ -2863,6 +2932,9 @@ static inline BOOL _CompareResources(NSString *responseETag, NSString *requestET
 }
 
 - (WSKResponse *)overrideResponse:(WSKResponse *)response forRequest:(WSKRequest *)request {
+    // Subclasses may adjust or replace the handler's response before calling super. Select
+    // encoding here so those supported overrides receive the same conditional evaluation.
+    response = [self _responseBySelectingContentEncoding:response forRequest:request];
     BOOL const isRead = [request.method isEqualToString:@"GET"] || [request.method isEqualToString:@"HEAD"];
 
     // RFC 9110 §13.2.1: If-Match and If-Unmodified-Since apply to EVERY method, and a false

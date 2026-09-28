@@ -95,6 +95,109 @@ static WSKDataResponse *CacheRevalidationResponse(NSString *cacheControl, BOOL t
     return response;
 }
 
+// Capture binary bodies below the HTTP-client layer, which might negotiate/decompress for us.
+// Decode the server's chunk framing separately from content coding; malformed framing fails
+// the body assertion instead of being mistaken for a valid compressed response.
+static NSData *ReadGZipNegotiationReply(NSUInteger port, NSString *request, NSString **headers) {
+    *headers = nil;
+    int const fd = ConnectToLocalhostPort(port);
+    if (fd < 0) {
+        return nil;
+    }
+    NSData *const requestData = UTF8Data(request);
+    NSUInteger sent = 0;
+    while (sent < requestData.length) {
+        ssize_t const count = send(fd, (const uint8_t *)requestData.bytes + sent, requestData.length - sent, 0);
+        if (count <= 0) {
+            close(fd);
+            return nil;
+        }
+        sent += (NSUInteger)count;
+    }
+    BOOL sawEOF = NO;
+    NSData *const raw = ReadToEOF(fd, &sawEOF);
+    close(fd);
+    NSData *const separator = UTF8Data(@"\r\n\r\n");
+    NSRange const headerEnd = [raw rangeOfData:separator options:0 range:NSMakeRange(0, raw.length)];
+    if (!sawEOF || (headerEnd.location == NSNotFound)) {
+        return nil;
+    }
+    *headers = [[NSString alloc] initWithData:[raw subdataWithRange:NSMakeRange(0, NSMaxRange(headerEnd))] encoding:NSISOLatin1StringEncoding];
+    NSData *const wireBody = [raw subdataWithRange:NSMakeRange(NSMaxRange(headerEnd), raw.length - NSMaxRange(headerEnd))];
+    NSString *const transferEncoding = [CacheRevalidationHeaders(*headers)[@"transfer-encoding"] lowercaseString];
+    if ((wireBody.length == 0) || ![transferEncoding isEqualToString:@"chunked"]) {
+        return wireBody;
+    }
+    NSMutableData *const body = [NSMutableData data];
+    NSData *const newline = UTF8Data(@"\r\n");
+    NSUInteger position = 0;
+    while (position < wireBody.length) {
+        NSRange const lineEnd = [wireBody rangeOfData:newline options:0 range:NSMakeRange(position, wireBody.length - position)];
+        if (lineEnd.location == NSNotFound) {
+            return nil;
+        }
+        NSString *const line = [[NSString alloc] initWithData:[wireBody subdataWithRange:NSMakeRange(position, lineEnd.location - position)] encoding:NSASCIIStringEncoding];
+        NSScanner *const scanner = [NSScanner scannerWithString:line ? line : @""];
+        unsigned long long length = 0;
+        if (![scanner scanHexLongLong:&length] || !scanner.isAtEnd) {
+            return nil;
+        }
+        position = NSMaxRange(lineEnd);
+        if ((length > wireBody.length - position) || (wireBody.length - position - (NSUInteger)length < 2)) {
+            return nil;
+        }
+        if (![[wireBody subdataWithRange:NSMakeRange(position + (NSUInteger)length, 2)] isEqualToData:newline]) {
+            return nil;
+        }
+        if (length == 0) {
+            return position + 2 == wireBody.length ? body : nil;
+        }
+        [body appendData:[wireBody subdataWithRange:NSMakeRange(position, (NSUInteger)length)]];
+        position += (NSUInteger)length + 2;
+    }
+    return nil;
+}
+
+static NSData *GZipNegotiationPayload(void) {
+    NSMutableData *const data = [NSMutableData dataWithLength:8193];
+    uint8_t *const bytes = data.mutableBytes;
+    for (NSUInteger index = 0; index < data.length; index++) {
+        bytes[index] = (uint8_t)((index * 37 + index / 7) % 256);
+    }
+    return data;
+}
+
+static WSKDataResponse *GZipNegotiationResponse(NSData *payload, NSString *vary) {
+    WSKDataResponse *const response = [WSKDataResponse responseWithData:payload contentType:@"application/octet-stream"];
+    response.gzipContentEncodingEnabled = YES;
+    response.eTag = @"\"gzip-test-v1\"";
+    response.lastModifiedDate = WSKParseRFC822(@"Sun, 06 Nov 1994 08:49:37 GMT");
+    if (vary.length) {
+        [response setValue:vary forAdditionalHeader:@"vArY"];
+    }
+    return response;
+}
+
+static NSArray<NSString *> *GZipVaryTokens(NSString *value) {
+    NSMutableArray<NSString *> *const tokens = [NSMutableArray array];
+    for (NSString *const token in [value componentsSeparatedByString:@","]) {
+        [tokens addObject:[[token stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]] lowercaseString]];
+    }
+    return tokens;
+}
+
+// The documented override hook may enable content coding before asking super to apply
+// conditionals. This must negotiate the final response configuration, not the handler's input.
+@interface WSKGZipOverrideConnection : WSKConnection
+@end
+
+@implementation WSKGZipOverrideConnection
+- (WSKResponse *)overrideResponse:(WSKResponse *)response forRequest:(WSKRequest *)request {
+    response.gzipContentEncodingEnabled = YES;
+    return [super overrideResponse:response forRequest:request];
+}
+@end
+
 @interface WSKConnectionTests : XCTestCase
 @end
 
@@ -738,10 +841,11 @@ static WSKDataResponse *CacheRevalidationResponse(NSString *cacheControl, BOOL t
     XCTAssertTrue([server startWithOptions:options error:NULL]);
     int const fd = ConnectToLocalhostPort(server.port);
     XCTAssertGreaterThan(fd, 0);
-    const char *const request = "GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    const char *const request = gzipEnabled ? "GET /stream HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n" : "GET /stream HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
     XCTAssertEqual(send(fd, request, strlen(request), 0), (ssize_t)strlen(request));
     NSString *const headers = ReadLifetimeResponseHeaders(fd);
     XCTAssertTrue(ReplyHasStatus(headers, 200), @"the stream must start successfully: %@", headers);
+    XCTAssertEqualObjects(CacheRevalidationHeaders(headers)[@"content-encoding"], gzipEnabled ? @"gzip" : nil, @"the gzip lifetime case must actually install its encoder");
     [self waitForExpectations:@[readerParked] timeout:5.0];
     WSKBodyReaderCompletionBlock retained = nil;
     @synchronized(callbacks) {
@@ -1432,6 +1536,263 @@ static WSKDataResponse *CacheRevalidationResponse(NSString *cacheControl, BOOL t
     XCTAssertTrue(ReplyHasStatus(refused, 412), @"the existing resource still fails the write precondition: %@", refused);
     XCTAssertEqualObjects([NSData dataWithContentsOfFile:path], UTF8Data(@"FIRST"));
     XCTAssertEqualObjects([fm contentsOfDirectoryAtPath:dir error:NULL], @[@"created.txt"]);
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+- (void)testOptInGZipNegotiationHonorsAcceptedAndRefusedEncodings {
+    NSData *const payload = GZipNegotiationPayload();
+    WSKWebServer *const server = [[WSKWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[WSKRequest class]
+                          processBlock:^WSKResponse *(WSKRequest *request) {
+                              WSKDataResponse *const response = GZipNegotiationResponse(payload, nil);
+                              response.gzipContentEncodingEnabled = ![request.path isEqualToString:@"/plain"];
+                              return response;
+                          }];
+    NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    NSArray<NSArray *> *const cases = @[
+        @[@"", @NO, @200],
+        @[@"Accept-Encoding:\r\n", @NO, @200],
+        @[@"Accept-Encoding: gzip;q=0\r\n", @NO, @200],
+        @[@"Accept-Encoding: gzip;q=0, *;q=1\r\n", @NO, @200],
+        @[@"Accept-Encoding: gzip\r\n", @YES, @200],
+        @[@"Accept-Encoding: GZIP;q=0.5\r\n", @YES, @200],
+        @[@"Accept-Encoding: *;q=0.5\r\n", @YES, @200],
+        @[@"Accept-Encoding: gzip, identity;q=0\r\n", @YES, @200],
+        @[@"Accept-Encoding: *;q=0, identity;q=1\r\n", @NO, @200],
+        @[@"Accept-Encoding: identity;q=1, *;q=0\r\n", @NO, @200],
+        @[@"Accept-Encoding: *;q=0\r\n", @NO, @406],
+        @[@"Accept-Encoding: gzip;q=0, identity;q=0\r\n", @NO, @406]
+    ];
+    for (NSArray *const row in cases) {
+        NSString *const request = [NSString stringWithFormat:@"GET /encoded HTTP/1.1\r\nHost: localhost\r\n%@Connection: close\r\n\r\n", row[0]];
+        NSString *head = nil;
+        NSData *const body = ReadGZipNegotiationReply(server.port, request, &head);
+        XCTAssertTrue(ReplyHasStatus(head, [(NSNumber *)row[2] integerValue]), @"%@ => %@", row[0], head);
+        if ([(NSNumber *)row[2] integerValue] == 200) {
+            NSDictionary *const headers = CacheRevalidationHeaders(head);
+            BOOL const gzip = [(NSNumber *)row[1] boolValue];
+            XCTAssertEqualObjects(headers[@"content-encoding"], gzip ? @"gzip" : nil, @"%@", row[0]);
+            XCTAssertEqualObjects(gzip ? GZipDecompress(body) : body, payload, @"%@ must deliver the exact binary representation", row[0]);
+        }
+    }
+    NSString *head = nil;
+    NSData *const plain = ReadGZipNegotiationReply(server.port, @"GET /plain HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: gzip;q=0, identity;q=0\r\nConnection: close\r\n\r\n", &head);
+    XCTAssertTrue(ReplyHasStatus(head, 200), @"negotiation changes apply only to opted-in responses: %@", head);
+    XCTAssertEqualObjects(plain, payload);
+    XCTAssertNil(CacheRevalidationHeaders(head)[@"vary"]);
+    [server stop];
+}
+
+- (void)testGZipEnabledByResponseOverrideIsNegotiatedBeforeConditions {
+    NSData *const payload = GZipNegotiationPayload();
+    WSKWebServer *const server = [[WSKWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[WSKRequest class]
+                          processBlock:^WSKResponse *(WSKRequest *request) {
+                              WSKDataResponse *const response = GZipNegotiationResponse(payload, nil);
+                              response.gzipContentEncodingEnabled = NO;
+                              return response;
+                          }];
+    NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES, WSKOption_ConnectionClass: [WSKGZipOverrideConnection class]};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    NSString *identityHead = nil;
+    NSData *const identityBody = ReadGZipNegotiationReply(server.port, @"GET / HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: gzip;q=0\r\nConnection: close\r\n\r\n", &identityHead);
+    NSDictionary *const identityHeaders = CacheRevalidationHeaders(identityHead);
+    XCTAssertTrue(ReplyHasStatus(identityHead, 200), @"%@", identityHead);
+    XCTAssertEqualObjects(identityBody, payload);
+    XCTAssertNil(identityHeaders[@"content-encoding"]);
+    XCTAssertEqualObjects(GZipVaryTokens(identityHeaders[@"vary"]), @[@"accept-encoding"]);
+    NSString *gzipHead = nil;
+    NSData *const gzipBody = ReadGZipNegotiationReply(server.port, @"GET / HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n", &gzipHead);
+    NSDictionary *const gzipHeaders = CacheRevalidationHeaders(gzipHead);
+    NSString *const gzipTag = gzipHeaders[@"etag"];
+    XCTAssertTrue(ReplyHasStatus(gzipHead, 200), @"%@", gzipHead);
+    XCTAssertEqualObjects(gzipHeaders[@"content-encoding"], @"gzip");
+    XCTAssertEqualObjects(GZipDecompress(gzipBody), payload);
+    XCTAssertTrue([gzipTag hasPrefix:@"W/\""], @"%@", gzipHead);
+    NSString *const gzipOpaque = [gzipTag hasPrefix:@"W/"] ? [gzipTag substringFromIndex:2] : gzipTag;
+    XCTAssertNotEqualObjects(gzipOpaque, identityHeaders[@"etag"]);
+    XCTAssertEqualObjects(GZipVaryTokens(gzipHeaders[@"vary"]), @[@"accept-encoding"]);
+    if (gzipTag) {
+        NSString *const request = [NSString stringWithFormat:@"GET / HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: gzip\r\nIf-None-Match: %@\r\nConnection: close\r\n\r\n", gzipTag];
+        NSString *head = nil;
+        NSData *const body = ReadGZipNegotiationReply(server.port, request, &head);
+        NSDictionary *const headers = CacheRevalidationHeaders(head);
+        XCTAssertTrue(ReplyHasStatus(head, 304), @"%@", head);
+        XCTAssertEqualObjects(headers[@"etag"], gzipTag);
+        XCTAssertEqualObjects(GZipVaryTokens(headers[@"vary"]), @[@"accept-encoding"]);
+        XCTAssertNil(headers[@"content-encoding"]);
+        XCTAssertEqual(body.length, (NSUInteger)0);
+    }
+    [server stop];
+}
+
+- (void)testGZipNegotiationMergesVaryForBothRepresentations {
+    NSData *const payload = GZipNegotiationPayload();
+    for (NSString *const vary in @[@"", @"Accept-Language", @"aCcEpT-EnCoDiNg, Accept-Language", @"*"]) {
+        WSKWebServer *const server = [[WSKWebServer alloc] init];
+        [server addDefaultHandlerForMethod:@"GET"
+                              requestClass:[WSKRequest class]
+                              processBlock:^WSKResponse *(WSKRequest *request) {
+                                  return GZipNegotiationResponse(payload, vary);
+                              }];
+        NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+        XCTAssertTrue([server startWithOptions:options error:NULL]);
+        for (NSString *const encoding in @[@"identity", @"gzip"]) {
+            NSString *const request = [NSString stringWithFormat:@"GET / HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: %@\r\nConnection: close\r\n\r\n", encoding];
+            NSString *head = nil;
+            NSData *const body = ReadGZipNegotiationReply(server.port, request, &head);
+            XCTAssertTrue(ReplyHasStatus(head, 200), @"%@", head);
+            NSArray<NSString *> *const tokens = GZipVaryTokens(CacheRevalidationHeaders(head)[@"vary"]);
+            NSArray<NSString *> *const expected = [vary isEqualToString:@"*"] ? @[@"*"] : (vary.length ? @[@"accept-encoding", @"accept-language"] : @[@"accept-encoding"]);
+            XCTAssertEqualObjects([tokens sortedArrayUsingSelector:@selector(compare:)], expected, @"Vary must merge case-insensitively without repeating Accept-Encoding or extending '*': %@", head);
+            XCTAssertEqualObjects([encoding isEqualToString:@"gzip"] ? GZipDecompress(body) : body, payload);
+        }
+        [server stop];
+    }
+}
+
+- (void)testGZipValidatorsDescribeTheSelectedRepresentationBeforeConditions {
+    NSData *const payload = GZipNegotiationPayload();
+    WSKWebServer *const server = [[WSKWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[WSKRequest class]
+                          processBlock:^WSKResponse *(WSKRequest *request) {
+                              return GZipNegotiationResponse(payload, @"Accept-Language");
+                          }];
+    NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    NSString *identityHead = nil;
+    NSData *const identityBody = ReadGZipNegotiationReply(server.port, @"GET / HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n", &identityHead);
+    NSString *gzipHead = nil;
+    NSData *const gzipBody = ReadGZipNegotiationReply(server.port, @"GET / HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n", &gzipHead);
+    NSString *const identityTag = CacheRevalidationHeaders(identityHead)[@"etag"];
+    NSString *const gzipTag = CacheRevalidationHeaders(gzipHead)[@"etag"];
+    XCTAssertEqualObjects(identityBody, payload);
+    XCTAssertEqualObjects(GZipDecompress(gzipBody), payload);
+    XCTAssertEqualObjects(identityTag, @"\"gzip-test-v1\"");
+    XCTAssertTrue([gzipTag hasPrefix:@"W/\""], @"gzip flush boundaries are not a strong validator: %@", gzipHead);
+    NSString *const gzipOpaque = [gzipTag hasPrefix:@"W/"] ? [gzipTag substringFromIndex:2] : gzipTag;
+    XCTAssertNotEqualObjects(gzipOpaque, identityTag, @"weak comparison must still distinguish gzip from identity");
+    XCTAssertNotNil(CacheRevalidationHeaders(identityHead)[@"last-modified"]);
+    XCTAssertNil(CacheRevalidationHeaders(gzipHead)[@"last-modified"], @"gzip must not advertise an identity date that could authorize an If-Range splice");
+    if (identityTag && gzipTag) {
+        NSArray<NSArray *> *const cases = @[
+            @[@"gzip", @"If-None-Match", gzipTag, @304],
+            @[@"gzip", @"If-None-Match", gzipOpaque, @304],
+            @[@"gzip", @"If-None-Match", identityTag, @200],
+            @[@"identity", @"If-None-Match", gzipTag, @200],
+            @[@"gzip", @"If-Match", gzipTag, @412],
+            @[@"gzip", @"If-Match", identityTag, @412],
+            @[@"gzip", @"If-Match", @"*", @200],
+            @[@"gzip", @"If-Modified-Since", @"Sun, 06 Nov 1994 08:49:37 GMT", @200]
+        ];
+        for (NSArray *const row in cases) {
+            NSString *const request = [NSString stringWithFormat:@"GET / HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: %@\r\n%@: %@\r\nConnection: close\r\n\r\n", row[0], row[1], row[2]];
+            NSString *head = nil;
+            NSData *const body = ReadGZipNegotiationReply(server.port, request, &head);
+            NSInteger const status = [(NSNumber *)row[3] integerValue];
+            XCTAssertTrue(ReplyHasStatus(head, status), @"%@ %@ on %@ must use the selected validator: %@", row[1], row[2], row[0], head);
+            if (status == 200) {
+                XCTAssertEqualObjects([(NSString *)row[0] isEqualToString:@"gzip"] ? GZipDecompress(body) : body, payload);
+            } else if (status == 304) {
+                NSDictionary *const headers = CacheRevalidationHeaders(head);
+                XCTAssertEqualObjects(headers[@"etag"], gzipTag);
+                XCTAssertTrue([GZipVaryTokens(headers[@"vary"]) containsObject:@"accept-encoding"]);
+                XCTAssertNil(headers[@"content-encoding"]);
+                XCTAssertNil(headers[@"last-modified"]);
+                XCTAssertEqual(body.length, (NSUInteger)0);
+            }
+        }
+    }
+    [server stop];
+}
+
+- (void)testGZipMappedHeadMatchesGetMetadataWithoutSendingABody {
+    NSData *const payload = GZipNegotiationPayload();
+    WSKWebServer *const server = [[WSKWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[WSKRequest class]
+                          processBlock:^WSKResponse *(WSKRequest *request) {
+                              return GZipNegotiationResponse(payload, @"Accept-Language");
+                          }];
+    NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    for (NSString *const encoding in @[@"identity", @"gzip"]) {
+        NSString *const getRequest = [NSString stringWithFormat:@"GET / HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: %@\r\nConnection: close\r\n\r\n", encoding];
+        NSString *const headRequest = [NSString stringWithFormat:@"HEAD / HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: %@\r\nConnection: close\r\n\r\n", encoding];
+        NSString *getHead = nil;
+        NSData *const getBody = ReadGZipNegotiationReply(server.port, getRequest, &getHead);
+        NSString *headHead = nil;
+        NSData *const headBody = ReadGZipNegotiationReply(server.port, headRequest, &headHead);
+        XCTAssertTrue(ReplyHasStatus(getHead, 200), @"%@", getHead);
+        XCTAssertTrue(ReplyHasStatus(headHead, 200), @"%@", headHead);
+        XCTAssertEqualObjects([encoding isEqualToString:@"gzip"] ? GZipDecompress(getBody) : getBody, payload);
+        XCTAssertEqualObjects(headBody, [NSData data]);
+        NSDictionary *const getHeaders = CacheRevalidationHeaders(getHead);
+        NSDictionary *const headHeaders = CacheRevalidationHeaders(headHead);
+        for (NSString *const field in @[@"etag", @"last-modified", @"vary", @"content-encoding", @"content-length", @"transfer-encoding"]) {
+            XCTAssertEqualObjects(headHeaders[field], getHeaders[field], @"HEAD %@ metadata must describe the selected GET representation", field);
+        }
+        XCTAssertEqualObjects(headHeaders[@"content-encoding"], [encoding isEqualToString:@"gzip"] ? @"gzip" : nil);
+    }
+    [server stop];
+}
+
+- (void)testGZipNegotiationKeepsPartialResponsesAndIfRangeHonest {
+    NSFileManager *const fm = [NSFileManager defaultManager];
+    NSString *const dir = MakeTempDirectory();
+    NSString *const path = [dir stringByAppendingPathComponent:@"data.bin"];
+    NSData *const payload = GZipNegotiationPayload();
+    XCTAssertTrue([payload writeToFile:path atomically:YES]);
+    NSDictionary *const attributes = @{NSFileModificationDate: [NSDate dateWithTimeIntervalSince1970:784111777.0]};
+    XCTAssertTrue([fm setAttributes:attributes ofItemAtPath:path error:NULL]);
+    WSKWebServer *const server = [[WSKWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[WSKRequest class]
+                          processBlock:^WSKResponse *(WSKRequest *request) {
+                              WSKFileResponse *const response = [WSKFileResponse responseWithFile:path byteRange:request.byteRange isAttachment:NO ifRange:request.ifRange];
+                              response.gzipContentEncodingEnabled = YES;
+                              return response;
+                          }];
+    NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    NSString *identityHead = nil;
+    NSData *const identityBody = ReadGZipNegotiationReply(server.port, @"GET / HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n", &identityHead);
+    NSString *gzipHead = nil;
+    NSData *const gzipBody = ReadGZipNegotiationReply(server.port, @"GET / HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n", &gzipHead);
+    XCTAssertEqualObjects(identityBody, payload);
+    XCTAssertEqualObjects(GZipDecompress(gzipBody), payload);
+    NSDictionary *const identityHeaders = CacheRevalidationHeaders(identityHead);
+    NSString *const gzipTag = CacheRevalidationHeaders(gzipHead)[@"etag"];
+    XCTAssertNotNil(identityHeaders[@"last-modified"]);
+    XCTAssertNotNil(gzipTag);
+    NSArray<NSString *> *const conditions = @[
+        @"",
+        [NSString stringWithFormat:@"If-Range: %@\r\n", identityHeaders[@"etag"]],
+        [NSString stringWithFormat:@"If-Range: %@\r\n", identityHeaders[@"last-modified"]]
+    ];
+    for (NSString *const condition in conditions) {
+        NSString *const request = [NSString stringWithFormat:@"GET / HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: gzip\r\nRange: bytes=7-19\r\n%@Connection: close\r\n\r\n", condition];
+        NSString *head = nil;
+        NSData *const body = ReadGZipNegotiationReply(server.port, request, &head);
+        NSDictionary *const headers = CacheRevalidationHeaders(head);
+        XCTAssertTrue(ReplyHasStatus(head, 206), @"identity validators must continue to authorize a range: %@", head);
+        XCTAssertNil(headers[@"content-encoding"]);
+        XCTAssertEqualObjects(headers[@"etag"], identityHeaders[@"etag"]);
+        XCTAssertEqualObjects(body, [payload subdataWithRange:NSMakeRange(7, 13)]);
+    }
+    NSString *const resumeRequest = [NSString stringWithFormat:@"GET / HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: gzip\r\nRange: bytes=7-19\r\nIf-Range: %@\r\nConnection: close\r\n\r\n", gzipTag];
+    NSString *resumeHead = nil;
+    NSData *const resumed = ReadGZipNegotiationReply(server.port, resumeRequest, &resumeHead);
+    XCTAssertTrue(ReplyHasStatus(resumeHead, 200), @"a weak gzip validator cannot authorize identity byte offsets: %@", resumeHead);
+    XCTAssertEqualObjects(GZipDecompress(resumed), payload);
+    NSString *refusedHead = nil;
+    (void)ReadGZipNegotiationReply(server.port, @"GET / HTTP/1.1\r\nHost: localhost\r\nAccept-Encoding: gzip, identity;q=0\r\nRange: bytes=7-19\r\nConnection: close\r\n\r\n", &refusedHead);
+    XCTAssertTrue(ReplyHasStatus(refusedHead, 406), @"identity-only partial content cannot satisfy an identity refusal: %@", refusedHead);
     [server stop];
     [fm removeItemAtPath:dir error:NULL];
 }

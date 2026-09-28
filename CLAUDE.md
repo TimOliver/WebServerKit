@@ -419,6 +419,27 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   process-wide serial queue).
 - The DATE form of `If-Range` must keep working — Finder resumes with it (trace `059`).
 - gzip is never applied to a 206. Unsatisfiable ranges: 416 + `Content-Range: bytes */N`.
+- Opt-in gzip is negotiated BEFORE response preconditions, without opening a body reader.
+  Missing/empty `Accept-Encoding` selects identity; explicit coding refusals override wildcards.
+  If neither gzip nor identity is available and acceptable, answer 406. Partial responses,
+  including any case spelling of `Content-Range`, can only select identity.
+  Every opted-in variant merges `Vary: Accept-Encoding` case-insensitively, preserving `*` and
+  existing fields. Set the flag on every eligible handler response, not just accepted-gzip calls.
+  Actual gzip derives a DISTINCT WEAK tag from the typed source ETag: async flush boundaries
+  can change encoded bytes, so a strong gzip tag would promise more than the encoder guarantees.
+  It also withholds Last-Modified so a gzip client cannot use its date to resume identity bytes.
+  Identity ETags, sealed dates and Finder's date-based If-Range remain unchanged. Gzip weak-tag
+  If-Range falls back to a whole response; cross-encoding If-None-Match cannot produce a 304.
+  Verified 2026-09-17: six new wire regressions fail on the prior source, then pass with the fix;
+  an additional mutant proves that enabling gzip in a subclass before calling super is covered.
+  The existing disconnect regression explicitly requests and asserts gzip, so it still exercises
+  encoder cancellation. Eleven focused tests pass, followed by `Run-Tests.sh`: 278 ASan tests,
+  eight traces, Mac/iOS/tvOS Release builds and both Swift consumers.
+  A live Release probe completes 4,000 responses across four clients and 80 reused connections:
+  2,400 status-200, 1,200 status-304 and 400 byte-exact status-206 replies. It verifies 420,659,200
+  decoded bytes by SHA-256, including 800 gzip bodies split over 1,600 chunks. Descriptors return
+  11→11, all 1,216 tracked readers close, reserved bytes return to zero, and only the stats
+  request remains connected. The probe host and temporary share are removed afterwards.
 - `WSKFileResponse` opens once with `O_NOFOLLOW` and derives everything from `fstat` on that
   descriptor; EVERY chunk is verified against the promised size/mtime BEFORE handing over.
   A zero-length NSData is the end-of-stream sentinel — the `} else if (_size > 0)` branch is
@@ -1008,9 +1029,8 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
   - *Advertisement and negotiation.* ~~Neither DAV GET nor uploader `/download`/`/preview` sends
     `Accept-Ranges: bytes`~~ — fixed in 7e6e74f, verified on the wire 2026-09-03. `HEAD` + `Range` answers 206 + `Content-Range` (§14.2
     defines Range for GET only; internally consistent, and `curl -I -r` expects exactly this).
-    Opt-in gzip reuses the identity representation's strong ETag and no response ever carries
-    `Vary: Accept-Encoding`; outbound gzip is applied on the handler's flag without consulting
-    `Accept-Encoding` at all. 415 for an undecodable `Content-Encoding` omits `Accept-Encoding`.
+    Opt-in gzip negotiation and variant validators are fixed (see Validators and conditional
+    requests). 415 for an undecodable `Content-Encoding` omits `Accept-Encoding`.
   - *Cache metadata.* Generated 304 cache fields are now preserved (see Validators), including
     custom directives and `Vary`; arbitrary additional headers deliberately are not. Other
     non-2xx responses carry no cache metadata, leaving error pages heuristically cacheable;

@@ -365,6 +365,20 @@
 - (void)close {
 }
 
+- (BOOL)isPartialContent {
+    if (_statusCode == kWSKHTTPStatusCode_PartialContent) {
+        return YES;
+    }
+
+    for (NSString *const header in _additionalHeaders) {
+        if ([header caseInsensitiveCompare:@"Content-Range"] == NSOrderedSame) {
+            return YES;
+        }
+    }
+
+    return NO;
+}
+
 - (void)prepareForReading {
     _reader = self;
 
@@ -374,7 +388,7 @@
         // asserting identity offsets for a gzip body, and a client reassembling ranges
         // then concatenates independent gzip members at offsets that do not line up.
         // Serve the range honestly rather than half-honouring both.
-        if ((_statusCode == kWSKHTTPStatusCode_PartialContent) || [self valueForAdditionalHeader:@"Content-Range"]) {
+        if ([self isPartialContent]) {
             WSK_LOG_ERROR(@"Not gzip-encoding a partial response: its Content-Range describes the identity coding");
         } else {
             WSKGZipEncoder *const encoder = [[WSKGZipEncoder alloc] initWithResponse:self reader:_reader];

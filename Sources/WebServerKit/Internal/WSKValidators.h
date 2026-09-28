@@ -52,7 +52,8 @@ NSString *WSKEntityTagForFileInfo(const struct stat *info);
  *  and keying `*` on it made every conditional operation on a collection fail forever. `strong`
  *  selects the RFC 9110 §8.8.3.2 comparison: strong (required for `If-Match`), where a `W/` tag
  *  can never match, or weak (for `If-None-Match`), where the prefix is stripped from the
- *  client's side — tags this server issues are always strong.
+ *  client's side against a strong file tag. Use weak mode here only with a strong currentTag;
+ *  the connection's If-None-Match comparison separately handles weak selected gzip tags.
  *
  *  One home shared by the WebDAV write-verb preconditions and the connection's read-side
  *  evaluation, so the tag a GET hands out is judged by the same rule everywhere it comes back.

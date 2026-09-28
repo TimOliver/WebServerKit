@@ -167,9 +167,11 @@ NS_ASSUME_NONNULL_BEGIN
  *  You can either modify the current response and return it, or return a
  *  completely new one.
  *
- *  The default implementation replaces any response matching the "ETag" or
- *  "Last-Modified-Date" header of the request by a barebone "Not-Modified" (304)
- *  one.
+ *  The default implementation negotiates opted-in gzip encoding, then evaluates
+ *  conditional headers against the selected representation, returning 304 or 412
+ *  when appropriate. Overrides should modify or replace the response before calling
+ *  super to retain this behavior. An override that bypasses super owns both encoding
+ *  negotiation and conditional-request handling.
  */
 - (WSKResponse *)overrideResponse:(WSKResponse *)response forRequest:(WSKRequest *)request;
 
