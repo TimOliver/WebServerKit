@@ -147,6 +147,54 @@ static NSData *DAVFetchHref(NSUInteger port, NSString *href, NSString **headers)
     return [reply subdataWithRange:NSMakeRange(NSMaxRange(separator), reply.length - NSMaxRange(separator))];
 }
 
+static NSArray<NSString *> *DAVLivePropertyNames(void) {
+    return @[@"resourcetype", @"creationdate", @"getlastmodified", @"getcontentlength", @"getetag", @"getcontenttype", @"displayname", @"supportedlock", @"lockdiscovery"];
+}
+
+static NSString *DAVExpandedName(NSString *uri, NSString *name) {
+    return [NSString stringWithFormat:@"{%@}%@", uri ? uri : @"", name];
+}
+
+static NSArray<NSXMLNode *> *DAVDirectChildren(NSXMLNode *parent, NSString *name) {
+    NSMutableArray<NSXMLNode *> *const result = [NSMutableArray array];
+    for (NSXMLNode *const child in parent.children) {
+        if (child.kind == NSXMLElementKind && [child.localName isEqualToString:name] && [child.URI isEqualToString:@"DAV:"]) {
+            [result addObject:child];
+        }
+    }
+    return result;
+}
+
+static NSString *DAVNamedPropertiesXML(BOOL live, BOOL foreign, BOOL emptyNamespace) {
+    NSMutableString *const elements = [NSMutableString string];
+    for (NSString *const name in DAVLivePropertyNames()) {
+        if (live) {
+            [elements appendFormat:@"<D:%@/>", name];
+        }
+        if (foreign) {
+            [elements appendFormat:@"<X:%@ xmlns:X=\"urn:metadata\"/>", name];
+        }
+        if (emptyNamespace) {
+            [elements appendFormat:@"<%@ xmlns=\"\"/>", name];
+        }
+    }
+    return elements;
+}
+
+static NSString *DAVPropertyFind(NSUInteger port, NSString *path, NSUInteger depth, NSString *selection) {
+    NSString *const body = [NSString stringWithFormat:@"<D:propfind xmlns:D=\"DAV:\">%@</D:propfind>", selection];
+    NSString *const request = [NSString stringWithFormat:@"PROPFIND %@ HTTP/1.1\r\nHost: localhost\r\nDepth: %lu\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n%@", path, (unsigned long)depth, (unsigned long)UTF8Data(body).length, body];
+    return SendRawRequest(port, request);
+}
+
+static NSString *DAVCustomMetadataValue(NSString *uri, NSString *name) {
+    // Empty stored values must still be found rather than mistaken for missing properties.
+    if ([name isEqualToString:@"lockdiscovery"]) {
+        return @"";
+    }
+    return [NSString stringWithFormat:@"%@-%@", uri.length ? @"foreign" : @"empty", name];
+}
+
 @interface WSKWebDAVTests : XCTestCase
 @end
 
@@ -257,6 +305,296 @@ static NSData *DAVFetchHref(NSUInteger port, NSString *href, NSString **headers)
 
 - (void)testDAVProppatchAtomicRefusalHrefsRoundTripReservedAndUnicodePaths {
     [self _checkDAVProppatchResponseHrefsWithRefusedProperty:YES];
+}
+
+// Index only direct children of DAV:prop. Nested content (e.g. DAV:collection) is a value,
+// not another requested property. Reject duplicates before dictionary insertion can hide them.
+- (NSDictionary<NSString *, NSDictionary *> *)_davPropertyResults:(NSString *)reply {
+    XCTAssertTrue(ReplyHasStatus(reply, 207), @"%@", reply);
+    if (!reply.length) {
+        return @{};
+    }
+    NSRange const separator = [reply rangeOfString:@"\r\n\r\n"];
+    XCTAssertNotEqual(separator.location, NSNotFound);
+    if (separator.location == NSNotFound) {
+        return @{};
+    }
+    NSError *error = nil;
+    NSXMLDocument *const document = [[NSXMLDocument alloc] initWithXMLString:[reply substringFromIndex:NSMaxRange(separator)] options:0 error:&error];
+    XCTAssertNotNil(document, @"%@", error);
+    XCTAssertNil(error);
+    XCTAssertEqualObjects(document.rootElement.localName, @"multistatus");
+    XCTAssertEqualObjects(document.rootElement.URI, @"DAV:");
+    NSMutableDictionary<NSString *, NSDictionary *> *const resources = [NSMutableDictionary dictionary];
+    for (NSXMLNode *const response in DAVDirectChildren(document.rootElement, @"response")) {
+        NSArray<NSXMLNode *> *const hrefs = DAVDirectChildren(response, @"href");
+        XCTAssertEqual(hrefs.count, (NSUInteger)1);
+        NSString *const href = hrefs.firstObject.stringValue;
+        if (!href.length) {
+            XCTFail(@"resource response has no href");
+            continue;
+        }
+        XCTAssertNil(resources[href], @"duplicate response for %@", href);
+        NSMutableDictionary<NSString *, NSDictionary *> *const properties = [NSMutableDictionary dictionary];
+        NSArray<NSXMLNode *> *const propstats = DAVDirectChildren(response, @"propstat");
+        XCTAssertGreaterThan(propstats.count, (NSUInteger)0);
+        for (NSXMLNode *const propstat in propstats) {
+            NSArray<NSXMLNode *> *const statuses = DAVDirectChildren(propstat, @"status");
+            NSArray<NSXMLNode *> *const containers = DAVDirectChildren(propstat, @"prop");
+            XCTAssertEqual(statuses.count, (NSUInteger)1);
+            XCTAssertEqual(containers.count, (NSUInteger)1);
+            NSString *const statusLine = statuses.firstObject.stringValue;
+            BOOL const found = [statusLine isEqualToString:@"HTTP/1.1 200 OK"];
+            XCTAssertTrue(found || [statusLine isEqualToString:@"HTTP/1.1 404 Not Found"], @"%@", statusLine);
+            for (NSXMLNode *const property in containers.firstObject.children) {
+                if (property.kind != NSXMLElementKind) {
+                    continue;
+                }
+                NSString *const key = DAVExpandedName(property.URI, property.localName);
+                XCTAssertNil(properties[key], @"%@ appears more than once for %@", key, href);
+                NSMutableArray<NSString *> *const children = [NSMutableArray array];
+                for (NSXMLNode *const child in property.children) {
+                    if (child.kind == NSXMLElementKind) {
+                        [children addObject:DAVExpandedName(child.URI, child.localName)];
+                    }
+                }
+                properties[key] = @{@"status": found ? @200 : @404, @"value": property.stringValue ? property.stringValue : @"", @"children": children};
+            }
+        }
+        // Preserve the serializer's existing empty 200 propstat for all-missing requests.
+        resources[href] = properties;
+    }
+    XCTAssertGreaterThan(resources.count, (NSUInteger)0);
+    return resources;
+}
+
+- (void)_assertDAVProperties:(NSDictionary<NSString *, NSDictionary *> *)properties statuses:(NSDictionary<NSString *, NSNumber *> *)statuses {
+    XCTAssertEqualObjects([NSSet setWithArray:properties.allKeys], [NSSet setWithArray:statuses.allKeys]);
+    for (NSString *const key in statuses) {
+        NSDictionary *const property = properties[key];
+        XCTAssertEqualObjects(property[@"status"], statuses[key], @"%@", key);
+        if (statuses[key].integerValue == 404) {
+            XCTAssertEqualObjects(property[@"value"], @"", @"unavailable %@ must have no value", key);
+            XCTAssertEqualObjects(property[@"children"], @[]);
+        }
+    }
+}
+
+- (WSKWebDAVServer *)_davMetadataServerAtDirectory:(NSString *)dir {
+    NSFileManager *const fm = [NSFileManager defaultManager];
+    XCTAssertTrue([fm createDirectoryAtPath:[dir stringByAppendingPathComponent:@"folder"] withIntermediateDirectories:NO attributes:nil error:NULL]);
+    NSString *const known = [dir stringByAppendingPathComponent:@"known.css"];
+    NSString *const future = [dir stringByAppendingPathComponent:@"future"];
+    XCTAssertTrue([@"KNOWN-BODY" writeToFile:known atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([@"FUTURE" writeToFile:future atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    NSDictionary *const oldAttributes = @{NSFileModificationDate: [NSDate dateWithTimeIntervalSince1970:946684800.0]};
+    NSDictionary *const futureAttributes = @{NSFileModificationDate: [NSDate dateWithTimeIntervalSinceNow:86400.0]};
+    XCTAssertTrue([fm setAttributes:oldAttributes ofItemAtPath:known error:NULL]);
+    XCTAssertTrue([fm setAttributes:futureAttributes ofItemAtPath:future error:NULL]);
+    // No LaunchServices extension association can influence this unknown-type control.
+    XCTAssertEqualObjects(WSKGetMimeTypeForExtension(@"", nil), @"application/octet-stream");
+    WSKWebDAVServer *const server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    return server;
+}
+
+- (void)_storeDAVNamespaceCollisions:(WSKWebDAVServer *)server {
+    NSMutableString *const elements = [NSMutableString string];
+    NSMutableDictionary<NSString *, NSNumber *> *const statuses = [NSMutableDictionary dictionary];
+    for (NSString *const name in DAVLivePropertyNames()) {
+        [elements appendFormat:@"<X:%@>%@</X:%@><%@ xmlns=\"\">%@</%@>", name, DAVCustomMetadataValue(@"urn:metadata", name), name, name, DAVCustomMetadataValue(@"", name), name];
+        statuses[DAVExpandedName(@"urn:metadata", name)] = @200;
+        statuses[DAVExpandedName(@"", name)] = @200;
+    }
+    NSString *const body = [NSString stringWithFormat:@"<D:propertyupdate xmlns:D=\"DAV:\" xmlns:X=\"urn:metadata\"><D:set><D:prop>%@</D:prop></D:set></D:propertyupdate>", elements];
+    NSString *const request = [NSString stringWithFormat:@"PROPPATCH /known.css HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\nConnection: close\r\n\r\n%@", (unsigned long)UTF8Data(body).length, body];
+    NSDictionary *const resources = [self _davPropertyResults:SendRawRequest(server.port, request)];
+    [self _assertDAVProperties:resources[@"/known.css"] statuses:statuses];
+}
+
+- (NSDictionary<NSString *, NSNumber *> *)_davLiveStatusesForResource:(NSString *)href {
+    BOOL const collection = [href isEqualToString:@"/"] || [href isEqualToString:@"/folder"];
+    NSSet<NSString *> *const fileOnly = [NSSet setWithArray:@[@"getlastmodified", @"getcontentlength", @"getetag", @"getcontenttype"]];
+    NSMutableDictionary<NSString *, NSNumber *> *const statuses = [NSMutableDictionary dictionary];
+    for (NSString *const name in DAVLivePropertyNames()) {
+        BOOL const unavailable = (collection && [fileOnly containsObject:name]) || ([href isEqualToString:@"/future"] && [name isEqualToString:@"getlastmodified"]);
+        statuses[DAVExpandedName(@"DAV:", name)] = unavailable ? @404 : @200;
+    }
+    return statuses;
+}
+
+- (void)_assertDAVLiveValues:(NSDictionary<NSString *, NSDictionary *> *)properties resource:(NSString *)href {
+    BOOL const collection = [href isEqualToString:@"/"] || [href isEqualToString:@"/folder"];
+    NSArray<NSString *> *const children = collection ? @[@"{DAV:}collection"] : @[];
+    XCTAssertEqualObjects(properties[@"{DAV:}resourcetype"][@"children"], children);
+    XCTAssertEqualObjects(properties[@"{DAV:}resourcetype"][@"value"], @"");
+    XCTAssertEqualObjects(properties[@"{DAV:}lockdiscovery"][@"value"], @"");
+    XCTAssertEqualObjects(properties[@"{DAV:}supportedlock"][@"value"], @"");
+    NSString *const name = [href isEqualToString:@"/"] ? @"" : href.lastPathComponent;
+    XCTAssertEqualObjects(properties[@"{DAV:}displayname"][@"value"], name);
+    NSString *const creationDate = properties[@"{DAV:}creationdate"][@"value"];
+    XCTAssertGreaterThan(creationDate.length, (NSUInteger)0);
+    if (!collection) {
+        BOOL const future = [href isEqualToString:@"/future"];
+        XCTAssertEqualObjects(properties[@"{DAV:}getcontentlength"][@"value"], future ? @"6" : @"10");
+        XCTAssertEqualObjects(properties[@"{DAV:}getcontenttype"][@"value"], future ? @"application/octet-stream" : @"text/css");
+        NSString *const tag = properties[@"{DAV:}getetag"][@"value"];
+        XCTAssertGreaterThan(tag.length, (NSUInteger)0);
+        if (!future) {
+            XCTAssertEqualObjects(properties[@"{DAV:}getlastmodified"][@"value"], @"Sat, 01 Jan 2000 00:00:00 GMT");
+        }
+    }
+}
+
+- (void)testDAVNamedPropfindDistinguishesStoredNamespaceCollisions {
+    NSString *const dir = MakeTempDirectory();
+    WSKWebDAVServer *const server = [self _davMetadataServerAtDirectory:dir];
+    [self _storeDAVNamespaceCollisions:server];
+    NSString *const selection = [NSString stringWithFormat:@"<D:prop>%@</D:prop>", DAVNamedPropertiesXML(YES, YES, YES)];
+    NSDictionary *const resources = [self _davPropertyResults:DAVPropertyFind(server.port, @"/known.css", 0, selection)];
+    NSDictionary *const properties = resources[@"/known.css"];
+    NSMutableDictionary<NSString *, NSNumber *> *const statuses = [[self _davLiveStatusesForResource:@"/known.css"] mutableCopy];
+    for (NSString *const uri in @[@"urn:metadata", @""]) {
+        for (NSString *const name in DAVLivePropertyNames()) {
+            NSString *const key = DAVExpandedName(uri, name);
+            statuses[key] = @200;
+            NSDictionary *const property = properties[key];
+            XCTAssertEqualObjects(property[@"value"], DAVCustomMetadataValue(uri, name), @"%@", key);
+        }
+    }
+    [self _assertDAVProperties:properties statuses:statuses];
+    [self _assertDAVLiveValues:properties resource:@"/known.css"];
+    [server stop];
+    [[NSFileManager defaultManager] removeItemAtPath:dir error:NULL];
+}
+
+- (void)testDAVNamedPropfindReportsMissingNamespaceCollisions {
+    NSString *const dir = MakeTempDirectory();
+    WSKWebDAVServer *const server = [self _davMetadataServerAtDirectory:dir];
+    for (NSNumber *const mixed in @[@NO, @YES]) {
+        NSString *const selection = [NSString stringWithFormat:@"<D:prop>%@%@</D:prop>", DAVNamedPropertiesXML(NO, YES, YES), mixed.boolValue ? @"<D:getcontentlength/>" : @""];
+        NSDictionary *const resources = [self _davPropertyResults:DAVPropertyFind(server.port, @"/known.css", 0, selection)];
+        NSMutableDictionary<NSString *, NSNumber *> *const statuses = [NSMutableDictionary dictionary];
+        for (NSString *const uri in @[@"urn:metadata", @""]) {
+            for (NSString *const name in DAVLivePropertyNames()) {
+                statuses[DAVExpandedName(uri, name)] = @404;
+            }
+        }
+        if (mixed.boolValue) {
+            statuses[@"{DAV:}getcontentlength"] = @200;
+        }
+        [self _assertDAVProperties:resources[@"/known.css"] statuses:statuses];
+    }
+    [server stop];
+    [[NSFileManager defaultManager] removeItemAtPath:dir error:NULL];
+}
+
+- (void)testDAVNamedPropfindAcceptsAlternateAndDefaultDAVPrefixes {
+    NSString *const dir = MakeTempDirectory();
+    WSKWebDAVServer *const server = [self _davMetadataServerAtDirectory:dir];
+    for (NSString *const prefix in @[@"Other:", @""]) {
+        NSMutableString *const elements = [NSMutableString string];
+        for (NSString *const name in DAVLivePropertyNames()) {
+            [elements appendFormat:@"<%@%@/>", prefix, name];
+        }
+        NSString *const declaration = prefix.length ? @"xmlns:Other=\"DAV:\"" : @"xmlns=\"DAV:\"";
+        NSString *const selection = [NSString stringWithFormat:@"<D:prop %@>%@</D:prop>", declaration, elements];
+        NSDictionary *const resources = [self _davPropertyResults:DAVPropertyFind(server.port, @"/known.css", 0, selection)];
+        [self _assertDAVProperties:resources[@"/known.css"] statuses:[self _davLiveStatusesForResource:@"/known.css"]];
+        [self _assertDAVLiveValues:resources[@"/known.css"] resource:@"/known.css"];
+    }
+    NSString *const emptyReply = DAVPropertyFind(server.port, @"/known.css", 0, @"<D:prop/>");
+    NSDictionary *const empty = [self _davPropertyResults:emptyReply];
+    XCTAssertEqualObjects(empty[@"/known.css"], @{});
+    XCTAssertTrue([emptyReply containsString:@"<D:status>HTTP/1.1 200 OK</D:status>"]);
+    XCTAssertFalse([emptyReply containsString:@"<D:status>HTTP/1.1 404 Not Found</D:status>"]);
+    [server stop];
+    [[NSFileManager defaultManager] removeItemAtPath:dir error:NULL];
+}
+
+- (void)testDAVNamedPropfindReportsUnavailableLiveProperties {
+    NSString *const dir = MakeTempDirectory();
+    WSKWebDAVServer *const server = [self _davMetadataServerAtDirectory:dir];
+    NSString *const selection = [NSString stringWithFormat:@"<D:prop>%@</D:prop>", DAVNamedPropertiesXML(YES, NO, NO)];
+    for (NSString *const href in @[@"/folder", @"/known.css", @"/future"]) {
+        NSDictionary *const resources = [self _davPropertyResults:DAVPropertyFind(server.port, href, 0, selection)];
+        [self _assertDAVProperties:resources[href] statuses:[self _davLiveStatusesForResource:href]];
+        [self _assertDAVLiveValues:resources[href] resource:href];
+    }
+    NSString *const allMissing = @"<D:prop><D:getlastmodified/><D:getetag/><D:getcontentlength/><D:getcontenttype/></D:prop>";
+    NSDictionary *const missing = [self _davPropertyResults:DAVPropertyFind(server.port, @"/folder", 0, allMissing)];
+    NSDictionary *const statuses = @{@"{DAV:}getlastmodified": @404, @"{DAV:}getetag": @404, @"{DAV:}getcontentlength": @404, @"{DAV:}getcontenttype": @404};
+    [self _assertDAVProperties:missing[@"/folder"] statuses:statuses];
+    [server stop];
+    [[NSFileManager defaultManager] removeItemAtPath:dir error:NULL];
+}
+
+- (void)testDAVDepthOnePropfindKeepsPropertyStatusesIndependent {
+    NSString *const dir = MakeTempDirectory();
+    WSKWebDAVServer *const server = [self _davMetadataServerAtDirectory:dir];
+    [self _storeDAVNamespaceCollisions:server];
+    NSString *const selection = [NSString stringWithFormat:@"<D:prop>%@<X:getetag xmlns:X=\"urn:metadata\"/></D:prop>", DAVNamedPropertiesXML(YES, NO, NO)];
+    NSDictionary *const resources = [self _davPropertyResults:DAVPropertyFind(server.port, @"/", 1, selection)];
+    NSSet *const expectedResources = [NSSet setWithArray:@[@"/", @"/folder", @"/known.css", @"/future"]];
+    XCTAssertEqualObjects([NSSet setWithArray:resources.allKeys], expectedResources);
+    for (NSString *const href in expectedResources) {
+        NSMutableDictionary<NSString *, NSNumber *> *const statuses = [[self _davLiveStatusesForResource:href] mutableCopy];
+        BOOL const stored = [href isEqualToString:@"/known.css"];
+        statuses[@"{urn:metadata}getetag"] = stored ? @200 : @404;
+        NSDictionary *const properties = resources[href];
+        [self _assertDAVProperties:properties statuses:statuses];
+        [self _assertDAVLiveValues:properties resource:href];
+        if (stored) {
+            NSDictionary *const custom = properties[@"{urn:metadata}getetag"];
+            XCTAssertEqualObjects(custom[@"value"], @"foreign-getetag");
+        }
+    }
+    [server stop];
+    [[NSFileManager defaultManager] removeItemAtPath:dir error:NULL];
+}
+
+- (void)testDAVAllpropAndPropnameKeepExistingEnumeration {
+    NSString *const dir = MakeTempDirectory();
+    WSKWebDAVServer *const server = [self _davMetadataServerAtDirectory:dir];
+    [self _storeDAVNamespaceCollisions:server];
+    for (NSNumber *const namesOnly in @[@NO, @YES]) {
+        NSString *const selection = namesOnly.boolValue ? @"<D:propname/>" : @"<D:allprop/>";
+        for (NSString *const href in @[@"/known.css", @"/future", @"/folder"]) {
+            NSDictionary *const resources = [self _davPropertyResults:DAVPropertyFind(server.port, href, 0, selection)];
+            NSDictionary<NSString *, NSDictionary *> *const properties = resources[href];
+            NSMutableDictionary<NSString *, NSNumber *> *const statuses = [[self _davLiveStatusesForResource:href] mutableCopy];
+            for (NSString *const key in [statuses.allKeys copy]) {
+                if (statuses[key].integerValue == 404) {
+                    if (namesOnly.boolValue && [href isEqualToString:@"/future"]) {
+                        statuses[key] = @200;  // Existing propname lists regular-file names even when a date is unsealed.
+                    } else {
+                        [statuses removeObjectForKey:key];
+                    }
+                }
+            }
+            if ([href isEqualToString:@"/known.css"]) {
+                for (NSString *const uri in @[@"urn:metadata", @""]) {
+                    for (NSString *const name in DAVLivePropertyNames()) {
+                        NSString *const key = DAVExpandedName(uri, name);
+                        statuses[key] = @200;
+                        XCTAssertEqualObjects(properties[key][@"value"], namesOnly.boolValue ? @"" : DAVCustomMetadataValue(uri, name));
+                    }
+                }
+            }
+            [self _assertDAVProperties:properties statuses:statuses];
+            if (namesOnly.boolValue) {
+                for (NSDictionary *const property in properties.allValues) {
+                    XCTAssertEqualObjects(property[@"value"], @"");
+                    XCTAssertEqualObjects(property[@"children"], @[]);
+                }
+            } else {
+                [self _assertDAVLiveValues:properties resource:href];
+            }
+        }
+    }
+    [server stop];
+    [[NSFileManager defaultManager] removeItemAtPath:dir error:NULL];
 }
 
 - (void)testDAVServer {

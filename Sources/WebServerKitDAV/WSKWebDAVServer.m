@@ -87,6 +87,33 @@ typedef NS_ENUM(NSInteger, DAVProperties) {
                         kDAVProperty_ETag | kDAVProperty_ContentType | kDAVProperty_DisplayName | kDAVProperty_SupportedLock | kDAVProperty_LockDiscovery
 };
 
+// The same names select live properties and identify requested properties that could not
+// be returned. Prefix spelling is irrelevant; only the exact DAV: namespace selects this map.
+static const struct {
+    NSString *__unsafe_unretained name;
+    DAVProperties property;
+} kDAVLiveProperties[] = {
+    {@"resourcetype", kDAVProperty_ResourceType},
+    {@"creationdate", kDAVProperty_CreationDate},
+    {@"getlastmodified", kDAVProperty_LastModified},
+    {@"getcontentlength", kDAVProperty_ContentLength},
+    {@"getetag", kDAVProperty_ETag},
+    {@"getcontenttype", kDAVProperty_ContentType},
+    {@"displayname", kDAVProperty_DisplayName},
+    {@"supportedlock", kDAVProperty_SupportedLock},
+    {@"lockdiscovery", kDAVProperty_LockDiscovery}};
+
+static DAVProperties _DAVLivePropertyForName(NSString *namespaceHref, NSString *localName) {
+    if ([namespaceHref isEqualToString:@"DAV:"]) {
+        for (NSUInteger index = 0; index < sizeof(kDAVLiveProperties) / sizeof(kDAVLiveProperties[0]); index++) {
+            if ([localName isEqualToString:kDAVLiveProperties[index].name]) {
+                return kDAVLiveProperties[index].property;
+            }
+        }
+    }
+    return 0;
+}
+
 NS_ASSUME_NONNULL_BEGIN
 
 @interface WSKWebDAVServer (Methods)
@@ -1861,6 +1888,9 @@ static NSString *_DAVResourceHref(NSString *resourcePath) {
 
             [xmlString appendString:@"<D:propstat>"];
             [xmlString appendString:@"<D:prop>"];
+            // Local to this resource: a Depth:1 request can have file properties available
+            // on one child and unavailable on the next. Empty values still count as returned.
+            DAVProperties returnedProperties = 0;
 
             // Read before the property block because displayname consults it for a stored value.
             NSDictionary<NSString *, NSString *> *const dead = _DeadPropertiesAtPath(metadataPath);
@@ -1871,24 +1901,24 @@ static NSString *_DAVResourceHref(NSString *resourcePath) {
                 } else {
                     [xmlString appendString:@"<D:resourcetype/>"];
                 }
+                returnedProperties |= kDAVProperty_ResourceType;
             }
 
             if ((properties & kDAVProperty_CreationDate) && attributes[NSFileCreationDate]) {
                 [xmlString appendFormat:@"<D:creationdate>%@</D:creationdate>", WSKFormatISO8601((NSDate *)[attributes fileCreationDate])];
+                returnedProperties |= kDAVProperty_CreationDate;
             }
 
             if ((properties & kDAVProperty_LastModified) && isFile && attributes[NSFileModificationDate]) {  // Last modification date is not useful for directories as it changes implicitely and 'Last-Modified' header is not provided for directories anyway
                 // The same seal the GET path applies when it MINTS a Last-Modified, for the
                 // same reason: without it PROPFIND publishes precisely the date WSKFileResponse
                 // refuses to issue — one still inside its own timestamp bucket, so a later
-                // If-Range resume carrying it splices two builds under one 206. And PROPFIND
-                // emits no getetag, so that unsealed date is the ONLY validator a
-                // PROPFIND-driven client can obtain.
+                // If-Range resume carrying it could splice two builds under one 206.
                 //
                 // Opened O_NOFOLLOW because the containment and hidden-item rules have already
                 // judged the resolved path; this only needs the descriptor to ask the filesystem
-                // its timestamp granularity. If it cannot be opened the property is omitted, which
-                // is the same fail-closed direction as an unsealed date. metadataPath, not
+                // its timestamp granularity. If it cannot be opened, no successful value is
+                // published, just as for an unsealed date. metadataPath, not
                 // itemPath: a symlink child made this open fail ELOOP on every request, so the
                 // alias never published a date at all — O_NOFOLLOW is only compatible with a
                 // path whose final component is already resolved.
@@ -1899,6 +1929,7 @@ static NSString *_DAVResourceHref(NSString *resourcePath) {
 
                     if ((fstat(descriptor, &info) == 0) && WSKLastModifiedDateIsSealed(descriptor, &info)) {
                         [xmlString appendFormat:@"<D:getlastmodified>%@</D:getlastmodified>", WSKFormatRFC822((NSDate *)[attributes fileModificationDate])];
+                        returnedProperties |= kDAVProperty_LastModified;
                     }
 
                     close(descriptor);
@@ -1907,6 +1938,7 @@ static NSString *_DAVResourceHref(NSString *resourcePath) {
 
             if ((properties & kDAVProperty_ContentLength) && !isDirectory && attributes[NSFileSize]) {
                 [xmlString appendFormat:@"<D:getcontentlength>%llu</D:getcontentlength>", [attributes fileSize]];
+                returnedProperties |= kDAVProperty_ContentLength;
             }
 
             // Minted by WSKEntityTagForFileInfo — the SAME single formatter WSKFileResponse uses, so
@@ -1923,6 +1955,7 @@ static NSString *_DAVResourceHref(NSString *resourcePath) {
 
                 if (stat([metadataPath fileSystemRepresentation], &info) == 0) {
                     [xmlString appendFormat:@"<D:getetag>%@</D:getetag>", WSKEntityTagForFileInfo(&info)];
+                    returnedProperties |= kDAVProperty_ETag;
                 }
             }
 
@@ -1934,6 +1967,7 @@ static NSString *_DAVResourceHref(NSString *resourcePath) {
 
                 if (mimeType.length) {
                     [xmlString appendFormat:@"<D:getcontenttype>%@</D:getcontenttype>", _XMLEscape(mimeType)];
+                    returnedProperties |= kDAVProperty_ContentType;
                 }
             }
 
@@ -1962,6 +1996,7 @@ static NSString *_DAVResourceHref(NSString *resourcePath) {
                 }
 
                 [xmlString appendFormat:@"<D:displayname>%@</D:displayname>", _XMLEscape(published)];
+                returnedProperties |= kDAVProperty_DisplayName;
             }
 
             // RFC 4918 §18.2 counts DAV:supportedlock as part of class 2, which OPTIONS advertises
@@ -1974,6 +2009,7 @@ static NSString *_DAVResourceHref(NSString *resourcePath) {
                 } else {
                     [xmlString appendString:@"<D:supportedlock/>"];
                 }
+                returnedProperties |= kDAVProperty_SupportedLock;
             }
 
             // Always EMPTY, and that is not a stub apology — it is the one honest answer available.
@@ -1982,6 +2018,7 @@ static NSString *_DAVResourceHref(NSString *resourcePath) {
             // of the two places that must start reporting it.
             if (properties & kDAVProperty_LockDiscovery) {
                 [xmlString appendString:@"<D:lockdiscovery/>"];
+                returnedProperties |= kDAVProperty_LockDiscovery;
             }
 
             // Dead properties stored by PROPPATCH. <allprop/> returns them all; a named request
@@ -1989,6 +2026,15 @@ static NSString *_DAVResourceHref(NSString *resourcePath) {
             // is SKIPPED here because the live block above has already published it — emitting it
             // from both would put two <D:displayname> elements in one <D:prop>.
             NSMutableArray<NSString *> *const notFound = [NSMutableArray array];
+
+            if (kind == kDAVPropFind_Named) {
+                DAVProperties const missing = properties & ~returnedProperties;
+                for (NSUInteger index = 0; index < sizeof(kDAVLiveProperties) / sizeof(kDAVLiveProperties[0]); index++) {
+                    if (missing & kDAVLiveProperties[index].property) {
+                        [notFound addObject:_DeadPropertyKey(@"DAV:", kDAVLiveProperties[index].name)];
+                    }
+                }
+            }
 
             if (kind == kDAVPropFind_AllProp) {
                 for (NSString *key in dead) {
@@ -2327,45 +2373,23 @@ static NSString *_DAVResourceHref(NSString *resourcePath) {
                 xmlNodePtr node = propNode->children;
 
                 while (node) {
-                    if (!xmlStrcmp(node->name, (const xmlChar *)"resourcetype")) {
-                        properties |= kDAVProperty_ResourceType;
-                    } else if (!xmlStrcmp(node->name, (const xmlChar *)"creationdate")) {
-                        properties |= kDAVProperty_CreationDate;
-                    } else if (!xmlStrcmp(node->name, (const xmlChar *)"getlastmodified")) {
-                        properties |= kDAVProperty_LastModified;
-                    } else if (!xmlStrcmp(node->name, (const xmlChar *)"getcontentlength")) {
-                        properties |= kDAVProperty_ContentLength;
-                    } else if (!xmlStrcmp(node->name, (const xmlChar *)"getetag")) {
-                        properties |= kDAVProperty_ETag;
-                    } else if (!xmlStrcmp(node->name, (const xmlChar *)"getcontenttype")) {
-                        properties |= kDAVProperty_ContentType;
-                    } else if (!xmlStrcmp(node->name, (const xmlChar *)"displayname")) {
-                        properties |= kDAVProperty_DisplayName;
-                    } else if (!xmlStrcmp(node->name, (const xmlChar *)"supportedlock")) {
-                        properties |= kDAVProperty_SupportedLock;
-                    } else if (!xmlStrcmp(node->name, (const xmlChar *)"lockdiscovery")) {
-                        properties |= kDAVProperty_LockDiscovery;
-                    } else if (node->type == XML_ELEMENT_NODE) {
-                        // Remembered rather than dropped, so it can be reported in a 404 propstat.
-                        // The namespace travels with it: a client asking for a property in its own
-                        // namespace must see that name back, not a DAV:-qualified guess at it.
+                    if (node->type == XML_ELEMENT_NODE) {
                         NSString *const localName = [NSString stringWithUTF8String:(const char *)node->name];
                         NSString *const href = _PropertyNamespaceHref(node);
 
-                        // Same refusal as PROPPATCH, for the same reasons: neither a name carrying
-                        // an undeclared prefix nor a namespace containing "}" can be echoed back
-                        // into a well-formed 404 propstat, and this is where such a name would be
-                        // echoed. Both parsers must judge them alike or one becomes the way in.
+                        // Validate both halves before classifying, just as PROPPATCH does.
+                        // A familiar local name does not make a foreign namespace a DAV property.
                         if (!_PropertyLocalNameIsRepresentable(localName) || !_PropertyNamespaceIsRepresentable(href)) {
                             success = NO;
                             break;
                         }
 
-                        if (localName.length) {
-                            // The SAME convention PROPPATCH keys by — a property in no namespace
-                            // keys by its bare name. Defaulting to "DAV:" here instead made the two
-                            // parsers disagree, so a no-namespace property could be stored and then
-                            // never read back. litmus's propnullns/propget pair found it.
+                        DAVProperties const liveProperty = _DAVLivePropertyForName(href, localName);
+                        if (liveProperty) {
+                            properties |= liveProperty;
+                        } else if (localName.length) {
+                            // Foreign and unqualified names use the same keys as PROPPATCH, even
+                            // when their local names collide with built-in DAV properties.
                             [unsupported addObject:_DeadPropertyKey(href, localName)];
                         }
                     }

@@ -705,6 +705,26 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
 
 ### WebDAV
 
+- **Named PROPFIND matches the namespace AND local name** (2026-09-28). Only the exact
+  `DAV:` namespace selects a live property; arbitrary/default prefixes are equivalent.
+  Foreign and unqualified names such as `getetag` use the same dead-property keys as
+  PROPPATCH, so they can be stored and retrieved without colliding with built-in metadata.
+  Every element's name and namespace are validated before classification.
+  Each resource tracks which requested live properties it actually returned. The remainder
+  gets a property-level 404 for named queries, including file-only properties requested on
+  collections and a modification date withheld by the timestamp seal. Empty successful
+  values count as returned. Allprop and propname behavior is unchanged; availability tracking
+  is local to each resource in Depth:1 listings. Existing empty 200 propstats are retained.
+  The trace update is strictly additive: 69 Finder/Transmit responses gain 404 entries for
+  112 collections' requested dates and sizes, plus adjusted Content-Length. Removing those
+  entries and restoring lengths reproduces every prior byte; all other traces are unchanged.
+  Native `mount_webdav` reads 14 files and completes write/rename/delete after metadata checks
+  across 15 resources. All 85 connections close, descriptors return 8→8, and reservations and
+  temporary files are zero.
+  Six new ASan cases parse expanded property names and assert exact per-resource statuses
+  and values. Four fail against the old code (219 assertions); the prefix/enumeration controls
+  already pass. The final ASan suite passes 295 tests. The source and fixture changes also
+  pass the complete gate: eight trace suites, all platform/Swift builds and endurance smoke.
 - **PROPFIND and PROPPATCH share `_DAVResourceHref`** (2026-09-28). The decoded resource
   path is percent-encoded once, then escaped for its XML context. PROPPATCH formerly only
   XML-escaped the decoded path, so spaces, fragments, queries and literal percent sequences
@@ -1142,10 +1162,8 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
     lifetime), `stale=TRUE` is asserted without validating the presented credential, the
     auth-scheme token is compared case-sensitively, non-ASCII usernames cannot work (Latin-1
     header decode vs UTF-8 HA1), and unknown-username short-circuits measurably.
-  - *WebDAV.* Named PROPFIND matches the nine live properties by LOCAL NAME only, so a
-    foreign-namespace `getetag` gets the DAV value; a requested live property that is
-    conditionally unavailable (a sealed date) is silently omitted instead of getting a 404
-    propstat; PROPPATCH flattens dead-property
+  - *WebDAV.* Named PROPFIND namespace matching and unavailable-property statuses were
+    fixed on 2026-09-28 (see WebDAV invariants above). PROPPATCH flattens dead-property
     VALUES to text (child elements, attributes, `xml:lang` lost); duplicate instructions for one
     property repeat the element inside one propstat; PROPFIND of a FIFO/socket returns a 207 with
     zero responses instead of 404; COPY/MOVE never produce the §9.8.3 207 for a member failure
