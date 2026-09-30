@@ -289,6 +289,8 @@ Bonjour discovery failures can be handled through the optional delegate method b
 
 Run `./Run-Tests.sh` for the validation gate, including a short concurrent-transfer check. The [endurance runner](Scripts/Endurance/README.md) supports longer continuous runs, checks upload/download hashes and cancellation cleanup, and records connections, descriptors, memory reservations, and process footprint.
 
+The [native iPhone smoke test](Scripts/DeviceSmoke/README.md) installs a separate synthetic-data host to check concurrent HTTP/WebDAV transfers, cancellation cleanup, advertised hostname access, and background/resume on a physical device over Wi-Fi.
+
 Using WSKWebServer
 ==================
 
