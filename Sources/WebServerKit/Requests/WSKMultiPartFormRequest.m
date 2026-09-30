@@ -347,13 +347,14 @@ static NSData *_dashNewlineData = nil;
                         if (_tmpFile >= 0) {
                             _tmpPath = [path copy];
                         } else {
+                            int const openErrno = errno;  // Logging can change the thread's errno.
                             // A full or unwritable temporary directory is an environment condition
                             // rather than an unreachable state.
-                            WSK_LOG_ERROR(@"Failed creating temporary file for part of 'multipart/form-data': %s (%i)", strerror(errno), errno);
+                            WSK_LOG_ERROR(@"Failed creating temporary file for part of 'multipart/form-data': %s (%i)", strerror(openErrno), openErrno);
                             // The environment, not the client. Carrying the errno is what lets a full
                             // volume reach WSKServerErrorStatusCodeForError's 507 rather than being
                             // reported as malformed input the client must never send again.
-                            _failureError = WSKMakePosixError(errno);
+                            _failureError = WSKMakePosixError(openErrno);
                             success = NO;
                         }
                     }
@@ -531,9 +532,10 @@ static NSData *_dashNewlineData = nil;
                             [_data replaceBytesInRange:NSMakeRange(0, length) withBytes:NULL length:0];
                             _scanOffset = 0;
                         } else {
+                            int const writeErrno = errno;  // Preserve the syscall error before logging.
                             // As above: a short write means the temporary directory filled up.
-                            WSK_LOG_ERROR(@"Failed streaming part of 'multipart/form-data' to disk: %s (%i)", strerror(errno), errno);
-                            _failureError = WSKMakePosixError(errno);
+                            WSK_LOG_ERROR(@"Failed streaming part of 'multipart/form-data' to disk: %s (%i)", strerror(writeErrno), writeErrno);
+                            _failureError = WSKMakePosixError(writeErrno);
                             success = NO;
                         }
                     } else if (_state == kParserState_Start) {

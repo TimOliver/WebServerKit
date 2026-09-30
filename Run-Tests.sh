@@ -7,7 +7,7 @@
 #   2. the recorded-trace corpus under Tests/, replayed against a real server
 #   3. a Release build of the shipping framework for every platform
 #   4. SwiftPM and Xcode consumer builds, plus a live Swift consumer check
-#   5. the endurance runner's oracles and a concurrent-transfer smoke check
+#   5. endurance oracles, concurrent transfers and upload storage-failure recovery
 #
 # Deployment targets are deliberately NOT overridden. This script used to build with
 # MACOSX_DEPLOYMENT_TARGET=10.7 and IPHONEOS_DEPLOYMENT_TARGET=8.0 to check the oldest
@@ -99,6 +99,7 @@ swift run --package-path Scripts/SwiftConsumer --scratch-path "$BUILD_DIR/SwiftC
 echo "=== Endurance smoke check ==="
 python3 -m unittest discover -s Scripts/Endurance -p 'test_*.py'
 python3 Scripts/Endurance/run.py --cycles 1 --restart-cycles 1 --pause 0 --report "$BUILD_DIR/endurance.json"
+python3 Scripts/Endurance/storage_recovery.py --report "$BUILD_DIR/storage-recovery.json"
 
 echo ""
 echo "All tests completed successfully."
