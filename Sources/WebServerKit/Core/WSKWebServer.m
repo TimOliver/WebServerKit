@@ -179,6 +179,7 @@ static void _ExecuteMainThreadRunLoopSources(void) {
 
     NSDictionary<NSString *, id> *_options;
     NSSet<NSString *> *_allowedHostNames;
+    NSLock *_allowedHostNamesLock;  // Immutable snapshots can change after Bonjour resolves.
     NSMutableDictionary<NSString *, NSString *> *_authenticationBasicAccounts;
     NSMutableDictionary<NSString *, NSString *> *_authenticationDigestAccounts;
     Class _connectionClass;
@@ -228,6 +229,7 @@ static void _ExecuteMainThreadRunLoopSources(void) {
         _sourceGroup = dispatch_group_create();
         _handlers = [[NSMutableArray alloc] init];
         _registeredMethods = [[NSMutableSet alloc] init];
+        _allowedHostNamesLock = [[NSLock alloc] init];
 #if TARGET_OS_IPHONE
         _backgroundTask = UIBackgroundTaskInvalid;
 #endif
@@ -247,6 +249,22 @@ static void _ExecuteMainThreadRunLoopSources(void) {
     dispatch_release(_stateQueue);
     dispatch_release(_syncQueue);
 #endif
+}
+
+// Accept handlers cannot enter _stateQueue: stop waits for them to finish.
+// A separate short lock publishes immutable hostname snapshots without that cycle.
+- (NSSet<NSString *> *)allowedHostNames {
+    [_allowedHostNamesLock lock];
+    NSSet<NSString *> *const names = _allowedHostNames;
+    [_allowedHostNamesLock unlock];
+    return names;
+}
+
+- (void)_replaceAllowedHostNames:(NSSet<NSString *> *)names {
+    NSSet<NSString *> *const snapshot = [names copy];
+    [_allowedHostNamesLock lock];
+    _allowedHostNames = snapshot;
+    [_allowedHostNamesLock unlock];
 }
 
 #if TARGET_OS_IPHONE
@@ -581,7 +599,16 @@ static void _NetServiceResolveCallBack(CFNetServiceRef service, CFStreamError *e
         if (error.error) {
             [self _reportBonjourError:error operation:@"resolution"];
         } else {
-            WSK_LOG_INFO(@"%@ now locally reachable at %@", [self class], [self _bonjourServerURL]);
+            NSURL *const url = [self _bonjourServerURL];
+            NSString *const host = url.host;
+            // iOS can advertise a different local name from gethostname(). This is
+            // the already-resolved target of our current service, not a synchronous
+            // DNS lookup. Publish before telling the delegate this URL is ready.
+            if (host.length) {
+                NSString *const normalized = [WSKHostNameWithoutRootLabel(host) lowercaseString];
+                [self _replaceAllowedHostNames:[self.allowedHostNames setByAddingObject:normalized]];
+            }
+            WSK_LOG_INFO(@"%@ now locally reachable at %@", [self class], url);
             [self _notifyBonjourAttempt:attempt error:nil];
         }
     });
@@ -1059,7 +1086,7 @@ static inline NSString *_EncodeBase64(NSString *string) {
         }
     }
 
-    _allowedHostNames = allowedHostNames;
+    [self _replaceAllowedHostNames:allowedHostNames];
     WSK_LOG_INFO(@"%@ will answer to host names %@ (and any IP address literal) on port %i", [self class], [[allowedHostNames allObjects] componentsJoinedByString:@", "], (int)_port);
 
     if (bonjourName) {
@@ -1232,7 +1259,7 @@ static inline NSString *_EncodeBase64(NSString *string) {
     _bindToLocalhost = NO;
 
     _serverName = nil;
-    _allowedHostNames = nil;
+    [self _replaceAllowedHostNames:nil];
     _authenticationRealm = nil;
     _authenticationBasicAccounts = nil;
     _authenticationDigestAccounts = nil;

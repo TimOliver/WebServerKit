@@ -1686,6 +1686,8 @@ static uint64_t _SocketTransmittedByteCount(int socket) {
         _authenticationRealm = server.authenticationRealm;
         _authenticationBasicAccounts = server.authenticationBasicAccounts;
         _authenticationDigestAccounts = server.authenticationDigestAccounts;
+        // Bonjour may publish its hostname after startup. The getter supplies a
+        // locked immutable snapshot; this connection keeps the names it accepted.
         _allowedHostNames = server.allowedHostNames;
         _shouldAutomaticallyMapHEADToGET = server.shouldAutomaticallyMapHEADToGET;
         _registeredMethods = server.registeredMethods;

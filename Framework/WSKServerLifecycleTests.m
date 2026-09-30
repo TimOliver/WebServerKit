@@ -43,6 +43,7 @@
 - (BOOL)_setBonjourClient:(CFNetServiceRef)service callback:(CFNetServiceClientCallBack)callback context:(CFNetServiceClientContext *)context;
 - (BOOL)_registerBonjourService:(CFNetServiceRef)service error:(CFStreamError *)error;
 - (BOOL)_resolveBonjourService:(CFNetServiceRef)service error:(CFStreamError *)error;
+- (NSURL *)_bonjourServerURL;
 @end
 
 // Retain exactly the callback's CF context and service, as CF may do while dispatching an
@@ -115,6 +116,16 @@
 }
 @end
 
+@interface WSKBonjourHostProbeServer : WSKBonjourFailureProbeServer
+@property (nonatomic, copy) NSString *resolvedHost;
+@end
+
+@implementation WSKBonjourHostProbeServer
+- (NSURL *)_bonjourServerURL {
+    return [NSURL URLWithString:[NSString stringWithFormat:@"http://%@/", self.resolvedHost]];
+}
+@end
+
 @interface WSKBonjourFailureDelegate : NSObject <WSKDelegate>
 @property (nonatomic, strong) NSMutableArray<NSError *> *errors;
 @property (nonatomic) NSUInteger successCount;
@@ -152,6 +163,52 @@
 @end
 
 @implementation WSKServerLifecycleTests
+
+- (void)testResolvedBonjourHostIsPublishedAsAnImmutableCurrentListenerSnapshot {
+    WSKBonjourHostProbeServer *const server = [[WSKBonjourHostProbeServer alloc] init];
+    server.resolvedHost = @"FIRST-DEVICE-PROBE.LOCAL.";
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[WSKRequest class]
+                          processBlock:^WSKResponse *(WSKRequest *request) {
+                              return [WSKDataResponse responseWithText:@"bonjour-host-ok"];
+                          }];
+    NSDictionary *const options = [self _bonjourProbeOptions];
+    @try {
+        XCTAssertTrue([server startWithOptions:options error:NULL]);
+        XCTAssertEqual(server.callbacks.count, (NSUInteger)2);
+        if (server.callbacks.count != 2) {
+            return;
+        }
+        NSSet *const before = server.allowedHostNames;
+        NSString *reply = SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: first-device-probe.local\r\nConnection: close\r\n\r\n");
+        XCTAssertTrue(ReplyHasStatus(reply, 421));
+        [server.callbacks[1] deliverError:(CFStreamError){0}];
+        XCTAssertFalse([before containsObject:@"first-device-probe.local"], @"Existing connections retain an immutable configuration snapshot");
+        XCTAssertTrue([server.allowedHostNames containsObject:@"first-device-probe.local"]);
+        reply = SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: FIRST-DEVICE-PROBE.LOCAL.\r\nConnection: close\r\n\r\n");
+        XCTAssertTrue(ReplyHasStatus(reply, 200));
+        XCTAssertTrue([reply hasSuffix:@"bonjour-host-ok"]);
+
+        WSKBonjourCallbackProbe *const previous = server.callbacks[1];
+        [server stop];
+        [server.callbacks removeAllObjects];
+        server.resolvedHost = @"second-device-probe.local";
+        XCTAssertTrue([server startWithOptions:options error:NULL]);
+        [previous deliverError:(CFStreamError){0}];
+        XCTAssertFalse([server.allowedHostNames containsObject:@"first-device-probe.local"]);
+        XCTAssertFalse([server.allowedHostNames containsObject:@"second-device-probe.local"], @"A stale callback must not publish a new listener's hostname");
+        XCTAssertEqual(server.callbacks.count, (NSUInteger)2);
+        if (server.callbacks.count == 2) {
+            [server.callbacks[1] deliverError:(CFStreamError){0}];
+        }
+        reply = SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: second-device-probe.local\r\nConnection: close\r\n\r\n");
+        XCTAssertTrue(ReplyHasStatus(reply, 200));
+        reply = SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: first-device-probe.local\r\nConnection: close\r\n\r\n");
+        XCTAssertTrue(ReplyHasStatus(reply, 421));
+    } @finally {
+        [server stop];
+    }
+}
 
 - (void)testStartupUsesKernelHostnameWithoutResolvingProcessInfoHostName {
     // The resolver-backed Foundation accessor can block an iPhone launch until its
