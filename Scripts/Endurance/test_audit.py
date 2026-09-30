@@ -5,7 +5,8 @@ import io
 import json
 import threading
 import unittest
-from unittest.mock import Mock
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 import xml.etree.ElementTree as ET
 
 from audit import SharedAudit, bodies_in_flight, check_listing, distribution
@@ -145,6 +146,55 @@ class DiagnosticTests(unittest.TestCase):
             self.assertEqual(item["last_resource_sample"], {"connections": 1})
             self.assertEqual(item["operations"]["get.dav"]["latency"]["count"], 1)
             self.assertEqual(item["operations"]["get.dav"]["response_bytes"], 5)
+
+    def test_timeout_identifies_send_headers_or_partial_body(self):
+        for stage in ("send", "headers", "body"):
+            response = Mock(status=207)
+            response.getheader.return_value = "5"
+            response.getheaders.return_value = [("Content-Length", "5")]
+            connection = Mock()
+            connection.getresponse.return_value = response
+            failure = TimeoutError("scripted timeout")
+            if stage == "send":
+                connection.request.side_effect = failure
+            elif stage == "headers":
+                connection.getresponse.side_effect = failure
+            else:
+                response.read1.side_effect = [b"a", failure]
+                # A secondary close error must not hide the initiating timeout.
+                response.close.side_effect = OSError("scripted close failure")
+            runner = self.runner(connection)
+            with self.subTest(stage=stage), self.assertRaises(TimeoutError) as caught:
+                runner.request("dav", "PROPFIND", "/catalog/", 207)
+            self.assertIs(caught.exception, failure)
+            item, = runner.report["failed_requests"]
+            self.assertEqual((item["server"], item["method"], item["path"], item["stage"]),
+                             ("dav", "PROPFIND", "/catalog/", stage))
+            self.assertEqual(item["status"], 207 if stage == "body" else None)
+            self.assertEqual(item["response_bytes"], 1 if stage == "body" else 0)
+            if stage == "body":
+                self.assertEqual(item["content_length"], "5")
+                self.assertGreaterEqual(item["elapsed_ms"], item["last_progress_ms"])
+                self.assertGreaterEqual(item["last_progress_ms"], item["headers_ms"])
+                self.assertEqual(runner.report["cleanup_errors"][0]["resource"], "response")
+                response.close.assert_called_once()
+            self.assertNotIn("requests", runner.report)
+            connection.close.assert_called_once()
+
+    def test_upload_timeout_identifies_server_and_method(self):
+        for kind, method in (("uploader", "POST"), ("dav", "PUT")):
+            connection = Mock()
+            connection.getresponse.side_effect = TimeoutError("scripted upload timeout")
+            runner = self.runner(connection)
+            runner.serial = 0
+            runner.args = SimpleNamespace(upload_mib=1)
+            runner.begin_upload = Mock(return_value=(connection, b"final chunk"))
+            with self.subTest(kind=kind), patch("audit.time.sleep"), self.assertRaises(TimeoutError):
+                runner.workflow(kind, 0)
+            item, = runner.report["failed_requests"]
+            self.assertEqual((item["server"], item["method"], item["stage"]), (kind, method, "headers"))
+            self.assertNotIn("completed_uploads", runner.report)
+            connection.close.assert_called_once()
 
 
 if __name__ == "__main__":

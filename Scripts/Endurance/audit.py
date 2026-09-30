@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Bounded shared-folder integration and listing measurements on an owned local host."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import argparse
 import hashlib
 import json
@@ -113,23 +114,50 @@ class SharedAudit(Runner):
                 "total_ms": (finished - started) * 1000, "response_bytes": size,
                 "upload": upload})
 
+    @contextmanager
+    def request_diagnostics(self, kind, method, path, started):
+        state = {"server": kind, "method": method, "path": path, "stage": "send",
+                 "status": None, "content_length": None, "response_bytes": 0,
+                 "headers_ms": None, "last_progress_ms": None}
+        try:
+            yield state
+        except Exception as error:
+            with self.lock:
+                self.report.setdefault("failed_requests", []).append({**state,
+                    "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+                    "error": f"{type(error).__name__}: {error}"})
+            raise
+
+    def received_headers(self, state, response, started, headers_at):
+        state.update(stage="body", status=response.status,
+                     content_length=response.getheader("Content-Length"),
+                     headers_ms=round((headers_at - started) * 1000, 3))
+
     def request(self, kind, method, path, expected=200, body=None, headers=None, label=None):
         started = time.monotonic()
-        with closing_reported(self.connection(kind), self.report, "request_connection") as connection:
+        with self.request_diagnostics(kind, method, path, started) as state, \
+                closing_reported(self.connection(kind), self.report, "request_connection") as connection:
             connection.request(method, path, body, {"Connection": "close", **(headers or {})})
+            state["stage"] = "headers"
             with closing_reported(connection.getresponse(), self.report, "response") as response:
                 headers_at = time.monotonic()
+                self.received_headers(state, response, started, headers_at)
+                state["stage"] = "validation"
                 require(response.status == expected, f"{kind} {method}: expected {expected}, got {response.status}")
                 fields = dict(response.getheaders())
                 chunks, size = [], 0
                 while True:
+                    state["stage"] = "body"
                     data = response.read1(CHUNK)
                     if not data:
                         break
                     size += len(data)
+                    state.update(response_bytes=size, last_progress_ms=round((time.monotonic() - started) * 1000, 3))
+                    state["stage"] = "validation"
                     require(size <= 16 * MIB, "Audit response exceeds bounded fixture limit")
                     chunks.append(data)
                 finished = time.monotonic()
+                state["stage"] = "validation"
                 length = response.getheader("Content-Length")
                 require(length is None or size == int(length), "Response was truncated")
         if label:
@@ -196,24 +224,32 @@ class SharedAudit(Runner):
             name = f"transfer-{worker}-{self.serial}.bin"
         payload = hashlib.shake_256(name.encode()).digest(self.args.upload_mib * MIB)
         started = time.monotonic()
-        connection, remainder = self.begin_upload(kind, name, payload)
-        with closing_reported(connection, self.report, "upload_connection"):
-            body_started = time.monotonic()
-            # Healthy paced sends keep bodies progressing while other clients work.
-            for offset in range(0, len(remainder), CHUNK):
-                time.sleep(.008)
-                connection.send(remainder[offset:offset + CHUNK])
-            body_sent = time.monotonic()
-            with closing_reported(connection.getresponse(), self.report, "upload_response") as response:
-                headers_at = time.monotonic()
-                require(response.status == (200 if kind == "uploader" else 201), "Shared upload failed")
-                result = response.read(1024)
-                require(response.read(1) == b"", "Unexpected upload response")
-                if kind == "uploader":
-                    require(json.loads(result) == {}, "Upload response differs")
-                else:
-                    require(result == b"", "PUT response differs")
-                finished = time.monotonic()
+        method, path = ("POST", "/upload") if kind == "uploader" else ("PUT", "/" + name)
+        with self.request_diagnostics(kind, method, path, started) as state:
+            connection, remainder = self.begin_upload(kind, name, payload)
+            with closing_reported(connection, self.report, "upload_connection"):
+                body_started = time.monotonic()
+                # Healthy paced sends keep bodies progressing while other clients work.
+                for offset in range(0, len(remainder), CHUNK):
+                    time.sleep(.008)
+                    connection.send(remainder[offset:offset + CHUNK])
+                body_sent = time.monotonic()
+                state["stage"] = "headers"
+                with closing_reported(connection.getresponse(), self.report, "upload_response") as response:
+                    headers_at = time.monotonic()
+                    self.received_headers(state, response, started, headers_at)
+                    state["stage"] = "validation"
+                    require(response.status == (200 if kind == "uploader" else 201), "Shared upload failed")
+                    state["stage"] = "body"
+                    result = response.read(1024)
+                    state.update(response_bytes=len(result), last_progress_ms=round((time.monotonic() - started) * 1000, 3))
+                    require(response.read(1) == b"", "Unexpected upload response")
+                    state["stage"] = "validation"
+                    if kind == "uploader":
+                        require(json.loads(result) == {}, "Upload response differs")
+                    else:
+                        require(result == b"", "PUT response differs")
+                    finished = time.monotonic()
         self.record("upload." + kind, started, headers_at, finished, len(result),
                     upload={"start": body_started, "end": body_sent, "file_bytes": len(payload)})
         self.count(completed_uploads=1, requests=1)
