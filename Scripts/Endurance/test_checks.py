@@ -1,15 +1,19 @@
 """Fault fixtures for the runner's oracles; no library or external service needed."""
 import io
 import http.client
+import json
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from pathlib import Path
 import tempfile
 import threading
 import socket
 import time
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
-from run import DeadlineConnection, MIB, Runner, check_entries, check_resources, digest
+import run
+from run import DeadlineConnection, Host, MIB, Runner, check_entries, check_resources, closing_reported, digest
 
 
 class WireSocket:
@@ -84,6 +88,88 @@ class OracleTests(unittest.TestCase):
         finally:
             connection.close()
             peer.close()
+
+
+class ReportCleanupTests(unittest.TestCase):
+    def test_startup_and_initial_upload_errors_survive_failed_close(self):
+        report = {}
+        primary = TimeoutError("startup failed")
+        with tempfile.TemporaryDirectory() as directory, \
+                patch("run.subprocess.Popen"), patch.object(Host, "read", side_effect=primary), \
+                patch.object(Host, "close", side_effect=OSError("close failed")), \
+                self.assertRaises(TimeoutError) as caught:
+            Host(Path("/unused"), Path("/unused.dylib"), Path(directory), None, report=report)
+        self.assertIs(caught.exception, primary)
+        self.assertEqual(report["cleanup_errors"][0]["resource"], "host_startup")
+
+        connection = Mock()
+        primary = TimeoutError("send failed")
+        connection.send.side_effect = primary
+        connection.close.side_effect = OSError("close failed")
+        runner = Runner.__new__(Runner)
+        runner.connection, runner.report = Mock(return_value=connection), {}
+        with self.assertRaises(TimeoutError) as caught:
+            runner.begin_upload("dav", "file.bin", b"contents")
+        self.assertIs(caught.exception, primary)
+        self.assertEqual(runner.report["cleanup_errors"][0]["resource"], "upload_connection")
+
+    def test_handled_outer_exception_does_not_suppress_cleanup_failure(self):
+        resource, report = Mock(), {}
+        resource.close.side_effect = OSError("cleanup failed")
+        try:
+            raise ValueError("already handled")
+        except ValueError:
+            with self.assertRaisesRegex(OSError, "cleanup failed"):
+                with closing_reported(resource, report, "fixture"):
+                    pass
+        self.assertEqual(report["cleanup_errors"][0]["resource"], "fixture")
+
+    def test_endurance_main_fails_on_cleanup_and_preserves_workload_error(self):
+        # Scripted no-I/O workloads isolate report and cleanup behavior; no build
+        # tools, server processes or sockets are used by these cases.
+        for module in (run,):
+            for failure in (None, "host", "temporary_directory", "workload_and_cleanup"):
+                with self.subTest(module=module.__name__, failure=failure), tempfile.TemporaryDirectory() as directory:
+                    report_path = Path(directory) / "report.json"
+                    temporary = SimpleNamespace(name=str(Path(directory) / "scratch"), cleanup=Mock())
+                    host = Mock()
+                    host.process.pid, host.process.wait.return_value = 123, 0
+                    host.command.return_value = {"running": False}
+                    if failure in ("host", "workload_and_cleanup"):
+                        host.close.side_effect = OSError("host cleanup failed")
+                    if failure in ("temporary_directory", "workload_and_cleanup"):
+                        temporary.cleanup.side_effect = OSError("temporary cleanup failed")
+
+                    def runner_factory(host, args, report, *unused):
+                        runner = Mock(stopped_baseline={})
+                        runner.quiescent.return_value = {"accepted": 0, "descriptors": 8}
+                        runner.cycle.return_value = {"accepted": 0, "descriptors": 8, "footprint_bytes": 0, "reserved_bytes": 0}
+                        runner.phase.return_value = {}
+                        report["verified_bytes"] = 0
+                        if failure == "workload_and_cleanup":
+                            runner.cycle.side_effect = ValueError("workload failed")
+                            runner.phase.side_effect = ValueError("workload failed")
+                        return runner
+
+                    extra = ["--cycles", "1", "--restart-cycles", "0", "--pause", "0"] if module is run else ["--entries", "1", "--seconds", "1", "--repeats", "1"]
+                    with ExitStack() as stack:
+                        stack.enter_context(patch.object(module.sys, "argv", [module.__name__, "--report", str(report_path), *extra]))
+                        stack.enter_context(patch.object(module.subprocess, "run"))
+                        stack.enter_context(patch.object(module.subprocess, "check_output", return_value="/unused"))
+                        stack.enter_context(patch.object(module.tempfile, "TemporaryDirectory", return_value=temporary))
+                        stack.enter_context(patch.object(module, "Host", return_value=host))
+                        stack.enter_context(patch.object(module, "Runner" if module is run else "SharedAudit", side_effect=runner_factory))
+                        stack.enter_context(redirect_stdout(io.StringIO()))
+                        stack.enter_context(redirect_stderr(io.StringIO()))
+                        status = module.main()
+                    report = json.loads(report_path.read_text())
+                    self.assertEqual(status, 0 if failure is None else 1, report.get("error"))
+                    self.assertEqual(report["passed"], failure is None)
+                    host.close.assert_called_once()
+                    temporary.cleanup.assert_called_once()
+                    if failure == "workload_and_cleanup":
+                        self.assertEqual(report["error"], "ValueError: workload failed")
+                        self.assertEqual([e["resource"] for e in report["cleanup_errors"]], ["host", "temporary_directory"])
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Bounded, loopback-only endurance checks against a host this runner creates."""
 import argparse
-from contextlib import closing
+from contextlib import closing, contextmanager
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import http.client
@@ -31,6 +31,25 @@ def require(condition, message):
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
+
+
+@contextmanager
+def closing_reported(resource, report, label, method="close"):
+    """Record cleanup failures without replacing an exception already in flight."""
+    failed = False
+    try:
+        yield resource
+    except BaseException:
+        failed = True
+        raise
+    finally:
+        try:
+            getattr(resource, method)()
+        except Exception as error:
+            report.setdefault("cleanup_errors", []).append({"resource": label,
+                "error": f"{type(error).__name__}: {error}"})
+            if not failed:
+                raise
 
 
 class DeadlineConnection(http.client.HTTPConnection):
@@ -99,7 +118,7 @@ def check_entries(directory, expected):
 
 
 class Host:
-    def __init__(self, binary, temporary_library, directory, log):
+    def __init__(self, binary, temporary_library, directory, log, report=None):
         self.directory = directory
         self.tmp = directory / "tmp"
         self.shares = {kind: directory / kind for kind in ("uploader", "dav")}
@@ -117,8 +136,8 @@ class Host:
                     "Host temporary directory is not owned by this run")
             self.ports = {kind: ready[kind + "_port"] for kind in self.shares}
         except BaseException:
-            self.close()
-            raise
+            with closing_reported(self, report if report is not None else {}, "host_startup"):
+                raise
 
     def read(self):
         # Unbuffered pipe + explicit deadline: a wedged host must fail the run.
@@ -248,8 +267,8 @@ class Runner:
             connection.send(prefix + data[:CHUNK])
             return connection, data[CHUNK:] + suffix
         except BaseException:
-            connection.close()
-            raise
+            with closing_reported(connection, self.report, "upload_connection"):
+                raise
 
     def wait_for(self, predicate, message):
         deadline = time.monotonic() + TIMEOUT
@@ -454,10 +473,11 @@ def main():
         temporary_library = Path(binary_path) / "EnduranceTemporaryDirectory.dylib"
         subprocess.run(["xcrun", "clang", "-dynamiclib", "-fobjc-arc", "-framework", "Foundation",
                         str(PACKAGE / "TemporaryDirectory.m"), "-o", str(temporary_library)], check=True)
-        with tempfile.TemporaryDirectory(prefix="wsk-endurance-") as directory, report_path.with_suffix(".host.log").open("wb") as log, \
-                report_path.with_suffix(".samples.jsonl").open("w") as samples:
-            host = Host(Path(binary_path) / "EnduranceHost", temporary_library, Path(directory), log)
-            try:
+        with closing_reported(tempfile.TemporaryDirectory(prefix="wsk-endurance-"), report, "temporary_directory", "cleanup") as temporary, \
+                closing_reported(report_path.with_suffix(".host.log").open("wb"), report, "host_log") as log, \
+                closing_reported(report_path.with_suffix(".samples.jsonl").open("w"), report, "samples_log") as samples:
+            host = Host(Path(binary_path) / "EnduranceHost", temporary_library, Path(temporary.name), log, report=report)
+            with closing_reported(host, report, "host"):
                 report["host_pid"] = host.process.pid
                 runner = Runner(host, args, report)
                 # Warm every path BEFORE fixing baselines. Counters remain cumulative.
@@ -489,10 +509,9 @@ def main():
                 report["final_stopped"] = runner.quiescent(runner.stopped_baseline)
                 host.command("shutdown")
                 require(host.process.wait(timeout=TIMEOUT) == 0, "Host shutdown failed")
-                report["passed"] = True
-            finally:
-                host.close()
+        report["passed"] = True
     except (Exception, KeyboardInterrupt) as error:
+        report["passed"] = False
         report["error"] = f"{type(error).__name__}: {error}"
         print(report["error"], file=sys.stderr)
     finally:
