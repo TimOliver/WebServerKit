@@ -6,6 +6,7 @@
 @import WebServerKitUploader;
 
 #include <dirent.h>
+#include <dlfcn.h>
 #include <mach/mach.h>
 #include <malloc/malloc.h>
 #include <sys/resource.h>
@@ -161,6 +162,13 @@ int main(int argc, const char *argv[]) {
                     dispatch_async(dispatch_get_main_queue(), ^{
                         @autoreleasepool {
                             NSString *command = [message isKindOfClass:[NSDictionary class]] ? message[@"command"] : nil;
+                            if ([command hasPrefix:@"fault-"]) {
+                                // Available only when the dedicated fixture image is
+                                // explicitly loaded into this disposable test host.
+                                NSDictionary *(*control)(NSDictionary *) = dlsym(RTLD_DEFAULT, "WSKStorageFaultControl");
+                                Reply(control ? control(message) : @{@"error": @"Storage fault fixture is not loaded"});
+                                return;
+                            }
                             size_t relieved = 0;
                             if ([command isEqualToString:@"stop"] || [command isEqualToString:@"shutdown"]) {
                                 [uploader stop];
