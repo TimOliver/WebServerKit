@@ -270,6 +270,36 @@ real volume, establish crash durability, or cover publication/rename failure pat
 They also do not cover clients that continue sending after an early refusal; that
 exercises the connection layer's separately bounded lingering close.
 
+Measured on 2026-09-30 (Release, arm64 macOS), all twelve cases passed after fixing
+multipart error preservation. The old implementation logged a streamed write failure
+before constructing its error, allowing logging to replace ENOSPC with another errno
+and return 500 instead of 507. The final harness rejects the old source with exactly
+that status mismatch and one verified injection after 131,024 real file bytes. The
+fix saves the syscall error before logging, including the analogous temporary-file
+open failure path. The live regression directly covers streamed writes; open failure
+is a source-reviewed sibling correction.
+
+The successful standalone matrix completed 90 requests, twelve failed uploads and
+twelve successful retries, plus warmup; 114 MiB of download responses were verified by
+hash. Every fault fired once. Write failures followed 131,024 multipart or 131,072 DAV
+file bytes; close failures followed the complete 1 MiB file and a successful real close.
+All 90 connections closed, descriptors returned to eight, reservations to zero, and
+no temporary/staging files remained. Original inode, bytes and metadata survived all
+six existing-destination failures. Each download client completed verified responses
+before release and fresh requests after the error. These measurements are functional
+checks under instrumentation, not throughput results.
+
+Reports `build/storage-recovery-final-before.json` and
+`build/storage-recovery-after-matrix.json` retain the negative control, passing matrix,
+harness hashes and multipart-source hashes. An initial eager sender produced a reset
+while still sending after the early error; the final sender behavior above deliberately
+isolates storage recovery and does not claim to resolve that connection scenario.
+The bounded storage matrix now runs in `Run-Tests.sh` alongside the existing endurance
+smoke and the runner-oracle tests. The complete gate passed: 301 ASan tests, eight
+recorded trace suites, Mac/iOS/tvOS Release builds, both Swift consumers, 23 harness
+tests, concurrent-transfer endurance and all twelve storage cases. Its independent
+matrix run again completed 90 requests with all resource checks passing.
+
 ## Real-device validation still required
 
 Loopback endurance cannot establish Windows client compatibility, Wi-Fi behavior,

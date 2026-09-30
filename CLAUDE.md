@@ -587,6 +587,28 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   the gap was the uploader call sites never consulting it, the "class closed at only some sites"
   shape. Regression driven by injecting `NSFileWriteOutOfSpaceError` into `-moveItemAtPath:` at the
   live `/upload` endpoint, which the pure-function test could not reach.
+- **Multipart syscall errors survive logging** (2026-09-30). Save the temporary-file
+  open/streamed-write errno before any logging, and use that saved value in the NSError.
+  The built-in logger's first `isatty` call and application logger callbacks may change
+  errno. A real ENOSPC after 131,024 streamed file bytes consequently answered 500; the
+  deterministic test logger sets errno to EIO and pins the required 507. The new
+  `Scripts/Endurance/storage_recovery.py` rejects the old multipart source, then passes
+  twelve cases with the fix: uploader/DAV × ENOSPC write/EIO write/EIO close × new/existing
+  destination. The fixture requires at least 64 KiB of real file writes, selects one
+  regular temp file by fd/device/inode, and fires exactly once; close EIO follows a real
+  successful close. Six existing destinations preserve inode/body/metadata. Concurrent
+  verified downloads progress before release and after refusal, and every unarmed retry
+  succeeds in the same process. Standalone result: 90 requests, 114 MiB hash-verified,
+  all connections closed, FDs 8→8, zero reservations/temp or staging residue. The test
+  uses one extra chunk then reads an early write-error response; an earlier eager sender
+  hit RST, so this does NOT establish behavior for clients continuing to send after an
+  early refusal. Nor does it cover real volume exhaustion, positive short writes,
+  crash durability or publication/rename failures. Open errno capture is the analogous
+  source-reviewed correction; live regression directly covers streamed writes. Reports
+  `build/storage-recovery-{final-before,after-matrix}.json` preserve exact source/harness
+  hashes. The twelve-case check is now part of `Run-Tests.sh`. Full gate passed:
+  301 ASan tests, all eight traces, Mac/iOS/tvOS Release builds, both Swift consumers,
+  23 harness tests, endurance and the independent twelve-case storage run.
 
 ### File serving and connection reuse
 
