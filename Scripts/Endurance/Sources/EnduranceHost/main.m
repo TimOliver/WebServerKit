@@ -7,6 +7,8 @@
 
 #include <dirent.h>
 #include <mach/mach.h>
+#include <malloc/malloc.h>
+#include <sys/resource.h>
 #include <unistd.h>
 
 static NSUInteger liveConnections, acceptedConnections, closedConnections, activeUploads, activeDownloads;
@@ -57,7 +59,7 @@ static NSUInteger liveConnections, acceptedConnections, closedConnections, activ
 }
 @end
 
-static NSDictionary *Resources(void) {
+static NSDictionary *Resources(BOOL includeAllocations) {
     // Count entries, not the allocation size of a proc_pidinfo buffer. Exclude
     // our own directory descriptor, which is closed before returning.
     DIR *directory = opendir("/dev/fd");
@@ -78,14 +80,31 @@ static NSDictionary *Resources(void) {
     if (result != KERN_SUCCESS) {
         return @{@"error": @"Cannot read process memory footprint"};
     }
+    NSMutableDictionary *resources;
     @synchronized([EnduranceConnection class]) {
-        return @{
+        resources = [@{
             @"connections": @(liveConnections), @"accepted": @(acceptedConnections),
             @"closed": @(closedConnections), @"uploads": @(activeUploads), @"downloads": @(activeDownloads),
             @"reserved_bytes": @([WSKWebServer reservedInMemoryByteCount]),
             @"descriptors": @(descriptors), @"footprint_bytes": @(memory.phys_footprint)
-        };
+        } mutableCopy];
     }
+    if (includeAllocations) {
+        struct rusage usage;
+        if (getrusage(RUSAGE_SELF, &usage) != 0) {
+            return @{@"error": @"Cannot read process CPU usage"};
+        }
+        // NULL sums every malloc zone. Reserved allocator capacity is distinct
+        // from bytes in live blocks and from the process's phys_footprint.
+        malloc_statistics_t allocations;
+        malloc_zone_statistics(NULL, &allocations);
+        resources[@"cpu_user_seconds"] = @(usage.ru_utime.tv_sec + usage.ru_utime.tv_usec / 1000000.0);
+        resources[@"cpu_system_seconds"] = @(usage.ru_stime.tv_sec + usage.ru_stime.tv_usec / 1000000.0);
+        resources[@"allocator_live_bytes"] = @(allocations.size_in_use);
+        resources[@"allocator_live_blocks"] = @(allocations.blocks_in_use);
+        resources[@"allocator_reserved_bytes"] = @(allocations.size_allocated);
+    }
+    return resources;
 }
 
 static void Reply(NSDictionary *value) {
@@ -130,7 +149,7 @@ int main(int argc, const char *argv[]) {
             return 1;
         }
         Reply(@{@"ready": @YES, @"pid": @(getpid()), @"uploader_port": @(uploaderPort), @"dav_port": @(davPort),
-                @"temporary_directory": NSTemporaryDirectory(), @"resources": Resources()});
+                @"temporary_directory": NSTemporaryDirectory(), @"resources": Resources(NO)});
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             char *line = NULL;
             size_t capacity = 0;
@@ -142,6 +161,7 @@ int main(int argc, const char *argv[]) {
                     dispatch_async(dispatch_get_main_queue(), ^{
                         @autoreleasepool {
                             NSString *command = [message isKindOfClass:[NSDictionary class]] ? message[@"command"] : nil;
+                            size_t relieved = 0;
                             if ([command isEqualToString:@"stop"] || [command isEqualToString:@"shutdown"]) {
                                 [uploader stop];
                                 [dav stop];
@@ -151,11 +171,16 @@ int main(int argc, const char *argv[]) {
                                     Reply(@{@"error": startError.description ?: @"Cannot restart servers"});
                                     return;
                                 }
-                            } else if (![command isEqualToString:@"stats"]) {
+                            } else if ([command isEqualToString:@"relieve-allocator"]) {
+                                // Explicit diagnostic control, used only after all
+                                // measured cycles and the final idle window.
+                                relieved = malloc_zone_pressure_relief(NULL, 0);
+                            } else if (![command isEqualToString:@"stats"] && ![command isEqualToString:@"profile-stats"]) {
                                 Reply(@{@"error": @"Unknown command"});
                                 return;
                             }
-                            Reply(@{@"resources": Resources(), @"running": @(uploader.isRunning && dav.isRunning),
+                            Reply(@{@"resources": Resources(![command isEqualToString:@"stats"]), @"running": @(uploader.isRunning && dav.isRunning),
+                                    @"allocator_relieved_bytes": @(relieved),
                                     @"uploader_port": @(uploaderPort), @"dav_port": @(davPort)});
                             if ([command isEqualToString:@"shutdown"]) exit(0);
                         }

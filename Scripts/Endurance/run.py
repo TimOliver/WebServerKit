@@ -118,7 +118,7 @@ def check_entries(directory, expected):
 
 
 class Host:
-    def __init__(self, binary, temporary_library, directory, log, shared_directory=False, report=None):
+    def __init__(self, binary, temporary_library, directory, log, shared_directory=False, report=None, allocation_stacks=False):
         self.directory = directory
         self.control_lock = threading.Lock()
         self.tmp = directory / "tmp"
@@ -128,7 +128,8 @@ class Host:
         self.process = subprocess.Popen(
             [str(binary), *(str(path) for path in self.shares.values())],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log,
-            env={**os.environ, "TMPDIR": str(self.tmp) + "/", "DYLD_INSERT_LIBRARIES": str(temporary_library)}, bufsize=0)
+            env={**os.environ, "TMPDIR": str(self.tmp) + "/", "DYLD_INSERT_LIBRARIES": str(temporary_library),
+                 **({"MallocStackLogging": "1"} if allocation_stacks else {})}, bufsize=0)
         try:
             ready = self.read()
             require(ready.get("ready"), f"Host did not start: {ready}")
