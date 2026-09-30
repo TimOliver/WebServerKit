@@ -118,11 +118,12 @@ def check_entries(directory, expected):
 
 
 class Host:
-    def __init__(self, binary, temporary_library, directory, log, report=None):
+    def __init__(self, binary, temporary_library, directory, log, shared_directory=False, report=None):
         self.directory = directory
+        self.control_lock = threading.Lock()
         self.tmp = directory / "tmp"
-        self.shares = {kind: directory / kind for kind in ("uploader", "dav")}
-        for path in [self.tmp, *self.shares.values()]:
+        self.shares = {kind: directory / ("shared" if shared_directory else kind) for kind in ("uploader", "dav")}
+        for path in [self.tmp, *dict.fromkeys(self.shares.values())]:
             path.mkdir()
         self.process = subprocess.Popen(
             [str(binary), *(str(path) for path in self.shares.values())],
@@ -157,8 +158,11 @@ class Host:
         return reply
 
     def command(self, command):
-        self.process.stdin.write(json.dumps({"command": command}).encode() + b"\n")
-        return self.read()
+        # A live sampler and the workload may both request metrics. Keep each
+        # request/reply pair together on the one stdio control channel.
+        with self.control_lock:
+            self.process.stdin.write(json.dumps({"command": command}).encode() + b"\n")
+            return self.read()
 
     def stats(self):
         return self.command("stats")["resources"]
