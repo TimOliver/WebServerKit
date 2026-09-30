@@ -1013,6 +1013,29 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   retention and the original timeout remain unclassified. This does not establish same-path
   transaction atomicity, changing-list snapshot semantics, storage-failure recovery or
   physical-client behavior. No production/library or browser changes were made.
+- **Serial DAV profile (2026-09-30, same production tip `a3799a9`):**
+  `Scripts/Endurance/profile_listings.py` adds bounded listing/idle cycles, all-malloc-zone
+  live bytes/blocks and reserved capacity, process CPU, and a separate own-PID stack/leaks
+  mode. It keeps the fixed resource baseline and performs optional diagnostic inspection
+  before an endpoint-only allocator pressure-relief control. Release arm64 macOS 27.0.1,
+  `MallocNanoZone=0`: 45 validated immutable 5,000-entry listings; eight measured batch
+  medians 695–707 ms, max 785 ms, 0.380–0.391 CPU s/listing. Warmup still included 6.712 s
+  almost entirely before headers; the later warm stacks cannot explain it or the earlier
+  timeout. Baseline→final ten-second idle: live bytes 511,344→528,800 (+17,456), blocks
+  2,951→2,950, footprint 17.1→16.5 MiB. Idle live bytes first rose to 542,064, then fell.
+  Allocator capacity reached 84 MiB in measured cycle three and plateaued (baseline 68);
+  pressure relief released zero. This is a bounded serial result, NOT a classification
+  of the earlier 72.2 MiB mixed-workload footprint or proof against slower/reachable growth.
+  Separate 15-listing instrumented run: zero leaks reported; active PROPFIND stacks most
+  often show per-file open, then realpath/classification, with fewer xattr/string/sort
+  observations. Sampling includes idle and kernel waits; do not equate its counts with
+  uninstrumented CPU percentages. All connections closed, FDs returned to each run's own
+  baseline (8/9), no reservations/residual files. Reports and sidecars under
+  `build/listing-profile-{timing,diagnostic}.*` retain harness hashes. Twenty-one harness
+  tests, the transfer/restart smoke and ObjC lint pass. No production defect established;
+  measure individual stages before optimizing, preserving containment and descriptor-based
+  metadata coherence. Complete XML plus UTF-8 buffer overlap is temporary by construction
+  and these data do not show it leaking. See the endurance README for repeatable commands.
 
 ### Style (enforced by `Scripts/lint-objc.py`, run first by Run-Tests.sh)
 

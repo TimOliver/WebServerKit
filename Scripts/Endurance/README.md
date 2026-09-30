@@ -197,6 +197,41 @@ and `.leaks.txt`. Incomplete batches and tool failures remain visible, and PASS 
 successful process/log/directory cleanup. The metrics and allocator control exist only
 in the test executable, over stdin.
 
+Measured on 2026-09-30 against production tip `a3799a9` (Release, arm64 macOS 27.0.1,
+`MallocNanoZone=0`), the timing run completed 45 validated 5,000-entry listings. The
+eight measured batches had medians of 695–707 ms and a maximum request of 785 ms,
+using 0.380–0.391 host CPU seconds per listing. Warmup included a 6.712-second request,
+almost entirely before headers. Its cause remains unclassified; the later warm stacks
+do not explain that outlier or the earlier mixed-workload timeout.
+
+| Idle measurement | Fixed warm baseline | After final ten-second idle |
+| --- | --- | --- |
+| Live malloc bytes | 511,344 | 528,800 |
+| Live malloc blocks | 2,951 | 2,950 |
+| Allocator-reserved capacity | 68 MiB | 84 MiB |
+| Physical footprint | 17.1 MiB | 16.5 MiB |
+
+During the measured cycles, idle live bytes rose as high as 542,064 before falling in
+the final idle window. Reserved capacity reached 84 MiB in the third measured cycle
+and stayed there; idle footprint reached 24.4 MiB and then fell. The endpoint relief
+control reported zero bytes released. This shows a bounded capacity plateau with a
+small net live-byte increase in this run; it does not classify the earlier 72.2 MiB
+mixed-workload footprint or exclude slower/reachable accumulation.
+
+The separate diagnostic completed 15 validated listings and `leaks` reported zero
+leaked allocations. Active PROPFIND stacks most often showed per-file `open`, followed
+by containment/classification through `realpath`; xattr reads, strings and sorting
+appeared less often. These are instrumented stack observations, including filesystem
+calls that may wait, not percentages of uninstrumented CPU time. The five-second sample
+also overlapped idle time. Both runs closed every connection, returned descriptors to
+their own baselines (eight without stack logging, nine with it), and left no reservations
+or temporary/staging files. Reports are `build/listing-profile-timing.json` and
+`build/listing-profile-diagnostic.json`, with their sidecars and exact harness hashes.
+Twenty-one deterministic harness tests, the existing transfer/restart endurance smoke
+and Objective-C lint passed. These measurements do not establish a production defect;
+no library change was made. Future optimization needs stage-specific evidence while
+preserving containment and the single-descriptor metadata snapshot.
+
 ## Real-device validation still required
 
 Loopback endurance cannot establish Windows client compatibility, Wi-Fi behavior,
