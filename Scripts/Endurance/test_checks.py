@@ -12,6 +12,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import audit
 import run
 from run import DeadlineConnection, Host, MIB, Runner, check_entries, check_resources, closing_reported, digest
 
@@ -124,10 +125,10 @@ class ReportCleanupTests(unittest.TestCase):
                     pass
         self.assertEqual(report["cleanup_errors"][0]["resource"], "fixture")
 
-    def test_endurance_main_fails_on_cleanup_and_preserves_workload_error(self):
+    def test_both_mains_fail_on_cleanup_and_preserve_workload_error(self):
         # Scripted no-I/O workloads isolate report and cleanup behavior; no build
         # tools, server processes or sockets are used by these cases.
-        for module in (run,):
+        for module in (run, audit):
             for failure in (None, "host", "temporary_directory", "workload_and_cleanup"):
                 with self.subTest(module=module.__name__, failure=failure), tempfile.TemporaryDirectory() as directory:
                     report_path = Path(directory) / "report.json"
@@ -156,6 +157,8 @@ class ReportCleanupTests(unittest.TestCase):
                         stack.enter_context(patch.object(module.sys, "argv", [module.__name__, "--report", str(report_path), *extra]))
                         stack.enter_context(patch.object(module.subprocess, "run"))
                         stack.enter_context(patch.object(module.subprocess, "check_output", return_value="/unused"))
+                        if module is audit:
+                            stack.enter_context(patch.object(module.platform, "platform", return_value="fixture"))
                         stack.enter_context(patch.object(module.tempfile, "TemporaryDirectory", return_value=temporary))
                         stack.enter_context(patch.object(module, "Host", return_value=host))
                         stack.enter_context(patch.object(module, "Runner" if module is run else "SharedAudit", side_effect=runner_factory))
