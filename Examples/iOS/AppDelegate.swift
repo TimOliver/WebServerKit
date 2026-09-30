@@ -28,6 +28,9 @@
 import UIKit
 
 @UIApplicationMain
-class AppDelegate: UIResponder, UIApplicationDelegate {
+class AppDelegate: UIResponder, UIApplicationDelegate {}
+
+final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
+  // UIKit creates the window and its root controller from the scene storyboard.
   var window: UIWindow?
 }

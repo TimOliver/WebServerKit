@@ -60,10 +60,10 @@ when it resigns active or enters the background. Keep the app visible during the
 foreground test, without a debugger attached.
 
 Preparation creates a project under `build/device-smoke-project`, reuses the
-repository's framework sources, and substitutes the probe controller. Its scene
-manifest and minimal scene delegate support current iOS SDKs, including the iOS 27
-scene requirement. These adaptations affect only the generated host; preparation
-does not edit the shipping library or example app.
+repository's framework sources, and substitutes the probe controller. It inherits
+the shipping iOS example's scene manifest and scene delegate, including support
+for the iOS 27 scene requirement. Preparation does not edit the shipping library
+or example app.
 
 ## Copy the report and run transfers
 
@@ -211,8 +211,9 @@ names for a replacement listener. DNS-derived aliases that are neither the kerne
 hostname nor the app's advertised target still need `WSKOption_AllowedHostNames`.
 
 The unadapted example-based host also failed iOS 27's scene lifecycle requirement.
-The generated probe adopts scenes; the shipping iOS example still needs that
-migration. See [Apple's scene migration guidance](https://developer.apple.com/documentation/uikit/transitioning-to-the-uikit-scene-based-life-cycle).
+The shipping iOS example has since adopted a single-window scene with its existing
+Main storyboard. The generated probe now inherits that configuration directly.
+See [Apple's scene migration guidance](https://developer.apple.com/documentation/uikit/transitioning-to-the-uikit-scene-based-life-cycle).
 
 Raw summaries and samples are local ignored artifacts at
 `build/native-device-transfers.json` and `build/native-device-lifecycle.json`.

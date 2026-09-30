@@ -1029,6 +1029,16 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   preceding source; the 303-test ASan suite and lint pass. This is not Windows client,
   permission-toggle, Wi-Fi-loss, active-background-transfer or overnight coverage, and the
   full multi-platform gate was not repeated. Reports: `build/native-device-{transfers,lifecycle}.json`.
+  The sample's original app lifecycle also failed iOS 27's scene-adoption check. The
+  follow-up migrates `Examples/iOS` to a single storyboard-backed `UIWindowScene`:
+  `SceneDelegate` owns the window, the manifest loads `Main`, and multiple scenes are
+  disabled. DeviceSmoke inherits this setup rather than injecting its own delegate or
+  manifest. Keep UIKit application notifications for the library's lifecycle handling;
+  the scene delegate must not manually repost them or duplicate server start/stop calls.
+  The migrated sample passes Release simulator and signed iOS device builds. In the iOS
+  27.0 simulator, its unchanged controller/storyboard launch, serve HTTP 200, and resume
+  serving in the same process after backgrounding. The new physical launch check was
+  blocked by the locked phone. Evidence: `build/scene-sample-validation.json`.
 - **Shared-folder/listing audit (2026-09-30, production tip `a3799a9`):**
   `Scripts/Endurance/audit.py --seconds 10` runs both servers over one disposable root,
   four mixed uploads and cross-server read/move/copy/delete workflows on distinct names.
@@ -1198,11 +1208,6 @@ Each was deliberate; full reasons in the archived record (`git show 09416c2:CLAU
 
 Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3.
 
-- **iOS example scene lifecycle (confirmed 2026-09-30):** the example's original app
-  lifecycle, when built with SDK 27.1 and launched on iOS 27.0, terminates in
-  `UIApplicationEvaluateRuntimeIssueForNoSceneLifecycleAdoption`. The separate DeviceSmoke
-  generator supplies a scene manifest/delegate; the shipping `Examples/iOS` still needs
-  that migration. Keep UIKit application notifications for the library's lifecycle handling.
 - **The allow-list vetting walk judges a symlink's TARGET, not the alias** — fail-closed
   over-refusal contradicting "symlinks are aliases"; needs an OWNER RULING, not a fix (the
   obvious `lstat` fix re-refuses via `_checkFileExtension:` for extensionless link names).

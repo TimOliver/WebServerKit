@@ -22,24 +22,11 @@ def main():
     example = OUTPUT / "Examples" / "iOS"
     shutil.copytree(ROOT / "Examples" / "iOS", example, dirs_exist_ok=True)
     shutil.copy2(ROOT / "Scripts" / "DeviceSmoke" / "ViewController.swift", example / "ViewController.swift")
-    # The current SDK requires a scene lifecycle on iOS 27. Keep this change in
-    # the generated probe; the shipping example is not modified by preparation.
-    delegate = example / "AppDelegate.swift"
-    delegate.write_text(delegate.read_text() + '\nfinal class SceneDelegate: UIResponder, UIWindowSceneDelegate {\n  var window: UIWindow?\n}\n')
     info_path = example / "Info.plist"
     info = plistlib.loads(info_path.read_bytes())
     info.update(CFBundleDisplayName="WSK Device Test",
                 NSLocalNetworkUsageDescription="Test HTTP and WebDAV transfers with your Mac on this local network.",
                 NSBonjourServices=["_http._tcp", "_webdav._tcp"])
-    info.pop("UIMainStoryboardFile", None)
-    info["UIApplicationSceneManifest"] = {
-        "UIApplicationSupportsMultipleScenes": False,
-        "UISceneConfigurations": {"UIWindowSceneSessionRoleApplication": [{
-            "UISceneConfigurationName": "Device Smoke",
-            "UISceneDelegateClassName": "$(PRODUCT_MODULE_NAME).SceneDelegate",
-            "UISceneStoryboardFile": "Main",
-        }]},
-    }
     info_path.write_bytes(plistlib.dumps(info))
     project = OUTPUT / "WebServerKit.xcodeproj"
     project.mkdir(exist_ok=True)
