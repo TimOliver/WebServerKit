@@ -984,6 +984,35 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   This is repeatable local evidence, not an overnight or physical-device run. The new Bonjour
   behavior passes five new ASan regressions within the 283-test suite, eight traces, all
   platform/Swift builds, and three real Bonjour registration/stop cycles.
+- **Shared-folder/listing audit (2026-09-30, production tip `a3799a9`):**
+  `Scripts/Endurance/audit.py --seconds 10` runs both servers over one disposable root,
+  four mixed uploads and cross-server read/move/copy/delete workflows on distinct names.
+  GET, Range and listing completions must occur during client body sends; four-body
+  overlap also needs temp files and reserved multipart memory. Immutable catalogs of
+  100/1,000/5,000 files are checked for exact JSON/DAV contents. Two repeats alternate
+  baseline/listing order after warming the largest directory; metrics sample live
+  `phys_footprint` rather than just idle snapshots. Passed: 63,535 completed requests,
+  2,817 uploads, two cancellations, 10.56 GiB hash-verified; all 63,537 connections closed,
+  descriptors 8→8, zero reservations/residue. Sampled footprint peaked at 59.1 MiB including
+  warmup and finished at 8.6 MiB. At 5,000 entries, uploader median 251–262 ms and two-property
+  DAV median 850–914 ms; only 11 DAV samples per phase, so no p95 claim. Probe GET/Range p95
+  stayed below 1.6 ms in every measured phase. Eighteen runner-oracle tests cover malformed
+  local result fixtures, exact resources and concurrency evidence. An earlier warmup had
+  an unclassified timeout; simulator/installer and scanner activity were present, but
+  causality is NOT established by the passing rerun. Reports now retain request failure
+  stage/status/length/bytes/timing, traceback, partial phase metrics and load averages.
+  Phase evidence survives sampler/concurrency/settling failures. Both runners now mark PASS
+  only AFTER all owned contexts close; cleanup errors are separate and cannot replace an
+  earlier failure (including startup and initial upload sends). Follow-up at 5,000 entries:
+  23,884 completed requests, 1,073 uploads, two cancellations, 4.02 GiB hash-verified;
+  all 23,886 connections closed, FDs 8→8, zero reservations/residue. No repeat timeout,
+  but DAV medians varied 1.16–4.46 s (eight/three samples), max 6.69 s; probe GET/Range p95
+  stayed below 2 ms. Footprint peaked at 72.7 MiB and finished at 72.2 MiB, 60.7 MiB above
+  the fixed warm baseline, within its 64 MiB allowance. Do not call this memory recovery
+  or infer allocator caching versus a leak from this short run: latency variability,
+  retention and the original timeout remain unclassified. This does not establish same-path
+  transaction atomicity, changing-list snapshot semantics, storage-failure recovery or
+  physical-client behavior. No production/library or browser changes were made.
 
 ### Style (enforced by `Scripts/lint-objc.py`, run first by Run-Tests.sh)
 

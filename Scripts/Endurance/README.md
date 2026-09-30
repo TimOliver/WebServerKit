@@ -65,6 +65,98 @@ shipping library is unchanged, and the runner never inventories or removes files
 another process's temporary directory. Everything else uses the public server APIs.
 Control and metrics travel over stdio so measuring resources creates no HTTP connection.
 
+## Shared-folder and listing audit
+
+```sh
+python3 Scripts/Endurance/audit.py --seconds 10 --report build/shared-folder-audit.json
+```
+
+This separate audit points the uploader and WebDAV server at **the same disposable
+directory**. Four workers (two multipart, two PUT) upload distinct 1 MiB files, read
+them through the other server, move and copy them, verify their hashes, and delete
+them. Two additional clients continuously fetch a small file and a 128 KiB range
+from an 8 MiB asset. A cancelled upload through each server must also leave no residue.
+It exercises ordinary independent-resource operations; it does not establish atomicity
+when clients modify the same path or validate recovery from storage failures.
+
+The default directory sizes are 100, 1,000 and 5,000 entries (`--entries` accepts
+comma-separated counts from 1 to 5,000). At each size, two repeats alternate baseline/listing order.
+Baseline phases run the transfer workload; listing phases add one JSON listing client
+and one Depth:1 PROPFIND client requesting `displayname` and `getcontentlength`.
+Every listing must contain exactly the expected resources, names, sizes, namespaces
+and property statuses. Fixture files in the listed directory remain immutable while
+transfers and mutations use its parent directory. This does not test a changing listing
+snapshot, recursive listings, dead-property-heavy responses, or maximum request capacity.
+
+Uploads send continuously in paced 64 KiB chunks. The audit requires samples with four
+unfinished bodies, four temporary files and reserved multipart memory, corroborated by
+client send intervals. Both GET and Range clients, and both listing clients when enabled,
+must complete responses while a body is still being sent. Upload durations include
+deliberate pacing and are not throughput benchmarks.
+
+The host is warmed using the largest directory before fixing its resource baseline.
+Each phase requires three clean idle samples: no connections, transfers, reservations,
+temporary or staging files, and no descriptor growth. The footprint allowance remains
+64 MiB. Approximate 25 ms sampling records **observed** peak `phys_footprint`, descriptor
+counts and actual sample gaps; shorter peaks can be missed. Reports include per-operation
+latency and time to headers for uploads, probe GETs, ranges and listings, plus counts,
+received response bytes, uploaded file bytes and completions during uploads. Mutations
+are verified but not timed separately. Percentiles use nearest rank; p95 is omitted below 20 samples
+and p99 below 1,000. These are client-observed loopback timings, including client scheduling;
+XML/JSON validation occurs after the measured response interval.
+
+`--seconds` defaults to five seconds per phase; ten gives larger listings more observations.
+A phase finishes its current operations before settling. The report includes warmup
+separately and records the library revision, harness hashes and phase load averages. Summary JSON, resource
+samples and the host log use the supplied report stem. Run this audit alone for useful
+timings. The unit tests for its oracles run in the regular validation gate; the live audit
+is explicit, alongside the existing endurance smoke.
+
+Failed requests retain the server, method/path, last stage (`send`, `headers`, `body`
+or `validation`), status, advertised length, elapsed time, bytes returned by successful
+reads and last observed body progress. This distinguishes a timeout before headers
+from a partially consumed response; it does not attribute server CPU or filesystem time.
+Failed phases preserve completed-operation metrics and the last sampled resources,
+including when sampler, concurrency or settling checks fail. Cleanup errors are recorded
+separately and cannot mask an earlier error. Both runners mark PASS only after the host,
+logs and temporary directory have been cleaned up successfully. Harness removal of a
+failed run's disposable files is separate from the library's idle-resource checks; it
+does not count as evidence that the library cleaned up correctly.
+
+Measured on 2026-09-30 against `a3799a9` (Release, arm64 macOS loopback), using the command
+above: 63,535 completed requests, 2,817 uploads, two cancellations and 10.56 GiB verified
+by hash, including warmup. All 63,537 accepted connections closed; descriptors returned
+to eight, reservations to zero, and no temporary or staging files remained. Observed
+peak footprint was 59.1 MiB including warmup; final idle footprint was 8.6 MiB.
+
+| Entries | Uploader listing median, two phases | DAV listing median, two phases |
+| --- | --- | --- |
+| 100 | 6.0–6.1 ms | 8.3–8.4 ms |
+| 1,000 | 49.7–53.7 ms | 161–230 ms |
+| 5,000 | 251–262 ms | 850–914 ms |
+
+Probe GET and Range p95 stayed below 1.6 ms in every measured phase, including with
+listings. There were only 11 DAV listings in each 5,000-entry phase, so no p95 is claimed
+for that case. Background simulator/installer and security-scanner work was present;
+these timings are descriptive, not an isolated performance comparison. An earlier
+warmup hit an unclassified timeout. The instrumented full rerun passed, but does not
+explain that failure. Its report now includes phase load averages, partial metrics and
+a traceback on workload failure to support investigation if it recurs. No shipping
+library or browser code changed for this audit.
+
+A follow-up at 5,000 entries with the additional diagnostics passed 23,884 completed
+requests, 1,073 uploads, two cancellations and 4.02 GiB hash-verified. All 23,886
+connections closed, descriptors returned to eight and reservations/residual files to
+zero. The timeout did not recur. Performance still varied: measured DAV medians were
+1.16 s and 4.46 s (eight and three samples), with a 6.69 s maximum. Probe GET/Range p95
+stayed below 2 ms. Observed peak footprint was 72.7 MiB and final idle footprint 72.2 MiB,
+60.7 MiB above the fixed post-warmup baseline and within the 64 MiB allowance. This
+short run cannot distinguish allocator retention from a slower accumulation trend.
+The earlier timeout, listing latency variability and memory retention remain unclassified;
+neither a passing run nor load averages establish their cause. Eighteen deterministic
+runner tests now also cover request diagnostics and cleanup-error reporting, including
+both runners' exit codes when cleanup fails.
+
 ## Real-device validation still required
 
 Loopback endurance cannot establish Windows client compatibility, Wi-Fi behavior,
