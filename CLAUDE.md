@@ -80,6 +80,15 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   allow-list admits only localhost, IP literals, own hostname and `.local` (else 421). An
   entry without a port matches ANY port (needed behind port-translating hops); a request with
   no `Host` header at all is allowed.
+- Startup hostname discovery must not resolve DNS: `NSProcessInfo.hostName` blocked a
+  physical iPhone launch until the 19.96 s watchdog killed it (2026-09-30). Use bounded
+  `gethostname` with explicit termination/UTF-8 checks. The current Bonjour service's
+  resolved target is admitted asynchronously before success notification; iOS can advertise
+  a different name from its kernel hostname. Publish immutable host sets under their short
+  dedicated lock. Accept-time reads must NOT enter `_stateQueue`, because stop waits for
+  accept handlers to finish. Connections retain their accepted snapshot; stale Bonjour
+  callbacks cannot publish names for a replacement listener. Other canonical DNS aliases
+  require explicit `AllowedHostNames` configuration.
 - `WSKOption_ConnectionIdleTimeout` default 30 s; 0 disables — without it, 128 idle sockets
   is a permanent denial of service.
 - Both connection timeout options must be finite and in 0...2147483647 seconds; a positive
@@ -1006,6 +1015,20 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   This is repeatable local evidence, not an overnight or physical-device run. The new Bonjour
   behavior passes five new ASan regressions within the 283-test suite, eight traces, all
   platform/Swift builds, and three real Bonjour registration/stop cycles.
+- **Physical iPhone smoke (2026-09-30, hostname fixes `80e64d4` / `714b034`):**
+  `Scripts/DeviceSmoke` builds a dedicated synthetic-data host, serves both protocols from
+  one share, and copies metrics from its app container instead of an HTTP endpoint.
+  iPhone Air / iOS 27.0 (24A437), signed Release with SDK 27.1, Mac Python client on actual
+  Wi-Fi: four held multipart uploads and four held DAV PUTs in separate phases, simultaneous
+  full/If-Range downloads, cross-server hashes, cancellation, exact named-property listings
+  and COPY/MOVE/DELETE all pass. Foreground: 57 requests, 10 uploads including warmups,
+  two cancellations, 63,700,992 verified bytes. Idle background/resume: 16 requests,
+  34,078,720 bytes; both listeners refuse while backgrounded, same PID/ports serve again,
+  and Bonjour Host names work before/after resume. All 75 connections close; idle FDs 11→11,
+  reservations zero, no temp/staging residue. Both hostname regressions fail against their
+  preceding source; the 303-test ASan suite and lint pass. This is not Windows client,
+  permission-toggle, Wi-Fi-loss, active-background-transfer or overnight coverage, and the
+  full multi-platform gate was not repeated. Reports: `build/native-device-{transfers,lifecycle}.json`.
 - **Shared-folder/listing audit (2026-09-30, production tip `a3799a9`):**
   `Scripts/Endurance/audit.py --seconds 10` runs both servers over one disposable root,
   four mixed uploads and cross-server read/move/copy/delete workflows on distinct names.
@@ -1175,6 +1198,11 @@ Each was deliberate; full reasons in the archived record (`git show 09416c2:CLAU
 
 Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3.
 
+- **iOS example scene lifecycle (confirmed 2026-09-30):** the example's original app
+  lifecycle, when built with SDK 27.1 and launched on iOS 27.0, terminates in
+  `UIApplicationEvaluateRuntimeIssueForNoSceneLifecycleAdoption`. The separate DeviceSmoke
+  generator supplies a scene manifest/delegate; the shipping `Examples/iOS` still needs
+  that migration. Keep UIKit application notifications for the library's lifecycle handling.
 - **The allow-list vetting walk judges a symlink's TARGET, not the alias** — fail-closed
   over-refusal contradicting "symlinks are aliases"; needs an OWNER RULING, not a fix (the
   obvious `lstat` fix re-refuses via `_checkFileExtension:` for extensionless link names).

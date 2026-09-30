@@ -178,3 +178,44 @@ xcrun devicectl device uninstall app --device "$PROBE_DEVICE" \
 If HTTP cleanup could not complete, stop the identified probe and remove this
 dedicated app after saving the evidence. No cleanup step needs access to another
 app's container, personal files, or device-wide temporary storage.
+
+## Recorded run: 2026-09-30
+
+A signed Release host on an iPhone Air running iOS 27.0 (24A437), built with the
+iOS 27.1 SDK, passed using the Mac Python client over the phone's actual Wi-Fi
+IPv4 address. The production changes were `80e64d4` and `714b034`.
+
+- Foreground: 57 completed requests, 10 uploads including two warmups, two
+  cancellations, four exact DAV listings, and 63,700,992 hash-verified download
+  bytes. Four held multipart uploads and four held DAV PUTs were tested in
+  separate phases; both phases allowed simultaneous full and ranged downloads.
+- Idle background/resume: 16 completed requests and 34,078,720 verified bytes.
+  Both listeners refused new connections in the background; the same process
+  resumed on the same ports. Advertised Bonjour Host names returned 200 before
+  and after resume.
+- Across both phases, all 75 accepted connections closed. Idle descriptors
+  stayed at 11, memory reservations returned to zero, and the only remaining
+  shared files were the two original fixtures. No app-temp residue remained.
+- The complete ASan unit suite passed all 303 tests; Objective-C lint passed.
+  Both new hostname regressions failed against their preceding implementations
+  in isolated source snapshots. This run did not repeat the entire multi-platform
+  `Run-Tests.sh` gate.
+
+The first launch exposed a synchronous `NSProcessInfo.hostName` DNS wait: iOS
+terminated the app with a scene-create watchdog after 19.96 seconds. Startup now
+uses bounded `gethostname` instead. A compatibility follow-up found that iOS's
+advertised Bonjour hostname differed from its kernel hostname; the existing
+asynchronous Bonjour success callback now publishes that name through a locked,
+immutable snapshot before notifying the delegate. Stale callbacks cannot publish
+names for a replacement listener. DNS-derived aliases that are neither the kernel
+hostname nor the app's advertised target still need `WSKOption_AllowedHostNames`.
+
+The unadapted example-based host also failed iOS 27's scene lifecycle requirement.
+The generated probe adopts scenes; the shipping iOS example still needs that
+migration. See [Apple's scene migration guidance](https://developer.apple.com/documentation/uikit/transitioning-to-the-uikit-scene-based-life-cycle).
+
+Raw summaries and samples are local ignored artifacts at
+`build/native-device-transfers.json` and `build/native-device-lifecycle.json`.
+Preserve them before running `Run-Tests.sh`, which clears `build`. Windows clients,
+active transfers across background suspension, permission denial/recovery, Wi-Fi
+loss/rejoin, and overnight device endurance remain outside this run's coverage.
