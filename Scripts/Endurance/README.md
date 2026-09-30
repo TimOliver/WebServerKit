@@ -157,6 +157,46 @@ neither a passing run nor load averages establish their cause. Eighteen determin
 runner tests now also cover request diagnostics and cleanup-error reporting, including
 both runners' exit codes when cleanup fails.
 
+## Serial DAV listing profile
+
+```sh
+python3 Scripts/Endurance/profile_listings.py --report build/listing-profile-timing.json
+python3 Scripts/Endurance/profile_listings.py --diagnostic --cycles 2 --report build/listing-profile-diagnostic.json
+```
+
+Run these separately and without other test workloads. Both create an owned loopback
+host and an immutable 5,000-file catalog, using the shared-folder audit's exact two-property
+DAV listing and cleanup checks. The timing run warms five requests, fixes its baseline,
+then measures eight cycles of five serial listings with two seconds idle between cycles
+and ten seconds idle at the end. Counts and durations have bounded CLI overrides. This
+isolates listings; it does not measure mixed-client concurrency or allocation churn.
+
+Stdio snapshots record process user/system CPU, bytes and blocks currently live across
+all malloc zones, allocator-reserved capacity and `phys_footprint`. These quantities are
+different: allocator capacity is not the size of live objects or the physical footprint.
+Snapshots bracket each request batch and continue during idle; they do not capture peak
+in-request allocations. Request latency excludes client validation, while batch elapsed
+time includes it. CPU deltas include host control/background work. The fixed 64 MiB
+footprint allowance remains enforced; exceeding it produces a partial failed report,
+not a complete retention diagnosis.
+
+The diagnostic run enables `MallocStackLogging` only in its child host, samples that PID
+for five seconds at 10 ms intervals during the first measured cycle, and runs `leaks`
+after the final idle window. It records request-batch intervals and the sampler's launch
+through observed completion, which may include idle. Read active request stacks rather
+than interpreting all-thread idle counts as request cost. Instrumented timing and memory
+are not comparable to the timing run; zero reported leaks does not exclude reachable
+retention. Inherited `Malloc*` instrumentation is rejected except `MallocNanoZone`, whose
+value is recorded and preserved in both modes.
+
+Only after all measured cycles, final idle and any leak inspection does the harness ask
+the allocator for pressure relief and record a further idle window. That endpoint control
+never rebases or rescues a failed memory check. It may release zero bytes. JSON, resource
+JSONL and host logs share the report stem; diagnostics add `.stacks.txt`, `.stacks.tool.log`
+and `.leaks.txt`. Incomplete batches and tool failures remain visible, and PASS requires
+successful process/log/directory cleanup. The metrics and allocator control exist only
+in the test executable, over stdin.
+
 ## Real-device validation still required
 
 Loopback endurance cannot establish Windows client compatibility, Wi-Fi behavior,
