@@ -232,6 +232,38 @@ and Objective-C lint passed. These measurements do not establish a production de
 no library change was made. Future optimization needs stage-specific evidence while
 preserving containment and the single-descriptor metadata snapshot.
 
+## Upload storage-failure recovery
+
+```sh
+python3 Scripts/Endurance/storage_recovery.py --report build/storage-recovery.json
+```
+
+This bounded check owns a loopback host, separate uploader/DAV shares and temporary
+upload storage. It injects ENOSPC or EIO into a write after a real 128 KiB body prefix
+has been sent, or EIO after actually closing a fully written temporary file. Each mode
+runs against a new and an existing destination on both servers, for twelve cases.
+At least 64 KiB must be observed on disk before releasing the fault, and exactly one
+injection must occur. The dedicated dylib matches only a regular file inside this
+child's canonical temp directory and pins its descriptor/device/inode. It exposes its
+control only through the test host's stdin; the library and HTTP endpoints have no
+fault-injection controls. Calls inside the fixture invoke the real syscalls.
+
+For each failure, the runner requires the expected 507/500 response with connection
+close, exact share/temp inventory, preservation of existing inode/body/metadata, and
+fixed-baseline recovery of connections, descriptors and memory reservations. Two
+hash-checked download clients run while the upload is held, across the error, and
+until both complete fresh requests after its response. The recorded intervals show
+client progress, not the kernel scheduling order at the failing syscall. An unarmed
+retry must then succeed in the same process. DAV retries replace the existing target;
+the uploader preserves it and uses its normal numbered filename for the new upload.
+
+Summary JSON retains each incomplete case and its last available resources and fault
+counters; append-only samples and host logs share its stem. PASS requires successful
+cleanup of the owned host, logs and directory. The separate unit tests prove that an
+unapplied fault, insufficient prefix, wrong number of hits or unclosed descriptor
+cannot pass. These are temporary-upload error-handling checks: they do not exhaust a
+real volume, establish crash durability, or cover publication/rename failure paths.
+
 ## Real-device validation still required
 
 Loopback endurance cannot establish Windows client compatibility, Wi-Fi behavior,
