@@ -44,6 +44,7 @@
 #import <objc/runtime.h>
 #import <signal.h>
 #import <stdatomic.h>
+#import <sys/param.h>
 #import <unistd.h>
 
 #import "WSKPrivate.h"
@@ -1020,11 +1021,31 @@ static inline NSString *_EncodeBase64(NSString *string) {
         [allowedHostNames addObject:[WSKHostNameWithoutRootLabel([advertisedName stringByAppendingString:@".local"]) lowercaseString]];
     }
 
-    NSString *const machineName = [[NSProcessInfo processInfo] hostName];  // Typically "<device>.local"
+    // NSProcessInfo.hostName may resolve a canonical name through DNS and block
+    // synchronous startup long enough for the iOS launch watchdog to terminate us.
+    // The kernel's configured hostname needs no resolution. Reject failed,
+    // unterminated or non-UTF-8 results instead of admitting a truncated name.
+    char machineNameBuffer[MAXHOSTNAMELEN];
+    memset(machineNameBuffer, 0xFF, sizeof(machineNameBuffer));
+    NSString *machineName = nil;
+
+    if (gethostname(machineNameBuffer, sizeof(machineNameBuffer)) == 0) {
+        char const *const terminator = memchr(machineNameBuffer, '\0', sizeof(machineNameBuffer));
+
+        if (terminator != NULL) {
+            machineName = [[NSString alloc] initWithBytes:machineNameBuffer length:(NSUInteger)(terminator - machineNameBuffer) encoding:NSUTF8StringEncoding];
+        }
+    }
 
     if (machineName.length) {
         // A trailing dot makes an mDNS name fully qualified; browsers send it without.
-        [allowedHostNames addObject:[WSKHostNameWithoutRootLabel(machineName) lowercaseString]];
+        NSString *const normalizedMachineName = [WSKHostNameWithoutRootLabel(machineName) lowercaseString];
+        [allowedHostNames addObject:normalizedMachineName];
+
+        // Some devices store just the local label rather than its mDNS spelling.
+        if (normalizedMachineName.length && [normalizedMachineName rangeOfString:@"."].location == NSNotFound) {
+            [allowedHostNames addObject:[normalizedMachineName stringByAppendingString:@".local"]];
+        }
     }
 
     // Normalized through the SAME helper the check side uses. Previously these entries were only

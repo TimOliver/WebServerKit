@@ -6,7 +6,9 @@
 #import <float.h>
 #import <limits.h>
 #import <math.h>
+#import <objc/runtime.h>
 #import <stdatomic.h>
+#import <sys/param.h>
 
 #import "TestsSupport.h"
 
@@ -150,6 +152,76 @@
 @end
 
 @implementation WSKServerLifecycleTests
+
+- (void)testStartupUsesKernelHostnameWithoutResolvingProcessInfoHostName {
+    // The resolver-backed Foundation accessor can block an iPhone launch until its
+    // watchdog kills the app. Replace it with a counted block: the old startup
+    // path fails deterministically without DNS, sleeps or cross-queue exceptions.
+    WSKWebServer *const server = [[WSKWebServer alloc] init];
+    [server addDefaultHandlerForMethod:@"GET"
+                          requestClass:[WSKRequest class]
+                          processBlock:^WSKResponse *(WSKRequest *request) {
+                              return [WSKDataResponse responseWithText:@"hostname-startup-ok"];
+                          }];
+    Method const method = class_getInstanceMethod(object_getClass([NSProcessInfo processInfo]), @selector(hostName));
+    XCTAssertNotEqual(method, (Method)NULL);
+    if (!method) {
+        return;
+    }
+    __block atomic_uint calls = 0;
+    IMP const replacement = imp_implementationWithBlock(^NSString *(NSProcessInfo *processInfo) {
+        atomic_fetch_add(&calls, 1);
+        return @"unexpected-process-info-hostname.invalid";
+    });
+    IMP const original = method_setImplementation(method, replacement);
+    BOOL started = NO;
+    NSError *error = nil;
+    @try {
+        started = [server startWithOptions:@{WSKOption_Port: @0,
+                                            WSKOption_BindToLocalhost: @YES,
+                                            WSKOption_AllowedHostNames: @[@"startup.configured.example."]}
+                                    error:&error];
+    } @finally {
+        method_setImplementation(method, original);
+        imp_removeBlock(replacement);
+    }
+    @try {
+        XCTAssertTrue(started, @"%@", error);
+        XCTAssertNil(error);
+        XCTAssertEqual(atomic_load(&calls), (unsigned int)0, @"Startup must not invoke the resolver-backed hostname accessor");
+        if (!started) {
+            return;
+        }
+
+        char machineNameBuffer[MAXHOSTNAMELEN] = {0};
+        int const result = gethostname(machineNameBuffer, sizeof(machineNameBuffer));
+        XCTAssertEqual(result, 0);
+        char const *const terminator = memchr(machineNameBuffer, '\0', sizeof(machineNameBuffer));
+        XCTAssertNotEqual(terminator, (char const *)NULL);
+        NSString *const machineName = (result == 0 && terminator) ? [[NSString alloc] initWithBytes:machineNameBuffer length:(NSUInteger)(terminator - machineNameBuffer) encoding:NSUTF8StringEncoding] : nil;
+        XCTAssertGreaterThan(machineName.length, (NSUInteger)0);
+        if (!machineName.length) {
+            return;
+        }
+        NSString *const normalized = WSKHostNameWithoutRootLabel(machineName);
+        NSMutableArray<NSString *> *const hosts = [NSMutableArray arrayWithArray:@[
+            machineName, normalized.uppercaseString, [normalized stringByAppendingString:@"."],
+            @"localhost", @"STARTUP.CONFIGURED.EXAMPLE"
+        ]];
+        if ([normalized rangeOfString:@"."].location == NSNotFound) {
+            [hosts addObject:[normalized stringByAppendingString:@".local"]];
+        }
+        for (NSString *const host in hosts) {
+            NSString *const reply = SendRawRequest(server.port, [NSString stringWithFormat:@"GET / HTTP/1.1\r\nHost: %@\r\nConnection: close\r\n\r\n", host]);
+            XCTAssertTrue(ReplyHasStatus(reply, 200), @"Local/configured hostname %@ was refused: %@", host, reply);
+            XCTAssertTrue([reply hasSuffix:@"hostname-startup-ok"]);
+        }
+        NSString *const other = SendRawRequest(server.port, @"GET / HTTP/1.1\r\nHost: unexpected-process-info-hostname.invalid\r\nConnection: close\r\n\r\n");
+        XCTAssertTrue(ReplyHasStatus(other, 421), @"A resolver result must not be needed or admitted during startup: %@", other);
+    } @finally {
+        [server stop];
+    }
+}
 
 - (NSDictionary *)_bonjourProbeOptions {
     return @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES, WSKOption_BonjourName: @"WSK failure regression"};
