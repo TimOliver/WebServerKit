@@ -248,6 +248,10 @@ child's canonical temp directory and pins its descriptor/device/inode. It expose
 control only through the test host's stdin; the library and HTTP endpoints have no
 fault-injection controls. Calls inside the fixture invoke the real syscalls.
 
+For write failures, the client sends one more 64 KiB chunk and then reads the early
+error response; it does not keep sending the remaining advertised body after refusal.
+Close-failure cases send the complete body. The host installs a test logger that changes
+`errno` to EIO, so error preservation cannot accidentally depend on logger initialization.
 For each failure, the runner requires the expected 507/500 response with connection
 close, exact share/temp inventory, preservation of existing inode/body/metadata, and
 fixed-baseline recovery of connections, descriptors and memory reservations. Two
@@ -263,6 +267,8 @@ cleanup of the owned host, logs and directory. The separate unit tests prove tha
 unapplied fault, insufficient prefix, wrong number of hits or unclosed descriptor
 cannot pass. These are temporary-upload error-handling checks: they do not exhaust a
 real volume, establish crash durability, or cover publication/rename failure paths.
+They also do not cover clients that continue sending after an early refusal; that
+exercises the connection layer's separately bounded lingering close.
 
 ## Real-device validation still required
 

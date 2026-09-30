@@ -4,7 +4,6 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
-import os
 from pathlib import Path
 import platform
 import subprocess
@@ -21,6 +20,12 @@ from run import (CHUNK, MIB, PACKAGE, REPOSITORY, TIMEOUT, Host, Runner,
 
 MODES = {"write-enospc": 507, "write-eio": 500, "close-eio": 500}
 ATTRIBUTE = "com.webserverkit.storage-recovery"
+
+
+def read_metadata(path):
+    # Apple's bundled Python does not expose os.getxattr/setxattr.
+    value = subprocess.check_output(["/usr/bin/xattr", "-px", ATTRIBUTE, str(path)], text=True)
+    return bytes.fromhex(value)
 
 
 def check_fault(fault, mode, payload_length):
@@ -145,7 +150,7 @@ class StorageRecovery(Runner):
         original = b"original destination must survive"
         if existed:
             path.write_bytes(original)
-            os.setxattr(path, ATTRIBUTE, b"original metadata")
+            subprocess.run(["/usr/bin/xattr", "-wx", ATTRIBUTE, b"original metadata".hex(), str(path)], check=True)
             identity = path.stat().st_dev, path.stat().st_ino
             self.expected[kind].add(path.name)
         self.quiescent(self.baseline)
@@ -168,7 +173,13 @@ class StorageRecovery(Runner):
                             "Upload ended before concurrent downloads completed")
                     row["release_started"] = time.monotonic()
                     self.host.command("fault-release")
-                    status = self.finish_upload(connection, remainder, row)
+                    # A write fault can answer before Content-Length is received.
+                    # Read that early response after one trigger chunk; continuing
+                    # to send the entire body would instead exercise bounded
+                    # lingering-close behavior and can reset the response stream.
+                    tail = remainder if mode == "close-eio" else remainder[:CHUNK]
+                    row["bytes_sent_after_release"] = len(tail)
+                    status = self.finish_upload(connection, tail, row)
                     row["response_received"] = time.monotonic()
                     require(status == MODES[mode], f"Expected HTTP {MODES[mode]}, got {status}")
                     require((row["connection_header"] or "").lower() == "close", "Upload did not honor the requested connection close")
@@ -177,7 +188,7 @@ class StorageRecovery(Runner):
             row["after_failure"] = self.snapshot("after-failure")
             check_fault(row["after_failure"]["fault"], mode, len(self.payload))
             if existed:
-                require(path.read_bytes() == original and os.getxattr(path, ATTRIBUTE) == b"original metadata"
+                require(path.read_bytes() == original and read_metadata(path) == b"original metadata"
                         and (path.stat().st_dev, path.stat().st_ino) == identity,
                         "Failed upload changed the original destination")
             else:
@@ -207,6 +218,7 @@ def main():
     report_path = args.report.resolve()
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report = {"passed": False, "cases": [], "platform": platform.platform(),
+              "logger": "test callback changes errno to EIO, independent of logger initialization order",
               "revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPOSITORY, text=True).strip(),
               "harness_sha256": {name: digest((PACKAGE / name).read_bytes()) for name in
                                   ("storage_recovery.py", "StorageFaults.m", "run.py", "Sources/EnduranceHost/main.m")},

@@ -7,6 +7,7 @@
 
 #include <dirent.h>
 #include <dlfcn.h>
+#include <errno.h>
 #include <mach/mach.h>
 #include <malloc/malloc.h>
 #include <sys/resource.h>
@@ -122,6 +123,16 @@ int main(int argc, const char *argv[]) {
             return 2;
         }
         [WSKWebServer setLogLevel:4];
+        if (dlsym(RTLD_DEFAULT, "WSKStorageFaultControl")) {
+            // A legal application logger may perform syscalls and change errno.
+            // Make that deterministic in this fixture instead of depending on
+            // whether the built-in logger's first isatty() call has already run.
+            [WSKWebServer setBuiltInLogger:^(int level, NSString *message) {
+                (void)level;
+                (void)message;
+                errno = EIO;
+            }];
+        }
         WSKWebUploader *uploader = [[WSKWebUploader alloc] initWithUploadDirectory:@(argv[1])];
         WSKWebDAVServer *dav = [[WSKWebDAVServer alloc] initWithUploadDirectory:@(argv[2])];
         // SSE and directory monitoring are server resources too. Leave their defaults
