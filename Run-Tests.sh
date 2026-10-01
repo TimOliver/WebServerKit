@@ -8,6 +8,7 @@
 #   3. a Release build of the shipping framework for every platform
 #   4. SwiftPM and Xcode consumer builds, plus a live Swift consumer check
 #   5. endurance oracles, concurrent transfers and upload storage-failure recovery
+#   6. resumable storage/crash recovery and bounded session/receipt churn
 #
 # Deployment targets are deliberately NOT overridden. This script used to build with
 # MACOSX_DEPLOYMENT_TARGET=10.7 and IPHONEOS_DEPLOYMENT_TARGET=8.0 to check the oldest
@@ -103,6 +104,12 @@ echo "=== Endurance smoke check ==="
 python3 -m unittest discover -s Scripts/Endurance -p 'test_*.py'
 python3 Scripts/Endurance/run.py --cycles 1 --restart-cycles 1 --pause 0 --report "$BUILD_DIR/endurance.json"
 python3 Scripts/Endurance/storage_recovery.py --report "$BUILD_DIR/storage-recovery.json"
+
+echo "=== Resumable recovery and endurance ==="
+python3 -m unittest discover -s Scripts/ResumableUploads -p 'test_*.py'
+python3 -m unittest discover -s Scripts/DeviceSmoke -p 'test_*.py'
+python3 Scripts/ResumableUploads/recovery.py --report "$BUILD_DIR/resumable-recovery.json"
+python3 Scripts/ResumableUploads/endurance.py --duration 5 --receipts 129 --report "$BUILD_DIR/resumable-endurance.json"
 
 echo ""
 echo "All tests completed successfully."
