@@ -129,6 +129,14 @@ static WSKResponse *WSKResumeError(NSError *error) {
     return WSKResumeResponse(WSKServerErrorStatusCodeForError(error));
 }
 
+// Unreadable storage is not evidence that an upload has gone away. In
+// particular, iOS complete-protection files temporarily fail with EACCES while
+// locked. Only a missing or structurally invalid manifest is disposable.
+static BOOL WSKResumeManifestIsInvalid(NSError *error) {
+    return [error.domain isEqualToString:NSPOSIXErrorDomain] &&
+           (error.code == ENOENT || error.code == ENOTDIR || error.code == EINVAL || error.code == ELOOP);
+}
+
 @implementation WSKResumableFileRequest {
     NSUInteger _receivedResumeBytes;
 }
@@ -349,10 +357,12 @@ static WSKResponse *WSKResumeError(NSError *error) {
         return nil;
     }
     struct stat info;
-    if (fstat(file, &info) < 0 || !S_ISREG(info.st_mode) || info.st_size <= 0 || info.st_size > 32768) {
+    int const observed = fstat(file, &info);
+    if (observed < 0 || !S_ISREG(info.st_mode) || info.st_size <= 0 || info.st_size > 32768) {
+        int const code = observed < 0 ? errno : EINVAL;
         close(file);
         if (error) {
-            *error = WSKMakePosixError(EINVAL);
+            *error = WSKMakePosixError(code);
         }
         return nil;
     }
@@ -374,8 +384,11 @@ static WSKResponse *WSKResumeError(NSError *error) {
         received += (NSUInteger)count;
     }
     close(file);
-    NSObject *const object = [NSJSONSerialization JSONObjectWithData:bytes options:NSJSONReadingMutableContainers error:error];
+    NSObject *const object = [NSJSONSerialization JSONObjectWithData:bytes options:NSJSONReadingMutableContainers error:NULL];
     if (![object isKindOfClass:[NSMutableDictionary class]]) {
+        if (error) {
+            *error = WSKMakePosixError(EINVAL);
+        }
         return nil;
     }
     NSMutableDictionary *const manifest = (NSMutableDictionary *)object;
@@ -391,6 +404,9 @@ static WSKResponse *WSKResumeError(NSError *error) {
         return nil;
     }
     if ([state isEqualToString:@"complete"] && ![length isEqual:offset]) {
+        if (error) {
+            *error = WSKMakePosixError(EINVAL);
+        }
         return nil;
     }
     return manifest;
@@ -565,12 +581,13 @@ static WSKResponse *WSKResumeError(NSError *error) {
             continue;
         }
         NSString *const path = [self _sessionPath:name];
-        NSMutableDictionary *const manifest = [self _load:path error:NULL];
+        NSError *error = nil;
+        NSMutableDictionary *const manifest = [self _load:path error:&error];
         if (manifest && WSKResumeNumber(manifest, @"expires").doubleValue <= now) {
             [self _removeSession:path manifest:manifest error:NULL];
         } else if ([WSKResumeString(manifest, @"state") isEqualToString:@"complete"]) {
             [receipts addObject:@{@"path": path, @"manifest": manifest}];
-        } else if (!manifest) {
+        } else if (!manifest && WSKResumeManifestIsInvalid(error)) {
             struct stat info;
             if (lstat(path.fileSystemRepresentation, &info) == 0 && S_ISDIR(info.st_mode) && now - info.st_mtime >= _expirationInterval) {
                 [self _removeSession:path manifest:nil error:NULL];
@@ -749,7 +766,7 @@ static WSKResponse *WSKResumeError(NSError *error) {
     if (lstat(path.fileSystemRepresentation, &existing) == 0) {
         NSMutableDictionary *const manifest = [self _load:path error:&error];
         if (!manifest) {
-            return WSKResumeResponse(409);
+            return WSKResumeManifestIsInvalid(error) ? WSKResumeResponse(409) : WSKResumeError(error);
         }
         if (WSKResumeNumber(manifest, @"length").unsignedLongLongValue != length || ![WSKResumeDictionary(manifest, @"metadata") isEqual:metadata]) {
             return WSKResumeResponse(409);
@@ -759,16 +776,28 @@ static WSKResponse *WSKResumeError(NSError *error) {
         }
         return [self _response:201 manifest:manifest identifier:identifier];
     }
+    if (errno != ENOENT) {
+        return WSKResumeError(WSKMakePosixError(errno));
+    }
     NSUInteger active = 0;
     unsigned long long reserved = 0;
-    for (NSString *name in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:_directory error:NULL]) {
+    NSArray *const names = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:_directory error:&error];
+    if (!names) {
+        return WSKResumeError(error);
+    }
+    for (NSString *name in names) {
         if (![WSKResumeUUID(name) isEqualToString:name]) {
             continue;
         }
-        NSDictionary *const manifest = [self _load:[self _sessionPath:name] error:NULL];
+        NSDictionary *const manifest = [self _load:[self _sessionPath:name] error:&error];
+        if (!manifest && !WSKResumeManifestIsInvalid(error)) {
+            // Its declared length is unknown until storage becomes available.
+            // Do not admit more bytes against an underestimated reservation.
+            return WSKResumeError(error);
+        }
         if (![WSKResumeString(manifest, @"state") isEqualToString:@"complete"]) {
             ++active;
-            reserved += WSKResumeNumber(manifest, @"length").unsignedLongLongValue;
+            reserved += manifest ? WSKResumeNumber(manifest, @"length").unsignedLongLongValue : WSKResumeFileLimit;
         }
     }
     if (active >= WSKResumeActiveLimit || length > WSKResumeAggregateLimit - MIN(reserved, WSKResumeAggregateLimit)) {
@@ -950,7 +979,7 @@ static WSKResponse *WSKResumeError(NSError *error) {
         } else {
             NSMutableDictionary *const manifest = [self _load:path error:&error];
             if (!manifest) {
-                response = WSKResumeResponse(410);
+                response = WSKResumeManifestIsInvalid(error) ? WSKResumeResponse(410) : WSKResumeError(error);
             } else if (WSKResumeNumber(manifest, @"expires").doubleValue <= NSDate.date.timeIntervalSince1970) {
                 response = WSKResumeResponse(410);
             } else if (deleting) {

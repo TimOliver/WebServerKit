@@ -123,6 +123,24 @@ static WSKResumableHookUploader *WSKUploadServerAtRoot(NSString *root) {
     return server;
 }
 
+@interface WSKResumableUploadStore (WSKProtectedDataTesting)
+- (NSMutableDictionary *)_load:(NSString *)path error:(NSError **)error;
+@end
+
+@interface WSKUnavailableManifestStore : WSKResumableUploadStore
+@property (nonatomic) int manifestReadError;
+@end
+
+@implementation WSKUnavailableManifestStore
+- (NSMutableDictionary *)_load:(NSString *)path error:(NSError **)error {
+    if (self.manifestReadError) {
+        if (error) *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:self.manifestReadError userInfo:nil];
+        return nil;
+    }
+    return [super _load:path error:error];
+}
+@end
+
 static NSUInteger WSKUploadStoredFileCount(NSString *root) {
     NSFileManager *const fm = [NSFileManager defaultManager];
     NSString *const directory = [root stringByAppendingPathComponent:@"sessions"];
@@ -922,6 +940,133 @@ static NSString *WSKUploadCanonicalTempDirectory(void) {
         XCTAssertTrue([download hasSuffix:@"kept published bytes"]);
     } @finally {
         [server stop];
+        [fm removeItemAtPath:root error:NULL];
+    }
+}
+
+- (void)testResumableUploadMalformedManifestRemainsGoneAndReapsAfterGrace {
+    NSFileManager *const fm = [NSFileManager defaultManager];
+    NSString *const root = MakeTempDirectory();
+    WSKResumableHookUploader *const server = WSKUploadServerAtRoot(root);
+    server.resumableUploadTimeout = 3600;
+    NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    @try {
+        for (id damaged in @[@"[]", @"{", NSNull.null]) {
+            NSString *const key = NSUUID.UUID.UUIDString.lowercaseString;
+            NSString *const creation = WSKCreateUpload(server.port, key, @"incomplete.txt", @"abcdef");
+            XCTAssertTrue(ReplyHasStatus(creation, 201), @"%@", creation);
+            NSString *const location = WSKUploadReplyHeader(creation, @"Location");
+            if (!location) return;
+            NSString *const session = [[root stringByAppendingPathComponent:@"sessions"] stringByAppendingPathComponent:key];
+            NSString *const manifest = [session stringByAppendingPathComponent:@"manifest.json"];
+            if ([damaged isKindOfClass:NSString.class]) {
+                XCTAssertTrue([damaged writeToFile:manifest atomically:NO encoding:NSUTF8StringEncoding error:NULL]);
+            } else {
+                XCTAssertTrue([fm removeItemAtPath:manifest error:NULL]);
+            }
+            XCTAssertTrue(ReplyHasStatus(WSKUploadSessionRequest(server.port, @"HEAD", location, @{}, nil), 410));
+            XCTAssertTrue([fm fileExistsAtPath:session], @"Fresh malformed state retains its cleanup grace period");
+            XCTAssertTrue([fm setAttributes:@{NSFileModificationDate: [NSDate dateWithTimeIntervalSinceNow:-7200]} ofItemAtPath:session error:NULL]);
+            XCTAssertTrue(ReplyHasStatus(WSKUploadSessionRequest(server.port, @"HEAD", location, @{}, nil), 404));
+            XCTAssertFalse([fm fileExistsAtPath:session], @"Known invalid state must still be reclaimed after its grace period");
+        }
+    } @finally {
+        [server stop];
+        [fm removeItemAtPath:root error:NULL];
+    }
+}
+
+- (void)testResumableUploadUnreadableManifestRetainsAcknowledgedOffsetAndCapacity {
+    NSFileManager *const fm = [NSFileManager defaultManager];
+    NSString *const root = MakeTempDirectory();
+    WSKResumableHookUploader *const server = WSKUploadServerAtRoot(root);
+    server.resumableUploadTimeout = 3600;
+    NSString *const key = NSUUID.UUID.UUIDString.lowercaseString;
+    NSString *const session = [[root stringByAppendingPathComponent:@"sessions"] stringByAppendingPathComponent:key];
+    NSString *const manifest = [session stringByAppendingPathComponent:@"manifest.json"];
+    NSString *const nextKey = NSUUID.UUID.UUIDString.lowercaseString;
+    NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    @try {
+        NSString *const creation = WSKCreateUpload(server.port, key, @"protected.txt", @"abcdef");
+        XCTAssertTrue(ReplyHasStatus(creation, 201), @"%@", creation);
+        NSString *const location = WSKUploadReplyHeader(creation, @"Location");
+        if (!location) return;
+        XCTAssertTrue(ReplyHasStatus(WSKPatchUpload(server.port, location, 0, @"abc"), 204));
+        XCTAssertEqual(chmod(manifest.fileSystemRepresentation, 0000), 0);
+        // Session-directory age is not proof of expiry when its manifest cannot
+        // be read. Its actual expiry is still an hour in the future.
+        XCTAssertTrue([fm setAttributes:@{NSFileModificationDate: [NSDate dateWithTimeIntervalSinceNow:-7200]} ofItemAtPath:session error:NULL]);
+        int const unreadable = open(manifest.fileSystemRepresentation, O_RDONLY);
+        XCTAssertEqual(unreadable, -1, @"This regression needs ordinary unprivileged file permissions");
+        if (unreadable >= 0) {
+            close(unreadable);
+            return;
+        }
+        XCTAssertEqual(errno, EACCES);
+        XCTAssertTrue(ReplyHasStatus(WSKUploadSessionRequest(server.port, @"HEAD", location, @{}, nil), 500));
+        XCTAssertTrue(ReplyHasStatus(WSKCreateUpload(server.port, key, @"protected.txt", @"abcdef"), 500));
+        XCTAssertTrue(ReplyHasStatus(WSKPatchUpload(server.port, location, 3, @"def"), 500));
+        XCTAssertTrue(ReplyHasStatus(WSKUploadSessionRequest(server.port, @"DELETE", location, @{}, nil), 500));
+        XCTAssertTrue(ReplyHasStatus(WSKCreateUpload(server.port, nextKey, @"next.txt", @"next"), 500), @"Unknown capacity must block new admission until readable");
+        XCTAssertFalse([fm fileExistsAtPath:[[root stringByAppendingPathComponent:@"sessions"] stringByAppendingPathComponent:nextKey]]);
+        XCTAssertEqual(chmod(manifest.fileSystemRepresentation, 0600), 0, @"Unreadable state must survive request cleanup");
+        NSString *const resumed = WSKUploadSessionRequest(server.port, @"HEAD", location, @{}, nil);
+        XCTAssertTrue(ReplyHasStatus(resumed, 200), @"%@", resumed);
+        XCTAssertEqualObjects(WSKUploadReplyHeader(resumed, @"Upload-Offset"), @"3");
+        XCTAssertEqualObjects([NSData dataWithContentsOfFile:[session stringByAppendingPathComponent:@"payload"]], UTF8Data(@"abc"));
+        XCTAssertTrue(ReplyHasStatus(WSKPatchUpload(server.port, location, 3, @"def"), 204));
+        XCTAssertEqualObjects([NSData dataWithContentsOfFile:[[root stringByAppendingPathComponent:@"share"] stringByAppendingPathComponent:@"protected.txt"]], UTF8Data(@"abcdef"));
+    } @finally {
+        chmod(manifest.fileSystemRepresentation, 0600);
+        [server stop];
+        [fm removeItemAtPath:root error:NULL];
+    }
+}
+
+- (void)testResumableUploadTransientManifestReadErrorsDoNotExpireOrReplaceSessions {
+    NSFileManager *const fm = [NSFileManager defaultManager];
+    NSString *const root = WSKUploadCanonicalTempDirectory();
+    XCTAssertNotNil(root);
+    if (!root) return;
+    NSString *const share = [root stringByAppendingPathComponent:@"share"];
+    XCTAssertTrue([fm createDirectoryAtPath:share withIntermediateDirectories:NO attributes:nil error:NULL]);
+    NSString *const directory = [root stringByAppendingPathComponent:@"sessions"];
+    WSKUnavailableManifestStore *const store = [[WSKUnavailableManifestStore alloc] initWithDirectory:directory uploadDirectory:share expirationInterval:3600];
+    NSString *const key = NSUUID.UUID.UUIDString.lowercaseString;
+    NSString *const session = [directory stringByAppendingPathComponent:key];
+    NSMutableDictionary *const headers = [WSKUploadCreationHeaders(key, @"recover.txt", @"abcdef") mutableCopy];
+    headers[@"Tus-Resumable"] = @"1.0.0";
+    headers[@"Content-Length"] = @"0";
+    WSKRequest *const create = [[WSKRequest alloc] initWithMethod:@"POST" url:LiteralURL(@"http://localhost/uploads") headers:headers path:@"/uploads" query:@{}];
+    NSString *const path = [@"/uploads/" stringByAppendingString:key];
+    WSKRequest *const head = [[WSKRequest alloc] initWithMethod:@"HEAD" url:LiteralURL([@"http://localhost" stringByAppendingString:path]) headers:@{@"Tus-Resumable": @"1.0.0"} path:path query:@{}];
+    WSKResumableUploadValidationBlock const validate = ^WSKResponse *(NSDictionary *metadata) { (void)metadata; return nil; };
+    WSKResumableUploadPublicationBlock const publish = ^WSKResponse *(NSString *payload, NSDictionary *metadata, WSKResumableUploadJournalBlock journal) {
+        (void)payload;
+        (void)metadata;
+        (void)journal;
+        XCTFail(@"An incomplete session must never publish");
+        return [WSKResponse responseWithStatusCode:500];
+    };
+    @try {
+        XCTAssertEqual([store processRequest:create validate:validate publish:publish].statusCode, (NSInteger)201);
+        NSData *const original = [NSData dataWithContentsOfFile:[session stringByAppendingPathComponent:@"manifest.json"]];
+        XCTAssertNotNil(original);
+        XCTAssertTrue([fm setAttributes:@{NSFileModificationDate: [NSDate dateWithTimeIntervalSinceNow:-7200]} ofItemAtPath:session error:NULL]);
+        for (NSNumber *code in @[@EACCES, @EIO, @EMFILE, @ENFILE]) {
+            store.manifestReadError = code.intValue;
+            [store cleanupExpiredUploads];
+            XCTAssertEqualObjects([NSData dataWithContentsOfFile:[session stringByAppendingPathComponent:@"manifest.json"]], original);
+            XCTAssertEqual([store processRequest:head validate:validate publish:publish].statusCode, (NSInteger)500, @"%@", code);
+            XCTAssertEqual([store processRequest:create validate:validate publish:publish].statusCode, (NSInteger)500, @"%@", code);
+        }
+        store.manifestReadError = 0;
+        WSKResponse *const resumed = [store processRequest:head validate:validate publish:publish];
+        XCTAssertEqual(resumed.statusCode, (NSInteger)200);
+        XCTAssertEqualObjects(resumed.additionalHeaders[@"Upload-Offset"], @"0");
+    } @finally {
         [fm removeItemAtPath:root error:NULL];
     }
 }
