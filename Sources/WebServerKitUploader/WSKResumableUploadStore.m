@@ -796,6 +796,15 @@ static BOOL WSKResumeManifestIsInvalid(NSError *error) {
     return publicationError ? publicationError : WSKResumeResponse(500);
 }
 
+- (WSKResponse *)_completeEmptyUpload:(NSMutableDictionary *)manifest at:(NSString *)path validate:(WSKResumableUploadValidationBlock)validate publish:(WSKResumableUploadPublicationBlock)publish {
+    // A zero-byte upload has no later PATCH to finish publication after recovery.
+    // Offset 0/length 0 may only advertise completion once the file is published.
+    if (WSKResumeNumber(manifest, @"length").unsignedLongLongValue == 0 && [WSKResumeString(manifest, @"state") isEqualToString:@"active"]) {
+        return [self _publish:manifest at:path validate:validate publish:publish];
+    }
+    return nil;
+}
+
 - (WSKResponse *)_create:(WSKRequest *)request identifier:(NSString *)identifier validate:(WSKResumableUploadValidationBlock)validate publish:(WSKResumableUploadPublicationBlock)publish {
     unsigned long long length = 0;
     NSString *const metadataHeader = WSKResumeHeader(request, @"Upload-Metadata");
@@ -826,6 +835,10 @@ static BOOL WSKResumeManifestIsInvalid(NSError *error) {
         }
         if (![self _recover:manifest at:path error:&error]) {
             return WSKResumeError(error);
+        }
+        WSKResponse *const completionError = [self _completeEmptyUpload:manifest at:path validate:validate publish:publish];
+        if (completionError) {
+            return completionError;
         }
         return [self _response:201 manifest:manifest identifier:identifier];
     }
@@ -1048,10 +1061,11 @@ static BOOL WSKResumeManifestIsInvalid(NSError *error) {
                 response = [self _removeSession:path manifest:manifest error:&error] ? WSKResumeResponse(204) : WSKResumeError(error);
             } else if (![self _recover:manifest at:path error:&error]) {
                 response = WSKResumeError(error);
-            } else if ([method isEqualToString:@"HEAD"]) {
-                response = [self _response:200 manifest:manifest identifier:identifier];
             } else {
-                response = [self _patch:request manifest:manifest at:path identifier:identifier validate:validate publish:publish];
+                response = [self _completeEmptyUpload:manifest at:path validate:validate publish:publish];
+                if (!response) {
+                    response = [method isEqualToString:@"HEAD"] ? [self _response:200 manifest:manifest identifier:identifier] : [self _patch:request manifest:manifest at:path identifier:identifier validate:validate publish:publish];
+                }
             }
             close(sessionLock);
         }

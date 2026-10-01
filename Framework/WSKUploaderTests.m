@@ -403,6 +403,87 @@ static NSString *WSKUploadCanonicalTempDirectory(void) {
     }
 }
 
+- (void)testResumableZeroLengthRecoveryPublishesBeforeAdvertisingCompletion {
+    for (NSString *const method in @[@"POST", @"HEAD"]) {
+        NSFileManager *const fm = NSFileManager.defaultManager;
+        NSString *const root = WSKUploadCanonicalTempDirectory();
+        XCTAssertNotNil(root);
+        if (!root) return;
+        @try {
+            NSString *const share = [root stringByAppendingPathComponent:@"share"];
+            NSString *const sessions = [root stringByAppendingPathComponent:@"sessions"];
+            XCTAssertTrue([fm createDirectoryAtPath:share withIntermediateDirectories:NO attributes:nil error:NULL]);
+            NSString *const destination = [share stringByAppendingPathComponent:@"empty.txt"];
+            NSString *const key = NSUUID.UUID.UUIDString.lowercaseString;
+            NSString *const manifestPath = [[sessions stringByAppendingPathComponent:key] stringByAppendingPathComponent:@"manifest.json"];
+            WSKUnavailableFinalIdentityStore *const unavailable = [[WSKUnavailableFinalIdentityStore alloc] initWithDirectory:sessions uploadDirectory:share expirationInterval:3600];
+            unavailable.unavailablePath = destination;
+            unavailable.identityReadError = EIO;
+            NSMutableDictionary *const headers = [WSKUploadCreationHeaders(key, @"empty.txt", @"") mutableCopy];
+            headers[@"Content-Length"] = @"0";
+            headers[@"Tus-Resumable"] = @"1.0.0";
+            WSKRequest *const create = [[WSKRequest alloc] initWithMethod:@"POST" url:LiteralURL(@"http://localhost/uploads") headers:headers path:@"/uploads" query:@{}];
+            __block BOOL allowPublication = YES;
+            WSKResumableUploadValidationBlock const validate = ^WSKResponse *(NSDictionary *metadata) {
+                (void)metadata;
+                return allowPublication ? nil : [WSKResponse responseWithStatusCode:403];
+            };
+            __block NSUInteger publications = 0;
+            WSKResumableUploadPublicationBlock const publish = ^WSKResponse *(NSString *payload, NSDictionary *metadata, WSKResumableUploadJournalBlock journal) {
+                (void)metadata;
+                publications++;
+                NSString *const stage = [payload.stringByDeletingLastPathComponent stringByAppendingPathComponent:[@".stage-" stringByAppendingString:NSUUID.UUID.UUIDString.lowercaseString]];
+                XCTAssertTrue([NSData.data writeToFile:stage atomically:NO]);
+                struct stat info = {0};
+                int const observed = lstat(stage.fileSystemRepresentation, &info);
+                XCTAssertEqual(observed, 0);
+                if (observed) return [WSKResponse responseWithStatusCode:500];
+                BOOL const recorded = journal(destination, stage, (unsigned long long)info.st_dev, (unsigned long long)info.st_ino, NULL);
+                XCTAssertTrue(recorded);
+                if (!recorded) return [WSKResponse responseWithStatusCode:500];
+                // The first attempt fails after persisting the actual journal but
+                // before renaming. No test code manufactures or edits a manifest.
+                if (publications == 1) return [WSKResponse responseWithStatusCode:500];
+                int const renamed = rename(stage.fileSystemRepresentation, destination.fileSystemRepresentation);
+                XCTAssertEqual(renamed, 0);
+                return renamed ? [WSKResponse responseWithStatusCode:500] : nil;
+            };
+            WSKResponse *const first = [unavailable processRequest:create validate:validate publish:publish];
+            XCTAssertEqual(first.statusCode, (NSInteger)500);
+            XCTAssertEqual(unavailable.injectedIdentityErrors, (NSUInteger)1);
+            XCTAssertFalse([fm fileExistsAtPath:destination]);
+            NSData *const pending = [NSData dataWithContentsOfFile:manifestPath];
+            XCTAssertNotNil(pending);
+            if (!pending) return;
+            NSDictionary *const saved = [NSJSONSerialization JSONObjectWithData:pending options:0 error:NULL];
+            XCTAssertEqualObjects(saved[@"state"], @"publishing");
+            XCTAssertNotNil(saved[@"journal"]);
+            WSKResumableUploadStore *const recoveredStore = [[WSKResumableUploadStore alloc] initWithDirectory:sessions uploadDirectory:share expirationInterval:3600];
+            WSKRequest *const request = [method isEqualToString:@"POST"] ? create : [[WSKRequest alloc] initWithMethod:@"HEAD" url:LiteralURL(@"http://localhost/session") headers:@{@"Tus-Resumable": @"1.0.0"} path:[@"/uploads/" stringByAppendingString:key] query:@{}];
+            allowPublication = NO;
+            WSKResponse *const refused = [recoveredStore processRequest:request validate:validate publish:publish];
+            XCTAssertEqual(refused.statusCode, (NSInteger)403, @"Recovery must apply the current upload policy before claiming completion");
+            XCTAssertNil(refused.additionalHeaders[@"Upload-Offset"]);
+            XCTAssertFalse([fm fileExistsAtPath:destination]);
+            XCTAssertEqual(publications, (NSUInteger)1);
+            allowPublication = YES;
+            WSKResponse *const recovered = [recoveredStore processRequest:request validate:validate publish:publish];
+            XCTAssertEqual(recovered.statusCode, [method isEqualToString:@"POST"] ? (NSInteger)201 : (NSInteger)200);
+            XCTAssertEqualObjects(recovered.additionalHeaders[@"Upload-Offset"], @"0");
+            XCTAssertEqualObjects(recovered.additionalHeaders[@"Upload-Length"], @"0");
+            XCTAssertEqualObjects([NSData dataWithContentsOfFile:destination], NSData.data, @"An acknowledged zero-byte completion must correspond to a published file");
+            XCTAssertEqual(publications, (NSUInteger)2, @"Recovery must finish the uncommitted publication before reporting 0/0");
+            NSData *const completeData = [NSData dataWithContentsOfFile:manifestPath];
+            XCTAssertNotNil(completeData);
+            if (!completeData) return;
+            NSDictionary *const complete = [NSJSONSerialization JSONObjectWithData:completeData options:0 error:NULL];
+            XCTAssertEqualObjects(complete[@"state"], @"complete");
+        } @finally {
+            [fm removeItemAtPath:root error:NULL];
+        }
+    }
+}
+
 - (void)testResumableUploadAdvertisesProtocolAndCreationIsIdempotent {
     NSFileManager *const fm = [NSFileManager defaultManager];
     NSString *const root = MakeTempDirectory();
