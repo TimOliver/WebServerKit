@@ -256,3 +256,39 @@ Raw summaries and samples are local ignored artifacts at
 Preserve them before running `Run-Tests.sh`, which clears `build`. Windows clients,
 active transfers across background suspension, permission denial/recovery, Wi-Fi
 loss/rejoin, and overnight device endurance remain outside this run's coverage.
+
+## Recorded active-upload run: 2026-10-01
+
+The signed Release host built from production tip `5d5e032` passed on the same
+iPhone Air / iOS 27.0 (24A437), using Xcode 27.1 and the Mac Python client over
+Wi-Fi. The host inherited the shipping example's scene configuration, confirming
+physical scene launch and same-process foreground recovery.
+
+- Four uploads each saved 1 MiB, then held their second PATCH bodies after 64 KiB.
+  Full and ranged downloads through both servers and a DAV listing completed
+  while all four partial bodies remained present.
+- A fresh UIKit background callback recorded the active connections. Both
+  listeners refused connections 27.68 seconds after requesting Settings activation, before
+  the 120-second idle timeout and while all four client sockets were still open.
+  The client closed those incomplete requests only after observing refusal.
+- The same process resumed on the same ports. All four original upload keys
+  reported exactly 1 MiB; concurrent completion produced four exact files whose
+  hashes matched through both servers. Replaying completed POSTs produced no
+  duplicate names. The run completed 83 requests and checked 59,310,228 bytes.
+- Three fresh final samples showed zero connections and reservations, idle
+  descriptors 11→11, and no app-temp files, sessions, or receipts except the closed
+  root `.lock`. Only the two original shared fixtures remained. Final cumulative
+  accepted/closed counts were 126/126. The dedicated app was stopped after verification.
+
+No production change was required. The device build, driver syntax/import check,
+and independent driver review passed. This harness-only follow-up did not repeat
+the full multi-platform test gate already recorded for `5d5e032`.
+
+Evidence is in
+`build/device-resume-B607C4B2-CC07-4451-9EEF-4F2E8A269B2D/`, including
+`resumable.json`, `resumable.samples.jsonl`, and the background callback snapshot.
+Preserve this directory before running `Run-Tests.sh`, which clears `build`.
+This run uses a Python client; real Chrome retry/reselection has separate
+coverage. It does not establish browser-on-device behavior, server-side EOF on
+every accepted socket, process termination, reboot, Windows compatibility,
+Wi-Fi loss/rejoin, or overnight endurance.

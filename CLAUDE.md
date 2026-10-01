@@ -1015,8 +1015,9 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   Mac/iOS/tvOS Release builds, both Swift consumers, endurance smoke and the 12-case existing
   multipart/DAV storage-failure matrix. The browser probe separately verifies the resumable
   path; the older storage matrix does not establish new-session fault coverage.
-  This does not establish physical iPhone active-suspension behavior. Evidence is retained
-  under `build/resumable-uploads/` (before/after browser reports, screenshots and full gate log).
+  Physical iPhone active-background recovery is covered separately by the Python-client run
+  below. Browser evidence is retained under `build/resumable-uploads/` (before/after browser
+  reports, screenshots and full gate log).
 - The rename box is seeded with the real name from `/list` (jeditable otherwise re-escapes
   `&` on every pass).
 
@@ -1080,8 +1081,28 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   the scene delegate must not manually repost them or duplicate server start/stop calls.
   The migrated sample passes Release simulator and signed iOS device builds. In the iOS
   27.0 simulator, its unchanged controller/storyboard launch, serve HTTP 200, and resume
-  serving in the same process after backgrounding. The new physical launch check was
-  blocked by the locked phone. Evidence: `build/scene-sample-validation.json`.
+  serving in the same process after backgrounding. Physical scene launch and same-process
+  resume subsequently passed in the 2026-10-01 resumable-upload run below.
+  Simulator evidence: `build/scene-sample-validation.json`.
+- **Physical iPhone resumable uploads (2026-10-01, production tip `5d5e032`):**
+  The signed Release DeviceSmoke host inherits the shipping example's scene configuration.
+  On iPhone Air / iOS 27.0 (24A437), a Mac Python client acknowledged 1 MiB in each of four
+  uploads, then held their second PATCH bodies after 64 KiB. Full/ranged downloads through
+  both servers and a DAV listing still completed. A fresh UIKit background event recorded
+  the active connections; both listeners refused new connections 27.68 s after requesting
+  Settings activation, while the four client sockets remained open and before the 120 s server idle
+  timeout. Only then did the client close those incomplete requests. The same PID resumed
+  on the same ports, all four original session keys reported exactly 1 MiB, and concurrent
+  completion produced exact hashes through HTTP and DAV. Repeated completed POSTs created
+  no duplicate files. The run completed 83 requests and verified 59,310,228 download bytes.
+  Three fresh final samples had zero connections/reservations, idle FDs 11→11, the two
+  original fixtures, no app-temp residue, and no sessions or receipts except the closed root
+  `.lock`. Final cumulative accepted/closed counts were 126/126. No production fix was needed.
+  This is Python-client evidence of actual UIKit background/listener suspension and recovery;
+  it does not prove server-side EOF on accepted sockets, browser-on-device behavior, process
+  termination, reboot, Wi-Fi loss/rejoin, Windows clients, or overnight endurance.
+  Driver: `Scripts/DeviceSmoke/resumable.py`; report and samples:
+  `build/device-resume-B607C4B2-CC07-4451-9EEF-4F2E8A269B2D/resumable.{json,samples.jsonl}`.
 - **Shared-folder/listing audit (2026-09-30, production tip `a3799a9`):**
   `Scripts/Endurance/audit.py --seconds 10` runs both servers over one disposable root,
   four mixed uploads and cross-server read/move/copy/delete workflows on distinct names.
