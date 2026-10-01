@@ -46,8 +46,8 @@ Pod::Spec.new do |s|
   s.subspec 'WebUploader' do |cs|
     cs.dependency 'WebServerKit/Core'
     cs.source_files = 'Sources/WebServerKitUploader/*.{h,m}'
-    # Implementation details of the SSE endpoint, not part of the public API.
-    cs.private_header_files = 'Sources/WebServerKitUploader/WSKWebUploaderSSE*.h'
+    # SSE and resumable-session implementation details, not public API.
+    cs.private_header_files = 'Sources/WebServerKitUploader/WSKWebUploaderSSE*.h', 'Sources/WebServerKitUploader/WSKResumableUploadStore.h'
     cs.requires_arc = true
     cs.resources = 'Sources/WebServerKitUploader/WSKWebUploader.bundle'
   end

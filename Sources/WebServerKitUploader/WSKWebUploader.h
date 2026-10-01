@@ -134,6 +134,24 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic) NSUInteger fileCacheControlMaxAge;
 
 /**
+ *  Directory for resumable upload sessions. Set before starting the uploader.
+ *  It must be outside the served directory. The default (nil) uses an app cache
+ *  directory scoped to the resolved share path. Cache eviction may discard an
+ *  unfinished upload; clients can then start a new session.
+ *
+ *  Sessions contain partial files and completion receipts, never open sockets.
+ *  Reuse this directory and the same share to resume after recreating the server.
+ */
+@property (atomic, copy, nullable) NSString *resumableUploadDirectory;
+
+/**
+ *  Lifetime of a resumable session after its last successful upload progress.
+ *  Defaults to 24 hours. Set a finite positive value before starting the server.
+ *  Expired sessions are reclaimed on access and periodically while serving.
+ */
+@property (nonatomic) NSTimeInterval resumableUploadTimeout;
+
+/**
  *  Sets the title for the uploader web interface.
  *
  *  The default value is the application name.

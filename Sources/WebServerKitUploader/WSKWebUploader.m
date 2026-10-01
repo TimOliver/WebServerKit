@@ -29,6 +29,7 @@
 #error WSKWebUploader requires ARC
 #endif
 
+#import <CommonCrypto/CommonDigest.h>
 #import <TargetConditionals.h>
 #if TARGET_OS_IPHONE
 #import <UIKit/UIKit.h>
@@ -57,6 +58,7 @@ FOUNDATION_EXPORT NSBundle *WebServerKitUploader_SWIFTPM_MODULE_BUNDLE(void);
 #import "WSKFunctions.h"
 #import "WSKMultiPartFormRequest.h"
 #import "WSKPrivate.h"
+#import "WSKResumableUploadStore.h"
 #import "WSKStreamedResponse.h"
 #import "WSKURLEncodedFormRequest.h"
 #import "WSKWebUploader.h"
@@ -76,6 +78,11 @@ NS_ASSUME_NONNULL_BEGIN
 // Declared here, with the rest of this category's methods, because the handler blocks in
 // -initWithUploadDirectory: call it before its definition appears further down the file.
 - (nullable WSKResponse *)_rejectIfCrossOrigin:(WSKRequest *)request;
+- (nullable NSString *)_resolvedPathForRelativePath:(NSString *)relativePath hidden:(BOOL *)outHidden;
+- (WSKResponse *)_resumableUpload:(WSKRequest *)request;
+- (nullable NSString *)_resumableDestination:(NSDictionary<NSString *, NSString *> *)metadata uploadRoot:(NSString *)uploadRoot errorResponse:(WSKResponse *_Nullable *_Nonnull)response;
+- (nullable WSKResponse *)_publishResumableFile:(NSString *)temporaryPath metadata:(NSDictionary<NSString *, NSString *> *)metadata uploadRoot:(NSString *)uploadRoot journal:(WSKResumableUploadJournalBlock)journal publishedPath:(NSString *_Nullable *_Nonnull)resultPath;
+- (void)_didPublishUploadedFileAtPath:(NSString *)path;
 @end
 
 NS_ASSUME_NONNULL_END
@@ -146,6 +153,14 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
     NSDate *_firstPendingChangeDate;  // Main thread only, alongside _changeCoalescingTimer.
     BOOL _filePresenterRegistered;
     NSObject *_fileOperationLock;  // Serializes "pick a unique path, then create it" against concurrent requests.
+    NSObject *_resumableStoreLock;
+    WSKResumableUploadStore *_resumableStore;
+    NSString *_resumableStoreDirectory;
+    NSString *_resumableStoreRoot;
+    NSTimeInterval _resumableStoreTimeout;
+    dev_t _resumableStoreRootDevice;
+    ino_t _resumableStoreRootInode;
+    dispatch_source_t _resumableCleanupTimer;
 }
 
 @dynamic delegate;
@@ -201,6 +216,8 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
         _sseQueue = dispatch_queue_create("com.gcdwebuploader.sse", DISPATCH_QUEUE_SERIAL);
         _pendingChangedPaths = [NSMutableSet set];
         _fileOperationLock = [[NSObject alloc] init];
+        _resumableStoreLock = [[NSObject alloc] init];
+        _resumableUploadTimeout = 24 * 60 * 60;
         _filePresenterQueue = [[NSOperationQueue alloc] init];
         _filePresenterQueue.maxConcurrentOperationCount = 1;
         [self _createHeartbeatTimer];
@@ -377,6 +394,22 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
                      processBlock:^WSKResponse *(WSKRequest *request) {
                          return [server uploadFile:(WSKMultiPartFormRequest *)request];
                      }];
+
+        // Session HEAD requests are normally mapped to GET by the core. Preserve
+        // that option for the rest of the uploader; the store checks isVirtualHEAD.
+        [self
+            addHandlerWithMatchBlock:^WSKRequest *(NSString *method, NSURL *URL, NSDictionary<NSString *, NSString *> *headers, NSString *path, NSDictionary<NSString *, NSString *> *query) {
+                if (![path isEqualToString:@"/uploads"] && ![path hasPrefix:@"/uploads/"]) {
+                    return nil;
+                }
+                if (![@[@"POST", @"PATCH", @"HEAD", @"GET", @"DELETE", @"OPTIONS"] containsObject:method]) {
+                    return nil;
+                }
+                return [[WSKResumableFileRequest alloc] initWithMethod:method url:URL headers:headers path:path query:query];
+            }
+            processBlock:^WSKResponse *(WSKRequest *request) {
+                return [server _resumableUpload:request];
+            }];
 
         // File and folder moving
         [self addHandlerForMethod:@"POST"
@@ -643,6 +676,12 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
 }
 
 - (BOOL)startWithOptions:(NSDictionary<NSString *, id> *)options error:(NSError **)error {
+    if (!isfinite(_resumableUploadTimeout) || _resumableUploadTimeout <= 0) {
+        if (error) {
+            *error = [NSError errorWithDomain:kWSKErrorDomain code:-1 userInfo:@{NSLocalizedDescriptionKey: @"Resumable upload lifetime must be finite and positive"}];
+        }
+        return NO;
+    }
     // Arm SSE registration before the listening socket goes live, so a "/events" request
     // accepted immediately after start is not refused by the disarmed state -stop left behind.
     BOOL const enabled = _serverSentEventsEnabled;
@@ -662,11 +701,94 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
     }
     [self _updateFilePresenterRegistration];
     [self _updateHeartbeatTimerState];
+    [self _startResumableCleanup];
     return YES;
+}
+
+// Resolve the current root for each store selection. A retargeted share gets a
+// different default store; partials for the previous root cannot publish into it.
+- (nullable NSString *)_resumableStorageDirectoryForRoot:(NSString *)root {
+    NSString *directory = self.resumableUploadDirectory;
+    if (!directory && root) {
+        NSString *const cache = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES).firstObject;
+        NSData *const identity = [root dataUsingEncoding:NSUTF8StringEncoding];
+        unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+        CC_SHA256(identity.bytes, (CC_LONG)identity.length, digest);
+        NSMutableString *const key = [NSMutableString string];
+        for (NSUInteger i = 0; i < sizeof(digest); i++) {
+            [key appendFormat:@"%02x", digest[i]];
+        }
+        directory = [[cache stringByAppendingPathComponent:@"WebServerKit/ResumableUploads"] stringByAppendingPathComponent:key];
+        // A host may share its home/cache directory. Prefer the system temporary
+        // directory in that case; the store still verifies canonical containment.
+        if (WSKResolvedPathIsWithinDirectory(cache, root) || WSKResolvedPathIsWithinDirectory(directory, root)) {
+            directory = [[NSTemporaryDirectory() stringByAppendingPathComponent:@"WebServerKit-ResumableUploads"] stringByAppendingPathComponent:key];
+        }
+    }
+    return directory;
+}
+
+- (nullable WSKResumableUploadStore *)_uploadStoreCreatingIfNeeded:(BOOL)create uploadRoot:(NSString *_Nullable *_Nullable)uploadRoot {
+    BOOL hidden = NO;
+    NSString *const root = [self _resolvedPathForRelativePath:@"/" hidden:&hidden];
+    NSString *const directory = [self _resumableStorageDirectoryForRoot:root];
+    if (!root || !directory.length || WSKPathContainsNULByte(directory) || !isfinite(_resumableUploadTimeout) || _resumableUploadTimeout <= 0) {
+        return nil;
+    }
+    struct stat rootInfo;
+    if (lstat(root.fileSystemRepresentation, &rootInfo) != 0 || !S_ISDIR(rootInfo.st_mode)) {
+        return nil;
+    }
+    @synchronized(_resumableStoreLock) {
+        if (_resumableStoreRootDevice != rootInfo.st_dev || _resumableStoreRootInode != rootInfo.st_ino || ![_resumableStoreDirectory isEqualToString:directory] || ![_resumableStoreRoot isEqualToString:root] || _resumableStoreTimeout != _resumableUploadTimeout) {
+            _resumableStore = nil;
+        }
+        if (!_resumableStore && (create || [[NSFileManager defaultManager] fileExistsAtPath:directory])) {
+            _resumableStore = [[WSKResumableUploadStore alloc] initWithDirectory:directory uploadDirectory:root expirationInterval:_resumableUploadTimeout];
+            _resumableStoreDirectory = [directory copy];
+            _resumableStoreRoot = [root copy];
+            _resumableStoreTimeout = _resumableUploadTimeout;
+            _resumableStoreRootDevice = rootInfo.st_dev;
+            _resumableStoreRootInode = rootInfo.st_ino;
+        }
+        if (uploadRoot) {
+            *uploadRoot = _resumableStoreRoot;
+        }
+        return _resumableStore;
+    }
+}
+
+- (void)_startResumableCleanup {
+    @synchronized(_resumableStoreLock) {
+        if (_resumableCleanupTimer) {
+            return;
+        }
+        // Weak capture avoids keeping an abandoned server alive. No file or socket
+        // descriptor is retained by the store between operations. Access also reaps,
+        // so suspension of this timer never grants an expired session more life.
+        _resumableCleanupTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
+        dispatch_source_set_timer(_resumableCleanupTimer, DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC, NSEC_PER_SEC);
+        __weak WSKWebUploader *const weakSelf = self;
+        dispatch_source_set_event_handler(_resumableCleanupTimer, ^{
+            WSKWebUploader *const strongSelf = weakSelf;
+            if (!strongSelf) {
+                return;
+            }
+            WSKResumableUploadStore *const store = [strongSelf _uploadStoreCreatingIfNeeded:NO uploadRoot:NULL];
+            [store cleanupExpiredUploads];
+        });
+        dispatch_resume(_resumableCleanupTimer);
+    }
 }
 
 - (void)stop {
     [super stop];
+    @synchronized(_resumableStoreLock) {
+        if (_resumableCleanupTimer) {
+            dispatch_source_cancel(_resumableCleanupTimer);
+            _resumableCleanupTimer = nil;
+        }
+    }
     // No longer serving: stop observing the file system and actively end any
     // lingering SSE connections. Each channel must be closed (not just dropped):
     // closing completes the parked reader with end-of-stream so the connection
@@ -855,6 +977,9 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
 }
 
 - (void)dealloc {
+    if (_resumableCleanupTimer) {
+        dispatch_source_cancel(_resumableCleanupTimer);
+    }
     if (_heartbeatTimer) {
         // libdispatch traps on the release of a suspended object, and the timer spends
         // most of its life suspended, so resume it before letting go. Reading the flag
@@ -1298,6 +1423,204 @@ static NSString *_OriginAuthority(NSString *value) {
     return nil;
 }
 
+- (WSKResponse *)_resumableUpload:(WSKRequest *)request {
+    WSKResponse *const originFailure = [self _rejectIfCrossOrigin:request];
+    if (originFailure) {
+        return originFailure;
+    }
+    NSString *uploadRoot = nil;
+    WSKResumableUploadStore *const store = [self _uploadStoreCreatingIfNeeded:YES uploadRoot:&uploadRoot];
+    if (!store) {
+        return [WSKErrorResponse responseWithServerError:500 message:@"Resumable upload storage is unavailable"];
+    }
+    __block NSString *publishedPath = nil;
+    WSKResponse *const response = [store processRequest:request
+        validate:^WSKResponse *(NSDictionary<NSString *, NSString *> *metadata) {
+            WSKResponse *failure = nil;
+            [self _resumableDestination:metadata uploadRoot:uploadRoot errorResponse:&failure];
+            return failure;
+        }
+        publish:^WSKResponse *(NSString *temporaryPath, NSDictionary<NSString *, NSString *> *metadata, WSKResumableUploadJournalBlock journal) {
+            return [self _publishResumableFile:temporaryPath metadata:metadata uploadRoot:uploadRoot journal:journal publishedPath:&publishedPath];
+        }];
+    if (publishedPath && response.statusCode >= 200 && response.statusCode < 300) {
+        // A delegate may immediately import or move the file. Persist the receipt
+        // before notifying it so that move cannot be mistaken for failed publication.
+        [self _didPublishUploadedFileAtPath:publishedPath];
+    }
+    return response;
+}
+
+- (nullable NSString *)_resumableDestination:(NSDictionary<NSString *, NSString *> *)metadata uploadRoot:(NSString *)uploadRoot errorResponse:(WSKResponse **)response {
+    NSString *const name = metadata[@"filename"];
+    NSString *const path = metadata[@"path"];
+    if (!name.length || WSKPathContainsNULByte(name) || [name containsString:@"/"] || [name isEqualToString:@"."] || [name isEqualToString:@".."] ||
+        (!_allowHiddenItems && WSKNameIsHidden(name)) || ![self _checkFileExtension:name] || !path || WSKPathContainsNULByte(path)) {
+        *response = [WSKErrorResponse responseWithClientError:403 message:@"Upload destination is not allowed"];
+        return nil;
+    }
+    BOOL hidden = NO;
+    NSString *const currentRoot = [self _resolvedPathForRelativePath:@"/" hidden:&hidden];
+    if (![currentRoot isEqualToString:uploadRoot]) {
+        *response = [WSKErrorResponse responseWithClientError:409 message:@"Upload share changed; reconnect to the original share"];
+        return nil;
+    }
+    // Resolve through the session's canonical root so a later alias retarget cannot
+    // redirect publication to a different share.
+    NSString *const directory = WSKResolvedPathForRelativePath(path, uploadRoot, _allowHiddenItems, &hidden);
+    BOOL isDirectory = NO;
+    if (!directory || hidden || ![[NSFileManager defaultManager] fileExistsAtPath:directory isDirectory:&isDirectory] || !isDirectory) {
+        *response = [WSKErrorResponse responseWithClientError:403 message:@"Upload directory is unavailable"];
+        return nil;
+    }
+    // Reject a known-incompatible volume before receiving the file. A missing
+    // capability value is inconclusive, so the final rename remains authoritative.
+    NSNumber *supportsExclusiveRenaming = nil;
+    NSURL *const directoryURL = [NSURL fileURLWithPath:directory isDirectory:YES];
+    if ([directoryURL getResourceValue:&supportsExclusiveRenaming forKey:NSURLVolumeSupportsExclusiveRenamingKey error:NULL] &&
+        [supportsExclusiveRenaming isEqual:@NO]) {
+        *response = [WSKErrorResponse responseWithServerError:501 message:@"The destination filesystem does not support atomic resumable uploads"];
+        return nil;
+    }
+    NSString *const destination = [directory stringByAppendingPathComponent:name];
+    if (!WSKPathIsInsideDirectory(destination, directory)) {
+        *response = [WSKErrorResponse responseWithClientError:403 message:@"Upload destination is not allowed"];
+        return nil;
+    }
+    return destination;
+}
+
+- (nullable WSKResponse *)_publishResumableFile:(NSString *)temporaryPath metadata:(NSDictionary<NSString *, NSString *> *)metadata uploadRoot:(NSString *)uploadRoot journal:(WSKResumableUploadJournalBlock)journal publishedPath:(NSString *_Nullable *_Nonnull)resultPath {
+    NSFileManager *const manager = [NSFileManager defaultManager];
+    NSString *publishedPath;
+    @synchronized(_fileOperationLock) {
+        WSKResponse *failure = nil;
+        NSString *const desiredPath = [self _resumableDestination:metadata uploadRoot:uploadRoot errorResponse:&failure];
+        if (!desiredPath) {
+            return failure;
+        }
+        publishedPath = [self _uniquePathForPath:desiredPath];
+        if (![self shouldUploadFileAtPath:publishedPath withTemporaryFile:temporaryPath]) {
+            return [WSKErrorResponse responseWithClientError:403 message:@"Uploading this file is not permitted"];
+        }
+
+        // A replacement directory is on the destination volume, outside the share.
+        // Copy there before an exclusive rename: even across volumes, neither HTTP
+        // nor DAV can observe a half-published file, including with hidden files enabled.
+        NSError *error = nil;
+        NSURL *const replacement = [manager URLForDirectory:NSItemReplacementDirectory inDomain:NSUserDomainMask appropriateForURL:[NSURL fileURLWithPath:publishedPath] create:YES error:&error];
+        char resolvedReplacement[PATH_MAX];
+        NSString *replacementPath = nil;
+        if (replacement && realpath(replacement.path.fileSystemRepresentation, resolvedReplacement)) {
+            replacementPath = [manager stringWithFileSystemRepresentation:resolvedReplacement length:strlen(resolvedReplacement)];
+        }
+        NSString *const staging = [replacementPath stringByAppendingPathComponent:[@"wsk-upload-" stringByAppendingString:NSUUID.UUID.UUIDString]];
+        if (!staging || WSKResolvedPathIsWithinDirectory(replacementPath, uploadRoot)) {
+            if (replacement) {
+                rmdir(replacement.path.fileSystemRepresentation);
+            }
+            return [WSKErrorResponse responseWithServerError:500 underlyingError:error message:@"Cannot stage upload outside the share"];
+        }
+
+        int output = open(staging.fileSystemRepresentation, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, S_IRUSR | S_IWUSR);
+        int input = -1;
+        struct stat stagedInfo;
+        BOOL success = output >= 0;
+        BOOL unsupportedPublication = NO;
+        if (!success) {
+            error = WSKMakePosixError(errno);
+        } else if (fstat(output, &stagedInfo) != 0) {
+            error = WSKMakePosixError(errno);
+            success = NO;
+        } else if (!journal(publishedPath, staging, (unsigned long long)stagedInfo.st_dev, (unsigned long long)stagedInfo.st_ino, &error)) {
+            success = NO;
+        }
+        if (success) {
+            input = open(temporaryPath.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW);
+            if (input < 0) {
+                error = WSKMakePosixError(errno);
+                success = NO;
+            }
+        }
+        uint8_t buffer[64 * 1024];
+        CC_SHA256_CTX checksum;
+        CC_SHA256_Init(&checksum);
+        while (success) {
+            ssize_t count = read(input, buffer, sizeof(buffer));
+            if (count < 0 && errno == EINTR) {
+                continue;
+            }
+            if (count == 0) {
+                break;
+            }
+            if (count < 0) {
+                error = WSKMakePosixError(errno);
+                success = NO;
+                break;
+            }
+            CC_SHA256_Update(&checksum, buffer, (CC_LONG)count);
+            size_t offset = 0;
+            while (offset < (size_t)count) {
+                ssize_t const written = write(output, buffer + offset, (size_t)count - offset);
+                if (written < 0 && errno == EINTR) {
+                    continue;
+                }
+                if (written <= 0) {
+                    error = WSKMakePosixError(written < 0 ? errno : EIO);
+                    success = NO;
+                    break;
+                }
+                offset += (size_t)written;
+            }
+        }
+        if (input >= 0) {
+            close(input);
+        }
+        if (success) {
+            unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+            CC_SHA256_Final(digest, &checksum);
+            NSMutableString *const actual = [NSMutableString string];
+            for (NSUInteger i = 0; i < sizeof(digest); i++) {
+                [actual appendFormat:@"%02x", digest[i]];
+            }
+            if (![actual isEqualToString:metadata[@"sha256"]]) {
+                error = WSKMakePosixError(EIO);
+                success = NO;
+            }
+        }
+        if (output >= 0) {
+            if (success && fsync(output) != 0) {
+                error = WSKMakePosixError(errno);
+                success = NO;
+            }
+            if (close(output) != 0 && success) {
+                error = WSKMakePosixError(errno);
+                success = NO;
+            }
+        }
+        if (success && renamex_np(staging.fileSystemRepresentation, publishedPath.fileSystemRepresentation, RENAME_EXCL) != 0) {
+            int const renameError = errno;
+            unsupportedPublication = (renameError == ENOTSUP || renameError == ENOSYS);
+            error = WSKMakePosixError(renameError);
+            success = NO;
+        }
+        // Never recursively remove a staging path: only our own regular file and
+        // its now-empty replacement directory belong to this operation.
+        if (!success && output >= 0) {
+            unlink(staging.fileSystemRepresentation);
+        }
+        rmdir(replacement.path.fileSystemRepresentation);
+        if (!success) {
+            if (unsupportedPublication) {
+                return [WSKErrorResponse responseWithServerError:501 underlyingError:error message:@"The destination filesystem does not support atomic resumable uploads"];
+            }
+            return [WSKErrorResponse responseWithServerError:WSKServerErrorStatusCodeForError(error) underlyingError:error message:@"Failed publishing upload"];
+        }
+    }
+    *resultPath = publishedPath;
+    return nil;
+}
+
 - (WSKResponse *)uploadFile:(WSKMultiPartFormRequest *)request {
     WSKResponse *const crossOrigin = [self _rejectIfCrossOrigin:request];
     if (crossOrigin) {
@@ -1400,6 +1723,12 @@ static NSString *_OriginAuthority(NSString *value) {
         return [WSKErrorResponse responseWithServerError:WSKServerErrorStatusCodeForError(error) underlyingError:error message:@"Failed moving uploaded file to \"%@\"", relativePath];
     }
 
+    [self _didPublishUploadedFileAtPath:absolutePath];
+
+    return [WSKDataResponse responseWithJSONObject:@{} contentType:contentType];
+}
+
+- (void)_didPublishUploadedFileAtPath:(NSString *)absolutePath {
     if ([self.delegate respondsToSelector:@selector(webUploader:didUploadFileAtPath:)]) {
         dispatch_async(dispatch_get_main_queue(), ^{
             // Re-read and re-check inside the block. The property is weak AND mutable, so the
@@ -1421,8 +1750,6 @@ static NSString *_OriginAuthority(NSString *value) {
 
     NSString *const uploadedRelativePath = [self _relativePathForAbsolutePath:absolutePath];
     [self _broadcastSSEEvent:@"change" data:@{@"type": @"upload", @"path": uploadedRelativePath}];
-
-    return [WSKDataResponse responseWithJSONObject:@{} contentType:contentType];
 }
 
 - (WSKResponse *)moveItem:(WSKURLEncodedFormRequest *)request {
