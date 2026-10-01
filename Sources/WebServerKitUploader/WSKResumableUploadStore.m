@@ -521,7 +521,42 @@ static BOOL WSKResumeManifestIsInvalid(NSError *error) {
     return success;
 }
 
+- (BOOL)_removeUnjournaledStages:(NSString *)path manifest:(NSDictionary *)manifest error:(NSError **)error {
+    NSArray *const names = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:path error:error];
+    if (!names) {
+        return NO;
+    }
+    NSString *const recorded = WSKResumeString(WSKResumeDictionary(manifest, @"journal"), @"stagingPath");
+    for (NSString *name in names) {
+        if (![name hasPrefix:@".stage-"] || !WSKResumeUUID([name substringFromIndex:7])) {
+            continue;
+        }
+        NSString *const stage = [path stringByAppendingPathComponent:name];
+        if ([stage isEqualToString:recorded]) {
+            continue;  // The journal's device/inode checks govern this file.
+        }
+        // Only this private session's reserved namespace is ours. Never follow a
+        // symlink or walk a directory, including one placed here by the host app.
+        struct stat info;
+        if (lstat(stage.fileSystemRepresentation, &info) != 0) {
+            if (errno == ENOENT) {
+                continue;
+            }
+            if (error) *error = WSKMakePosixError(errno);
+            return NO;
+        }
+        if (S_ISREG(info.st_mode) && unlink(stage.fileSystemRepresentation) != 0 && errno != ENOENT) {
+            if (error) *error = WSKMakePosixError(errno);
+            return NO;
+        }
+    }
+    return YES;
+}
+
 - (BOOL)_recover:(NSMutableDictionary *)manifest at:(NSString *)path error:(NSError **)error {
+    if (![self _removeUnjournaledStages:path manifest:manifest error:error]) {
+        return NO;
+    }
     for (NSString *name in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:path error:NULL]) {
         if ([name hasPrefix:@".manifest-"] && WSKResumeUUID([name substringFromIndex:10])) {
             unlink([path stringByAppendingPathComponent:name].fileSystemRepresentation);
@@ -583,6 +618,9 @@ static BOOL WSKResumeManifestIsInvalid(NSError *error) {
         NSString *const path = [self _sessionPath:name];
         NSError *error = nil;
         NSMutableDictionary *const manifest = [self _load:path error:&error];
+        if (manifest && ![self _removeUnjournaledStages:path manifest:manifest error:&error]) {
+            continue;
+        }
         if (manifest && WSKResumeNumber(manifest, @"expires").doubleValue <= now) {
             [self _removeSession:path manifest:manifest error:NULL];
         } else if ([WSKResumeString(manifest, @"state") isEqualToString:@"complete"]) {
@@ -866,6 +904,15 @@ static BOOL WSKResumeManifestIsInvalid(NSError *error) {
     if (fstat(source, &info) < 0 || !S_ISREG(info.st_mode) || info.st_size < 0) {
         close(source);
         return WSKResumeResponse(500);
+    }
+    // Reception has finished and this descriptor now owns the disposable body.
+    // Remove its temporary name before touching persistent session state so a
+    // process exit during append/publication cannot strand the request spool.
+    // The request's eventual deallocation may harmlessly unlink it again.
+    if (unlink(incoming.fileSystemRepresentation) != 0) {
+        int const code = errno;
+        close(source);
+        return WSKResumeError(WSKMakePosixError(code));
     }
     unsigned long long const incomingLength = (unsigned long long)info.st_size;
     if (incomingLength > WSKResumeChunkLimit || incomingLength > length - offset) {

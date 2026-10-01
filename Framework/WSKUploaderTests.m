@@ -1071,6 +1071,56 @@ static NSString *WSKUploadCanonicalTempDirectory(void) {
     }
 }
 
+- (void)testResumableUploadMaintenanceReclaimsOnlyUnjournaledPrivateStages {
+    NSFileManager *const fm = NSFileManager.defaultManager;
+    NSString *const root = WSKUploadCanonicalTempDirectory();
+    XCTAssertNotNil(root);
+    if (!root) return;
+    WSKResumableHookUploader *const server = WSKUploadServerAtRoot(root);
+    NSString *const key = NSUUID.UUID.UUIDString.lowercaseString;
+    NSString *const sessions = [root stringByAppendingPathComponent:@"sessions"];
+    NSString *const session = [sessions stringByAppendingPathComponent:key];
+    NSString *const share = [root stringByAppendingPathComponent:@"share"];
+    NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    @try {
+        NSString *const creation = WSKCreateUpload(server.port, key, @"stage-recovery.txt", @"abcdef");
+        XCTAssertTrue(ReplyHasStatus(creation, 201), @"%@", creation);
+        NSString *const location = WSKUploadReplyHeader(creation, @"Location");
+        if (!location) return;
+        XCTAssertTrue(ReplyHasStatus(WSKPatchUpload(server.port, location, 0, @"abc"), 204));
+        [server stop];
+        NSString *const orphan = [session stringByAppendingPathComponent:[@".stage-" stringByAppendingString:NSUUID.UUID.UUIDString.lowercaseString]];
+        NSString *const unknown = [session stringByAppendingPathComponent:@".stage-not-an-upload"];
+        NSString *const sentinel = [root stringByAppendingPathComponent:@"retained.txt"];
+        NSString *const link = [session stringByAppendingPathComponent:[@".stage-" stringByAppendingString:NSUUID.UUID.UUIDString.lowercaseString]];
+        XCTAssertTrue([UTF8Data(@"partial stage") writeToFile:orphan atomically:NO]);
+        XCTAssertTrue([UTF8Data(@"not a stage") writeToFile:unknown atomically:NO]);
+        XCTAssertTrue([UTF8Data(@"retained") writeToFile:sentinel atomically:NO]);
+        XCTAssertEqual(symlink(sentinel.fileSystemRepresentation, link.fileSystemRepresentation), 0);
+        WSKResumableUploadStore *const store = [[WSKResumableUploadStore alloc] initWithDirectory:sessions uploadDirectory:share expirationInterval:3600];
+        // Exercise maintenance directly: no HEAD or upload request may perform
+        // recovery on its behalf, and this active session has not expired.
+        [store cleanupExpiredUploads];
+        XCTAssertFalse([fm fileExistsAtPath:orphan]);
+        XCTAssertEqualObjects([NSData dataWithContentsOfFile:unknown], UTF8Data(@"not a stage"));
+        XCTAssertEqualObjects([NSData dataWithContentsOfFile:sentinel], UTF8Data(@"retained"));
+        struct stat info = {0};
+        XCTAssertEqual(lstat(link.fileSystemRepresentation, &info), 0);
+        XCTAssertTrue(S_ISLNK(info.st_mode));
+        XCTAssertEqualObjects([NSData dataWithContentsOfFile:[session stringByAppendingPathComponent:@"payload"]], UTF8Data(@"abc"));
+        XCTAssertTrue([server startWithOptions:options error:NULL]);
+        NSString *const resumed = WSKUploadSessionRequest(server.port, @"HEAD", location, @{}, nil);
+        XCTAssertTrue(ReplyHasStatus(resumed, 200), @"%@", resumed);
+        XCTAssertEqualObjects(WSKUploadReplyHeader(resumed, @"Upload-Offset"), @"3");
+        XCTAssertTrue(ReplyHasStatus(WSKPatchUpload(server.port, location, 3, @"def"), 204));
+        XCTAssertEqualObjects([NSData dataWithContentsOfFile:[share stringByAppendingPathComponent:@"stage-recovery.txt"]], UTF8Data(@"abcdef"));
+    } @finally {
+        [server stop];
+        [fm removeItemAtPath:root error:NULL];
+    }
+}
+
 - (void)testResumableUploadDirectoryChangesTakeEffectAfterStopping {
     NSFileManager *const fm = [NSFileManager defaultManager];
     NSString *const root = MakeTempDirectory();

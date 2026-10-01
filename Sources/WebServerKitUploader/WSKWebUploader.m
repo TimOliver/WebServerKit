@@ -1504,17 +1504,25 @@ static NSString *_OriginAuthority(NSString *value) {
             return [WSKErrorResponse responseWithClientError:403 message:@"Uploading this file is not permitted"];
         }
 
-        // A replacement directory is on the destination volume, outside the share.
-        // Copy there before an exclusive rename: even across volumes, neither HTTP
-        // nor DAV can observe a half-published file, including with hidden files enabled.
+        // Prefer the already-owned private session directory on the same volume.
+        // Its .stage-* namespace is recoverable even if the process exits between
+        // creating this file and recording its inode in the publication journal.
+        // A different-volume session still needs Foundation's replacement directory
+        // on the destination volume; never expose staging inside the served share.
         NSError *error = nil;
-        NSURL *const replacement = [manager URLForDirectory:NSItemReplacementDirectory inDomain:NSUserDomainMask appropriateForURL:[NSURL fileURLWithPath:publishedPath] create:YES error:&error];
+        struct stat sourceInfo, destinationInfo;
+        if (lstat(temporaryPath.fileSystemRepresentation, &sourceInfo) != 0 || stat(publishedPath.stringByDeletingLastPathComponent.fileSystemRepresentation, &destinationInfo) != 0) {
+            return [WSKErrorResponse responseWithServerError:500 underlyingError:WSKMakePosixError(errno) message:@"Cannot locate upload staging volume"];
+        }
+        BOOL const sameVolume = sourceInfo.st_dev == destinationInfo.st_dev;
+        NSURL *const replacement = sameVolume ? nil : [manager URLForDirectory:NSItemReplacementDirectory inDomain:NSUserDomainMask appropriateForURL:[NSURL fileURLWithPath:publishedPath] create:YES error:&error];
         char resolvedReplacement[PATH_MAX];
-        NSString *replacementPath = nil;
+        NSString *replacementPath = sameVolume ? temporaryPath.stringByDeletingLastPathComponent : nil;
         if (replacement && realpath(replacement.path.fileSystemRepresentation, resolvedReplacement)) {
             replacementPath = [manager stringWithFileSystemRepresentation:resolvedReplacement length:strlen(resolvedReplacement)];
         }
-        NSString *const staging = [replacementPath stringByAppendingPathComponent:[@"wsk-upload-" stringByAppendingString:NSUUID.UUID.UUIDString]];
+        NSString *const prefix = sameVolume ? @".stage-" : @"wsk-upload-";
+        NSString *const staging = [replacementPath stringByAppendingPathComponent:[prefix stringByAppendingString:NSUUID.UUID.UUIDString.lowercaseString]];
         if (!staging || WSKResolvedPathIsWithinDirectory(replacementPath, uploadRoot)) {
             if (replacement) {
                 rmdir(replacement.path.fileSystemRepresentation);
@@ -1609,7 +1617,9 @@ static NSString *_OriginAuthority(NSString *value) {
         if (!success && output >= 0) {
             unlink(staging.fileSystemRepresentation);
         }
-        rmdir(replacement.path.fileSystemRepresentation);
+        if (replacement) {
+            rmdir(replacement.path.fileSystemRepresentation);
+        }
         if (!success) {
             if (unsupportedPublication) {
                 return [WSKErrorResponse responseWithServerError:501 underlyingError:error message:@"The destination filesystem does not support atomic resumable uploads"];
