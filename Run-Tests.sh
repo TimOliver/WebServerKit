@@ -60,6 +60,9 @@ echo "=== Style lint ==="
 # undeclared private method without its _ prefix. Keeps the 2026-08-18 style pass true.
 python3 Scripts/lint-objc.py
 
+echo "=== Browser upload state machine ==="
+node Scripts/test_resumable_upload.js
+
 echo "=== Unit tests ==="
 xcodebuild test -project WebServerKit.xcodeproj -scheme "WebServerKit (Mac)" -configuration Debug "SYMROOT=$BUILD_DIR" -derivedDataPath "$DERIVED_DATA_DIR" "${SIGNING[@]}"
 

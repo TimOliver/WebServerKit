@@ -276,61 +276,53 @@ $(document).ready(function() {
     event.stopPropagation();
   });
   
+  var uploadQueue = new WSKUploadQueue({
+    onstate: function(job) {
+      job.context.find('.upload-status').text(job.label);
+      job.context.find('.button-retry').prop('hidden', !job.paused).toggle(!!job.paused);
+      var progress = Math.max(0, Math.min(100, Math.floor(job.progress || 0)));
+      job.context.find('.progress-bar').css('width', progress + '%').attr('aria-valuenow', progress);
+    },
+    ondone: function(job) {
+      _reload(_path);
+    },
+    onfinish: function(job, error) {
+      job.context.remove();
+      $('.uploading').toggle($('#uploads').children().length !== 0);
+      $('#upload-resume-hint').prop('hidden', uploadQueue.pendingCount() === 0);
+      if (error) _showError('Failed uploading "' + job.file.name + '" to "' + job.path + '"', 'Upload failed', error);
+    }
+  });
+  $('#upload-resume-hint').prop('hidden', uploadQueue.pendingCount() === 0);
+  window.addEventListener('pagehide', function() { uploadQueue.suspend(); });
+  window.addEventListener('pageshow', function(event) { if (event.persisted) uploadQueue.resume(); });
+
+  // Keep the existing file picker/drop handling; the resumable queue owns all
+  // network work so each of four files holds at most one connection at a time.
   $("#fileupload").fileupload({
     dropZone: $(document),
     pasteZone: null,
-    autoUpload: true,
-    // Leave connections available for browsing and live updates while files upload.
-    sequentialUploads: false,
-    limitConcurrentUploads: 4,
-    // forceIframeTransport: true,
-    
-    url: 'upload',
-    type: 'POST',
-    dataType: 'json',
-    
-    start: function(e) {
-      $(".uploading").show();
-    },
-    
-    stop: function(e) {
-      $(".uploading").hide();
-    },
-    
+    autoUpload: false,
     add: function(e, data) {
       var file = data.files[0];
-      data.formData = {
-        path: _path
-      };
-      data.context = $(tmpl("template-uploads", {
-        path: _path + file.name
-      })).appendTo("#uploads");
-      var jqXHR = data.submit();
-      data.context.find("button").click(function(event) {
-        jqXHR.abort();
-      });
-    },
-    
-    progress: function(e, data) {
-      var progress = parseInt(data.loaded / data.total * 100, 10);
-      data.context.find(".progress-bar").css("width", progress + "%");
-    },
-    
-    done: function(e, data) {
-      _reload(_path);
-    },
-    
-    fail: function(e, data) {
-      var file = data.files[0];
-      if (data.errorThrown != "abort") {
-        _showError("Failed uploading \"" + file.name + "\" to \"" + _path + "\"", data.textStatus, data.errorThrown);
+      // Capture the destination before hashing or a later navigation can move it.
+      var destination = _path;
+      if (!WSKUploadQueue.supported()) {
+        _showError('This browser does not support resumable file uploads.', 'Upload unavailable', 'Please use a current browser');
+        return;
       }
-    },
-    
-    always: function(e, data) {
-      data.context.remove();
-    },
-    
+      var context = $(tmpl('template-uploads', { path: destination + file.name })).appendTo('#uploads');
+      $('.uploading').show();
+      try {
+        var job = uploadQueue.add(file, destination, context);
+        context.find('.button-cancel').click(function() { job.cancel(); });
+        context.find('.button-retry').click(function() { job.retry(); });
+      } catch (error) {
+        context.remove();
+        $('.uploading').toggle($('#uploads').children().length !== 0);
+        _showError('Failed adding "' + file.name + '"', 'Upload failed', error.message);
+      }
+    }
   });
   
   $("#create-input").keypress(function(event) {
