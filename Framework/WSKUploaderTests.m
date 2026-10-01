@@ -404,7 +404,7 @@ static NSString *WSKUploadCanonicalTempDirectory(void) {
 }
 
 - (void)testResumableZeroLengthRecoveryPublishesBeforeAdvertisingCompletion {
-    for (NSString *const method in @[@"POST", @"HEAD"]) {
+    for (NSString *const method in @[@"POST", @"HEAD", @"PATCH", @"PATCH-spooled"]) {
         NSFileManager *const fm = NSFileManager.defaultManager;
         NSString *const root = WSKUploadCanonicalTempDirectory();
         XCTAssertNotNil(root);
@@ -429,6 +429,7 @@ static NSString *WSKUploadCanonicalTempDirectory(void) {
                 return allowPublication ? nil : [WSKResponse responseWithStatusCode:403];
             };
             __block NSUInteger publications = 0;
+            __block NSUInteger successfulPublications = 0;
             WSKResumableUploadPublicationBlock const publish = ^WSKResponse *(NSString *payload, NSDictionary *metadata, WSKResumableUploadJournalBlock journal) {
                 (void)metadata;
                 publications++;
@@ -446,6 +447,7 @@ static NSString *WSKUploadCanonicalTempDirectory(void) {
                 if (publications == 1) return [WSKResponse responseWithStatusCode:500];
                 int const renamed = rename(stage.fileSystemRepresentation, destination.fileSystemRepresentation);
                 XCTAssertEqual(renamed, 0);
+                if (renamed == 0) successfulPublications++;
                 return renamed ? [WSKResponse responseWithStatusCode:500] : nil;
             };
             WSKResponse *const first = [unavailable processRequest:create validate:validate publish:publish];
@@ -459,7 +461,15 @@ static NSString *WSKUploadCanonicalTempDirectory(void) {
             XCTAssertEqualObjects(saved[@"state"], @"publishing");
             XCTAssertNotNil(saved[@"journal"]);
             WSKResumableUploadStore *const recoveredStore = [[WSKResumableUploadStore alloc] initWithDirectory:sessions uploadDirectory:share expirationInterval:3600];
-            WSKRequest *const request = [method isEqualToString:@"POST"] ? create : [[WSKRequest alloc] initWithMethod:@"HEAD" url:LiteralURL(@"http://localhost/session") headers:@{@"Tus-Resumable": @"1.0.0"} path:[@"/uploads/" stringByAppendingString:key] query:@{}];
+            BOOL const patching = [method hasPrefix:@"PATCH"];
+            NSString *const location = [@"/uploads/" stringByAppendingString:key];
+            NSDictionary *const patchHeaders = @{@"Tus-Resumable": @"1.0.0", @"Content-Type": @"application/offset+octet-stream", @"Content-Length": @"0", @"Upload-Offset": @"0"};
+            WSKRequest *request = create;
+            if (patching) {
+                request = [[WSKResumableFileRequest alloc] initWithMethod:@"PATCH" url:LiteralURL(@"http://localhost/session") headers:patchHeaders path:location query:@{}];
+            } else if ([method isEqualToString:@"HEAD"]) {
+                request = [[WSKRequest alloc] initWithMethod:@"HEAD" url:LiteralURL(@"http://localhost/session") headers:@{@"Tus-Resumable": @"1.0.0"} path:location query:@{}];
+            }
             allowPublication = NO;
             WSKResponse *const refused = [recoveredStore processRequest:request validate:validate publish:publish];
             XCTAssertEqual(refused.statusCode, (NSInteger)403, @"Recovery must apply the current upload policy before claiming completion");
@@ -467,12 +477,42 @@ static NSString *WSKUploadCanonicalTempDirectory(void) {
             XCTAssertFalse([fm fileExistsAtPath:destination]);
             XCTAssertEqual(publications, (NSUInteger)1);
             allowPublication = YES;
+            if (patching) {
+                NSData *const beforeInvalid = [NSData dataWithContentsOfFile:manifestPath];
+                NSArray<NSDictionary *> *const invalidHeaders = @[@{@"Content-Type": @"text/plain"}, @{@"Content-Encoding": @"gzip"}, @{@"Upload-Offset": @"invalid"}, @{@"Upload-Offset": @"1"}, @{@"Content-Length": @"1"}];
+                NSArray<NSNumber *> *const expectedStatuses = @[@415, @415, @400, @409, @413];
+                for (NSUInteger index = 0; index < invalidHeaders.count; index++) {
+                    NSMutableDictionary *const invalid = [patchHeaders mutableCopy];
+                    [invalid addEntriesFromDictionary:invalidHeaders[index]];
+                    WSKResumableFileRequest *const rejectedRequest = [[WSKResumableFileRequest alloc] initWithMethod:@"PATCH" url:LiteralURL(@"http://localhost/session") headers:invalid path:location query:@{}];
+                    if (rejectedRequest.contentLength == 1) {
+                        XCTAssertTrue([rejectedRequest open:NULL]);
+                        XCTAssertTrue([rejectedRequest writeData:UTF8Data(@"x") error:NULL]);
+                        XCTAssertTrue([rejectedRequest close:NULL]);
+                    }
+                    WSKResponse *const rejected = [recoveredStore processRequest:rejectedRequest validate:validate publish:publish];
+                    XCTAssertEqual(rejected.statusCode, expectedStatuses[index].integerValue);
+                    XCTAssertNil(rejected.additionalHeaders[@"Upload-Offset"]);
+                    XCTAssertFalse([fm fileExistsAtPath:destination], @"Invalid PATCH must never publish");
+                    XCTAssertEqual(publications, (NSUInteger)1);
+                    XCTAssertEqualObjects([NSData dataWithContentsOfFile:manifestPath], beforeInvalid, @"Invalid PATCH must not commit recovery progress");
+                }
+                if ([method isEqualToString:@"PATCH-spooled"]) {
+                    XCTAssertTrue([request open:NULL]);
+                    XCTAssertTrue([request close:NULL]);
+                }
+            }
             WSKResponse *const recovered = [recoveredStore processRequest:request validate:validate publish:publish];
-            XCTAssertEqual(recovered.statusCode, [method isEqualToString:@"POST"] ? (NSInteger)201 : (NSInteger)200);
+            NSInteger const expectedSuccess = patching ? 204 : ([method isEqualToString:@"POST"] ? 201 : 200);
+            XCTAssertEqual(recovered.statusCode, expectedSuccess);
             XCTAssertEqualObjects(recovered.additionalHeaders[@"Upload-Offset"], @"0");
             XCTAssertEqualObjects(recovered.additionalHeaders[@"Upload-Length"], @"0");
             XCTAssertEqualObjects([NSData dataWithContentsOfFile:destination], NSData.data, @"An acknowledged zero-byte completion must correspond to a published file");
             XCTAssertEqual(publications, (NSUInteger)2, @"Recovery must finish the uncommitted publication before reporting 0/0");
+            XCTAssertEqual(successfulPublications, (NSUInteger)1);
+            WSKResponse *const repeated = [recoveredStore processRequest:request validate:validate publish:publish];
+            XCTAssertEqual(repeated.statusCode, patching ? (NSInteger)409 : expectedSuccess);
+            XCTAssertEqual(publications, (NSUInteger)2, @"A repeated request must not republish the completed empty file");
             NSData *const completeData = [NSData dataWithContentsOfFile:manifestPath];
             XCTAssertNotNil(completeData);
             if (!completeData) return;

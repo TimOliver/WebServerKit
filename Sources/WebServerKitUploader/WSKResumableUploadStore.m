@@ -925,7 +925,8 @@ static BOOL WSKResumeManifestIsInvalid(NSError *error) {
     struct stat info;
     if (source < 0) {
         if (request.contentLength == 0) {
-            return [self _response:204 manifest:manifest identifier:identifier];
+            WSKResponse *const completionError = [self _completeEmptyUpload:manifest at:path validate:validate publish:publish];
+            return completionError ? completionError : [self _response:204 manifest:manifest identifier:identifier];
         }
         return WSKResumeError(WSKMakePosixError(errno));
     }
@@ -949,7 +950,8 @@ static BOOL WSKResumeManifestIsInvalid(NSError *error) {
     }
     if (incomingLength == 0) {
         close(source);
-        return [self _response:204 manifest:manifest identifier:identifier];
+        WSKResponse *const completionError = [self _completeEmptyUpload:manifest at:path validate:validate publish:publish];
+        return completionError ? completionError : [self _response:204 manifest:manifest identifier:identifier];
     }
     int const destination = open([path stringByAppendingPathComponent:@"payload"].fileSystemRepresentation, O_WRONLY | O_NOFOLLOW | O_CLOEXEC);
     if (destination < 0) {
@@ -1061,11 +1063,13 @@ static BOOL WSKResumeManifestIsInvalid(NSError *error) {
                 response = [self _removeSession:path manifest:manifest error:&error] ? WSKResumeResponse(204) : WSKResumeError(error);
             } else if (![self _recover:manifest at:path error:&error]) {
                 response = WSKResumeError(error);
-            } else {
+            } else if ([method isEqualToString:@"HEAD"]) {
                 response = [self _completeEmptyUpload:manifest at:path validate:validate publish:publish];
                 if (!response) {
-                    response = [method isEqualToString:@"HEAD"] ? [self _response:200 manifest:manifest identifier:identifier] : [self _patch:request manifest:manifest at:path identifier:identifier validate:validate publish:publish];
+                    response = [self _response:200 manifest:manifest identifier:identifier];
                 }
+            } else {
+                response = [self _patch:request manifest:manifest at:path identifier:identifier validate:validate publish:publish];
             }
             close(sessionLock);
         }
