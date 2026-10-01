@@ -53,6 +53,11 @@ final class ViewController: UIViewController {
   private var uploaderPort: UInt = 0
   private var davPort: UInt = 0
   private var lifecycleEvents = [[String: Any]]()
+  private var protectedDataProbe = false
+  private var protectedSession: [String: Any]?
+  private var protectedDataResults = [[String: Any]]()
+  private var protectedProbeRunning = false
+  private var protectedBackgroundTask = UIBackgroundTaskIdentifier.invalid
 
   override func viewDidLoad() {
     super.viewDidLoad()
@@ -62,6 +67,8 @@ final class ViewController: UIViewController {
     notifications.addObserver(self, selector: #selector(willEnterForeground), name: UIApplication.willEnterForegroundNotification, object: nil)
     notifications.addObserver(self, selector: #selector(didBecomeActive), name: UIApplication.didBecomeActiveNotification, object: nil)
     notifications.addObserver(self, selector: #selector(willResignActive), name: UIApplication.willResignActiveNotification, object: nil)
+    notifications.addObserver(self, selector: #selector(protectedDataWillBecomeUnavailable), name: UIApplication.protectedDataWillBecomeUnavailableNotification, object: nil)
+    notifications.addObserver(self, selector: #selector(protectedDataDidBecomeAvailable), name: UIApplication.protectedDataDidBecomeAvailableNotification, object: nil)
 
     do {
       try startProbe()
@@ -90,6 +97,7 @@ final class ViewController: UIViewController {
     let documents = try manager.url(for: .documentDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
     reportURL = documents.appendingPathComponent("probe.json")
     let arguments = ProcessInfo.processInfo.arguments
+    protectedDataProbe = arguments.contains("--probe-protected-data")
     let flags = arguments.indices.filter { arguments[$0] == "--probe-run-id" }
     guard flags.count == 1, let index = flags.first, index + 1 < arguments.count,
           let identifier = UUID(uuidString: arguments[index + 1]),
@@ -146,6 +154,7 @@ final class ViewController: UIViewController {
     guard timer == nil, runStatus == "ready", UIApplication.shared.applicationState != .background else { return }
     timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
       guard UIApplication.shared.applicationState != .background else { return }
+      self?.armProtectedSessionIfReady()
       self?.writeSnapshot(reason: "foreground_timer")
     }
   }
@@ -154,6 +163,13 @@ final class ViewController: UIViewController {
     UIApplication.shared.isIdleTimerDisabled = false
     timer?.invalidate()
     timer = nil
+    if protectedDataProbe && protectedSession != nil && protectedBackgroundTask == .invalid {
+      // This disposable probe needs enough time to observe key eviction. The
+      // production server keeps its normal background policy unchanged.
+      protectedBackgroundTask = UIApplication.shared.beginBackgroundTask(withName: "Protected synthetic upload probe") { [weak self] in
+        self?.endProtectedBackgroundTask()
+      }
+    }
     recordLifecycle("did_enter_background")
   }
 
@@ -165,17 +181,180 @@ final class ViewController: UIViewController {
     UIApplication.shared.isIdleTimerDisabled = true
     recordLifecycle("did_become_active")
     startTimer()
+    endProtectedBackgroundTask()
   }
 
   @objc private func willResignActive() {
     UIApplication.shared.isIdleTimerDisabled = false
   }
 
+  private func endProtectedBackgroundTask() {
+    if protectedBackgroundTask != .invalid {
+      UIApplication.shared.endBackgroundTask(protectedBackgroundTask)
+      protectedBackgroundTask = .invalid
+    }
+  }
+
+  // Only the opt-in, fresh, synthetic run receives complete-protection files.
+  // The saved protocol offset must be stable before those attributes are set.
+  private func armProtectedSessionIfReady() {
+    guard protectedDataProbe, protectedSession == nil, let directory = resumableURL else { return }
+    do {
+      let candidates = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+      for candidate in candidates where UUID(uuidString: candidate.lastPathComponent) != nil {
+        let manifestURL = candidate.appendingPathComponent("manifest.json")
+        let data = try Data(contentsOf: manifestURL)
+        guard let manifest = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let offset = manifest["offset"] as? Int, offset == 1024 * 1024,
+              manifest["state"] as? String == "active",
+              let metadata = manifest["metadata"] as? [String: String],
+              metadata["filename"]?.hasPrefix("smoke-\(runID.lowercased())-") == true else { continue }
+        let payloadURL = candidate.appendingPathComponent("payload")
+        for file in [manifestURL, payloadURL] {
+          try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: file.path)
+          let actual = try FileManager.default.attributesOfItem(atPath: file.path)[.protectionKey] as? FileProtectionType
+          guard actual == .complete else { throw probeError("Synthetic file did not acquire complete protection") }
+        }
+        // Exercise cleanup too: old directory mtime must not make unreadable
+        // but still-live manifest state disposable.
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -172800)], ofItemAtPath: candidate.path)
+        protectedSession = ["key": candidate.lastPathComponent, "offset": offset,
+                            "length": manifest["length"] ?? 0, "metadata": manifest["metadataHeader"] ?? "",
+                            "protection": FileProtectionType.complete.rawValue,
+                            "armed_at": Date().timeIntervalSince1970]
+        recordLifecycle("protected_session_armed")
+        return
+      }
+    } catch {
+      protectedDataResults.append(["phase": "arming", "error": error.localizedDescription])
+    }
+  }
+
+  @objc private func protectedDataWillBecomeUnavailable() {
+    recordLifecycle("protected_data_will_become_unavailable")
+    guard protectedDataProbe, protectedSession != nil, !protectedProbeRunning else { return }
+    protectedProbeRunning = true
+    probeUnavailableData(deadline: Date().addingTimeInterval(20))
+  }
+
+  private func probeUnavailableData(deadline: Date) {
+    guard Date() <= deadline else {
+      protectedDataResults.append(["phase": "inconclusive",
+        "error": "No file-protection denial was observed within the execution window; suspension or a delayed lock notification may have prevented the probe",
+        "probe_requested_at": deadline.timeIntervalSince1970 - 20,
+        "callback_observed_at": Date().timeIntervalSince1970,
+        "protected_data_available_now": UIApplication.shared.isProtectedDataAvailable,
+        "background_time_remaining_seconds": backgroundTimeRemaining()])
+      writeSnapshot(reason: "protected_data_probe_inconclusive")
+      return
+    }
+    guard !UIApplication.shared.isProtectedDataAvailable else {
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in self?.probeUnavailableData(deadline: deadline) }
+      return
+    }
+    guard let session = protectedSession, let directory = resumableURL,
+          let key = session["key"] as? String else { return }
+    let sessionURL = directory.appendingPathComponent(key)
+    let manifestURL = sessionURL.appendingPathComponent("manifest.json")
+    let file = open(manifestURL.path, O_RDONLY | O_CLOEXEC)
+    let readError = file < 0 ? errno : 0
+    if file >= 0 { close(file) }
+    let port = uploaderPort
+    let observedAt = Date().timeIntervalSince1970
+    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+      let status = Self.localProtocolStatus(port: port, method: "HEAD", key: key)
+      var manifestInfo = stat()
+      var payloadInfo = stat()
+      let manifestRetained = lstat(manifestURL.path, &manifestInfo) == 0
+      let payloadRetained = lstat(sessionURL.appendingPathComponent("payload").path, &payloadInfo) == 0
+      DispatchQueue.main.async {
+        guard let self = self else { return }
+        self.protectedDataResults.append(["phase": "locked", "observed_at": observedAt,
+          "protected_data_available": false, "read_errno": Int(readError), "http_status": status,
+          "manifest_retained": manifestRetained, "payload_retained": payloadRetained,
+          "payload_size": payloadRetained ? payloadInfo.st_size : -1,
+          "key": key, "complete_protection": true])
+        self.recordLifecycle("protected_data_denial_probed")
+      }
+    }
+  }
+
+  @objc private func protectedDataDidBecomeAvailable() {
+    if protectedDataProbe, let session = protectedSession, let key = session["key"] as? String,
+       let directory = resumableURL {
+      do {
+        let data = try Data(contentsOf: directory.appendingPathComponent(key).appendingPathComponent("manifest.json"))
+        let manifest = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        protectedDataResults.append(["phase": "unlocked", "observed_at": Date().timeIntervalSince1970,
+          "key": key, "protected_data_available": UIApplication.shared.isProtectedDataAvailable,
+          "offset": manifest?["offset"] ?? -1])
+      } catch {
+        protectedDataResults.append(["phase": "unlocked", "error": error.localizedDescription])
+      }
+    }
+    recordLifecycle("protected_data_did_become_available")
+  }
+
+  // A loopback request stays observable without depending on Wi-Fi while the
+  // phone is locked. This bounded client only addresses this process's server.
+  private static func localProtocolStatus(port: UInt, method: String, key: String) -> Int {
+    let descriptor = socket(AF_INET, SOCK_STREAM, 0)
+    guard descriptor >= 0 else { return -1 }
+    defer { close(descriptor) }
+    var timeout = timeval(tv_sec: 5, tv_usec: 0)
+    setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+    setsockopt(descriptor, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+    var noSignal: Int32 = 1
+    setsockopt(descriptor, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size))
+    var address = sockaddr_in()
+    address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+    address.sin_family = sa_family_t(AF_INET)
+    address.sin_port = UInt16(port).bigEndian
+    address.sin_addr.s_addr = inet_addr("127.0.0.1")
+    let connected = withUnsafePointer(to: &address) { pointer in
+      pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+    }
+    guard connected == 0 else { return -2 }
+    let request = Data("\(method) /uploads/\(key) HTTP/1.1\r\nHost: localhost\r\nTus-Resumable: 1.0.0\r\nConnection: close\r\n\r\n".utf8)
+    var sent = 0
+    let deadline = ProcessInfo.processInfo.systemUptime + 5
+    while sent < request.count && ProcessInfo.processInfo.systemUptime < deadline {
+      let count = request.withUnsafeBytes { send(descriptor, $0.baseAddress?.advanced(by: sent), $0.count - sent, 0) }
+      if count < 0 && errno == EINTR { continue }
+      guard count > 0 else { return -3 }
+      sent += count
+    }
+    guard sent == request.count else { return -3 }
+    var response = Data()
+    while response.count < 8192 && ProcessInfo.processInfo.systemUptime < deadline {
+      var bytes = [UInt8](repeating: 0, count: min(1024, 8192 - response.count))
+      let count = recv(descriptor, &bytes, bytes.count, 0)
+      if count < 0 && errno == EINTR { continue }
+      guard count > 0 else { return -4 }
+      response.append(contentsOf: bytes.prefix(count))
+      if let end = response.range(of: Data([13, 10])) {
+        guard let line = String(data: response[..<end.lowerBound], encoding: .utf8) else { return -5 }
+        return Int(line.split(separator: " ").dropFirst().first ?? "") ?? -5
+      }
+    }
+    return -4
+  }
+
   private func recordLifecycle(_ event: String) {
-    lifecycleEvents.append(["event": event, "timestamp": Date().timeIntervalSince1970])
+    lifecycleEvents.append(["event": event, "timestamp": Date().timeIntervalSince1970,
+      "protected_data_available": UIApplication.shared.isProtectedDataAvailable,
+      "background_time_remaining_seconds": backgroundTimeRemaining()])
     if lifecycleEvents.count > 32 { lifecycleEvents.removeFirst(lifecycleEvents.count - 32) }
     print("[DeviceSmoke] \(event) run=\(runID)")
     writeSnapshot(reason: event)
+  }
+
+  private func backgroundTimeRemaining() -> Any {
+    let remaining = UIApplication.shared.backgroundTimeRemaining
+    // UIKit uses an effectively unbounded sentinel in the foreground. Preserve
+    // limited execution time as seconds; null means no finite estimate here.
+    if remaining.isFinite && remaining < Double.greatestFiniteMagnitude { return remaining }
+    return NSNull()
   }
 
   private func writeSnapshot(reason: String) {
@@ -201,6 +380,7 @@ final class ViewController: UIViewController {
       "sample_reason": reason,
       "uptime_seconds": ProcessInfo.processInfo.systemUptime,
       "sampling_scope": "Foreground timer and lifecycle callbacks only; no samples while suspended",
+      "background_time_remaining_seconds": backgroundTimeRemaining(),
       "configuration": ["idle_timeout_seconds": 120, "keep_alive_timeout_seconds": 2, "automatically_suspend_in_background": true],
       "wifi_ipv4": address.map { $0 as Any } ?? NSNull(),
       "uploader_port": uploaderPort,
@@ -213,14 +393,20 @@ final class ViewController: UIViewController {
       "temp_inventory": inventory(at: URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)),
       "resumable_inventory": resumableURL.map { inventory(at: $0) } ?? ["entries": [], "errors": []],
       "lifecycle_events": lifecycleEvents,
+      "protected_data_available": UIApplication.shared.isProtectedDataAvailable,
+      "protected_data_probe_enabled": protectedDataProbe,
+      "protected_data_results": protectedDataResults,
     ]
+    if let session = protectedSession { report["protected_session"] = session }
     for (key, value) in DeviceSmokeConnection.snapshot() { report[key] = value }
     if let failure = failure { report["error"] = failure }
     if let url = uploader?.bonjourServerURL { report["uploader_bonjour_url"] = url.absoluteString }
     if let url = dav?.bonjourServerURL { report["dav_bonjour_url"] = url.absoluteString }
     do {
       let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
-      try data.write(to: reportURL, options: .atomic)
+      // This report contains only synthetic test metadata and must survive lock
+      // so the host can retrieve evidence of denied protected-file reads.
+      try data.write(to: reportURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     } catch {
       print("[DeviceSmoke] Failed writing probe.json: \(error.localizedDescription)")
       label?.text = "Probe reporting failed: \(error.localizedDescription)"
