@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <mach/mach.h>
 #include <malloc/malloc.h>
+#include <math.h>
 #include <sys/resource.h>
 #include <unistd.h>
 
@@ -138,6 +139,15 @@ int main(int argc, const char *argv[]) {
         // disposable directory, including across child-process restarts.
         NSString *const sessionDirectory = NSProcessInfo.processInfo.environment[@"WSK_ENDURANCE_RESUMABLE_DIRECTORY"];
         if (sessionDirectory.length) uploader.resumableUploadDirectory = sessionDirectory;
+        NSString *const configuredTimeout = NSProcessInfo.processInfo.environment[@"WSK_ENDURANCE_RESUMABLE_TIMEOUT"];
+        if (configuredTimeout.length) {
+            double value = configuredTimeout.doubleValue;
+            if (!isfinite(value) || value <= 0) {
+                Reply(@{@"error": @"Invalid resumable timeout"});
+                return 2;
+            }
+            uploader.resumableUploadTimeout = value;
+        }
         WSKWebDAVServer *dav = [[WSKWebDAVServer alloc] initWithUploadDirectory:@(argv[2])];
         // SSE and directory monitoring are server resources too. Leave their defaults
         // intact even though this runner never loads or changes the browser UI.
@@ -182,6 +192,16 @@ int main(int argc, const char *argv[]) {
                                 // explicitly loaded into this disposable test host.
                                 NSDictionary *(*control)(NSDictionary *) = dlsym(RTLD_DEFAULT, "WSKStorageFaultControl");
                                 Reply(control ? control(message) : @{@"error": @"Storage fault fixture is not loaded"});
+                                return;
+                            }
+                            if ([command isEqualToString:@"set-resumable-timeout"]) {
+                                NSNumber *value = message[@"seconds"];
+                                if (uploader.isRunning || ![value isKindOfClass:NSNumber.class] || !isfinite(value.doubleValue) || value.doubleValue <= 0) {
+                                    Reply(@{@"error": @"Timeout requires stopped servers and positive finite seconds"});
+                                } else {
+                                    uploader.resumableUploadTimeout = value.doubleValue;
+                                    Reply(@{@"resumable_timeout": @(uploader.resumableUploadTimeout)});
+                                }
                                 return;
                             }
                             size_t relieved = 0;
