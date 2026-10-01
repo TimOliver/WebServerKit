@@ -996,9 +996,14 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   committed rename from unfinished staging. A successful publication callback is authoritative
   even if another actor immediately moves the file. Commit the receipt BEFORE notifying the
   delegate/SSE. A process exit or receipt-write error can lose that notification; recovery is
-  not a callback replay mechanism. A kill before the first publication journal can leave a
-  Foundation temporary item outside the share; arbitrary external moves before receipt
-  durability and power-loss durability are not guaranteed. These limits are documented in
+  not a callback replay mechanism. Same-volume staging uses the private session's reserved
+  `.stage-<UUID>` namespace; recovery and maintenance reclaim unjournaled regular files there
+  without following symlinks. Cross-volume staging still uses Foundation's destination-volume
+  replacement directory, where a kill before the first journal can leave an untracked item.
+  The store unlinks a fully received PATCH spool after opening it, before persistent mutation;
+  a process exit during incomplete HTTP reception can still leave a request temporary file.
+  Arbitrary external moves before receipt durability and power-loss durability are not
+  guaranteed. These limits are documented in
   `Scripts/ResumableUploads/README.md`.
   Do not replace exclusive rename with a visible empty-file reservation: unsupported volumes
   (including measured FSKit exFAT) receive 501 and the browser pauses. Unknown volume capability
@@ -1018,6 +1023,48 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   Physical iPhone active-background recovery is covered separately by the Python-client run
   below. Browser evidence is retained under `build/resumable-uploads/` (before/after browser
   reports, screenshots and full gate log).
+- **Resumable storage availability (2026-10-01):** unreadable manifests are retained on
+  transient errors rather than treated as missing/invalid sessions, even when their directory
+  mtime is older than the malformed-record cleanup grace. Unknown reserved lengths block new
+  admission. Only definite absence or malformed records take the gone/cleanup path. During
+  publication recovery, EIO/EACCES/other uncertain final-file identity failures return 500
+  with the exact journal and payload intact; only definite absence or a verified mismatch
+  permits rollback. Empty-file creation also retains uncertain publication journals. After
+  a definite rollback, an active zero-length session must retry publication before POST/HEAD
+  can report offset 0/length 0 as complete; it has no later nonempty PATCH to trigger this.
+  Recovery reuses current destination validation and publication policy, never bypasses a
+  refusal, and never republishes a completed receipt.
+  Protected-manifest regressions fail on the previous store; a final-identity mutant fails
+  the journal-retention and empty-creation tests while its known-missing/mismatch control
+  still passes. Do not replace unavailable storage with a negative existence check.
+  `Scripts/ResumableUploads/recovery.py` adds 26 owned-loopback syscall/process-exit cases;
+  these are distinct from the older multipart/DAV matrix. Each requires actual fault proof,
+  authoritative saved bytes/offsets, one publication, both download hashes, original-file
+  identity preservation, and resource/temporary-file cleanup. `endurance.py` exercises four
+  concurrent uploads with reads, cancellation, listener restarts, receipt/admission churn
+  and real maintenance expiry during downloads-only traffic. Both run in `Run-Tests.sh`.
+  An accepted empty PATCH must validate headers, offset and body before recovering publication
+  and return 204 after success; publishing in the shared dispatcher first caused a later 409
+  and suppressed the delegate/SSE callback. The regression covers both spooled and unspooled
+  empty bodies plus invalid-request and current-policy controls; the preceding source fails
+  38 assertions, and all 43 uploader ASan tests pass after correction.
+  Recorded nonempty-file endurance: 1,200.60 s mixed phase, 1,258.89 s total, 3,409 completed
+  uploads, 613 cancellations, 212 listener restarts/816 resumed uploads, 16 expired sessions
+  reclaimed in four downloads-only windows, and 23,659 verified downloads (34,455,224,322
+  bytes). Four concurrent 64 MiB files were also verified through both servers. Descriptors
+  7→7; all 63,523 accepted connections closed; zero reservations or session/temp residue.
+  Live allocator growth 35,344 bytes and footprint growth 21,282,816 bytes passed bounded
+  allowances; this is not overnight or slow-leak exclusion. The long run's store matches
+  `9b08d3c`, before empty-only follow-ups. Its earlier harness allowed up to 128 receipts
+  at idle; applying the stricter final-inventory oracle to its report passed with none left.
+  Source/binary hashes and evidence: `/private/tmp/wsk-recovery-hardening-evidence/`.
+  The frozen final source (`a6892a6`) passed the full gate: 330 ASan tests, eight recorded
+  traces, Mac/iOS/tvOS Release builds, both Swift consumers, browser-state tests, existing
+  endurance/storage checks, all 26 resumable fault cases, 14 resumable oracle tests, four
+  device-oracle tests, and the updated concurrent/expiry smoke. Gate source hashes were
+  unchanged from start to finish; log `full-gate-frozen.log` and copied reports are retained
+  in that evidence directory. The longer soak and physical run remain scoped to their
+  separately recorded revisions rather than being presented as reruns of this final gate.
 - The rename box is seeded with the real name from `/list` (jeditable otherwise re-escapes
   `&` on every pass).
 
@@ -1103,6 +1150,23 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   termination, reboot, Wi-Fi loss/rejoin, Windows clients, or overnight endurance.
   Driver: `Scripts/DeviceSmoke/resumable.py`; report and samples:
   `build/device-resume-B607C4B2-CC07-4451-9EEF-4F2E8A269B2D/resumable.{json,samples.jsonl}`.
+- **Physical protected-file recovery (2026-10-01):** run
+  `ABF06AD3-4946-473D-B89C-0CF7C8472509` passed on iPhone Air/iOS 27.0 (24A437),
+  using the opt-in DeviceSmoke host with production store `44f0bed`. Native manifest open
+  returned EPERM while complete-protection data was locked; HEAD returned 500 and retained
+  both files and the acknowledged 1 MiB. Same-process unlock recovered the original key and
+  offset; completion and repeated POST produced one exact 2 MiB + 31 byte file verified
+  through HTTP and DAV. Final FDs 13→11, accepted/closed 26/26, zero connections/reservations,
+  no request temps or sessions/receipts except the root `.lock`. Dedicated app stopped.
+  Direct side-button lock must begin while the test app is foreground: an earlier attempt
+  backgrounded 29 s before locking and exhausted its observation budget. Suspension can
+  delay a scheduled probe until unlock; timeout is inconclusive, never proof of readable
+  locked files. Another earlier attempt proved denial but the driver touched a closed body
+  socket after resume; the driver now consumes lifecycle proof first and stops refreshes
+  after any fresh background/protected-data transition. Both failed attempts are retained.
+  Only the synthetic manifest/payload use complete protection; this does not establish a
+  general app protection policy or browser-on-device, reboot, Windows or overnight coverage.
+  Evidence: `/private/tmp/wsk-recovery-hardening-evidence/device-ABF06AD3-4946-473D-B89C-0CF7C8472509/`.
 - **Shared-folder/listing audit (2026-09-30, production tip `a3799a9`):**
   `Scripts/Endurance/audit.py --seconds 10` runs both servers over one disposable root,
   four mixed uploads and cross-server read/move/copy/delete workflows on distinct names.

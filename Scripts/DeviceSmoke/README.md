@@ -192,6 +192,97 @@ accepted socket received EOF. This run covers the native server with a Python
 client; the separate real Chrome probe covers browser retry and reselection.
 It does not test process termination, device reboot, Windows, or overnight use.
 
+## Protected files across a real lock/unlock cycle
+
+This separate check requires a passcode-enabled physical iPhone and a person to
+press its side button and unlock it. Use the preparation, build, and installation
+steps above, then launch a **new run** with the additional opt-in flag. Do not run
+the other transfer drivers concurrently with this check.
+
+```sh
+PROBE_RUN_ID='<NEW-UUID>'
+PROBE_RESULTS="build/device-protected-$PROBE_RUN_ID"
+mkdir -p "$PROBE_RESULTS"
+
+xcrun devicectl device process launch --device "$PROBE_DEVICE" \
+  --terminate-existing --json-output "$PROBE_RESULTS/launch.json" \
+  com.timoliver.WebServerKitDeviceSmoke \
+  --probe-run-id "$PROBE_RUN_ID" --probe-protected-data
+
+python3 Scripts/DeviceSmoke/protected_data.py \
+  --device "$PROBE_DEVICE" --run-id "$PROBE_RUN_ID" \
+  --report "$PROBE_RESULTS/protected.json"
+```
+
+Keep the app foregrounded and unlocked while the driver prepares the synthetic
+upload. Wait for the driver's lock instruction. **With WSK Device Test still
+visible, press the side button directly; do not go to the Home screen or another
+app first.** Leave the phone locked for **30 seconds**, then unlock it. Enter the
+passcode if requested. Do not force-quit or relaunch the app during this cycle;
+the driver reactivates the existing process after observing unlock. Its default
+wait for this manual sequence is 300 seconds; `--wait-seconds 600` permits a
+longer bounded wait. No typed confirmation substitutes for the device evidence.
+
+The driver first verifies both HTTP identities, acknowledges 1 MiB of a
+2 MiB + 31 byte upload, and waits for the host to apply `NSFileProtectionComplete`
+to that session's manifest and payload. Only those synthetic files are changed;
+the library's file-protection policy is unchanged. The session directory's
+modification time is deliberately older than the cleanup grace period while the
+manifest's real expiry remains in the future. This checks that unreadable live
+state is not mistaken for expired or corrupt state.
+
+Before requesting the manual lock, the driver verifies that an incomplete second
+PATCH has a live connection and a request temporary file, while its acknowledged
+payload remains exactly 1 MiB. It refreshes that body while waiting for the first
+lock, then stops writing to the old connection after a fresh background or
+protected-data-unavailable event. Suspension may legitimately close that socket.
+
+The opt-in host observes UIKit protected-data notifications and uses a short
+background task to record the result. While protected data is unavailable, a
+native file open must actually fail with `EPERM` or `EACCES`; a lock notification
+alone is insufficient. A bounded loopback HEAD to the host's own uploader must
+return retryable HTTP 500, retaining both the manifest and the 1 MiB payload.
+The held PATCH keeps the normal server's background interval active for this
+probe. This in-app request does not depend on Wi-Fi remaining usable while locked.
+Background execution time remains system-controlled. Backgrounding the app before
+actually locking the phone can consume the observation window. Lifecycle events
+record protected-data availability and the remaining background-time estimate;
+an expired observation is **inconclusive**, never evidence that protected files
+stayed readable while the process was suspended. A physical pass still requires
+the actual denied open and retryable response.
+The synthetic report uses protection that permits recording the denial after the
+phone's first unlock; no served file or upload payload gets that exception.
+
+On unlock, the saved manifest and protocol HEAD must both report the original
+1 MiB offset and upload key in the same process. The driver finishes the upload,
+checks the complete SHA-256 through HTTP and WebDAV, and replays the completed POST
+without creating a duplicate file. It deletes its file and receipt, then requires
+three fresh idle samples with the original share and temp inventory, no session
+state except the closed root `.lock`, zero connections and memory reservations,
+matching accepted/closed counts, and no descriptor growth from the warmed baseline.
+
+The report contains `armed`, `held_before_lock`, `locked_probe`, `unlocked_probe`,
+`published`, and `final` evidence, with raw snapshots in `.samples.jsonl`. CoreDevice
+report copying may be unavailable while locked; such copy failures are recorded
+but never count as proof of file-protection denial. Cleanup attempts to foreground
+the same app and remove only the registered synthetic upload. If the phone remains
+locked or cleanup fails, preserve the failed report before the ordinary disposable
+app cleanup described below.
+
+Run the offline lifecycle-oracle checks without a device:
+
+```sh
+python3 Scripts/DeviceSmoke/test_protected_data.py
+```
+
+These checks cover resumed snapshots with a closed old socket, observed background
+and protected-data transitions, and propagation of a connection failure before
+backgrounding. They do not establish a physical-device pass. A successful physical
+report covers the native server with a Python client and a bounded in-app probe;
+it does not establish browser-on-device behavior, process restart or reboot,
+protection-policy preservation across arbitrary app edits, Windows compatibility,
+Wi-Fi loss/rejoin, overnight endurance, or a guaranteed background execution time.
+
 ## Finish and remove the disposable app
 
 Preserve reports before cleanup. The transfer driver does not stop the app. Confirm
@@ -292,3 +383,34 @@ This run uses a Python client; real Chrome retry/reselection has separate
 coverage. It does not establish browser-on-device behavior, server-side EOF on
 every accepted socket, process termination, reboot, Windows compatibility,
 Wi-Fi loss/rejoin, or overnight endurance.
+
+## Recorded protected-file run: 2026-10-01
+
+Run `ABF06AD3-4946-473D-B89C-0CF7C8472509` passed on the iPhone Air / iOS 27.0
+(24A437), using the signed Release host and the Mac Python client. The production
+store matched `44f0bed`; the subsequent empty-PATCH validation correction does not
+affect this nonempty-file scenario. Source hashes are retained with the build.
+
+- The session saved 1 MiB before its manifest and payload received complete
+  protection. While locked, opening the manifest actually failed with `EPERM`.
+  Native loopback HEAD returned 500, retaining the manifest and 1 MiB payload.
+- Unlock recovered the same key and exact 1 MiB offset in the same process.
+  Completion produced the expected 2 MiB + 31 byte file, verified through HTTP and
+  WebDAV. Repeating POST produced no duplicate. The client completed 24 requests
+  and verified 21,233,726 download bytes.
+- Final idle descriptors were 13→11, connections/reservations were zero, and all
+  26 accepted connections closed. Only the original fixtures and the closed root
+  `.lock` remained; no request-temp files, partial sessions or receipts remained.
+  The identified dedicated app was stopped after cleanup.
+
+Earlier attempts are retained as failed evidence: one observed actual denial but
+hit a driver write to a socket closed during backgrounding; another exhausted its
+background observation interval after leaving the app before locking. Neither was
+counted as an end-to-end pass. The final driver checks stored lifecycle proof
+before touching the old connection and never refreshes it after backgrounding.
+Expired host observations are inconclusive, not evidence that files stayed readable.
+
+Reports, raw samples, build/source hashes and cleanup proof are outside the gate's
+disposable `build` directory:
+`/private/tmp/wsk-recovery-hardening-evidence/device-ABF06AD3-4946-473D-B89C-0CF7C8472509/`.
+The scope limits in the protected-file section above still apply.
