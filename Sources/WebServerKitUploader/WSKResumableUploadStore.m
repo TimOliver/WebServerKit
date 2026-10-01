@@ -425,9 +425,22 @@ static BOOL WSKResumeManifestIsInvalid(NSError *error) {
     return resolved && [resolved isEqualToString:finalPath] && WSKPathIsInsideDirectory(finalPath, _uploadDirectory) && !WSKPathIsInsideDirectory(stagePath, _uploadDirectory) && ![stagePath isEqualToString:_uploadDirectory];
 }
 
-- (BOOL)_file:(NSString *)path matchesJournal:(NSDictionary *)journal length:(NSNumber *)length {
+- (int)_statPath:(NSString *)path result:(struct stat *)info {
+    return lstat(path.fileSystemRepresentation, info);
+}
+
+- (BOOL)_file:(NSString *)path matchesJournal:(NSDictionary *)journal length:(NSNumber *)length error:(NSError **)error {
     struct stat info;
-    if (lstat(path.fileSystemRepresentation, &info) < 0 || !S_ISREG(info.st_mode) || (unsigned long long)info.st_dev != WSKResumeNumber(journal, @"device").unsignedLongLongValue || (unsigned long long)info.st_ino != WSKResumeNumber(journal, @"inode").unsignedLongLongValue) {
+    if ([self _statPath:path result:&info] < 0) {
+        int const code = errno;
+        // Inability to inspect the published file is not proof that the rename
+        // did not happen. Retain the publishing journal until storage is readable.
+        if (error && code != ENOENT && code != ENOTDIR) {
+            *error = WSKMakePosixError(code);
+        }
+        return NO;
+    }
+    if (!S_ISREG(info.st_mode) || (unsigned long long)info.st_dev != WSKResumeNumber(journal, @"device").unsignedLongLongValue || (unsigned long long)info.st_ino != WSKResumeNumber(journal, @"inode").unsignedLongLongValue) {
         return NO;
     }
     return !length || (info.st_size >= 0 && (unsigned long long)info.st_size == length.unsignedLongLongValue);
@@ -575,7 +588,13 @@ static BOOL WSKResumeManifestIsInvalid(NSError *error) {
             }
             return NO;
         }
-        if ([self _file:journal[@"finalPath"] matchesJournal:journal length:manifest[@"length"]]) {
+        NSError *inspectionError = nil;
+        BOOL const published = [self _file:journal[@"finalPath"] matchesJournal:journal length:manifest[@"length"] error:&inspectionError];
+        if (inspectionError) {
+            if (error) *error = inspectionError;
+            return NO;
+        }
+        if (published) {
             manifest[@"state"] = @"complete";
             manifest[@"offset"] = manifest[@"length"];
             manifest[@"expires"] = @(NSDate.date.timeIntervalSince1970 + _expirationInterval);
@@ -737,7 +756,7 @@ static BOOL WSKResumeManifestIsInvalid(NSError *error) {
                                         @"stagingPath": stagingPath,
                                         @"device": @(device),
                                         @"inode": @(inode)};
-        if (journalWritten || ![self _validJournal:journal] || ![self _file:stagingPath matchesJournal:journal length:nil]) {
+        if (journalWritten || ![self _validJournal:journal] || ![self _file:stagingPath matchesJournal:journal length:nil error:NULL]) {
             if (journalError) {
                 *journalError = WSKMakePosixError(EINVAL);
             }
@@ -767,16 +786,12 @@ static BOOL WSKResumeManifestIsInvalid(NSError *error) {
         [self _removeEmptyJournalDirectory:manifest[@"journal"] error:NULL];
         return nil;
     }
-    if (journalWritten && [self _file:manifest[@"journal"][@"finalPath"] matchesJournal:manifest[@"journal"] length:manifest[@"length"]]) {
-        // The rename succeeded even if its reply or a later bookkeeping operation
-        // failed. Recovery must report the one committed file rather than upload it again.
-        if (![self _recover:manifest at:path error:&error]) {
-            return WSKResumeError(error);
-        }
-        return nil;
-    }
     if (![self _recover:manifest at:path error:&error]) {
         return WSKResumeError(error);
+    }
+    if ([WSKResumeString(manifest, @"state") isEqualToString:@"complete"]) {
+        // Recovery recognized the renamed inode despite a later publication error.
+        return nil;
     }
     return publicationError ? publicationError : WSKResumeResponse(500);
 }
@@ -860,10 +875,10 @@ static BOOL WSKResumeManifestIsInvalid(NSError *error) {
     if (length == 0) {
         WSKResponse *const failure = [self _publish:manifest at:path validate:validate publish:publish];
         if (failure) {
-            // A successful rename followed by a failed receipt write must retain
-            // its publishing journal, including for the zero-byte creation case.
+            // A receipt-write or identity-inspection failure leaves publication
+            // uncertain. Keep that journal, including for zero-byte creation.
             NSDictionary *const journal = manifest[@"journal"];
-            if (!journal || (![WSKResumeString(manifest, @"state") isEqualToString:@"complete"] && ![self _file:journal[@"finalPath"] matchesJournal:journal length:manifest[@"length"]])) {
+            if (!journal) {
                 [self _removeSession:path manifest:manifest error:NULL];
             }
             return failure;
