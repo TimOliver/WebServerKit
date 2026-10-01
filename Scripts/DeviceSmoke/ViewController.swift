@@ -45,6 +45,7 @@ final class ViewController: UIViewController {
   private var dav: WSKWebDAVServer?
   private var timer: Timer?
   private var shareURL: URL?
+  private var resumableURL: URL?
   private var reportURL: URL?
   private var runID = ""
   private var runStatus = "starting"
@@ -106,7 +107,16 @@ final class ViewController: UIViewController {
     let identity = ["run_id": runID, "bundle_id": Bundle.main.bundleIdentifier ?? ""]
     try JSONSerialization.data(withJSONObject: identity, options: [.sortedKeys]).write(to: directory.appendingPathComponent("probe-identity.json"), options: .atomic)
 
+    // Keep every partial and receipt outside the HTTP/DAV share, scoped to this run.
+    let sessions = documents.appendingPathComponent("Sessions-\(runID)", isDirectory: true)
+    guard !manager.fileExists(atPath: sessions.path) else {
+      throw probeError("This session directory already exists; launch with a new UUID")
+    }
+    try manager.createDirectory(at: sessions, withIntermediateDirectories: false,
+                                attributes: [.posixPermissions: 0o700])
+    resumableURL = sessions
     let uploadServer = WSKWebUploader(uploadDirectory: directory.path)
+    uploadServer.resumableUploadDirectory = sessions.path
     let davServer = WSKWebDAVServer(uploadDirectory: directory.path)
     uploader = uploadServer
     dav = davServer
@@ -201,6 +211,7 @@ final class ViewController: UIViewController {
       "descriptors": descriptorCount(),
       "share_inventory": shareURL.map { inventory(at: $0) } ?? ["entries": [], "errors": []],
       "temp_inventory": inventory(at: URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)),
+      "resumable_inventory": resumableURL.map { inventory(at: $0) } ?? ["entries": [], "errors": []],
       "lifecycle_events": lifecycleEvents,
     ]
     for (key, value) in DeviceSmokeConnection.snapshot() { report[key] = value }

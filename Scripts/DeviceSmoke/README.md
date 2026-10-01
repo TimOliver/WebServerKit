@@ -156,6 +156,42 @@ and verify both identity fixtures before further traffic. A changed PID is a new
 process, not proof of suspension/resume. Record lifecycle observations separately
 from the foreground driver's result.
 
+## Active resumable uploads across backgrounding
+
+With the current probe host foregrounded, run this separate **Python client** check:
+
+```sh
+python3 Scripts/DeviceSmoke/resumable.py \
+  --device "$PROBE_DEVICE" --run-id "$PROBE_RUN_ID" \
+  --report "$PROBE_RESULTS/resumable.json"
+```
+
+The host gives each run a private session directory outside its share and reports
+`resumable_inventory`. The driver acknowledges the first 1 MiB of four synthetic
+files, holds their second PATCH bodies after 64 KiB, and checks that downloads and
+a DAV listing still finish. It activates Settings with those four connections
+open and requires a new UIKit background event and both listeners to refuse new
+connections within a bounded 90-second observation. Held sockets use a 180-second
+timeout, without the ordinary helper's 60-second shutdown timer. Their partial
+bodies receive a small amount of genuine progress immediately before backgrounding
+so the observation is shorter than the server's 120-second inactivity timeout.
+Network timeouts alone do not satisfy the listener-stop check.
+
+The driver then closes only its own held sockets, activates the same app process,
+and requires HEAD to report exactly the acknowledged 1 MiB for every original
+upload key. It finishes all four uploads, verifies their full hashes through both
+servers, and replays each completed creation request to check that no duplicate
+file appears. Cleanup removes its registered files and receipts; three fresh idle
+samples must show the original share and temp contents, no remaining sessions
+except the root `.lock`, no descriptor growth, and zero connections/reservations.
+Cleanup also attempts to restore the app to the foreground after a failed check.
+
+The background report is a lifecycle snapshot, not ongoing suspended-process
+telemetry. Listener refusal with held client sockets does not assert that every
+accepted socket received EOF. This run covers the native server with a Python
+client; the separate real Chrome probe covers browser retry and reselection.
+It does not test process termination, device reboot, Windows, or overnight use.
+
 ## Finish and remove the disposable app
 
 Preserve reports before cleanup. The transfer driver does not stop the app. Confirm
