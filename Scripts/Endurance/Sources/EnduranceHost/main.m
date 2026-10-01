@@ -36,7 +36,7 @@ static NSUInteger liveConnections, acceptedConnections, closedConnections, activ
 - (WSKResponse *)preflightRequest:(WSKRequest *)request {
     @synchronized([EnduranceConnection class]) {
         // Only count once per connection, including reused GET connections.
-        if (!self.uploading && ([request.method isEqualToString:@"PUT"] || [request.method isEqualToString:@"POST"])) {
+        if (!self.uploading && ([request.method isEqualToString:@"PUT"] || [request.method isEqualToString:@"POST"] || [request.method isEqualToString:@"PATCH"])) {
             self.uploading = YES;
             activeUploads++;
         }
@@ -134,6 +134,10 @@ int main(int argc, const char *argv[]) {
             }];
         }
         WSKWebUploader *uploader = [[WSKWebUploader alloc] initWithUploadDirectory:@(argv[1])];
+        // The browser recovery fixture keeps persistent sessions in its own
+        // disposable directory, including across child-process restarts.
+        NSString *const sessionDirectory = NSProcessInfo.processInfo.environment[@"WSK_ENDURANCE_RESUMABLE_DIRECTORY"];
+        if (sessionDirectory.length) uploader.resumableUploadDirectory = sessionDirectory;
         WSKWebDAVServer *dav = [[WSKWebDAVServer alloc] initWithUploadDirectory:@(argv[2])];
         // SSE and directory monitoring are server resources too. Leave their defaults
         // intact even though this runner never loads or changes the browser UI.

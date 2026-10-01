@@ -190,7 +190,9 @@ Web Based Uploads in iOS Apps
 
 WSKWebUploader is a subclass of ```WSKWebServer``` that provides a ready-to-use HTML 5 file uploader & downloader. This lets users upload, download, delete files and create directories from a directory inside your iOS app's sandbox using a clean user interface in their web browser.
 
-Each browser tab uploads up to four files concurrently, with additional files queued automatically. Individual uploads can be cancelled while queued or in progress.
+Each browser tab uploads up to four files concurrently, with additional files queued automatically. Uploads save progress in 1 MiB chunks and reconnect after interruptions. After reloading the page, select the same file in the same folder to resume; its SHA-256 content identity is checked first. Individual uploads can be cancelled while queued or in progress.
+
+Resumable sessions default to a private cache outside the share and expire after 24 hours without progress. Completed files are published atomically. Hosts can configure `resumableUploadDirectory` and `resumableUploadTimeout` before starting. See the [resumable upload documentation](Scripts/ResumableUploads/README.md) for limits, protocol details, cleanup, and validation. Existing multipart uploads and WebDAV PUT remain supported with their existing behavior.
 
 Simply instantiate and run a ```WSKWebUploader``` instance then visit ```http://{YOUR-IOS-DEVICE-IP-ADDRESS}/``` from your web browser:
 

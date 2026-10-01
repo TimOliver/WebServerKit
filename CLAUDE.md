@@ -127,8 +127,8 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   `/create` and the external coalesced producer append it; `/delete` broadcasts the relative path
   verbatim (though `isDirectory` is known at that point) and `/move` broadcasts both paths bare.
   Demonstrated by one resource, two spellings: `POST /create path=/Dir2` emits `"/Dir2/"` and
-  deleting that same directory moments later emits `"/Dir2"`. Unfixed — `index.js` has no test
-  harness, so a client-visible contract change needs a Chromium probe against both builds.
+  deleting that same directory moments later emits `"/Dir2"`. Unfixed — this event-path contract has no automated oracle, so a client-visible contract
+  change needs a Chromium probe against both builds.
 - iOS Files app: `UIFileSharingEnabled` + `LSSupportsOpeningDocumentsInPlace`; background
   serving via `WSKOption_AutomaticallySuspendInBackground: false` (~30 s).
 - **tvOS is a THIRD deployment shape (Shape C), and three of its rules invert the iOS ones.**
@@ -963,17 +963,60 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   dismisses everything. Key constraint that shaped this: **EventSource never surfaces SSE
   comments to JS**, so the `:heartbeat` keep-alives are invisible client-side and silence
   cannot be detected — the farewell event is the only prompt signal. Additive event type
-  (unknown names are ignored by old clients). Costs when built: index.js has no test harness
-  (Chromium probe against both builds) and the iOS half is simulator-verified. A Live
+  (unknown names are ignored by old clients). Costs when built: the suspension notice needs a focused Chromium probe against both
+  builds; existing upload tests do not cover it, and the iOS half is simulator-verified. A Live
   Activity cannot hold or receive a connection — display-only, no process.
 - All lifecycle mutation and `isRunning`/`serverURL` funnel through the serial `_stateQueue`;
   delegate callbacks are main-thread and OUTSIDE the queue (reading `-serverURL` inside the
   callback would deadlock). Each connection SNAPSHOTS server config at accept. NAT-PMP
   callbacks are confined to `_stateQueue`; `_DNSServiceCallBack` must not re-dispatch.
-- **`index.js` has NO test harness** — XCTest is structurally blind to it; every JS change
-  must be verified by a Chromium probe against the unfixed AND fixed builds. Do not
+- **XCTest cannot validate browser behavior.** The resumable upload state machine has
+  Node tests (`Scripts/test_resumable_upload.js`) and a real Chrome integration driver
+  (`Scripts/ResumableUploads/browser-probe.mjs`). Other page flows still need focused
+  coverage; every JS change must be verified by a Chromium probe against the unfixed AND
+  fixed builds. Do not
   reintroduce a shared reload counter (DOM-derived editor state is the design; the counter
   wedged the page permanently twice, and the "obvious repair" goes negative).
+- **Resumable browser uploads (2026-10-01):** the page owns four upload slots and sends one
+  1 MiB PATCH per file at a time through the private `/uploads` tus-based profile. Persist the
+  UUID before POST, reconcile uncertain offsets with HEAD, and retain creation uncertainty
+  across reloads/cancellation. A definite refusal can be deleted directly; a lost creation
+  needs the idempotent POST barrier so DELETE cannot race a late creation. Closing/reopening
+  requires selecting the same file in the same folder/origin; incremental full-file SHA-256
+  verifies identity without secure-context Web Crypto or file-access permissions.
+  The store binds sessions to the canonical share path plus device/inode, persists payload
+  before acknowledging offsets, truncates unacknowledged tails on recovery, and holds no
+  descriptors between requests. Partials live outside the share, expire after 24 hours by
+  default, and are reclaimed on access/startup/30-second maintenance while the process runs.
+  Limits: 8 GiB/file, 32 active sessions, 32 GiB declared active bytes, and 128 retained receipts
+  plus a bounded allowance for concurrent completions awaiting exclusive cleanup. Completed
+  receipts never consume active admission. Custom directory/timeout settings apply after stop.
+  Only a verified whole file reaches the share via an exclusive atomic rename. Publication
+  records stage/final paths and stage device/inode before copying; recovery distinguishes a
+  committed rename from unfinished staging. A successful publication callback is authoritative
+  even if another actor immediately moves the file. Commit the receipt BEFORE notifying the
+  delegate/SSE. A process exit or receipt-write error can lose that notification; recovery is
+  not a callback replay mechanism. A kill before the first publication journal can leave a
+  Foundation temporary item outside the share; arbitrary external moves before receipt
+  durability and power-loss durability are not guaranteed. These limits are documented in
+  `Scripts/ResumableUploads/README.md`.
+  Do not replace exclusive rename with a visible empty-file reservation: unsupported volumes
+  (including measured FSKit exFAT) receive 501 and the browser pauses. Unknown volume capability
+  still tries the syscall. Legacy multipart `/upload` and WebDAV PUT remain available unchanged.
+  Explicit DELETE must report cleanup failure rather than drop ownership and claim success.
+  Objective-C tests cover restart/journal recovery, idempotence, empty files, final policy hooks,
+  immediate delegate imports, canonical aliases, expiry/settings and admission; Node tests cover
+  hash boundaries and the client transport/lifecycle state machine. Real Chrome on an ordinary
+  HTTP LAN origin confirms four simultaneous uploads plus reads, lost creation/final replies,
+  interrupted chunks, an owned host process restart, reload/reselect and cancellation. The old
+  page stopped after one interrupted multipart request. Final idle descriptors are 7→7,
+  connections/reservations zero, session files gone except the closed `.lock` coordination file.
+  `Run-Tests.sh` passes: 322 ASan tests (19 new upload tests), all eight recorded traces,
+  Mac/iOS/tvOS Release builds, both Swift consumers, endurance smoke and the 12-case existing
+  multipart/DAV storage-failure matrix. The browser probe separately verifies the resumable
+  path; the older storage matrix does not establish new-session fault coverage.
+  This does not establish physical iPhone active-suspension behavior. Evidence is retained
+  under `build/resumable-uploads/` (before/after browser reports, screenshots and full gate log).
 - The rename box is seeded with the real name from `/list` (jeditable otherwise re-escapes
   `&` on every pass).
 
@@ -1516,8 +1559,8 @@ Re-measure before fixing any of these — aged findings evaporate roughly 1 in 3
     not). (P3) Bundle assets are `cacheAge:0` (`WSKWebUploader.m:230-234`) and
     `fileCacheControlMaxAge` never reaches them; nothing is gzipped (jquery.min.js 87 KB raw);
     the JS client shows only the reason phrase on failure (`_showError(…, errorThrown)` discards
-    `responseText`), and uploads are one un-chunked, un-resumable POST per file, strictly
-    sequential, with no retry. (P3) `-[WSKDataResponse initWithHTMLTemplate:variables:]`
+    `responseText`). The original sequential, un-resumable upload finding is superseded by
+    the four-slot resumable browser queue (2026-10-01); see its lifecycle invariants above. (P3) `-[WSKDataResponse initWithHTMLTemplate:variables:]`
     substitutes verbatim with no HTML escaping and the header does not say so
     (`WSKDataResponse.m:137`; the uploader defends by hand). ~~(P3) A huge idle timeout
     saturates the nanosecond conversion and keep-alive ≥ 2^31 overflows its integer header~~ —
