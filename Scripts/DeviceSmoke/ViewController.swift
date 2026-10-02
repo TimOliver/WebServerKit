@@ -48,6 +48,8 @@ final class ViewController: UIViewController {
   private var resumableURL: URL?
   private var reportURL: URL?
   private var runID = ""
+  private let launchID = UUID().uuidString
+  private var resumedExistingRun = false
   private var runStatus = "starting"
   private var failure: String?
   private var uploaderPort: UInt = 0
@@ -105,23 +107,43 @@ final class ViewController: UIViewController {
       throw probeError("Supply exactly one --probe-run-id followed by a UUID")
     }
     runID = arguments[index + 1]
+    resumedExistingRun = arguments.contains("--resume-probe-run")
     let directory = documents.appendingPathComponent("Share-\(runID)", isDirectory: true)
-    guard !manager.fileExists(atPath: directory.path) else {
-      throw probeError("This run directory already exists; launch with a new UUID")
-    }
-    try manager.createDirectory(at: directory, withIntermediateDirectories: false, attributes: nil)
-    shareURL = directory
-    try Data(repeating: 0x5a, count: 8 * 1024 * 1024).write(to: directory.appendingPathComponent("asset.bin"), options: .atomic)
     let identity = ["run_id": runID, "bundle_id": Bundle.main.bundleIdentifier ?? ""]
-    try JSONSerialization.data(withJSONObject: identity, options: [.sortedKeys]).write(to: directory.appendingPathComponent("probe-identity.json"), options: .atomic)
-
-    // Keep every partial and receipt outside the HTTP/DAV share, scoped to this run.
     let sessions = documents.appendingPathComponent("Sessions-\(runID)", isDirectory: true)
-    guard !manager.fileExists(atPath: sessions.path) else {
-      throw probeError("This session directory already exists; launch with a new UUID")
+    if resumedExistingRun {
+      // Explicitly reopen only this synthetic run. Never recreate fixtures: their
+      // bytes, inode/ETag and the real persisted manifests are the recovery oracle.
+      for path in [directory, sessions] {
+        var info = stat()
+        guard lstat(path.path, &info) == 0, info.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR) else {
+          throw probeError("Resume requires existing real run directories")
+        }
+      }
+      let identityURL = directory.appendingPathComponent("probe-identity.json")
+      let assetURL = directory.appendingPathComponent("asset.bin")
+      for path in [identityURL, assetURL] {
+        var info = stat()
+        guard lstat(path.path, &info) == 0, info.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+              path != assetURL || info.st_size == 8 * 1024 * 1024,
+              path == assetURL || info.st_size <= 4096 else {
+          throw probeError("Resume fixture is missing or has changed type/size")
+        }
+      }
+      let saved = try JSONSerialization.jsonObject(with: Data(contentsOf: identityURL)) as? [String: String]
+      guard saved == identity else { throw probeError("Resume identity does not match this run") }
+    } else {
+      guard !manager.fileExists(atPath: directory.path), !manager.fileExists(atPath: sessions.path) else {
+        throw probeError("This run already exists; use a new UUID or explicit --resume-probe-run")
+      }
+      try manager.createDirectory(at: directory, withIntermediateDirectories: false, attributes: nil)
+      try Data(repeating: 0x5a, count: 8 * 1024 * 1024).write(to: directory.appendingPathComponent("asset.bin"), options: .atomic)
+      try JSONSerialization.data(withJSONObject: identity, options: [.sortedKeys]).write(to: directory.appendingPathComponent("probe-identity.json"), options: .atomic)
+      try manager.createDirectory(at: sessions, withIntermediateDirectories: false,
+                                  attributes: [.posixPermissions: 0o700])
     }
-    try manager.createDirectory(at: sessions, withIntermediateDirectories: false,
-                                attributes: [.posixPermissions: 0o700])
+    shareURL = directory
+    // Keep every partial and receipt outside the HTTP/DAV share, scoped to this run.
     resumableURL = sessions
     let uploadServer = WSKWebUploader(uploadDirectory: directory.path)
     uploadServer.resumableUploadDirectory = sessions.path
@@ -342,6 +364,8 @@ final class ViewController: UIViewController {
 
   private func recordLifecycle(_ event: String) {
     lifecycleEvents.append(["event": event, "timestamp": Date().timeIntervalSince1970,
+      "connections": DeviceSmokeConnection.snapshot()["connections"] ?? -1,
+      "wifi_ipv4": wifiIPv4().map { $0 as Any } ?? NSNull(),
       "protected_data_available": UIApplication.shared.isProtectedDataAvailable,
       "background_time_remaining_seconds": backgroundTimeRemaining()])
     if lifecycleEvents.count > 32 { lifecycleEvents.removeFirst(lifecycleEvents.count - 32) }
@@ -371,6 +395,8 @@ final class ViewController: UIViewController {
     }
     var report: [String: Any] = [
       "run_id": runID,
+      "launch_id": launchID,
+      "resumed_existing_run": resumedExistingRun,
       "bundle_id": Bundle.main.bundleIdentifier ?? "",
       "pid": Int(getpid()),
       "os_version": ProcessInfo.processInfo.operatingSystemVersionString,
