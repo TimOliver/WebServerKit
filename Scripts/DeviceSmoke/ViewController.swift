@@ -566,6 +566,13 @@ final class ViewController: UIViewController {
         let result = peer ? getpeername(descriptor, socketAddress, &length) : getsockname(descriptor, socketAddress, &length)
         guard result == 0 else { return ["errno": Int(errno)] }
         var value: [String: Any] = ["family": Int(socketAddress.pointee.sa_family)]
+        if socketAddress.pointee.sa_family == sa_family_t(AF_UNIX) {
+          // Darwin's sockaddr_un begins with one-byte length and family fields.
+          // Respect the returned length; unnamed Unix endpoints have no path.
+          let count = max(0, min(Int(length), MemoryLayout<sockaddr_storage>.size) - 2)
+          let bytes = UnsafeRawBufferPointer(start: UnsafeRawPointer(socketAddress).advanced(by: 2), count: count)
+          value["path"] = String(decoding: bytes.prefix { $0 != 0 }, as: UTF8.self)
+        }
         var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
         var service = [CChar](repeating: 0, count: Int(NI_MAXSERV))
         if getnameinfo(socketAddress, length, &host, socklen_t(host.count), &service,
