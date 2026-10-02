@@ -571,4 +571,65 @@ report, original samples, source hashes, independent validation and app teardown
 Only after saving the evidence was the dedicated synthetic test app removed.
 These runs do not cover a changed IP address, browser-origin migration, Windows
 clients or repeated overnight network cycling. The four request spools surviving
-active-body process death remain the separate, deferred production cleanup fix.
+active-body process death were the separate production fix addressed below.
+
+## Crash-cleanup follow-up: 2026-10-02
+
+With production commits `b642017` and `2ff3185`, the physical active-body crash
+regression passed both recovery and cleanup on the same iPhone Air / iOS 27.0.1.
+Run `18A45BF0-CF6E-4D38-B5F2-1585FD6A6685` was terminated with four incomplete
+PATCH bodies and two partial downloads. The new process reclaimed all four
+request spools while retaining the four original 1 MiB offsets and completed
+receipt. Upload completion/replay and both original-validator download resumes
+passed, with exact hashes (75 requests, 59,113,620 verified bytes). Final counts
+were 11 descriptors versus the previous process's warmed peak of 12,
+accepted/closed 51/51, zero connections/reservations and no temp/session residue.
+The initial attempt stopped at the inactive-app guard before transfers; that
+startup-only failure remains recorded separately.
+
+Six subsequent Settings background/foreground cycles kept the same process and
+launch UUID, with Wi-Fi left on. All six finished at 11 descriptors against the
+first cycle's fixed 11-descriptor baseline, with successful HTTP/WebDAV reads and
+no connections, reservations or temporary files. Named Unix-socket peers in the
+new diagnostics identify `/var/run/mDNSResponder`; unnamed Unix sockets remain
+explicitly unnamed. This does not retrospectively identify the earlier run's
+unrecorded extra descriptor.
+
+Two actual Wi-Fi off/on cycles then passed in one fresh process (PID 5476, launch
+`4179E27B-3A85-4616-99F5-DA309AD60234`, run
+`3A24AF83-F3E7-46E1-98A8-9B4A1A36321E`). Each interrupted four uploads and two
+downloads, proved the active app had no Wi-Fi address and both old endpoints were
+unreachable, then verified saved offsets, receipt replay and final hashes after
+rejoining. Both finished at 12 descriptors against the first warm baseline of 12;
+the second final was also compared to the first final, without adopting growth.
+Cumulative accepted/closed counts were 81/81 and 162/162, with zero connections,
+reservations or temporary/session residue. FD 11 was already present in the first
+baseline and remained unclassified: its inventory contains only the descriptor
+number. No system ownership or harmlessness claim is made for that descriptor or
+the earlier unexplained 11→12 result.
+
+The preceding `device-wifi-series/` attempt timed out without observing an outage;
+it remains a failed/unperformed network test. The successful repeat is preserved
+in `device-wifi-series-repeat/`, including an independent check of both reports
+against raw samples. The dedicated synthetic app was removed after saving the
+evidence.
+
+Idle summaries in both transfer and resumable drivers now select the complete
+snapshot with the highest descriptor count among the three fresh idle samples.
+Previously, the peak count could be combined with the last sample's inventory
+and timestamp, obscuring attribution. The resumable override was corrected after
+these Wi-Fi runs; their original reports remain unchanged. Both final snapshots
+match raw evidence, and both recorded baseline counts match their inventory
+lengths. The count limit is unchanged; 12 offline device-oracle tests pass, with
+the peak-pairing regression covering both driver implementations.
+
+The full repository gate passed with 333 ASan tests, protocol traces, supported
+platform/consumer builds, fault recovery and bounded endurance. Separate Mac
+tests confirmed six interrupted bodies are reclaimed while a second process's
+live body survives, and three process-exit boundaries recover correctly on an
+actual separate APFS volume. Cross-volume staging's new writable-parent requirement
+and conservative ownership rules are described in `../ResumableUploads/README.md`.
+
+Evidence: `/private/tmp/wsk-crash-cleanup-20261002/`, including signed-build logs,
+native crash reports, six lifecycle reports, two successful Wi-Fi reports, source
+hashes, copied gate reports and verified test-app teardown.

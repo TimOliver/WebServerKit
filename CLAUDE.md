@@ -998,10 +998,21 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   delegate/SSE. A process exit or receipt-write error can lose that notification; recovery is
   not a callback replay mechanism. Same-volume staging uses the private session's reserved
   `.stage-<UUID>` namespace; recovery and maintenance reclaim unjournaled regular files there
-  without following symlinks. Cross-volume staging still uses Foundation's destination-volume
-  replacement directory, where a kill before the first journal can leave an untracked item.
+  without following symlinks. Cross-volume staging uses a stable private 0700 sibling
+  `.WebServerKit-ResumableStaging-v1` beside the share. It requires a writable share parent
+  on the destination volume; same-volume staging is unchanged. Startup/access/maintenance
+  can reclaim its reserved process-owned stage names before any journal exists, while
+  preserving live/reused PIDs, links and unrelated files. The empty directory is retained
+  infrastructure, not a temporary file. Legacy journaled Foundation stages still recover;
+  unjournaled legacy items cannot safely be identified.
   The store unlinks a fully received PATCH spool after opening it, before persistent mutation;
-  a process exit during incomplete HTTP reception can still leave a request temporary file.
+  new incomplete request spools are reclaimed at server startup after their creator exits.
+  Names are `WebServerKit-body-v1-<pid>-<UUID>` (also multipart); cleanup requires a confirmed
+  absent PID, a regular file owned by this user and one link. No age guessing or lifetime
+  descriptor is used. Reused/live PIDs and uncertain checks defer cleanup; legacy unmarked
+  spools are not swept. Creation is exclusive/no-follow, 0600, and close-on-exec. Failed opens
+  never unlink an unowned colliding path. Cross-volume stages use the same owner rules with
+  the `stage` kind, outside the served root.
   Arbitrary external moves before receipt durability and power-loss durability are not
   guaranteed. These limits are documented in
   `Scripts/ResumableUploads/README.md`.
@@ -1183,7 +1194,8 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   matching both pre-kill names and the synthetic body-prefix hashes. FDs 13→11,
   new-process accepted/closed 51/51, zero connections/reservations; no session residue.
   This confirms the known incomplete-body process-death gap. Owner requested its
-  fix as subsequent item 3; do not hide residue by expanding a test's baseline.
+  fix as subsequent item 3; the 2026-10-02 cleanup follow-up below closes the new-spool
+  gap. Never hide residue by expanding a test's baseline.
   Both runs verified 59,113,620 bytes/75 requests. Evidence and spool contents were
   saved, then only the dedicated test app was removed to clean its fixture container;
   this is not a library cleanup pass. Signed build and nine offline oracles passed;
@@ -1210,7 +1222,38 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   signed build and 11 offline oracles passed. No production change, no count
   exemption, no changed-IP/browser/Windows/overnight claim. Preserve evidence in
   `/private/tmp/wsk-device-interruptions-20261002/`; only the synthetic app was
-  removed after evidence capture. Active-body crash spool cleanup remains deferred.
+  removed after evidence capture. Active-body crash cleanup is addressed by the follow-up below.
+- **Crash cleanup follow-up (2026-10-02):** process-owned request names reclaim incomplete
+  PATCH/PUT/multipart bodies on restart, and a stable private sibling namespace closes the
+  cross-volume pre-journal stage gap. Mac regression killed a child with four PATCH bodies,
+  one PUT and one multipart file, then restarted it while a second process's PUT was active.
+  Exactly the six dead creator's bodies were removed; the live peer finished with exact
+  bytes and all four saved offsets/files recovered concurrently. Both processes ended with
+  seven FDs, no connections/reservations/transfers or temporary/session residue.
+  Three exits on an actual separate sparse APFS volume (different device IDs) passed:
+  after empty stage creation before any journal, during stage copying, and after publication.
+  Recovery preserved unrelated/live-owner stage entries and verified offsets, final hashes
+  and no duplicate publications. The image was detached; the private staging directory is
+  retained empty infrastructure. A real iPhone active-body SIGKILL/relaunch then passed both
+  recovery and cleanup: four spools reclaimed, original 1 MiB offsets/receipt restored,
+  downloads resumed with original validators/hashes, 75 requests/59,113,620 verified bytes,
+  FDs 12→11 and new-process accepted/closed 51/51. The first native attempt stopped before
+  transfers because the app was inactive; it is not counted as a crash test.
+  Full gate passed: 333 ASan tests, recorded traces, platform/consumer builds, storage and
+  resumable fault matrices, the new interrupted-body regression and bounded endurance.
+  Evidence: `/private/tmp/wsk-crash-cleanup-20261002/`. Cross-volume uploads now require
+  permission to create the sibling staging directory; no power-loss or legacy-orphan
+  migration guarantee. Descriptor follow-up: six same-process Settings lifecycle cycles
+  with Wi-Fi on each finished at the fixed initial 11 FDs. Two actual Wi-Fi loss/rejoin
+  cycles in a fresh single process each recovered four uploads/two downloads and ended
+  at the fixed initial 12 FDs, accepted/closed 81/81 then 162/162, no connections,
+  reservations or temp/session residue. FD 11 was present before both interruptions but
+  could not be classified; the earlier unrecorded 11→12 increase remains unexplained.
+  A preceding manual-wait timeout remains a failed/unperformed Wi-Fi test. Original
+  reports/raw samples and dedicated-app teardown are retained. Both device idle-summary
+  implementations now retain the peak's matching inventory/time rather than combining
+  snapshots (12 offline tests, including both implementations); the resumable correction
+  followed the Wi-Fi runs and did not rewrite their reports or change count limits.
 - **Shared-folder/listing audit (2026-09-30, production tip `a3799a9`):**
   `Scripts/Endurance/audit.py --seconds 10` runs both servers over one disposable root,
   four mixed uploads and cross-server read/move/copy/delete workflows on distinct names.
