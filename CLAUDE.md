@@ -1187,9 +1187,30 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   Both runs verified 59,113,620 bytes/75 requests. Evidence and spool contents were
   saved, then only the dedicated test app was removed to clean its fixture container;
   this is not a library cleanup pass. Signed build and nine offline oracles passed;
-  later stricter pre-kill/type guards passed against saved snapshots. Wi-Fi loss
-  still awaits its own device run; no reboot, natural-crash/jetsam, Windows or
+  later stricter pre-kill/type guards passed against saved snapshots. No reboot,
+  natural-crash/jetsam, Windows or
   browser-origin recovery claim. Evidence: `/private/tmp/wsk-device-interruptions-20261002/`.
+- **Physical Wi-Fi loss/rejoin (2026-10-02):** same phone and unchanged production
+  `1a327bd`; diagnostic run `BE0B845F-30C1-4ABD-89EC-2E6A2F45C84E` passed recovery
+  and cleanup. USB snapshots proved the same active process had no Wi-Fi address
+  with both servers running, while both old endpoints were unreachable. After
+  rejoin, four original 1 MiB prefixes/keys and the completed receipt survived;
+  concurrent completion, HTTP/DAV hashes, both original-ETag Range downloads and
+  duplicate-free replay passed (59,113,620 bytes/75 requests). Same IP/ports; Settings
+  also caused lifecycle transitions. Three fresh idle snapshots: accepted/closed
+  81/81, zero connections/reservations, no temp/session residue, FDs 13→11. Detailed
+  descriptor inventory confirmed every final entry was already in the baseline,
+  with no transfer file or accepted client socket remaining.
+  **Unresolved measurement:** earlier full Wi-Fi run `wifi-live2/` recovered all
+  transfers but failed cleanup with FDs 11→12, still present in a later sample;
+  ownership was not recorded and remains unexplained. Keep that failure; the
+  instrumented repeat did not reproduce it and does not prove it harmless.
+  Test-host diagnostics now record paths/file identities/numeric socket endpoints.
+  Driver fixes handle Python 3.9 socket timeouts and wait for an address on resume;
+  signed build and 11 offline oracles passed. No production change, no count
+  exemption, no changed-IP/browser/Windows/overnight claim. Preserve evidence in
+  `/private/tmp/wsk-device-interruptions-20261002/`; only the synthetic app was
+  removed after evidence capture. Active-body crash spool cleanup remains deferred.
 - **Shared-folder/listing audit (2026-09-30, production tip `a3799a9`):**
   `Scripts/Endurance/audit.py --seconds 10` runs both servers over one disposable root,
   four mixed uploads and cross-server read/move/copy/delete workflows on distinct names.

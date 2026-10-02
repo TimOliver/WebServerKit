@@ -519,8 +519,56 @@ The signed build and all nine offline device-oracle tests passed. Stricter
 pre-kill presence/type guards added to the driver after these runs were also
 applied to the saved snapshots and passed; no repeat physical run is claimed.
 No production or browser code changed, so this work did not repeat the full
-library test gate. Wi-Fi loss still requires its separate physical run.
+library test gate. The subsequent Wi-Fi runs are recorded below.
 
 Evidence: `/private/tmp/wsk-device-interruptions-20261002/`, including both
 `report.json` files, raw samples, command evidence, `spool-ownership-proof.json`,
 the four retained synthetic spools, and the fixture teardown record.
+
+## Recorded Wi-Fi interruption runs: 2026-10-02
+
+The diagnostic repeat **passed recovery and cleanup** on the same iPhone Air /
+iOS 27.0.1, with unchanged production library `1a327bd`. Run
+`BE0B845F-30C1-4ABD-89EC-2E6A2F45C84E` held four partial PATCH bodies and two
+partial downloads. Two advancing USB snapshots confirmed the same active process
+had no Wi-Fi address while both servers remained running; bounded attempts to
+both old Wi-Fi ports timed out. After rejoining, the process, IPv4 address and
+server ports were unchanged. The Settings transitions also exercised app
+background/foreground handling; this is not an isolated radio-only test.
+
+All four uploads retained their original keys and acknowledged 1 MiB offsets,
+then completed concurrently with exact hashes over HTTP and WebDAV. Both
+downloads resumed using the original ETags, returned 206, and matched their full
+hashes. The pre-existing completion receipt survived; retries produced no
+duplicates. The run verified 59,113,620 download bytes in 75 client requests.
+Three fresh final snapshots showed zero connections/reservations, accepted/closed
+counts 81/81, no request temporary files or saved sessions/receipts, and descriptors
+13→11. Every final descriptor matched an entry in the warmed baseline: three
+standard streams, four listener sockets and four existing Unix-domain sockets.
+No transferred asset, request spool or accepted client socket remained open.
+
+An earlier full recovery run, `D0843FCF-B17A-4D6C-9F7B-01B53792AEA0` in `wifi-live2/`,
+passed all transfer checks but **failed cleanup** because descriptors rose 11→12.
+Connections, reservations and file/session inventories were clean. The extra
+descriptor was still present in a later snapshot. That build recorded only a
+count, so its ownership remains unexplained; the diagnostic repeat does not
+retroactively turn that result into a pass. The test host now records descriptor
+paths, file identities and numeric socket endpoints without opening a counting
+descriptor. No production fix or baseline exception was introduced.
+
+Earlier attempts are retained too: `wifi/` rejected Python 3.9's distinct
+`socket.timeout` exception and tried to parse an absent Wi-Fi address during
+failure cleanup. Both driver checks were corrected; all 11 offline oracle tests
+passed. `wifi-repeat/` expired its ten-minute manual wait before the switch-off
+and also failed its final descriptor-count check. `wifi-live/` rejected a manually
+launched session with the wrong run ID before sending transfers. Fresh launches
+use `--terminate-existing` and verify the requested run ID before starting the
+driver. None of these attempts counts as an outage/recovery pass.
+
+The signed diagnostic build passed. Evidence is under
+`/private/tmp/wsk-device-interruptions-20261002/`, including `wifi-diagnostics/`'s
+report, original samples, source hashes, independent validation and app teardown.
+Only after saving the evidence was the dedicated synthetic test app removed.
+These runs do not cover a changed IP address, browser-origin migration, Windows
+clients or repeated overnight network cycling. The four request spools surviving
+active-body process death remain the separate, deferred production cleanup fix.
