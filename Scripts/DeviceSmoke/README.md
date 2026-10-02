@@ -4,7 +4,8 @@ This workflow installs a disposable app named **WSK Device Test**, with bundle I
 `com.timoliver.WebServerKitDeviceSmoke`. It serves HTTP uploads and WebDAV from one
 new `Documents/Share-<UUID>` directory containing only synthetic fixtures: an
 8 MiB `asset.bin` filled with `0x5a`, and `probe-identity.json`. The app refuses to
-reuse an existing run directory. It does not serve the rest of Documents.
+reuse an existing run directory unless explicitly launched with `--resume-probe-run`
+for the interruption tests below. It does not serve the rest of Documents.
 
 The servers use unauthenticated HTTP on OS-assigned ports, advertising `_http._tcp`
 and `_webdav._tcp`. Use the intended test Wi-Fi network and keep personal files out
@@ -283,6 +284,76 @@ it does not establish browser-on-device behavior, process restart or reboot,
 protection-policy preservation across arbitrary app edits, Windows compatibility,
 Wi-Fi loss/rejoin, overnight endurance, or a guaranteed background execution time.
 
+## Wi-Fi loss and abrupt app restart
+
+`interruptions.py` saves 1 MiB of each of four resumable uploads and retains a
+separate completed upload receipt. It also saves the first 64 KiB and strong ETag
+of a download through each server. Each mode must recover the same four upload
+keys/offsets, resume both downloads with `Range`/`If-Range` and exact full hashes,
+finish the uploads concurrently, and replay the completed requests without
+creating duplicate files. This uses a Python client; it does not establish that
+a browser can find origin-scoped resume records after the address or port changes.
+
+Build/install as above. For every mode, generate a new run UUID, launch the app
+normally with `--probe-run-id`, then run:
+
+```sh
+python3 Scripts/DeviceSmoke/interruptions.py \
+  --device "$PROBE_DEVICE" --run-id "$PROBE_RUN_ID" \
+  --mode crash-between-chunks \
+  --install-record "$PROBE_RESULTS/install.json" \
+  --report "$PROBE_RESULTS/interruption.json"
+```
+
+The three modes are:
+
+- `crash-between-chunks`: issue SIGKILL after acknowledged prefixes are saved,
+  with the two downloads incomplete. No request body is being received at the
+  selected kill point.
+- `crash-active-body`: kill with four real incomplete PATCH bodies, each sent
+  after the acknowledged prefix. The pre-kill sample must show all four request
+  temporary files and saved payloads. This additionally checks the documented
+  request-spool cleanup gap; it does not implement its fix.
+- `wifi`: hold four PATCH bodies while the user disables Wi-Fi. **Connect USB
+  first**, so app-container reports remain accessible without Wi-Fi. When asked,
+  turn Wi-Fi off in Settings and return to WSK Device Test with Wi-Fi still off.
+  Wait for the restore instruction, then re-enable Wi-Fi, join the same network
+  and return to the app. Each manual wait is bounded by `--wait-seconds` (default
+  600, maximum 600). Keep the phone unlocked. No Mac network settings are changed.
+
+Wi-Fi loss requires fresh snapshots from the same live app process, foreground
+serving with no `en0` IPv4 address, and failed connections to both previously
+verified Wi-Fi endpoints. A timeout, a suspended listener, or a verbal confirmation
+alone is insufficient. The driver then accepts new endpoints only from the fresh
+same-process container report and rechecks both HTTP identities before resuming.
+Settings transitions also exercise normal background/foreground behavior, so the
+test does not attribute every old-socket closure exclusively to network loss.
+
+Crash modes require the installation JSON from this exact app installation. The
+driver matches the current PID/executable to that record before SIGKILL, checks
+that the old PID is gone, and launches only the dedicated bundle with the original
+run UUID and `--resume-probe-run`. A new PID and launch UUID, a fresh report and
+explicit existing-run mode are required. The host validates the existing run's
+identity and fixture types/sizes; it preserves the asset inode/bytes and private
+session directory instead of recreating them. This simulates abrupt process death;
+it is not evidence of a naturally occurring crash, jetsam-specific behavior or a
+device reboot. Host production background policy is unchanged.
+
+Reports distinguish `recovery_passed`, `cleanup_passed`, and overall `passed`.
+All three must be true for a clean pass. Cleanup requires three fresh idle
+samples with no connections/reservations, matching accepted/closed counts, no
+descriptor growth, no remaining sessions/receipts, and the original temp inventory.
+Crash residue is never silently adopted as a new baseline. An active-body kill
+can currently recover every file successfully yet fail overall because orphaned
+request spools remain. Preserve that failure evidence for the separate cleanup
+work; cleanup by removing the disposable app is not a library cleanup pass.
+
+Offline negative controls run without a phone:
+
+```sh
+python3 -B -m unittest discover -s Scripts/DeviceSmoke -p 'test_*.py'
+```
+
 ## Finish and remove the disposable app
 
 Preserve reports before cleanup. The transfer driver does not stop the app. Confirm
@@ -414,3 +485,42 @@ Reports, raw samples, build/source hashes and cleanup proof are outside the gate
 disposable `build` directory:
 `/private/tmp/wsk-recovery-hardening-evidence/device-ABF06AD3-4946-473D-B89C-0CF7C8472509/`.
 The scope limits in the protected-file section above still apply.
+
+## Recorded abrupt-restart runs: 2026-10-02
+
+Both modes ran on iPhone Air / iOS 27.0.1 (24A446), with the signed Release probe
+and unchanged production library `1a327bd`. The new host explicitly reopened its
+existing synthetic directories. Both old-process exits were verified, both new
+PIDs/launch UUIDs were confirmed, and fixture bytes were not recreated.
+
+- **Between chunks: passed.** Run `F56CF7AB-E0D1-49D0-85D6-927CF3A8400A` recovered
+  all four original 1 MiB upload prefixes and a previously completed receipt.
+  Both interrupted downloads returned 206 with their original ETags and exact
+  assembled hashes. All uploads completed and replayed without duplicates.
+  The final process had 11 descriptors versus the old warmed baseline's 14,
+  zero connections/reservations, accepted/closed counts 51/51, and no residual
+  requests, sessions or receipts. This tests abrupt death between chunk requests.
+- **During four incomplete bodies: recovery passed, cleanup failed.** Run
+  `53C39190-1425-4422-B9A9-35EEB094DF57` completed the same recovery checks, but
+  four 64 KiB request spools survived process death. Their names matched the
+  pre-kill inventory, and copied bytes exactly matched the four synthetic PATCH
+  prefixes. Final descriptors were 11 versus baseline 13, connections/reservations
+  zero and accepted/closed 51/51; persistent sessions and receipts were cleaned.
+  The driver returned failure rather than treating orphaned spools as a pass.
+
+Each mode completed 75 client requests and verified 59,113,620 download bytes.
+The active-body residue is the previously documented incomplete-request crash
+window; its production fix is deferred to the separate cleanup work. After all
+evidence and the four spool contents were saved on the Mac, only the disposable
+test app was removed to clear its synthetic container. This fixture teardown
+does not change the failed library cleanup result.
+
+The signed build and all nine offline device-oracle tests passed. Stricter
+pre-kill presence/type guards added to the driver after these runs were also
+applied to the saved snapshots and passed; no repeat physical run is claimed.
+No production or browser code changed, so this work did not repeat the full
+library test gate. Wi-Fi loss still requires its separate physical run.
+
+Evidence: `/private/tmp/wsk-device-interruptions-20261002/`, including both
+`report.json` files, raw samples, command evidence, `spool-ownership-proof.json`,
+the four retained synthetic spools, and the fixture teardown record.

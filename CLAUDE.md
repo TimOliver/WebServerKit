@@ -1167,6 +1167,29 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   Only the synthetic manifest/payload use complete protection; this does not establish a
   general app protection policy or browser-on-device, reboot, Windows or overnight coverage.
   Evidence: `/private/tmp/wsk-recovery-hardening-evidence/device-ABF06AD3-4946-473D-B89C-0CF7C8472509/`.
+- **Physical abrupt restart (2026-10-02):** `Scripts/DeviceSmoke/interruptions.py`
+  runs owned-app Wi-Fi loss, SIGKILL between chunks, and SIGKILL with four partial
+  PATCH bodies as separate modes. The test host's explicit `--resume-probe-run`
+  validates its old identity/directories and preserves asset bytes/inode and saved
+  sessions. New PID and launch UUID are required; signals require a current PID
+  whose executable matches the dedicated app's installation record. Production
+  remains `1a327bd`; this is test infrastructure, not a new recovery implementation.
+  On iPhone Air/iOS 27.0.1 (24A446), between-chunk termination passed: all four 1 MiB
+  saved prefixes and a completed receipt survived, both partial downloads resumed
+  with original ETags/206/exact hashes, all uploads completed/replayed without
+  duplicates, and idle resources/session/temp inventories were clean (FDs 14→11,
+  new-process accepted/closed 51/51). Active-body termination recovered every file
+  and receipt too, but **failed cleanup**: exactly four 64 KiB request spools survived,
+  matching both pre-kill names and the synthetic body-prefix hashes. FDs 13→11,
+  new-process accepted/closed 51/51, zero connections/reservations; no session residue.
+  This confirms the known incomplete-body process-death gap. Owner requested its
+  fix as subsequent item 3; do not hide residue by expanding a test's baseline.
+  Both runs verified 59,113,620 bytes/75 requests. Evidence and spool contents were
+  saved, then only the dedicated test app was removed to clean its fixture container;
+  this is not a library cleanup pass. Signed build and nine offline oracles passed;
+  later stricter pre-kill/type guards passed against saved snapshots. Wi-Fi loss
+  still awaits its own device run; no reboot, natural-crash/jetsam, Windows or
+  browser-origin recovery claim. Evidence: `/private/tmp/wsk-device-interruptions-20261002/`.
 - **Shared-folder/listing audit (2026-09-30, production tip `a3799a9`):**
   `Scripts/Endurance/audit.py --seconds 10` runs both servers over one disposable root,
   four mixed uploads and cross-server read/move/copy/delete workflows on distinct names.
