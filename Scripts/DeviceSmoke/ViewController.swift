@@ -393,6 +393,7 @@ final class ViewController: UIViewController {
     case .background: state = "background"
     @unknown default: state = "unknown"
     }
+    let descriptors = descriptorInventory()
     var report: [String: Any] = [
       "run_id": runID,
       "launch_id": launchID,
@@ -414,7 +415,8 @@ final class ViewController: UIViewController {
       "uploader_running": uploader?.isRunning ?? false,
       "dav_running": dav?.isRunning ?? false,
       "reserved_bytes": WSKWebServer.reservedInMemoryByteCount,
-      "descriptors": descriptorCount(),
+      "descriptors": descriptors?.count ?? -1,
+      "descriptor_inventory": descriptors.map { $0 as Any } ?? NSNull(),
       "share_inventory": shareURL.map { inventory(at: $0) } ?? ["entries": [], "errors": []],
       "temp_inventory": inventory(at: URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)),
       "resumable_inventory": resumableURL.map { inventory(at: $0) } ?? ["entries": [], "errors": []],
@@ -523,16 +525,56 @@ final class ViewController: UIViewController {
     return nil
   }
 
-  private func descriptorCount() -> Int {
-    // F_GETFD examines this process's descriptors without opening a counting descriptor.
+  private func descriptorInventory() -> [[String: Any]]? {
+    // Inspect existing descriptors without opening a counting descriptor. Paths
+    // and socket endpoints distinguish library resources from system lazy opens.
     var limits = rlimit()
     guard getrlimit(RLIMIT_NOFILE, &limits) == 0,
-          limits.rlim_cur > 0, limits.rlim_cur <= 65_536 else { return -1 }
+          limits.rlim_cur > 0, limits.rlim_cur <= 65_536 else { return nil }
     let limit = Int32(limits.rlim_cur)
-    var count = 0
+    var entries = [[String: Any]]()
     for descriptor in 0..<limit {
-      if fcntl(descriptor, F_GETFD) >= 0 { count += 1 }
+      guard fcntl(descriptor, F_GETFD) >= 0 else { continue }
+      var entry: [String: Any] = ["fd": Int(descriptor)]
+      var info = stat()
+      if fstat(descriptor, &info) == 0 {
+        entry["mode"] = Int(info.st_mode)
+        entry["device"] = Int(info.st_dev)
+        entry["inode"] = UInt64(info.st_ino)
+      }
+      var path = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+      if fcntl(descriptor, F_GETPATH, &path) == 0 {
+        entry["path"] = String(cString: path)
+      }
+      var socketType: Int32 = 0
+      var typeLength = socklen_t(MemoryLayout<Int32>.size)
+      if getsockopt(descriptor, SOL_SOCKET, SO_TYPE, &socketType, &typeLength) == 0 {
+        entry["socket_type"] = Int(socketType)
+        entry["local"] = socketEndpoint(descriptor, peer: false)
+        entry["peer"] = socketEndpoint(descriptor, peer: true)
+      }
+      entries.append(entry)
     }
-    return count
+    return entries
+  }
+
+  private func socketEndpoint(_ descriptor: Int32, peer: Bool) -> [String: Any] {
+    var address = sockaddr_storage()
+    var length = socklen_t(MemoryLayout<sockaddr_storage>.size)
+    return withUnsafeMutablePointer(to: &address) { pointer in
+      pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+        let result = peer ? getpeername(descriptor, socketAddress, &length) : getsockname(descriptor, socketAddress, &length)
+        guard result == 0 else { return ["errno": Int(errno)] }
+        var value: [String: Any] = ["family": Int(socketAddress.pointee.sa_family)]
+        var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        var service = [CChar](repeating: 0, count: Int(NI_MAXSERV))
+        if getnameinfo(socketAddress, length, &host, socklen_t(host.count), &service,
+                       socklen_t(service.count), NI_NUMERICHOST | NI_NUMERICSERV) == 0 {
+          value["host"] = String(cString: host)
+          value["port"] = String(cString: service)
+        }
+        return value
+      }
+    }
   }
 }
