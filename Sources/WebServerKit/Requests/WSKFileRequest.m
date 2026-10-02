@@ -33,23 +33,26 @@
 
 @implementation WSKFileRequest {
     int _file;
+    BOOL _ownsTemporaryFile;
 }
 
 - (instancetype)initWithMethod:(NSString *)method url:(NSURL *)url headers:(NSDictionary<NSString *, NSString *> *)headers path:(NSString *)path query:(NSDictionary<NSString *, NSString *> *)query {
     if ((self = [super initWithMethod:method url:url headers:headers path:path query:query])) {
         _file = -1;  // Not 0, which is a legal descriptor -close: must not close by accident
-        _temporaryPath = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSProcessInfo processInfo] globallyUniqueString]];
+        _temporaryPath = WSKOwnedTemporaryPath(NSTemporaryDirectory(), @"body");
     }
 
     return self;
 }
 
 - (void)dealloc {
-    unlink([_temporaryPath fileSystemRepresentation]);
+    if (_ownsTemporaryFile) {
+        unlink([_temporaryPath fileSystemRepresentation]);
+    }
 }
 
 - (BOOL)open:(NSError **)error {
-    _file = open([_temporaryPath fileSystemRepresentation], O_CREAT | O_TRUNC | O_WRONLY, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+    _file = open([_temporaryPath fileSystemRepresentation], O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, S_IRUSR | S_IWUSR);
 
     // 0 is a legal descriptor (it is handed out whenever stdin has been closed), so only a
     // negative result means failure. Treating 0 as one both reported a stale errno and
@@ -61,6 +64,8 @@
 
         return NO;
     }
+
+    _ownsTemporaryFile = YES;
 
     return YES;
 }

@@ -34,16 +34,76 @@
 #import <SystemConfiguration/SystemConfiguration.h>
 #endif
 #import <CommonCrypto/CommonDigest.h>
+#import <dirent.h>
 #import <ifaddrs.h>
 #import <net/if.h>
 #import <netdb.h>
 #import <os/lock.h>
+#import <signal.h>
 #import <sys/ioctl.h>
 #import <sys/mount.h>
 #import <sys/param.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 #import "WSKPrivate.h"
+
+NSString *WSKOwnedTemporaryPath(NSString *directory, NSString *kind) {
+    return [directory stringByAppendingPathComponent:[NSString stringWithFormat:@"WebServerKit-%@-v1-%d-%@", kind, getpid(), NSUUID.UUID.UUIDString.lowercaseString]];
+}
+
+BOOL WSKCleanAbandonedTemporaryFiles(NSString *directory, NSString *kind, NSError **error) {
+    // The system temp directory can have a canonical alias (e.g. /var on macOS).
+    // Pin the directory once; never follow a candidate entry or recurse into it.
+    char resolved[PATH_MAX];
+    int descriptor = -1;
+    if (realpath(directory.fileSystemRepresentation, resolved)) {
+        descriptor = open(resolved, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    }
+    if (descriptor < 0) {
+        if (error) *error = WSKMakePosixError(errno);
+        return NO;
+    }
+    DIR *const stream = fdopendir(descriptor);
+    if (!stream) {
+        int const code = errno;
+        close(descriptor);
+        if (error) *error = WSKMakePosixError(code);
+        return NO;
+    }
+    NSString *const prefix = [NSString stringWithFormat:@"WebServerKit-%@-v1-", kind];
+    int failure = 0;
+    while (YES) {
+        errno = 0;
+        struct dirent *const entry = readdir(stream);
+        if (!entry) {
+            if (!failure) failure = errno;
+            break;
+        }
+        NSString *const name = [NSString stringWithUTF8String:entry->d_name];
+        if (![name hasPrefix:prefix]) continue;
+        NSString *const suffix = [name substringFromIndex:prefix.length];
+        NSRange const separator = [suffix rangeOfString:@"-"];
+        if (separator.location == NSNotFound) continue;
+        NSString *const owner = [suffix substringToIndex:separator.location];
+        NSString *const identifier = [suffix substringFromIndex:separator.location + 1];
+        long long const number = owner.longLongValue;
+        if (number <= 1 || number > INT_MAX || ![owner isEqualToString:[NSString stringWithFormat:@"%lld", number]] || ![[[NSUUID alloc] initWithUUIDString:identifier].UUIDString.lowercaseString isEqualToString:identifier]) continue;
+        // No age heuristics, PID reuse guesses or locks held for an upload's
+        // lifetime. Creation is safe from reaping because its process is alive.
+        // EPERM and every other uncertain result conservatively retain the file.
+        if (kill((pid_t)number, 0) == 0 || errno != ESRCH) continue;
+        struct stat info;
+        if (fstatat(descriptor, entry->d_name, &info, AT_SYMLINK_NOFOLLOW) != 0) {
+            if (errno != ENOENT && !failure) failure = errno;
+            continue;
+        }
+        if (!S_ISREG(info.st_mode) || info.st_uid != geteuid() || info.st_nlink != 1) continue;
+        if (unlinkat(descriptor, entry->d_name, 0) != 0 && errno != ENOENT && !failure) failure = errno;
+    }
+    if (closedir(stream) != 0 && !failure) failure = errno;
+    if (failure && error) *error = WSKMakePosixError(failure);
+    return failure == 0;
+}
 
 static NSDateFormatter *_dateFormatterRFC822 = nil;
 // RFC 9110 s5.6.7 requires a recipient to accept all three HTTP-date formats — a spelling

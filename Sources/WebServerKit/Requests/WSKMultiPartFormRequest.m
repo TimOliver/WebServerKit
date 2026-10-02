@@ -341,8 +341,8 @@ static NSData *_dashNewlineData = nil;
                             success = NO;
                         }
                     } else if (_fileName) {
-                        NSString *const path = [NSTemporaryDirectory() stringByAppendingPathComponent:[[NSProcessInfo processInfo] globallyUniqueString]];
-                        _tmpFile = open([path fileSystemRepresentation], O_CREAT | O_TRUNC | O_WRONLY, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+                        NSString *const path = WSKOwnedTemporaryPath(NSTemporaryDirectory(), @"body");
+                        _tmpFile = open([path fileSystemRepresentation], O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, S_IRUSR | S_IWUSR);
 
                         if (_tmpFile >= 0) {
                             _tmpPath = [path copy];

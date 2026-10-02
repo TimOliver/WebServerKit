@@ -45,6 +45,66 @@ static BOOL WriteMultipartInSlices(WSKMultiPartFormRequest *request, NSData *bod
 
 @implementation WSKRequestBodyTests
 
+- (void)testAbandonedBodyCleanupRequiresExitedOwnerAndPreservesOtherEntries {
+    NSString *const directory = MakeTempDirectory();
+    NSFileManager *const manager = NSFileManager.defaultManager;
+    [self addTeardownBlock:^{ [manager removeItemAtPath:directory error:NULL]; }];
+    NSTask *const owner = [[NSTask alloc] init];
+    owner.executableURL = [NSURL fileURLWithPath:@"/bin/sleep"];
+    owner.arguments = @[@"60"];
+    NSError *error = nil;
+    XCTAssertTrue([owner launchAndReturnError:&error], @"%@", error);
+    if (!owner.running) return;
+    [self addTeardownBlock:^{ if (owner.running) { [owner terminate]; [owner waitUntilExit]; } }];
+    NSString * (^path)(void) = ^NSString * {
+        return [directory stringByAppendingPathComponent:[NSString stringWithFormat:@"WebServerKit-body-v1-%d-%@", owner.processIdentifier, NSUUID.UUID.UUIDString.lowercaseString]];
+    };
+    NSString *const orphan = path();
+    NSData *const bytes = UTF8Data(@"owned interrupted request body");
+    XCTAssertTrue([bytes writeToFile:orphan atomically:NO]);
+    NSString *const current = WSKOwnedTemporaryPath(directory, @"body");
+    XCTAssertTrue([bytes writeToFile:current atomically:NO]);
+    NSString *const unrelated = [directory stringByAppendingPathComponent:@"host-owned-file"];
+    XCTAssertTrue([bytes writeToFile:unrelated atomically:NO]);
+    NSString *const legacy = [directory stringByAppendingPathComponent:NSProcessInfo.processInfo.globallyUniqueString];
+    XCTAssertTrue([bytes writeToFile:legacy atomically:NO]);
+    NSString *const symbolic = path();
+    XCTAssertEqual(symlink(unrelated.fileSystemRepresentation, symbolic.fileSystemRepresentation), 0);
+    NSString *const linked = path();
+    XCTAssertEqual(link(unrelated.fileSystemRepresentation, linked.fileSystemRepresentation), 0);
+    NSString *const nested = path();
+    XCTAssertTrue([manager createDirectoryAtPath:nested withIntermediateDirectories:NO attributes:nil error:&error]);
+    NSString *const malformed = [directory stringByAppendingPathComponent:[NSString stringWithFormat:@"WebServerKit-body-v1-%d-invalid", owner.processIdentifier]];
+    XCTAssertTrue([bytes writeToFile:malformed atomically:NO]);
+    XCTAssertTrue(WSKCleanAbandonedTemporaryFiles(directory, @"body", &error), @"%@", error);
+    XCTAssertEqualObjects([NSData dataWithContentsOfFile:orphan], bytes, @"A live creator must keep its file, even when another server starts");
+    [owner terminate];
+    [owner waitUntilExit];
+    XCTAssertTrue(WSKCleanAbandonedTemporaryFiles(directory, @"body", &error), @"%@", error);
+    XCTAssertFalse([manager fileExistsAtPath:orphan]);
+    for (NSString *const retained in @[current, unrelated, legacy, symbolic, linked, malformed]) {
+        XCTAssertEqualObjects([NSData dataWithContentsOfFile:retained], bytes, @"%@", retained);
+    }
+    BOOL isDirectory = NO;
+    XCTAssertTrue([manager fileExistsAtPath:nested isDirectory:&isDirectory] && isDirectory);
+}
+
+- (void)testFileRequestDoesNotOverwriteOrRemoveAnUnownedExistingPath {
+    NSString *path;
+    NSData *const bytes = UTF8Data(@"existing host data");
+    @autoreleasepool {
+        WSKFileRequest *request = [[WSKFileRequest alloc] initWithMethod:@"PUT" url:LiteralURL(@"http://localhost/file") headers:@{@"Content-Length": @"1"} path:@"/file" query:nil];
+        path = request.temporaryPath;
+        XCTAssertTrue([bytes writeToFile:path atomically:NO]);
+        NSError *error = nil;
+        XCTAssertFalse([request open:&error]);
+        XCTAssertEqual(error.code, EEXIST);
+        request = nil;
+    }
+    XCTAssertEqualObjects([NSData dataWithContentsOfFile:path], bytes);
+    [[NSFileManager defaultManager] removeItemAtPath:path error:NULL];
+}
+
 // Each field has its own boundary before '=' is considered. Previously a flag
 // became part of the following key, and an empty name terminated the whole form.
 - (void)testURLEncodedFormSeparatesFlagsEmptyNamesAndEmptyFields {

@@ -217,6 +217,10 @@ static inline NSError *WSKMakePosixError(int code) {
 }
 
 extern void WSKInitializeFunctions(void);
+// Reserved names encode a creator PID. Reaping requires positive proof that the
+// creator exited; live/reused/inaccessible PIDs and unrecognized files are kept.
+extern NSString *WSKOwnedTemporaryPath(NSString *directory, NSString *kind);
+extern BOOL WSKCleanAbandonedTemporaryFiles(NSString *directory, NSString *kind, NSError **error);
 extern NSString *_Nullable WSKNormalizeHeaderValue(NSString *_Nullable value);
 extern NSString *_Nullable WSKTruncateHeaderValue(NSString *_Nullable value);
 extern NSString *_Nullable WSKExtractHeaderValueParameter(NSString *_Nullable value, NSString *attribute);

@@ -109,6 +109,7 @@ echo "=== Resumable recovery and endurance ==="
 python3 -m unittest discover -s Scripts/ResumableUploads -p 'test_*.py'
 python3 -m unittest discover -s Scripts/DeviceSmoke -p 'test_*.py'
 python3 Scripts/ResumableUploads/recovery.py --report "$BUILD_DIR/resumable-recovery.json"
+python3 Scripts/ResumableUploads/interrupted_bodies.py --report "$BUILD_DIR/interrupted-bodies.json"
 python3 Scripts/ResumableUploads/endurance.py --duration 5 --receipts 129 --report "$BUILD_DIR/resumable-endurance.json"
 
 echo ""

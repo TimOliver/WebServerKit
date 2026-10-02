@@ -86,6 +86,21 @@ the Foundation replacement directory/staging file and saving its publication
 journal can still leave an untracked Foundation temporary item outside the share.
 Recovery cannot safely reclaim an outside item it never recorded. Normal request
 cleanup closes files and sockets, and process exit releases held descriptors.
+Request-body files created by this version use the reserved
+`WebServerKit-body-v1-<pid>-<UUID>` namespace and owner-only permissions. Each
+server start reclaims regular, singly linked files owned by the current user only
+when the creating PID is confirmed absent. Files belonging to live or reused
+PIDs, uncertain process checks, links, directories, unrelated files and legacy
+unmarked request files are retained. This uses no age threshold and holds no
+extra descriptors during normal serving. A process reusing a dead creator's PID
+can therefore conservatively postpone reclamation until a later server start.
+
+`interrupted_bodies.py --report <unused-path>` verifies process-death cleanup for
+four partial resumable PATCH bodies, WebDAV PUT and multipart upload, while a
+second process uses the same temporary directory. Recovery must preserve that
+live peer's body, allow it to finish with exact bytes, preserve the four saved
+offsets and complete their files concurrently without temporary/session residue.
+
 The protocol does not promise durability across power loss or storage failure.
 
 Limits are 8 GiB per file, 32 unfinished sessions and 32 GiB of their declared

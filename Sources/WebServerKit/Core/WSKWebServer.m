@@ -924,6 +924,11 @@ static inline NSString *_EncodeBase64(NSString *string) {
 - (BOOL)_start:(NSError **)error {
     WSK_DCHECK(_source4 == NULL);
 
+    NSError *temporaryError = nil;
+    if (!WSKCleanAbandonedTemporaryFiles(NSTemporaryDirectory(), @"body", &temporaryError)) {
+        WSK_LOG_WARNING(@"Could not reclaim abandoned request files: %@", temporaryError);
+    }
+
     NSUInteger const configuredPort = [(NSNumber *)_GetOption(_options, WSKOption_Port, @0) unsignedIntegerValue];
     NSUInteger port = configuredPort;
     // When the caller asked for an OS-assigned port (0), reuse the port we were
