@@ -239,9 +239,9 @@ class Transfers(Runner):
                 require(baseline is None or sample["descriptors"] <= baseline["descriptors"], "Phone descriptors grew")
                 stable.append(sample)
                 if len(stable) == 3:
-                    result = dict(stable[-1])
-                    result["descriptors"] = max(item["descriptors"] for item in stable)
-                    return result
+                    # Keep the conservative peak and its actual inventory/time
+                    # together, rather than combining two different snapshots.
+                    return dict(max(stable, key=lambda item: item["descriptors"]))
             except AssertionError as failure:
                 error, stable = str(failure), []
             time.sleep(.2)
