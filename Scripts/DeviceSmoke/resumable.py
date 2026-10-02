@@ -159,9 +159,8 @@ class Resumable(Lifecycle):
                 require(baseline is None or sample["descriptors"] <= baseline["descriptors"], "Descriptors grew")
                 stable.append(sample)
                 if len(stable) == 3:
-                    result = dict(stable[-1])
-                    result["descriptors"] = max(value["descriptors"] for value in stable)
-                    return result
+                    # Keep the peak paired with its actual inventory and time.
+                    return dict(max(stable, key=lambda item: item["descriptors"]))
             except AssertionError as failure:
                 error, stable = str(failure), []
             time.sleep(.2)

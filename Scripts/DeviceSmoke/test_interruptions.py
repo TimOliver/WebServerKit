@@ -10,25 +10,29 @@ import uuid
 
 from lifecycle import Lifecycle, LifecyclePhone
 from transfers import Transfers
+from resumable import Resumable
 from interruptions import (BUNDLE, MIB, check_clean_resources, check_owned_process,
                            check_prefixes, check_relaunch, wifi_absent_while_serving)
 
 
 class InterruptionOracleTests(unittest.TestCase):
     def test_idle_peak_keeps_its_own_descriptor_inventory_and_timestamp(self):
-        driver = object.__new__(Transfers)
-        driver.expected = {"asset.bin": 1}
-        driver.temp_baseline = set()
         common = {"connections": 0, "reserved_bytes": 0, "accepted": 4, "closed": 4,
                   "share_inventory": {"errors": [], "entries": [{"path": "asset.bin", "type": "file", "size": 1}]},
-                  "temp_inventory": {"errors": [], "entries": []}}
+                  "temp_inventory": {"errors": [], "entries": []},
+                  "resumable_inventory": {"errors": [], "entries": []}}
         samples = [{**common, "sample_timestamp": stamp, "descriptors": count,
                     "descriptor_inventory": [{"fd": fd} for fd in range(count)]}
                    for stamp, count in [(1, 1), (2, 2), (3, 1)]]
-        with patch.object(driver, "sample", side_effect=samples), patch("transfers.time.sleep"):
-            result = driver.idle(None)
-        self.assertEqual(result, samples[1])
-        self.assertEqual(result["descriptors"], len(result["descriptor_inventory"]))
+        for driver_type in (Transfers, Resumable):
+            with self.subTest(driver=driver_type.__name__):
+                driver = object.__new__(driver_type)
+                driver.expected = {"asset.bin": 1}
+                driver.temp_baseline = set()
+                with patch.object(driver, "sample", side_effect=samples), patch("time.sleep"):
+                    result = driver.idle(None)
+                self.assertEqual(result, samples[1])
+                self.assertEqual(result["descriptors"], len(result["descriptor_inventory"]))
 
     def test_resume_waits_for_wifi_address_before_adopting_endpoint(self):
         phone = object.__new__(LifecyclePhone)
