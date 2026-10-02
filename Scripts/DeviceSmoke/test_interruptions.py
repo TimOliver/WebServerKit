@@ -1,15 +1,43 @@
 #!/usr/bin/env python3
 """Negative controls for physical interruption evidence; no device or network."""
 import copy
+import errno
+import socket
 import time
 import unittest
+from unittest.mock import patch
 import uuid
 
+from lifecycle import Lifecycle, LifecyclePhone
 from interruptions import (BUNDLE, MIB, check_clean_resources, check_owned_process,
                            check_prefixes, check_relaunch, wifi_absent_while_serving)
 
 
 class InterruptionOracleTests(unittest.TestCase):
+    def test_resume_waits_for_wifi_address_before_adopting_endpoint(self):
+        phone = object.__new__(LifecyclePhone)
+        absent = {**self.sample(), "uploader_port": 1234, "dav_port": 1235}
+        joined = {**absent, "wifi_ipv4": "192.0.2.1"}
+        with patch.object(phone, "raw_sample", side_effect=[absent, joined]) as sample, \
+                patch.object(phone, "sample", return_value=joined), patch("lifecycle.time.sleep"):
+            self.assertEqual(phone.resume(absent["sample_timestamp"] - 1), joined)
+            self.assertEqual(sample.call_count, 2)
+            self.assertEqual(phone.endpoint, ("192.0.2.1", (1234, 1235)))
+
+    def test_endpoint_probe_accepts_socket_timeouts_but_rejects_unexpected_errors(self):
+        probe = object.__new__(Lifecycle)
+        endpoint = ("192.0.2.1", (1234, 1235))
+        for error in [socket.timeout("timed out"), TimeoutError("timed out"),
+                      OSError(errno.EHOSTUNREACH, "No route to host")]:
+            with self.subTest(error=type(error).__name__), \
+                    patch("lifecycle.socket.create_connection", side_effect=error):
+                self.assertFalse(probe.port_attempt(endpoint, "uploader")["reachable"])
+        with patch("lifecycle.socket.create_connection", side_effect=OSError(errno.EACCES, "Denied")), \
+                self.assertRaises(AssertionError):
+            probe.port_attempt(endpoint, "uploader")
+        with patch("lifecycle.socket.create_connection"):
+            self.assertTrue(probe.port_attempt(endpoint, "uploader")["reachable"])
+
     def sample(self):
         return {"run_id": "owned-run", "bundle_id": BUNDLE, "pid": 123,
                 "launch_id": str(uuid.uuid4()), "sample_timestamp": time.time(),

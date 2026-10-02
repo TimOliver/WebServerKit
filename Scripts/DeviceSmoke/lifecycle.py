@@ -70,7 +70,8 @@ class LifecyclePhone(Phone):
         while time.monotonic() < deadline:
             sample = self.raw_sample("resume-wait")
             if (sample["sample_timestamp"] > after and sample["status"] == "ready"
-                    and sample["app_state"] == "active" and sample["uploader_running"] and sample["dav_running"]):
+                    and sample["app_state"] == "active" and sample["uploader_running"] and sample["dav_running"]
+                    and sample.get("wifi_ipv4")):
                 require(time.time() - sample["sample_timestamp"] <= FRESH_SECONDS, "Resumed report is stale")
                 address = ipaddress.IPv4Address(sample["wifi_ipv4"])
                 require(not (address.is_unspecified or address.is_multicast or address.is_loopback), "Invalid resumed Wi-Fi address")
@@ -113,7 +114,8 @@ class Lifecycle(Transfers):
         except OSError as error:
             expected = {errno.ECONNREFUSED, errno.ETIMEDOUT, errno.EHOSTUNREACH, errno.ENETUNREACH,
                         errno.EHOSTDOWN, errno.ENETDOWN, errno.ECONNRESET}
-            require(isinstance(error, TimeoutError) or error.errno in expected,
+            # Before Python 3.10, socket.timeout is distinct from TimeoutError.
+            require(isinstance(error, (TimeoutError, socket.timeout)) or error.errno in expected,
                     f"Unexpected background connect failure: {error}")
             row.update(error=f"{type(error).__name__}: {error}", errno=error.errno)
         row["elapsed_seconds"] = time.monotonic() - started
