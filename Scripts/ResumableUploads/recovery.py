@@ -42,11 +42,14 @@ def build(faults=True):
 
 class ResumableHost(Host):
     """No target parameter: every HTTP port comes from our own child over stdin."""
-    def __init__(self, binary, libraries, root, log, report=None, ttl=None):
+    def __init__(self, binary, libraries, root, log, report=None, ttl=None, shared_directory=None):
         self.binary, self.libraries, self.directory, self.log = Path(binary), libraries, Path(root), log
         self.report, self.ttl = report if report is not None else {}, ttl
         self.control_lock = threading.Lock()
         self.tmp, self.shared, self.sessions = (self.directory / name for name in ("tmp", "shared", "sessions"))
+        self.cross_volume_share = Path(shared_directory) if shared_directory is not None else None
+        if self.cross_volume_share is not None:
+            self.shared = self.cross_volume_share
         self.shares = {kind: self.shared for kind in ("uploader", "dav")}
         for path in (self.tmp, self.shared, self.sessions):
             path.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -58,6 +61,8 @@ class ResumableHost(Host):
                        "DYLD_INSERT_LIBRARIES": ":".join(str(path) for path in self.libraries)}
         if self.ttl is not None:
             environment["WSK_ENDURANCE_RESUMABLE_TIMEOUT"] = str(self.ttl)
+        if self.cross_volume_share is not None:
+            environment["WSK_RECOVERY_CROSS_VOLUME_SHARE"] = str(self.cross_volume_share)
         self.process = subprocess.Popen([str(self.binary), str(self.shared), str(self.shared)],
                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log,
                                         env=environment, bufsize=0)

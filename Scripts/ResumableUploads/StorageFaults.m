@@ -12,7 +12,7 @@
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static __thread BOOL insideFixture;
 static atomic_bool enabled;
-static NSString *mode, *session, *evidence;
+static NSString *mode, *session, *evidence, *crossStageDirectory;
 static BOOL armed;
 static NSUInteger hits, calls;
 static unsigned long long written;
@@ -31,6 +31,10 @@ static BOOL UUID(NSString *name) {
     return name.length == 36 && [[[NSUUID alloc] initWithUUIDString:name].UUIDString.lowercaseString isEqual:name.lowercaseString];
 }
 static NSString *Kind(NSString *path) {
+    if (path && crossStageDirectory && [path.stringByDeletingLastPathComponent isEqual:crossStageDirectory]) {
+        NSString *prefix = [NSString stringWithFormat:@"WebServerKit-stage-v1-%d-", getpid()];
+        if ([path.lastPathComponent hasPrefix:prefix] && UUID([path.lastPathComponent substringFromIndex:prefix.length])) return @"stage";
+    }
     if (!path || ![path.stringByDeletingLastPathComponent isEqual:session]) return nil;
     NSString *name = path.lastPathComponent;
     if ([name isEqual:@"payload"]) return @"payload";
@@ -191,6 +195,10 @@ __attribute__((visibility("default"))) NSDictionary *WSKStorageFaultControl(NSDi
             if (![Canonical(candidate.fileSystemRepresentation) isEqual:candidate]) error = @"Session must be an existing canonical child";
             else {
                 session = candidate; mode = message[@"mode"]; armed = YES; hits = calls = 0; written = 0; lastHit = nil;
+                // Optional, test-owned separate-volume share. The fixture can
+                // intercept only our PID's reserved stage files in its sibling pool.
+                NSString *share = Canonical(getenv("WSK_RECOVERY_CROSS_VOLUME_SHARE"));
+                crossStageDirectory = share ? [share.stringByDeletingLastPathComponent stringByAppendingPathComponent:@".WebServerKit-ResumableStaging-v1"] : nil;
                 evidence = [root.stringByDeletingLastPathComponent stringByAppendingPathComponent:@"fault-event.json"];
                 unlink(evidence.fileSystemRepresentation);
                 atomic_store(&enabled, true);

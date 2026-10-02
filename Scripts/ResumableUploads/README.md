@@ -36,8 +36,19 @@ staging outside the share, then uses an exclusive atomic rename. When the sessio
 and destination are on the same volume, staging is a `.stage-<UUID>` file inside
 the existing private session directory. Recovery and periodic maintenance remove
 unjournaled regular files in that reserved namespace; they do not follow symlinks
-or walk staging directories. A session on another volume uses Foundation's
-replacement directory on the destination volume instead.
+or walk staging directories. A session on another volume uses the private sibling
+directory `.WebServerKit-ResumableStaging-v1` beside the share. Its files use the
+reserved `WebServerKit-stage-v1-<pid>-<UUID>` namespace; startup, access and periodic
+maintenance reclaim stages whose creator is confirmed gone, even before a journal
+exists. Live/reused PIDs and unrelated entries remain untouched. The empty 0700
+directory remains as shared infrastructure; no descriptor is held for it.
+
+Cross-volume publication therefore requires a writable share parent on the
+destination volume. A volume-root share, a share whose parent cannot be written,
+or an existing staging directory that is a link, foreign-owned or accessible by
+other users is refused rather than staging inside the served folder. Same-volume
+publication does not need this sibling directory. Legacy journaled Foundation
+stages remain recoverable; an unjournaled legacy item cannot safely be identified.
 
 Existing names use the uploader's normal unique-name behavior, and its extension,
 hidden-file and `shouldUploadFileAtPath` policy applies again at completion. The
@@ -79,13 +90,10 @@ Once the store has opened and checked a fully received PATCH body, it removes th
 request temporary filename while keeping its read descriptor. Process exit during
 subsequent append or publication therefore cannot strand that request spool. The
 same-volume staging name remains recoverable even before its journal is saved.
-These protections do not cover every possible process-exit point: termination
-during HTTP body reception, before the store opens that body, can still leave an
-ordinary request temporary file. For a cross-volume upload, an exit between creating
-the Foundation replacement directory/staging file and saving its publication
-journal can still leave an untracked Foundation temporary item outside the share.
-Recovery cannot safely reclaim an outside item it never recorded. Normal request
-cleanup closes files and sockets, and process exit releases held descriptors.
+Cross-volume stages now have a stable private namespace before their publication
+journal is saved. Interrupted HTTP bodies are also discoverable on restart, as
+described below. Normal request cleanup closes files and sockets, and process exit
+releases held descriptors.
 Request-body files created by this version use the reserved
 `WebServerKit-body-v1-<pid>-<UUID>` namespace and owner-only permissions. Each
 server start reclaims regular, singly linked files owned by the current user only
@@ -100,6 +108,14 @@ four partial resumable PATCH bodies, WebDAV PUT and multipart upload, while a
 second process uses the same temporary directory. Recovery must preserve that
 live peer's body, allow it to finish with exact bytes, preserve the four saved
 offsets and complete their files concurrently without temporary/session residue.
+
+`cross_volume.py --report <unused-path>` creates and mounts its own sparse APFS
+image, then checks process exits immediately after stage creation (before any
+journal), during copying and after publication. It verifies actual differing
+device IDs, exact offsets/hashes, no duplicate publication, reclaimed stages and
+preservation of unrelated/live-owner files. The script detaches its image and
+retains the disposable fixture path in its report. It is a separate opt-in check
+requiring disk-image support; the ordinary test gate does not mount a volume.
 
 The protocol does not promise durability across power loss or storage failure.
 

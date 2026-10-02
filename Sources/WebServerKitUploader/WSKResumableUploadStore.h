@@ -5,6 +5,10 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+// Stable private sibling of the share, on its volume. Unlike a per-operation
+// replacement directory, startup can find it before any stage journal exists.
+NSString *_Nullable WSKResumableStagingDirectory(NSString *uploadRoot, BOOL create, NSError *_Nullable *_Nullable error);
+
 // Private uploader implementation. A completed PATCH body is disposable until the
 // store commits it; aborting a body never advances the durable session offset.
 @interface WSKResumableFileRequest : WSKFileRequest

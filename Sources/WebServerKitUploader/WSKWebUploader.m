@@ -1491,7 +1491,6 @@ static NSString *_OriginAuthority(NSString *value) {
 }
 
 - (nullable WSKResponse *)_publishResumableFile:(NSString *)temporaryPath metadata:(NSDictionary<NSString *, NSString *> *)metadata uploadRoot:(NSString *)uploadRoot journal:(WSKResumableUploadJournalBlock)journal publishedPath:(NSString *_Nullable *_Nonnull)resultPath {
-    NSFileManager *const manager = [NSFileManager defaultManager];
     NSString *publishedPath;
     @synchronized(_fileOperationLock) {
         WSKResponse *failure = nil;
@@ -1507,26 +1506,17 @@ static NSString *_OriginAuthority(NSString *value) {
         // Prefer the already-owned private session directory on the same volume.
         // Its .stage-* namespace is recoverable even if the process exits between
         // creating this file and recording its inode in the publication journal.
-        // A different-volume session still needs Foundation's replacement directory
-        // on the destination volume; never expose staging inside the served share.
+        // A different-volume session uses a stable private sibling of the share,
+        // so startup can reclaim a dead creator's stage even before its journal.
         NSError *error = nil;
         struct stat sourceInfo, destinationInfo;
         if (lstat(temporaryPath.fileSystemRepresentation, &sourceInfo) != 0 || stat(publishedPath.stringByDeletingLastPathComponent.fileSystemRepresentation, &destinationInfo) != 0) {
             return [WSKErrorResponse responseWithServerError:500 underlyingError:WSKMakePosixError(errno) message:@"Cannot locate upload staging volume"];
         }
         BOOL const sameVolume = sourceInfo.st_dev == destinationInfo.st_dev;
-        NSURL *const replacement = sameVolume ? nil : [manager URLForDirectory:NSItemReplacementDirectory inDomain:NSUserDomainMask appropriateForURL:[NSURL fileURLWithPath:publishedPath] create:YES error:&error];
-        char resolvedReplacement[PATH_MAX];
-        NSString *replacementPath = sameVolume ? temporaryPath.stringByDeletingLastPathComponent : nil;
-        if (replacement && realpath(replacement.path.fileSystemRepresentation, resolvedReplacement)) {
-            replacementPath = [manager stringWithFileSystemRepresentation:resolvedReplacement length:strlen(resolvedReplacement)];
-        }
-        NSString *const prefix = sameVolume ? @".stage-" : @"wsk-upload-";
-        NSString *const staging = [replacementPath stringByAppendingPathComponent:[prefix stringByAppendingString:NSUUID.UUID.UUIDString.lowercaseString]];
+        NSString *const replacementPath = sameVolume ? temporaryPath.stringByDeletingLastPathComponent : WSKResumableStagingDirectory(uploadRoot, YES, &error);
+        NSString *const staging = sameVolume ? [replacementPath stringByAppendingPathComponent:[@".stage-" stringByAppendingString:NSUUID.UUID.UUIDString.lowercaseString]] : (replacementPath ? WSKOwnedTemporaryPath(replacementPath, @"stage") : nil);
         if (!staging || WSKResolvedPathIsWithinDirectory(replacementPath, uploadRoot)) {
-            if (replacement) {
-                rmdir(replacement.path.fileSystemRepresentation);
-            }
             return [WSKErrorResponse responseWithServerError:500 underlyingError:error message:@"Cannot stage upload outside the share"];
         }
 
@@ -1613,12 +1603,10 @@ static NSString *_OriginAuthority(NSString *value) {
             success = NO;
         }
         // Never recursively remove a staging path: only our own regular file and
-        // its now-empty replacement directory belong to this operation.
+        // belongs to this operation. The private staging directory is shared
+        // infrastructure; keep it available to concurrent publishers.
         if (!success && output >= 0) {
             unlink(staging.fileSystemRepresentation);
-        }
-        if (replacement) {
-            rmdir(replacement.path.fileSystemRepresentation);
         }
         if (!success) {
             if (unsupportedPublication) {

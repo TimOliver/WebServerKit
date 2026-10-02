@@ -138,6 +138,8 @@ NS_ASSUME_NONNULL_BEGIN
  *  It must be outside the served directory. The default (nil) uses an app cache
  *  directory scoped to the resolved share path. Cache eviction may discard an
  *  unfinished upload; clients can then start a new session.
+ *  If sessions are on a different volume, publication requires a writable parent
+ *  of the share on the destination volume for a private sibling staging directory.
  *
  *  Sessions contain partial files and completion receipts, never open sockets.
  *  Reuse this directory and the same share to resume after recreating the server.

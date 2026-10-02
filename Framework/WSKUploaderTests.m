@@ -189,6 +189,41 @@ static NSString *WSKUploadCanonicalTempDirectory(void) {
 
 @implementation WSKUploaderTests
 
+- (void)testCrossVolumeStagingDirectoryIsPrivateStableAndOutsideShare {
+    NSString *const directory = MakeTempDirectory();
+    NSFileManager *const manager = NSFileManager.defaultManager;
+    [self addTeardownBlock:^{ [manager removeItemAtPath:directory error:NULL]; }];
+    NSString *const share = [directory stringByAppendingPathComponent:@"share"];
+    XCTAssertTrue([manager createDirectoryAtPath:share withIntermediateDirectories:NO attributes:nil error:NULL]);
+    char canonicalDirectory[PATH_MAX];
+    XCTAssertNotEqual(realpath(directory.fileSystemRepresentation, canonicalDirectory), NULL);
+    NSString *const expected = [@(canonicalDirectory) stringByAppendingPathComponent:@".WebServerKit-ResumableStaging-v1"];
+    NSError *error = nil;
+    XCTAssertNil(WSKResumableStagingDirectory(share, NO, &error));
+    XCTAssertEqual(error.code, ENOENT);
+    NSString *const staging = WSKResumableStagingDirectory(share, YES, &error);
+    XCTAssertEqualObjects(staging, expected);
+    XCTAssertEqualObjects(WSKResumableStagingDirectory(share, NO, &error), staging);
+    XCTAssertFalse(WSKPathIsInsideDirectory(staging, share));
+    struct stat info;
+    XCTAssertEqual(lstat(staging.fileSystemRepresentation, &info), 0);
+    XCTAssertEqual(info.st_mode & 0777, 0700);
+    XCTAssertEqual(info.st_uid, geteuid());
+    // Existing broad permissions must not be silently adopted or changed.
+    XCTAssertEqual(chmod(staging.fileSystemRepresentation, 0755), 0);
+    XCTAssertNil(WSKResumableStagingDirectory(share, YES, &error));
+    XCTAssertEqual(error.code, EACCES);
+    XCTAssertEqual(lstat(staging.fileSystemRepresentation, &info), 0);
+    XCTAssertEqual(info.st_mode & 0777, 0755);
+    XCTAssertEqual(rmdir(staging.fileSystemRepresentation), 0);
+    XCTAssertEqual(symlink(share.fileSystemRepresentation, staging.fileSystemRepresentation), 0);
+    XCTAssertNil(WSKResumableStagingDirectory(share, YES, &error));
+    XCTAssertEqual(error.code, EACCES);
+    XCTAssertEqual(lstat(staging.fileSystemRepresentation, &info), 0);
+    XCTAssertTrue(S_ISLNK(info.st_mode));
+    XCTAssertEqualObjects([manager contentsOfDirectoryAtPath:share error:NULL], @[]);
+}
+
 - (NSDictionary<NSString *, NSString *> *)_publishingFixtureAtRoot:(NSString *)root renamed:(BOOL)renamed {
     NSFileManager *const fm = NSFileManager.defaultManager;
     NSString *const share = [root stringByAppendingPathComponent:@"share"];

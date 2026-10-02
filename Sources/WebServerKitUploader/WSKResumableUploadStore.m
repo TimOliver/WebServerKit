@@ -16,6 +16,39 @@ static const unsigned long long WSKResumeAggregateLimit = 32ULL * 1024 * 1024 * 
 static const NSUInteger WSKResumeActiveLimit = 32;
 static const NSUInteger WSKResumeReceiptLimit = 128;
 
+NSString *WSKResumableStagingDirectory(NSString *uploadRoot, BOOL create, NSError **error) {
+    char resolved[PATH_MAX];
+    if (!realpath(uploadRoot.fileSystemRepresentation, resolved)) {
+        if (error) *error = WSKMakePosixError(errno);
+        return nil;
+    }
+    NSString *const root = @(resolved);
+    NSString *const parent = root.stringByDeletingLastPathComponent;
+    NSString *const directory = [parent stringByAppendingPathComponent:@".WebServerKit-ResumableStaging-v1"];
+    struct stat rootInfo, parentInfo, info;
+    if (stat(root.fileSystemRepresentation, &rootInfo) != 0 || stat(parent.fileSystemRepresentation, &parentInfo) != 0) {
+        if (error) *error = WSKMakePosixError(errno);
+        return nil;
+    }
+    if (!S_ISDIR(rootInfo.st_mode) || rootInfo.st_dev != parentInfo.st_dev || [directory isEqualToString:root] || WSKPathIsInsideDirectory(directory, root)) {
+        if (error) *error = WSKMakePosixError(EXDEV);
+        return nil;
+    }
+    if (create && mkdir(directory.fileSystemRepresentation, S_IRWXU) != 0 && errno != EEXIST) {
+        if (error) *error = WSKMakePosixError(errno);
+        return nil;
+    }
+    if (lstat(directory.fileSystemRepresentation, &info) != 0) {
+        if (error) *error = WSKMakePosixError(errno);
+        return nil;
+    }
+    if (!S_ISDIR(info.st_mode) || info.st_uid != geteuid() || (info.st_mode & (S_IRWXG | S_IRWXO)) || info.st_dev != rootInfo.st_dev) {
+        if (error) *error = WSKMakePosixError(EACCES);
+        return nil;
+    }
+    return directory;
+}
+
 static NSNumber *WSKResumeNumber(NSDictionary *dictionary, NSString *key) {
     NSNumber *const value = dictionary[key];
     return [value isKindOfClass:NSNumber.class] ? value : nil;
@@ -664,6 +697,15 @@ static BOOL WSKResumeManifestIsInvalid(NSError *error) {
 }
 
 - (void)cleanupExpiredUploads {
+    // This independent namespace is safe to reap even when another process has
+    // a session lock: only confirmed-dead creators' files can be removed.
+    if ([self _boundRootIsCurrent]) {
+        NSString *const staging = WSKResumableStagingDirectory(_uploadDirectory, NO, NULL);
+        NSError *stagingError = nil;
+        if (staging && !WSKCleanAbandonedTemporaryFiles(staging, @"stage", &stagingError)) {
+            WSK_LOG_WARNING(@"Could not reclaim abandoned publication stages: %@", stagingError);
+        }
+    }
     int const lock = [self _lockDirectory:LOCK_EX | LOCK_NB create:NO error:NULL];
     if (lock < 0) {
         return;
