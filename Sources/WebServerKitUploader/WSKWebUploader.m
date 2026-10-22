@@ -1112,7 +1112,10 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
 }
 
 - (NSString *)_uniquePathForPath:(NSString *)path {
-    if ([[NSFileManager defaultManager] fileExistsAtPath:path]) {
+    // A dangling symlink still occupies its name. -fileExistsAtPath: follows the final link
+    // and mistakes it for a free destination, so /upload and /move then attempt to publish
+    // onto the link and report 500 instead of choosing their documented unique sibling.
+    if (WSKNamedEntryExistsAtPath(path, NULL)) {
         NSString *const directory = [path stringByDeletingLastPathComponent];
         NSString *const file = [path lastPathComponent];
         NSString *const base = [file stringByDeletingPathExtension];
@@ -1124,7 +1127,7 @@ static const NSTimeInterval kChangeCoalescingMaxDelay = 1.0;
             } else {
                 path = [directory stringByAppendingPathComponent:[base stringByAppendingFormat:@" (%i)", ++retries]];
             }
-        } while ([[NSFileManager defaultManager] fileExistsAtPath:path]);
+        } while (WSKNamedEntryExistsAtPath(path, NULL));
     }
 
     return path;
@@ -1454,7 +1457,10 @@ static NSString *_OriginAuthority(NSString *value) {
 - (nullable NSString *)_resumableDestination:(NSDictionary<NSString *, NSString *> *)metadata uploadRoot:(NSString *)uploadRoot errorResponse:(WSKResponse **)response {
     NSString *const name = metadata[@"filename"];
     NSString *const path = metadata[@"path"];
-    if (!name.length || WSKPathContainsNULByte(name) || [name containsString:@"/"] || [name isEqualToString:@"."] || [name isEqualToString:@".."] ||
+    // Search for the literal code unit. NSString's default search can treat a slash followed by
+    // a combining mark as one composed sequence and miss the separator entirely.
+    BOOL const containsSeparator = [name rangeOfString:@"/" options:NSLiteralSearch].location != NSNotFound;
+    if (!name.length || WSKPathContainsNULByte(name) || containsSeparator || [name isEqualToString:@"."] || [name isEqualToString:@".."] ||
         (!_allowHiddenItems && WSKNameIsHidden(name)) || ![self _checkFileExtension:name] || !path || WSKPathContainsNULByte(path)) {
         *response = [WSKErrorResponse responseWithClientError:403 message:@"Upload destination is not allowed"];
         return nil;
@@ -1650,7 +1656,8 @@ static NSString *_OriginAuthority(NSString *value) {
     // one. The same shape that made "/list?path=%00" terminate the process — the query and form
     // fields were guarded then, this one was missed because it arrives through the multipart
     // parser rather than the request arguments.
-    if ((fileName.length == 0) || [fileName containsString:@"/"] || WSKPathContainsNULByte(fileName) || [fileName isEqualToString:@"."] || [fileName isEqualToString:@".."] ||
+    BOOL const containsSeparator = [fileName rangeOfString:@"/" options:NSLiteralSearch].location != NSNotFound;
+    if ((fileName.length == 0) || containsSeparator || WSKPathContainsNULByte(fileName) || [fileName isEqualToString:@"."] || [fileName isEqualToString:@".."] ||
         (!_allowHiddenItems && WSKNameIsHidden(fileName)) || ![self _checkFileExtension:fileName]) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Uploaded file name \"%@\" is not allowed", file.fileName];
     }
@@ -1803,7 +1810,7 @@ static NSString *_OriginAuthority(NSString *value) {
     oldAbsolutePath = resolvedOldPath;
     desiredNewPath = resolvedNewPath;
 
-    if (![[NSFileManager defaultManager] fileExistsAtPath:oldAbsolutePath isDirectory:&isDirectory]) {
+    if (!WSKNamedEntryExistsAtPath(oldAbsolutePath, &isDirectory)) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", oldRelativePath];
     }
 
@@ -1934,7 +1941,7 @@ static NSString *_OriginAuthority(NSString *value) {
 
     absolutePath = resolvedPath;
 
-    if (![[NSFileManager defaultManager] fileExistsAtPath:absolutePath isDirectory:&isDirectory]) {
+    if (!WSKNamedEntryExistsAtPath(absolutePath, &isDirectory)) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
     }
 

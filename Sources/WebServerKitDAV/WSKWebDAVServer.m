@@ -621,29 +621,6 @@ static NSString *_Nullable _DeadPropertyElement(NSString *key) {
     return [NSString stringWithFormat:@"<W:%@ xmlns:W=\"%@\"/>", _XMLEscape(name), _XMLEscape(href)];
 }
 
-// Does the entry the client NAMED exist, and is it a collection? One home, because DELETE, MOVE and
-// COPY all act on the named entry rather than on what it points at, and answering this with
-// -fileExistsAtPath: gets a dangling alias wrong in both fields at once: it follows the final link,
-// so the link reads as absent, and it reports the TARGET's directory-ness when it does resolve.
-// A symlink is not a collection whatever it points at, so isDirectory comes from the same lstat.
-static BOOL _NamedEntryExistsAtPath(NSString *absolutePath, BOOL *outIsDirectory) {
-    struct stat info;
-
-    if (lstat([absolutePath fileSystemRepresentation], &info) != 0) {
-        if (outIsDirectory) {
-            *outIsDirectory = NO;
-        }
-
-        return NO;
-    }
-
-    if (outIsDirectory) {
-        *outIsDirectory = ((info.st_mode & S_IFMT) == S_IFDIR);
-    }
-
-    return YES;
-}
-
 static WSKErrorResponse *_ResponseIfRequestBodyTooLarge(WSKDataRequest *request) {
     if (request.data.length <= kDAVMaxRequestBodyLength) {
         return nil;
@@ -1003,9 +980,7 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
         return _MethodNotAllowed(request, @"PUT not allowed on existing collection \"%@\"", relativePath);
     }
 
-    NSString *const fileName = [absolutePath lastPathComponent];
-
-    if (isHidden || ![self _checkFileExtension:fileName]) {
+    if (isHidden || ![self _checkFileExtensionForName:[relativePath lastPathComponent] resolvedName:[absolutePath lastPathComponent]]) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Uploading to \"%@\" is not allowed", relativePath];
     }
 
@@ -1546,8 +1521,8 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
         // never ran on COPY/MOVE — letting an allowed file be renamed to any extension.
 
         // The named entry, not what it points at — a dangling alias is a thing this verb can move, and
-        // is the ordinary end state of publish-by-symlink. See _NamedEntryExistsAtPath.
-        if (!_NamedEntryExistsAtPath(srcAbsolutePath, &srcIsDirectory)) {
+        // is the ordinary end state of publish-by-symlink. See WSKNamedEntryExistsAtPath.
+        if (!WSKNamedEntryExistsAtPath(srcAbsolutePath, &srcIsDirectory)) {
             return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", srcRelativePath];
         }
 
@@ -1575,7 +1550,7 @@ static WSKResponse *_MethodNotAllowed(WSKRequest *request, NSString *format, ...
         // Likewise for the destination: a dangling alias sitting there EXISTS, so Overwrite decides
         // whether it may be replaced. Read as absent it produced 403 from renamex_np's EEXIST with
         // Overwrite: T, and 403 rather than the owed 412 without.
-        existing = _NamedEntryExistsAtPath(dstAbsolutePath, &dstIsDirectory);
+        existing = WSKNamedEntryExistsAtPath(dstAbsolutePath, &dstIsDirectory);
 
         if (existing && ((isMove && !_HeaderTokenIs(overwriteHeader, @"T")) || (!isMove && _HeaderTokenIs(overwriteHeader, @"F")))) {
             return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_PreconditionFailed message:@"Destination \"%@\" already exists", dstRelativePath];
@@ -2116,7 +2091,7 @@ static NSString *_DAVResourceHref(NSString *resourcePath) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
     }
 
-    if (isHidden || (!isDirectory && ![self _checkFileExtension:[absolutePath lastPathComponent]])) {
+    if (isHidden || (!isDirectory && ![self _checkFileExtensionForName:[relativePath lastPathComponent] resolvedName:[absolutePath lastPathComponent]])) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Setting properties on \"%@\" is not allowed", relativePath];
     }
 
@@ -2162,7 +2137,7 @@ static NSString *_DAVResourceHref(NSString *resourcePath) {
             return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
         }
 
-        if (!isDirectory && ![self _checkFileExtension:[absolutePath lastPathComponent]]) {
+        if (!isDirectory && ![self _checkFileExtensionForName:[relativePath lastPathComponent] resolvedName:[absolutePath lastPathComponent]]) {
             xmlFreeDoc(document);
             return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Setting properties on %@ is not allowed", relativePath];
         }
@@ -2428,9 +2403,7 @@ static NSString *_DAVResourceHref(NSString *resourcePath) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_NotFound message:@"\"%@\" does not exist", relativePath];
     }
 
-    NSString *const itemName = [absolutePath lastPathComponent];
-
-    if (isHidden || (!isDirectory && ![self _checkFileExtension:itemName])) {
+    if (isHidden || (!isDirectory && ![self _checkFileExtensionForName:[relativePath lastPathComponent] resolvedName:[absolutePath lastPathComponent]])) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Retrieving properties for \"%@\" is not allowed", relativePath];
     }
 
@@ -2586,9 +2559,7 @@ static NSString *_DAVResourceHref(NSString *resourcePath) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Locking request \"%@/%@/%@\" for \"%@\" is not allowed", scope, type, depthHeader, relativePath];
     }
 
-    NSString *const itemName = [absolutePath lastPathComponent];
-
-    if (isHidden || (!isDirectory && ![self _checkFileExtension:itemName])) {
+    if (isHidden || (!isDirectory && ![self _checkFileExtensionForName:[relativePath lastPathComponent] resolvedName:[absolutePath lastPathComponent]])) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Locking \"%@\" is not allowed", relativePath];
     }
 
@@ -2675,9 +2646,7 @@ static NSString *_DAVResourceHref(NSString *resourcePath) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_BadRequest message:@"Missing 'Lock-Token' header"];
     }
 
-    NSString *const itemName = [absolutePath lastPathComponent];
-
-    if (isHidden || (!isDirectory && ![self _checkFileExtension:itemName])) {
+    if (isHidden || (!isDirectory && ![self _checkFileExtensionForName:[relativePath lastPathComponent] resolvedName:[absolutePath lastPathComponent]])) {
         return [WSKErrorResponse responseWithClientError:kWSKHTTPStatusCode_Forbidden message:@"Unlocking \"%@\" is not allowed", relativePath];
     }
 

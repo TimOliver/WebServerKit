@@ -165,8 +165,9 @@
     [fm removeItemAtPath:dir error:NULL];
 }
 
-// The multipart filename is reduced to a leaf with -lastPathComponent, and "/" is the one input
-// for which that does not yield a leaf: it returns "/" unchanged. The name then passes every
+// The multipart filename is reduced to a leaf with -lastPathComponent. A traversal-shaped name
+// may be accepted under its final component, but must never write beside the share. "/" is the
+// one input for which that does not yield a leaf: it returns "/" unchanged. The name then passes every
 // guard (non-empty, no NUL, not "." or "..", no leading dot, and an empty pathExtension is
 // allowed when no allow-list is set — the default), and
 // -[NSString stringByAppendingPathComponent:@"/"] collapses straight back to the upload
@@ -174,7 +175,7 @@
 // leaf* in its PARENT, so the body lands beside the share as "Share (1)". Measured before this:
 // 200 OK, repeatable and unbounded. Same class as the eighth pass's symlink write — a file
 // landing outside the shared directory — arriving through the filename instead.
-- (void)testUploaderRefusesAFileNameThatIsNotASingleComponent {
+- (void)testUploaderSanitizesPathlikeFileNamesAndRefusesNonComponents {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSString *parent = MakeTempDirectory();
     NSString *share = [parent stringByAppendingPathComponent:@"Share"];
@@ -206,6 +207,15 @@
         [strays removeObject:@"Share"];
         XCTAssertEqual(strays.count, (NSUInteger)0, @"filename \"%@\" wrote outside the share: %@", name, [strays componentsJoinedByString:@", "]);
     }
+
+    // The report's exact multipart filename must become a leaf inside Share, never a path to
+    // Library beside it. The raw join in old tags wrote outside; basename sanitization keeps it here.
+    NSString *const outside = [parent stringByAppendingPathComponent:@"Library"];
+    XCTAssertTrue([fm createDirectoryAtPath:outside withIntermediateDirectories:NO attributes:nil error:NULL]);
+    NSString *const traversal = SendRawDataRequest(server.port, upload(@"../Library/evil.txt"));
+    XCTAssertTrue(ReplyHasStatus(traversal, 200), @"the sanitized filename should upload normally: %@", traversal);
+    XCTAssertEqualObjects([NSString stringWithContentsOfFile:[share stringByAppendingPathComponent:@"evil.txt"] encoding:NSUTF8StringEncoding error:NULL], @"ESCAPED");
+    XCTAssertEqual([fm contentsOfDirectoryAtPath:outside error:NULL].count, (NSUInteger)0, @"the filename escaped the share");
 
     [server stop];
     [fm removeItemAtPath:parent error:NULL];
@@ -465,6 +475,86 @@
     XCTAssertTrue([absent hasPrefix:@"HTTP/1.1 404"], @"deleting a name that holds nothing must still be 404: %@", [absent substringToIndex:MIN((NSUInteger)40, absent.length)]);
 
     [dav stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// The uploader also resolves DELETE and MOVE to the entry the client named. Its existence
+// checks still followed the final link, so a dangling alias answered 404 and could neither be
+// removed nor renamed. A named-entry existence check must classify the link itself.
+- (void)testUploaderCanDeleteAndMoveDanglingSymlinkAliases {
+    NSFileManager *const fm = [NSFileManager defaultManager];
+    NSString *const dir = MakeTempDirectory();
+    NSString *const deleteLink = [dir stringByAppendingPathComponent:@"delete-link"];
+    NSString *const moveLink = [dir stringByAppendingPathComponent:@"move-link"];
+    NSString *const movedLink = [dir stringByAppendingPathComponent:@"moved-link"];
+    NSString *const missingTarget = [dir stringByAppendingPathComponent:@"missing-target"];
+    XCTAssertTrue([fm createSymbolicLinkAtPath:deleteLink withDestinationPath:@"missing-target" error:NULL]);
+    XCTAssertTrue([fm createSymbolicLinkAtPath:moveLink withDestinationPath:@"missing-target" error:NULL]);
+    XCTAssertFalse([fm fileExistsAtPath:deleteLink], @"the fixture must be dangling");
+
+    WSKWebUploader *const uploader = [[WSKWebUploader alloc] initWithUploadDirectory:dir];
+    NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+    XCTAssertTrue([uploader startWithOptions:options error:NULL]);
+
+    NSString *const deleteBody = @"path=%2Fdelete-link";
+    NSString *const deleteRequest = [NSString stringWithFormat:@"POST /delete HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)deleteBody.length, deleteBody];
+    NSString *const deleted = SendRawRequest(uploader.port, deleteRequest);
+    XCTAssertTrue(ReplyHasStatus(deleted, 200), @"deleting the dangling alias must succeed: %@", deleted);
+    struct stat info;
+    XCTAssertNotEqual(lstat([deleteLink fileSystemRepresentation], &info), 0, @"the link survived deletion");
+
+    NSString *const moveBody = @"oldPath=%2Fmove-link&newPath=%2Fmoved-link";
+    NSString *const moveRequest = [NSString stringWithFormat:@"POST /move HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)moveBody.length, moveBody];
+    NSString *const moved = SendRawRequest(uploader.port, moveRequest);
+    XCTAssertTrue(ReplyHasStatus(moved, 200), @"moving the dangling alias must succeed: %@", moved);
+    XCTAssertNotEqual(lstat([moveLink fileSystemRepresentation], &info), 0, @"the original alias survived its move");
+    XCTAssertEqual(lstat([movedLink fileSystemRepresentation], &info), 0, @"the moved alias is missing");
+    XCTAssertTrue(S_ISLNK(info.st_mode), @"MOVE changed the alias into its target");
+    XCTAssertFalse([fm fileExistsAtPath:missingTarget], @"an alias operation created the missing target");
+
+    NSString *const absentBody = @"path=%2Fnever-existed";
+    NSString *const absentRequest = [NSString stringWithFormat:@"POST /delete HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)absentBody.length, absentBody];
+    XCTAssertTrue(ReplyHasStatus(SendRawRequest(uploader.port, absentRequest), 404), @"a truly absent name must remain 404");
+
+    [uploader stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
+// An unresolvable target does not free a symlink's name. The uploader's unique-name loop used
+// -fileExistsAtPath:, so /upload and /move chose the occupied link itself and failed with 500
+// instead of publishing a numbered sibling. Keep the alias and its missing target untouched.
+- (void)testUploaderUniqueNamesTreatDanglingSymlinksAsOccupied {
+    NSFileManager *const fm = [NSFileManager defaultManager];
+    NSString *const dir = MakeTempDirectory();
+    NSString *const uploadLink = [dir stringByAppendingPathComponent:@"upload.txt"];
+    NSString *const moveLink = [dir stringByAppendingPathComponent:@"move.txt"];
+    XCTAssertTrue([fm createSymbolicLinkAtPath:uploadLink withDestinationPath:@"missing-target" error:NULL]);
+    XCTAssertTrue([fm createSymbolicLinkAtPath:moveLink withDestinationPath:@"missing-target" error:NULL]);
+    XCTAssertTrue([@"SOURCE" writeToFile:[dir stringByAppendingPathComponent:@"source.txt"] atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+
+    WSKWebUploader *const uploader = [[WSKWebUploader alloc] initWithUploadDirectory:dir];
+    NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+    XCTAssertTrue([uploader startWithOptions:options error:NULL]);
+
+    NSString *const uploadBody = @"--B\r\nContent-Disposition: form-data; name=\"path\"\r\n\r\n/\r\n--B\r\nContent-Disposition: form-data; name=\"files[]\"; filename=\"upload.txt\"\r\nContent-Type: text/plain\r\n\r\nUPLOADED\r\n--B--\r\n";
+    NSString *const uploadRequest = [NSString stringWithFormat:@"POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data; boundary=B\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)[uploadBody lengthOfBytesUsingEncoding:NSUTF8StringEncoding], uploadBody];
+    XCTAssertTrue(ReplyHasStatus(SendRawRequest(uploader.port, uploadRequest), 200), @"upload must choose an unused sibling of the alias");
+    XCTAssertEqualObjects([NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:@"upload (1).txt"] encoding:NSUTF8StringEncoding error:NULL], @"UPLOADED");
+
+    NSString *const moveBody = @"oldPath=%2Fsource.txt&newPath=%2Fmove.txt";
+    NSString *const moveRequest = [NSString stringWithFormat:@"POST /move HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: %lu\r\n\r\n%@", (unsigned long)moveBody.length, moveBody];
+    XCTAssertTrue(ReplyHasStatus(SendRawRequest(uploader.port, moveRequest), 200), @"move must choose an unused sibling of the alias");
+    XCTAssertEqualObjects([NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:@"move (1).txt"] encoding:NSUTF8StringEncoding error:NULL], @"SOURCE");
+    XCTAssertFalse([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"source.txt"]]);
+
+    struct stat info;
+    XCTAssertEqual(lstat([uploadLink fileSystemRepresentation], &info), 0, @"upload replaced the alias");
+    XCTAssertTrue(S_ISLNK(info.st_mode));
+    XCTAssertEqual(lstat([moveLink fileSystemRepresentation], &info), 0, @"move replaced the alias");
+    XCTAssertTrue(S_ISLNK(info.st_mode));
+    XCTAssertFalse([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"missing-target"]]);
+
+    [uploader stop];
     [fm removeItemAtPath:dir error:NULL];
 }
 

@@ -311,6 +311,24 @@ BOOL WSKPathsNameTheSameFile(NSString *path1, NSString *path2) {
            identifier1 && [(NSObject *)identifier1 isEqual:identifier2];
 }
 
+BOOL WSKNamedEntryExistsAtPath(NSString *absolutePath, BOOL *outIsDirectory) {
+    struct stat info;
+
+    if (lstat([absolutePath fileSystemRepresentation], &info) != 0) {
+        if (outIsDirectory) {
+            *outIsDirectory = NO;
+        }
+
+        return NO;
+    }
+
+    if (outIsDirectory) {
+        *outIsDirectory = ((info.st_mode & S_IFMT) == S_IFDIR);
+    }
+
+    return YES;
+}
+
 NSString *WSKFirstUnvettableItemAtPath(NSString *absolutePath, BOOL isDirectory, NSArray<NSString *> *allowedExtensions) {
     if (allowedExtensions == nil) {
         return nil;  // No restriction configured: nothing to vet against.

@@ -213,6 +213,12 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   `lstat`; `isDirectory` comes from the same observation, so a link is never a collection and
   `DELETE /dirlink` with `Depth: 0` removes the alias instead of answering 400 for a subtree it
   never touches. Recurring shape 8.
+- **Named-entry existence is shared, including dangling aliases (2026-10-21).**
+  `WSKNamedEntryExistsAtPath` uses `lstat`; uploader `/delete` and `/move` now match DAV's
+  semantics. Before this fix both returned 404 and left dangling links untouched. The uploader's
+  unique-name loop also uses this helper: a dangling destination occupies its name, so multipart
+  upload and move choose a numbered sibling rather than attempting the occupied name and
+  returning 500. Wire regressions verify alias preservation/removal and the actual published bytes.
 - **"Is this name hidden?" has ONE home, `WSKNameIsHidden`, and it reads the first character.**
   `-hasPrefix:@"."` is REPRESENTATION-dependent: for `"." + U+0301 + "x.txt"` an ordinary
   `__NSCFString` answers YES and the `NSPathStore2` that `-lastPathComponent` returns answers NO,
@@ -240,6 +246,21 @@ xcodebuild -project WebServerKit.xcodeproj -scheme "WebServerKit (tvOS)" -config
   classifier cost only, not end-to-end server throughput or other filesystems.
 - The extension allow-list judges BOTH names a symlink presents — alias AND resolved target
   (`WSKEntryPassesExtensionAllowList`, one home).
+  Swept again 2026-10-21: direct DAV PUT, PROPFIND, PROPPATCH, LOCK and UNLOCK had retained
+  target-only checks. With `[txt]`, `blocked.bin -> allowed.txt` was unreadable by GET but PUT
+  returned 204 and replaced the target, while PROPPATCH changed its metadata. These verbs now
+  use the same both-name predicate. The regression covers all six direct verbs in both mismatch
+  directions, checks unchanged bytes/dead properties on refusal, and includes an allowed alias.
+- **A filename separator check must be literal (2026-10-21).** Resumable metadata's filename
+  must be a single component. `containsString:@"/"` missed a slash followed by U+030C, allowing
+  `nested/<mark>outside.txt` to publish into an existing nested directory despite metadata
+  `path=/` (201, file present). Containment still blocked an escape outside the share. Both
+  resumable and multipart leaf checks now use `NSLiteralSearch`; the wire regression fails on
+  the old implementation's status and filesystem side effect and passes after the fix.
+  Wrap-up validation 2026-10-22: the full macOS XCTest suite passed under Address Sanitizer
+  (337 tests, zero failures or skips); Objective-C lint, `git diff --check`, and the browser
+  resumable-upload state-machine tests passed. Recorded traces, other platform builds, and
+  device endurance were not rerun for this pass.
 - The uploader's mutating endpoints hold `_fileOperationLock` (four sites; any new
   resolve-then-act endpoint must take it too).
 - Recursive-destroy vetting has one home, `WSKFirstUnvettableItemAtPath` (dot-names and their

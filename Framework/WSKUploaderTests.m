@@ -1114,6 +1114,30 @@ static NSString *WSKUploadCanonicalTempDirectory(void) {
     }
 }
 
+- (void)testResumableUploadRejectsASeparatorFollowedByACombiningMark {
+    NSFileManager *const fm = [NSFileManager defaultManager];
+    NSString *const root = MakeTempDirectory();
+    NSString *const share = [root stringByAppendingPathComponent:@"share"];
+    NSString *const nested = [share stringByAppendingPathComponent:@"nested"];
+    XCTAssertTrue([fm createDirectoryAtPath:nested withIntermediateDirectories:YES attributes:nil error:NULL]);
+    WSKResumableHookUploader *const server = WSKUploadServerAtRoot(root);
+    NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+    @try {
+        // NSString's default search treats a slash plus its following combining mark as one
+        // composed sequence. The upload name contract is one literal path component, so the
+        // slash must still be detected instead of letting the filename choose a subdirectory.
+        NSString *const smuggledName = @"nested/\u030Coutside.txt";
+        NSString *const rejected = WSKCreateUpload(server.port, [NSUUID UUID].UUIDString, smuggledName, @"");
+        XCTAssertTrue(ReplyHasStatus(rejected, 403), @"%@", rejected);
+        XCTAssertFalse([fm fileExistsAtPath:[nested stringByAppendingPathComponent:@"\u030Coutside.txt"]]);
+        XCTAssertEqualObjects([fm contentsOfDirectoryAtPath:nested error:NULL], @[]);
+    } @finally {
+        [server stop];
+        [fm removeItemAtPath:root error:NULL];
+    }
+}
+
 - (void)testResumableUploadRechecksDestinationPolicyBeforePublication {
     NSFileManager *const fm = [NSFileManager defaultManager];
     NSString *const root = MakeTempDirectory();

@@ -2508,6 +2508,76 @@ static NSString *DAVCustomMetadataValue(NSString *uri, NSString *name) {
                   entry);
 }
 
+// An extension allow-list applies to both names a symlink presents: the alias in the request and
+// the resolved target holding the bytes. GET and Depth:1 PROPFIND already enforced that pair, but
+// direct PUT, PROPFIND, PROPPATCH, LOCK and UNLOCK checked only the resolved leaf. With ["txt"],
+// "blocked.bin -> allowed.txt" was therefore hidden from listings and unreadable, yet PUT replaced
+// allowed.txt through it and PROPPATCH changed the target's metadata. Every direct verb must agree.
+- (void)testDAVDirectVerbsApplyExtensionAllowListToAliasAndTargetNames {
+    NSFileManager *const fm = [NSFileManager defaultManager];
+    NSString *const dir = MakeTempDirectory();
+    NSString *const allowedTarget = [dir stringByAppendingPathComponent:@"allowed.txt"];
+    NSString *const blockedTarget = [dir stringByAppendingPathComponent:@"blocked.bin"];
+    XCTAssertTrue([@"ALLOWED" writeToFile:allowedTarget atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([@"BLOCKED" writeToFile:blockedTarget atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    XCTAssertTrue([fm createSymbolicLinkAtPath:[dir stringByAppendingPathComponent:@"good.txt"] withDestinationPath:@"allowed.txt" error:NULL]);
+    XCTAssertTrue([fm createSymbolicLinkAtPath:[dir stringByAppendingPathComponent:@"bad-alias.bin"] withDestinationPath:@"allowed.txt" error:NULL]);
+    XCTAssertTrue([fm createSymbolicLinkAtPath:[dir stringByAppendingPathComponent:@"bad-target.txt"] withDestinationPath:@"blocked.bin" error:NULL]);
+
+    WSKWebDAVServer *const server = [[WSKWebDAVServer alloc] initWithUploadDirectory:dir];
+    server.allowedFileExtensions = @[@"txt"];
+    NSDictionary *const options = @{WSKOption_Port: @0, WSKOption_BindToLocalhost: @YES};
+    XCTAssertTrue([server startWithOptions:options error:NULL]);
+
+    NSString *const propertyBody = @"<?xml version=\"1.0\"?><D:propertyupdate xmlns:D=\"DAV:\" xmlns:Z=\"urn:test\"><D:set><D:prop><Z:note>kept</Z:note></D:prop></D:set></D:propertyupdate>";
+    NSString *const lockBody = @"<?xml version=\"1.0\"?><D:lockinfo xmlns:D=\"DAV:\"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>";
+    NSString *const finder = @"WebDAVFS/3.0.1 (03018000) Darwin/13.1.0 (x86_64)";
+
+    NSString * (^request)(NSString *, NSString *) = ^NSString *(NSString *method, NSString *path) {
+        if ([method isEqualToString:@"PUT"]) {
+            return SendRawRequest(server.port, [NSString stringWithFormat:@"PUT /%@ HTTP/1.1\r\nHost: localhost\r\nContent-Length: 7\r\n\r\nCHANGED", path]);
+        }
+        if ([method isEqualToString:@"PROPFIND"]) {
+            return SendRawRequest(server.port, [NSString stringWithFormat:@"PROPFIND /%@ HTTP/1.1\r\nHost: localhost\r\nDepth: 0\r\nContent-Length: 0\r\n\r\n", path]);
+        }
+        if ([method isEqualToString:@"PROPPATCH"]) {
+            return SendRawRequest(server.port, [NSString stringWithFormat:@"PROPPATCH /%@ HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/xml\r\nContent-Length: %lu\r\n\r\n%@", path, (unsigned long)[propertyBody lengthOfBytesUsingEncoding:NSUTF8StringEncoding], propertyBody]);
+        }
+        if ([method isEqualToString:@"LOCK"]) {
+            return SendRawRequest(server.port, [NSString stringWithFormat:@"LOCK /%@ HTTP/1.1\r\nHost: localhost\r\nUser-Agent: %@\r\nDepth: 0\r\nContent-Type: application/xml\r\nX-WebServerKit-LockToken: urn:uuid:ALLOW-LIST-TEST\r\nContent-Length: %lu\r\n\r\n%@", path, finder, (unsigned long)[lockBody lengthOfBytesUsingEncoding:NSUTF8StringEncoding], lockBody]);
+        }
+        if ([method isEqualToString:@"UNLOCK"]) {
+            return SendRawRequest(server.port, [NSString stringWithFormat:@"UNLOCK /%@ HTTP/1.1\r\nHost: localhost\r\nUser-Agent: %@\r\nLock-Token: <urn:uuid:ALLOW-LIST-TEST>\r\nContent-Length: 0\r\n\r\n", path, finder]);
+        }
+        return SendRawRequest(server.port, [NSString stringWithFormat:@"GET /%@ HTTP/1.1\r\nHost: localhost\r\n\r\n", path]);
+    };
+
+    // Control: when both alias and target names pass, each request reaches the verb itself.
+    NSDictionary<NSString *, NSNumber *> *const successfulStatuses = @{@"GET": @200, @"PUT": @204, @"PROPFIND": @207, @"PROPPATCH": @207, @"LOCK": @200, @"UNLOCK": @204};
+    for (NSString *const method in successfulStatuses) {
+        NSString *const reply = request(method, @"good.txt");
+        XCTAssertTrue(ReplyHasStatus(reply, successfulStatuses[method].integerValue), @"%@ control failed: %@", method, reply);
+    }
+    NSData *const propertiesAfterControl = DAVDeadPropertyBytes(allowedTarget);
+    XCTAssertNotNil(propertiesAfterControl, @"the PROPPATCH control did not reach the target");
+
+    // Refuse both mismatch directions. None may change bytes or DAV metadata through the alias.
+    for (NSString *const alias in @[@"bad-alias.bin", @"bad-target.txt"]) {
+        NSString *const original = [NSString stringWithContentsOfFile:[alias isEqualToString:@"bad-alias.bin"] ? allowedTarget : blockedTarget encoding:NSUTF8StringEncoding error:NULL];
+        NSData *const properties = DAVDeadPropertyBytes([alias isEqualToString:@"bad-alias.bin"] ? allowedTarget : blockedTarget);
+        for (NSString *const method in successfulStatuses) {
+            NSString *const reply = request(method, alias);
+            XCTAssertTrue(ReplyHasStatus(reply, 403), @"%@ admitted disallowed symlink %@: %@", method, alias, reply);
+        }
+        NSString *const target = [alias isEqualToString:@"bad-alias.bin"] ? allowedTarget : blockedTarget;
+        XCTAssertEqualObjects([NSString stringWithContentsOfFile:target encoding:NSUTF8StringEncoding error:NULL], original, @"a refused PUT changed %@", target);
+        XCTAssertEqualObjects(DAVDeadPropertyBytes(target), properties, @"a refused PROPPATCH changed %@", target);
+    }
+
+    [server stop];
+    [fm removeItemAtPath:dir error:NULL];
+}
+
 // RFC 9110 §13.2.2 orders the precondition steps but does not make step 3 conditional on steps 1
 // and 2: only If-Unmodified-Since is skipped when If-Match is present. If-None-Match is evaluated
 // whatever came before it. The chain here was written as one else-if ladder, so a request carrying

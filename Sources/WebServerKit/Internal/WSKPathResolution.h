@@ -313,6 +313,13 @@ NSString *_Nullable WSKResolveWithinDirectory(NSString *path, NSString *director
 NSString *_Nullable WSKResolveNamedEntryWithinDirectory(NSString *path, NSString *directory, NSString *_Nullable __autoreleasing *_Nullable outRelativePath);
 
 /**
+ * Does the named entry exist, including a dangling symlink? A link is not a collection even
+ * when its target is one. Use this after resolving the entry's parent for remove/relocate verbs;
+ * -fileExistsAtPath: follows the final link and mistakes a dangling alias for a missing name.
+ */
+BOOL WSKNamedEntryExistsAtPath(NSString *absolutePath, BOOL *_Nullable outIsDirectory);
+
+/**
  *  The NSFileType an enumeration should CLASSIFY `path` as, which for a symlink is the type of what
  *  it points at — or nil when nothing servable is there.
  *
